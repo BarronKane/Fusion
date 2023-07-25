@@ -8,5 +8,5 @@ use winit::window::Window;
 use winit::event_loop::EventLoop;
 
 pub trait App {
-    fn new(event_loop: &EventLoop<()>) -> Self;
+    fn new(window: &Window) -> Self;
 }

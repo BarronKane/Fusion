@@ -16,7 +16,7 @@ use ash::{
     vk, Device, Entry, Instance
 };
 
-use raw_window_handle::HasRawDisplayHandle;
+use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
 use winit::{
     dpi::PhysicalSize,
     event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent},
@@ -29,21 +29,26 @@ struct VulkanApp {
 }
 
 impl App for VulkanApp {
-    fn new(event_loop: &EventLoop<()>) -> Self {
+    fn new(window: &Window) -> Self {
         let entry = Entry::linked();
+
+        let instance = Self::create_instance(&entry, &window, true);
+
+        let surface = Surface::new(&entry, &instance);
+        let surface_khr = unsafe {
+            ash_window::create_surface(&entry, &instance, window.raw_display_handle(), window.raw_window_handle(), None)
+        };
 
         let va = VulkanApp {
             b_enable_validation_layers: true,
         };
-
-        let instance = Self::create_instance(&entry, &event_loop, true);
 
         return va;
     }    
 }
 
 impl VulkanApp {
-    fn create_instance(entry: &Entry, event_loop: &EventLoop<()>, validation: bool) -> Instance {
+    fn create_instance(entry: &Entry, window: &Window, validation: bool) -> Instance {
         let app_name = CString::new("Vulkan Application").unwrap();
         let engine_name = CString::new("No Engine").unwrap();
         let app_info = vk::ApplicationInfo::builder()
@@ -54,7 +59,7 @@ impl VulkanApp {
             .api_version(vk::make_api_version(0, 1, 3, 0))
             .build();
 
-        let extension_names = ash_window::enumerate_required_extensions(event_loop.raw_display_handle())
+        let extension_names = ash_window::enumerate_required_extensions(window.raw_display_handle())
             .expect("Unable to create vulkan instance: EXTENSIONS");
         let mut extension_names = extension_names
             .iter()
