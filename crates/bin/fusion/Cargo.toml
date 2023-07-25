@@ -1,0 +1,15 @@
+[package]
+name = "fusion"
+version = "0.1.0"
+authors = [ "Lance Wallis <walance@pvas.me>"]
+edition = "2021"
+
+[[bin]]
+name = "fusion"
+path = "fusion.rs"
+
+[dependencies]
+tracing = "0.1.37"
+tracing-subscriber = "0.3.17"
+
+cli = { path = "../../lib/cli" }

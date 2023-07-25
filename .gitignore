@@ -1,0 +1,8 @@
+# Ignore IDE files.
+.vscode/
+.idea/
+
+# Ignore rust intermediates and binaries.
+target/
+Cargo.lock
+**/*.rs.bk

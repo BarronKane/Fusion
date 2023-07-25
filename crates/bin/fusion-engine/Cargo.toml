@@ -1,0 +1,29 @@
+[package]
+name = "fusion-engine"
+version = "0.1.0"
+authors = [ "Lance Wallis <walance@pvas.me>"]
+edition = "2021"
+
+[[bin]]
+name = "fusion-engine"
+path = "fusion-engine.rs"
+
+[dependencies]
+fusion-editor = { path = "../../apps/fusion-editor", optional = true }
+fusion-util = { path = "../../lib/fusion-util" }
+
+libloading = "0.7.2"
+notify = "4.0.17"
+
+[dependencies.windows]
+version = "0.29"
+features = [
+    "alloc",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading"
+]
+
+[features]
+default = []
+monolithic = ["fusion-editor"]

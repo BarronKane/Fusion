@@ -1,0 +1,12 @@
+[package]
+name = "cli"
+version = "0.1.0"
+authors = ["Lance Wallis <walance@pvas.me>"]
+edition = "2021"
+
+[lib]
+crate-type = ["dylib"]
+path = "cli.rs"
+
+[dependencies]
+fusion-util = { path = "../fusion-util" }

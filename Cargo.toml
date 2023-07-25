@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "crates/lib/fusion-util",
+    "crates/lib/fusion-core",
+    "crates/lib/fusion-rhi",
+
+
+    "crates/bin/fusion",
+
+    "crates/apps/fusion-editor"
+]
