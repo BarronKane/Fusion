@@ -1,5 +1,6 @@
-pub mod device;
+pub mod context;
 pub mod debug;
+pub mod device;
 
 use crate::App;
 
@@ -24,6 +25,8 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+use self::context::VkContext;
+
 struct VulkanApp {
     b_enable_validation_layers: bool,
 }
@@ -40,6 +43,19 @@ impl App for VulkanApp {
         };
 
         let debug_callback = VulkanApp::setup_debug_messenger(true, &entry, &instance);
+
+        
+        /*
+        let vk_context = VkContext::new(
+            entry, 
+            instance, 
+            debug_callback, 
+            surface, 
+            surface_khr, 
+            physical_device, 
+            device
+        );
+        */
 
         let va = VulkanApp {
             b_enable_validation_layers: true,
@@ -86,5 +102,11 @@ impl VulkanApp {
         unsafe {
             entry.create_instance(&instance_create_info, None).unwrap()
         }
+    }
+}
+
+impl Drop for VulkanApp {
+    fn drop(&mut self) {
+        
     }
 }
