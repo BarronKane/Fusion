@@ -39,6 +39,8 @@ impl App for VulkanApp {
             ash_window::create_surface(&entry, &instance, window.raw_display_handle(), window.raw_window_handle(), None)
         };
 
+        let debug_callback = VulkanApp::setup_debug_messenger(true, &entry, &instance);
+
         let va = VulkanApp {
             b_enable_validation_layers: true,
         };

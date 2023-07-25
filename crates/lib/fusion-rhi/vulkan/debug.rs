@@ -16,7 +16,8 @@ use std::ffi::{
 
 use ash::{
     vk,
-    Entry
+    Entry,
+    Instance, extensions::ext::DebugUtils
 };
 
 unsafe extern "system" fn vulkan_debug_callback(
@@ -40,6 +41,45 @@ unsafe extern "system" fn vulkan_debug_callback(
 }
 
 impl VulkanApp {
+    pub fn setup_debug_messenger(
+        enable_validation: bool,
+        entry: &Entry,
+        instance: &Instance,
+    ) -> Option<(DebugUtils, vk::DebugUtilsMessengerEXT)> {
+        if enable_validation {
+            return None;
+        }
+
+        use vk::DebugUtilsMessageSeverityFlagsEXT as Flag;
+        use vk::DebugUtilsMessageTypeFlagsEXT as Type;
+
+        let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
+            .flags(vk::DebugUtilsMessengerCreateFlagsEXT::empty())
+            .message_severity(
+                Flag::ERROR     |
+                Flag::WARNING   |
+                Flag::INFO      |
+                Flag::VERBOSE
+            )
+            .message_type(
+                Type::GENERAL       |
+                Type::PERFORMANCE   |
+                Type::VALIDATION    |
+                Type::DEVICE_ADDRESS_BINDING
+            )
+            .pfn_user_callback(Some(vulkan_debug_callback))
+            .build();
+
+        let debug_utils = DebugUtils::new(entry, instance);
+        let debug_utils_messenger = unsafe {
+            debug_utils
+                .create_debug_utils_messenger(&debug_info, None)
+                .unwrap()
+        };
+
+        Some((debug_utils, debug_utils_messenger))
+    }
+
     pub fn check_validation_layer_support(entry: &Entry) {
             for in_layer in Self::get_layer_names().iter() {
                 let ilayer = in_layer.clone();
