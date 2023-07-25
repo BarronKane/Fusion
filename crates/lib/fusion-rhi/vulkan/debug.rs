@@ -34,7 +34,8 @@ unsafe extern "system" fn vulkan_debug_callback(
         Flag::VERBOSE => debug!("{:?} - {:?}", typ, message),
         Flag::INFO => info!("{:?} - {:?}", typ, message),
         Flag::WARNING => warn!("{:?} - {:?}", typ, message),
-        _ => error!("{:?} - {:?}", typ, message),
+        Flag::ERROR => error!("{:?} - {:?}", typ, message),
+        _ => error!("UKNOWN FLAG: {:?} - {:?}", typ, message)
     }
     
     vk::FALSE
@@ -53,22 +54,26 @@ impl VulkanApp {
         use vk::DebugUtilsMessageSeverityFlagsEXT as Flag;
         use vk::DebugUtilsMessageTypeFlagsEXT as Type;
 
-        let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
-            .flags(vk::DebugUtilsMessengerCreateFlagsEXT::empty())
-            .message_severity(
-                Flag::ERROR     |
-                Flag::WARNING   |
-                Flag::INFO      |
-                Flag::VERBOSE
-            )
-            .message_type(
+        let debug_info = vk::DebugUtilsMessengerCreateInfoEXT {
+            s_type:     vk::StructureType::DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+            p_next:     std::ptr::null(),
+            flags:      vk::DebugUtilsMessengerCreateFlagsEXT::empty(),
+
+            message_severity:
+                Flag::VERBOSE       |
+                Flag::INFO          |
+                Flag::WARNING       |
+                Flag::ERROR,
+
+            message_type:
                 Type::GENERAL       |
                 Type::PERFORMANCE   |
                 Type::VALIDATION    |
-                Type::DEVICE_ADDRESS_BINDING
-            )
-            .pfn_user_callback(Some(vulkan_debug_callback))
-            .build();
+                Type::DEVICE_ADDRESS_BINDING,
+
+            pfn_user_callback: Some(vulkan_debug_callback),
+            p_user_data:    std::ptr::null_mut()
+        };
 
         let debug_utils = DebugUtils::new(entry, instance);
         let debug_utils_messenger = unsafe {
