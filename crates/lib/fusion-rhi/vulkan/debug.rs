@@ -86,40 +86,40 @@ impl VulkanApp {
     }
 
     pub fn check_validation_layer_support(entry: &Entry) {
-            for in_layer in Self::get_layer_names().iter() {
-                let ilayer = in_layer.clone();
-                let ilayer = ilayer.into_string().unwrap();
-                let layer = ilayer.as_str();
-                let found = entry
-                    .enumerate_instance_layer_properties()
-                    .unwrap()
-                    .iter()
-                    .any(|lp| {
-                        let name = unsafe { CStr::from_ptr(lp.layer_name.as_ptr()) };
-                        let name = name.to_str().expect("Failed to get layer name pointer");
-                        &layer == &name
-                    });
-        
-                if !found {
-                    panic!("Validation layer not supported: {}", &ilayer.clone());
-                }
+        for in_layer in Self::get_layer_names().iter() {
+            let ilayer = in_layer.clone();
+            let ilayer = ilayer.into_string().unwrap();
+            let layer = ilayer.as_str();
+            let found = entry
+                .enumerate_instance_layer_properties()
+                .unwrap()
+                .iter()
+                .any(|lp| {
+                    let name = unsafe { CStr::from_ptr(lp.layer_name.as_ptr()) };
+                    let name = name.to_str().expect("Failed to get layer name pointer");
+                    &layer == &name
+                });
+    
+            if !found {
+                panic!("Validation layer not supported: {}", &ilayer.clone());
             }
         }
+    }
 
-        pub fn get_layer_names() -> Vec<CString> {
-            let layer_names = vec![
-                CString::new("VK_LAYER_KHRONOS_validation").unwrap()
-            ];
+    pub fn get_layer_names() -> Vec<CString> {
+        let layer_names = vec![
+            CString::new("VK_LAYER_KHRONOS_validation").unwrap()
+        ];
 
-            layer_names
-        }
+        layer_names
+    }
 
-        pub fn get_layer_names_ptrs() -> Vec<*const c_char> {
-            let layer_names_ptrs = Self::get_layer_names()
-                .iter()
-                .map(|name| name.as_ptr())
-                .collect::<Vec<_>>();
+    pub fn get_layer_names_ptrs() -> Vec<*const c_char> {
+        let layer_names_ptrs = Self::get_layer_names()
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect::<Vec<_>>();
 
-            layer_names_ptrs
-        }
+        layer_names_ptrs
+    }
 }
