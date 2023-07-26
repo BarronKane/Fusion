@@ -4,6 +4,13 @@ pub mod device;
 
 use crate::App;
 
+use tracing::{
+    error,
+    warn,
+    info,
+    debug,
+};
+
 use std::{
     ffi::{CStr, CString, c_char},
     mem::{align_of, size_of},
@@ -29,6 +36,8 @@ use self::context::VkContext;
 
 struct VulkanApp {
     b_enable_validation_layers: bool,
+
+    device: device::VulkanDevice,
 }
 
 impl App for VulkanApp {
@@ -44,6 +53,7 @@ impl App for VulkanApp {
 
         let debug_callback = VulkanApp::setup_debug_messenger(true, &entry, &instance);
 
+        
         
         /*
         let vk_context = VkContext::new(
@@ -101,6 +111,25 @@ impl VulkanApp {
 
         unsafe {
             entry.create_instance(&instance_create_info, None).unwrap()
+        }
+    }
+
+    fn select_device(instance: &Instance) {
+        let devices = unsafe {
+            instance.enumerate_physical_devices().unwrap()
+        };
+        let mut discreet_gpus: u8 = 0;
+        devices
+            .into_iter()
+            .map(|device| {
+                let gpu_props = device::VulkanDevice::get_gpu_props(instance, &device);
+                if gpu_props.properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
+                    discreet_gpus += 1;
+                }
+            });
+        if discreet_gpus == 0 {
+            error!("There are no discreet GPUs dectected, try updating your drivers.");
+            panic!("Unable to continue without an appropriate GPU.")
         }
     }
 }
