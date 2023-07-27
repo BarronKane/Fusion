@@ -1,6 +1,7 @@
 pub mod context;
 pub mod debug;
 pub mod device;
+pub mod swapchain;
 
 use crate::App;
 
@@ -114,7 +115,7 @@ impl VulkanApp {
         }
     }
 
-    fn select_device(instance: &Instance) {
+    fn select_device(instance: &Instance, surface: &Surface, surface_khr: vk::SurfaceKHR) {
         let devices = unsafe {
             instance.enumerate_physical_devices().unwrap()
         };
@@ -145,7 +146,7 @@ impl VulkanApp {
         // TODO: GPU Vendor
         if discreet_gpus.len() > 0 {
             for gpu in discreet_gpus {
-                if Self::is_device_suitable(&gpu) {
+                if Self::is_device_suitable(instance, surface, surface_khr, &gpu) {
                     device = Some(gpu);
                     break;
                 }
@@ -154,7 +155,7 @@ impl VulkanApp {
             warn!("No discreet GPUs detected! Try updating your graphics driver?");
             info!("Looking for integrated gpu.");
             for gpu in integrated_gpus {
-                if Self::is_device_suitable(&gpu) {
+                if Self::is_device_suitable(instance, surface, surface_khr, &gpu) {
                     device = Some(gpu);
                     break;
                 }
@@ -166,10 +167,25 @@ impl VulkanApp {
         }
     }
 
-    fn is_device_suitable(gpu: &vk::PhysicalDevice) -> bool {
-
-
-        return false;
+    fn is_device_suitable(
+        instance: &Instance, 
+        surface: &Surface,
+        surface_khr: vk::SurfaceKHR,
+        gpu: &vk::PhysicalDevice
+    ) -> bool {
+        let (graphics, present) = device::VulkanDevice::find_queue_families(instance, surface, surface_khr, gpu);
+        let extention_support = device::VulkanDevice::check_device_extension_support(instance, gpu);
+        let is_swapchain_adequate = {
+            let details = swapchain::SwapchainSupportDetails::new(*gpu, surface, surface_khr);
+            !details.formats.is_empty() && !details.present_modes.is_empty()
+        };
+        let features = unsafe { instance.get_physical_device_features(*gpu) };
+        
+        return graphics.is_some()
+            && present.is_some()
+            && extention_support
+            && is_swapchain_adequate
+            && features.sampler_anisotropy == vk::TRUE;
     }
 }
 
