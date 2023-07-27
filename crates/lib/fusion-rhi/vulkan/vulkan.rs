@@ -37,7 +37,7 @@ use self::context::VkContext;
 struct VulkanApp {
     b_enable_validation_layers: bool,
 
-    device: device::VulkanDevice,
+    //device: device::VulkanDevice,
 }
 
 impl App for VulkanApp {
@@ -118,19 +118,58 @@ impl VulkanApp {
         let devices = unsafe {
             instance.enumerate_physical_devices().unwrap()
         };
-        let mut discreet_gpus: u8 = 0;
-        devices
+
+        let mut other_gpus: Vec<vk::PhysicalDevice> = Vec::new();
+        let mut integrated_gpus: Vec<vk::PhysicalDevice> = Vec::new();
+        let mut discreet_gpus: Vec<vk::PhysicalDevice> = Vec::new();
+        let mut virtual_gpus: Vec<vk::PhysicalDevice> = Vec::new();
+        let mut cpu_gpus: Vec<vk::PhysicalDevice> = Vec::new();
+
+        let _total_devices = devices
             .into_iter()
             .map(|device| {
                 let gpu_props = device::VulkanDevice::get_gpu_props(instance, &device);
-                if gpu_props.properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
-                    discreet_gpus += 1;
+                match gpu_props.device_type {
+                    vk::PhysicalDeviceType::OTHER => other_gpus.push(device),
+                    vk::PhysicalDeviceType::INTEGRATED_GPU => integrated_gpus.push(device),
+                    vk::PhysicalDeviceType::DISCRETE_GPU => discreet_gpus.push(device),
+                    vk::PhysicalDeviceType::VIRTUAL_GPU => virtual_gpus.push(device),
+                    vk::PhysicalDeviceType::CPU => cpu_gpus.push(device),
+                    _ => other_gpus.push(device)
                 }
-            });
-        if discreet_gpus == 0 {
-            error!("There are no discreet GPUs dectected, try updating your drivers.");
-            panic!("Unable to continue without an appropriate GPU.")
+            })
+            .count();
+
+        let mut device: Option<vk::PhysicalDevice> = None;
+
+        // TODO: GPU Vendor
+        if discreet_gpus.len() > 0 {
+            for gpu in discreet_gpus {
+                if Self::is_device_suitable(&gpu) {
+                    device = Some(gpu);
+                    break;
+                }
+            }
+        } else if integrated_gpus.len() > 0 {
+            warn!("No discreet GPUs detected! Try updating your graphics driver?");
+            info!("Looking for integrated gpu.");
+            for gpu in integrated_gpus {
+                if Self::is_device_suitable(&gpu) {
+                    device = Some(gpu);
+                    break;
+                }
+            }            
         }
+
+        if device.is_none() {
+            error!("No viable GPU device detected! Try updating your graphics driver?")
+        }
+    }
+
+    fn is_device_suitable(gpu: &vk::PhysicalDevice) -> bool {
+
+
+        return false;
     }
 }
 

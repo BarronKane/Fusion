@@ -3,7 +3,7 @@ use crate::vulkan::VulkanApp;
 use ash::{
     Instance,
     Device,
-    vk, extensions::khr::GetPhysicalDeviceProperties2,
+    vk,
 };
 
 use std::ptr;
@@ -11,13 +11,13 @@ use std::ptr;
 pub struct VulkanDevice {
     device: Device,
     gpu: vk::PhysicalDevice,
-    gpu_props: vk::PhysicalDeviceProperties2,
+    gpu_props: vk::PhysicalDeviceProperties,
 }
 
 impl VulkanDevice {
     pub fn create_device(instance: &Instance) {
-        
-
+       
+        #[allow(deprecated)]
         let device_info = vk::DeviceCreateInfo {
             s_type: vk::StructureType::DEVICE_CREATE_INFO,
             p_next: ptr::null(),
@@ -32,7 +32,7 @@ impl VulkanDevice {
         };
     }
 
-    pub fn get_gpu_props(instance: &Instance, device: &vk::PhysicalDevice) -> vk::PhysicalDeviceProperties2 {
+    pub fn get_gpu_props(instance: &Instance, device: &vk::PhysicalDevice) -> vk::PhysicalDeviceProperties {
         let mut physical_device_properties_2 = vk::PhysicalDeviceProperties2::default();
         physical_device_properties_2.s_type = vk::StructureType::PHYSICAL_DEVICE_PROPERTIES_2;
 
@@ -40,6 +40,8 @@ impl VulkanDevice {
             instance.get_physical_device_properties2(*device, &mut physical_device_properties_2)
         };
 
-        return physical_device_properties_2;
+        return physical_device_properties_2.properties;
     }
+
+
 }
