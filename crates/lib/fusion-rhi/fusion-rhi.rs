@@ -1,3 +1,6 @@
+#[path = "./rhi/rhi.rs"]
+pub mod rhi;
+
 #[path = "./dx12/dx12.rs"]
 pub mod dx12;
 
