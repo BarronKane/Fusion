@@ -49,12 +49,12 @@ impl App for VulkanApp {
 
         let surface = Surface::new(&entry, &instance);
         let surface_khr = unsafe {
-            ash_window::create_surface(&entry, &instance, window.raw_display_handle(), window.raw_window_handle(), None)
+            ash_window::create_surface(&entry, &instance, window.raw_display_handle(), window.raw_window_handle(), None).unwrap()
         };
 
         let debug_callback = VulkanApp::setup_debug_messenger(true, &entry, &instance);
 
-        
+        let device = Self::select_device(&instance, &surface, surface_khr);
         
         /*
         let vk_context = VkContext::new(
@@ -115,22 +115,22 @@ impl VulkanApp {
         }
     }
 
-    fn select_device(instance: &Instance, surface: &Surface, surface_khr: vk::SurfaceKHR) {
+    fn select_device(instance: &Instance, surface: &Surface, surface_khr: vk::SurfaceKHR) -> device::VulkanDevice {
         let devices = unsafe {
             instance.enumerate_physical_devices().unwrap()
         };
 
-        let mut other_gpus: Vec<vk::PhysicalDevice> = Vec::new();
-        let mut integrated_gpus: Vec<vk::PhysicalDevice> = Vec::new();
-        let mut discreet_gpus: Vec<vk::PhysicalDevice> = Vec::new();
-        let mut virtual_gpus: Vec<vk::PhysicalDevice> = Vec::new();
-        let mut cpu_gpus: Vec<vk::PhysicalDevice> = Vec::new();
+        let mut other_gpus: Vec<device::VulkanDevice> = Vec::new();
+        let mut integrated_gpus: Vec<device::VulkanDevice> = Vec::new();
+        let mut discreet_gpus: Vec<device::VulkanDevice> = Vec::new();
+        let mut virtual_gpus: Vec<device::VulkanDevice> = Vec::new();
+        let mut cpu_gpus: Vec<device::VulkanDevice> = Vec::new();
 
         let _total_devices = devices
             .into_iter()
-            .map(|device| {
-                let gpu_props = device::VulkanDevice::get_gpu_props(instance, &device);
-                match gpu_props.device_type {
+            .map(|gpu| {
+                let device = device::VulkanDevice::create_device(instance, surface, surface_khr, gpu);
+                match device.gpu_props.device_type {
                     vk::PhysicalDeviceType::OTHER => other_gpus.push(device),
                     vk::PhysicalDeviceType::INTEGRATED_GPU => integrated_gpus.push(device),
                     vk::PhysicalDeviceType::DISCRETE_GPU => discreet_gpus.push(device),
@@ -141,22 +141,22 @@ impl VulkanApp {
             })
             .count();
 
-        let mut device: Option<vk::PhysicalDevice> = None;
+        let mut device: Option<device::VulkanDevice> = None;
 
         // TODO: GPU Vendor
         if discreet_gpus.len() > 0 {
-            for gpu in discreet_gpus {
-                if Self::is_device_suitable(instance, surface, surface_khr, &gpu) {
-                    device = Some(gpu);
+            for vulkan_device in discreet_gpus {
+                if Self::is_device_suitable(instance, surface, surface_khr, &vulkan_device.gpu) {
+                    device = Some(vulkan_device);
                     break;
                 }
             }
         } else if integrated_gpus.len() > 0 {
             warn!("No discreet GPUs detected! Try updating your graphics driver?");
             info!("Looking for integrated gpu.");
-            for gpu in integrated_gpus {
-                if Self::is_device_suitable(instance, surface, surface_khr, &gpu) {
-                    device = Some(gpu);
+            for vulkan_device in integrated_gpus {
+                if Self::is_device_suitable(instance, surface, surface_khr, &vulkan_device.gpu) {
+                    device = Some(vulkan_device);
                     break;
                 }
             }            
@@ -164,6 +164,12 @@ impl VulkanApp {
 
         if device.is_none() {
             error!("No viable GPU device detected! Try updating your graphics driver?")
+        }
+
+        if device.is_some() {
+            return device.unwrap();
+        } else {
+            panic!("Panicing, no viable GPU found.")
         }
     }
 
