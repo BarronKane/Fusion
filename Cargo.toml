@@ -1,7 +1,14 @@
 [workspace]
 resolver = "3"
-members = [
+members = ["Engine/Crates/RuntimeCore/RHI",
     "Engine/Crates/bin/editor",
+
+    "Engine/Crates/RuntimeCore/*",
+    "Engine/Crates/RuntimeCore/RHI/",
+    "Engine/Crates/RuntimeCore/RHI/rhi_core/",
+    "Engine/Crates/RuntimeCore/RHI/rhi_core/rhi_vulkan",
+    "Engine/Crates/RuntimeCore/RHI/rhi_core/rhi_dx12",
+    "Engine/Crates/RuntimeCore/RHI/rhi_core/rhi_metal"
 ]
 exclude = [
 
