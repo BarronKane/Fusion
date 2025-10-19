@@ -1,0 +1,19 @@
+[package]
+name = "fusion-rhi-vulkan"
+description = ""
+documentation = ""
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+path = "VulkanRHI.rs"
+
+[dependencies]
+fusion-rhi-core = { path = "../" }
+
+ash = { version = "0.38.0", default-features = false, features = ["linked"] }
+

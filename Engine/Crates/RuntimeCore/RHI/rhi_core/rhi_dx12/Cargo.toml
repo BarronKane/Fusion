@@ -1,0 +1,31 @@
+[package]
+name = "fusion-rhi-dx12"
+description = ""
+documentation = ""
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+path = "DX12RHI.rs"
+
+[dependencies]
+fusion-rhi-core = { path = "../" }
+
+[dependencies.windows]
+version = "0.62.2"
+default-features = false
+features = [
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_WindowsAndMessaging",
+]

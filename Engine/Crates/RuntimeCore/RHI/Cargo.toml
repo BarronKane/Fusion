@@ -1,0 +1,25 @@
+[package]
+name = "rusion-rhi"
+description = ""
+documentation = ""
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib", "dylib"]
+path = "RHI.rs"
+
+[dependencies]
+fusion-rhi-core = { path = "rhi_core" }
+
+[target.'cfg(not(target_vendor = "apple"))'.dependencies.fusion-rhi-vulkan]
+path = "rhi_core/rhi_vulkan"
+
+[target.'cfg(target_os = "windows")'.dependencies.fusion-rhi-dx12]
+path = "rhi_core/rhi_dx12"
+
+[target.'cfg(target_vendor = "apple")'.dependencies.fusion-rhi-metal]
+path = "rhi_core/rhi_metal"
