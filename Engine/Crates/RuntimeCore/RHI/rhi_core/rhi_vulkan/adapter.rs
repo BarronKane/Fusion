@@ -10,10 +10,12 @@ impl<'v> VulkanRHI<'v> {
     fn is_device_suitable(&self, device: PhysicalDevice) -> Result<bool> {
         let mut device_properties = PhysicalDeviceProperties2::default();
         let mut device_features = PhysicalDeviceFeatures2::default();
+
+        let instance = self.try_get_instance()?;
         
         unsafe {
-            self.instance.get_physical_device_properties2(device, &mut device_properties);
-            self.instance.get_physical_device_features2(device, &mut device_features);
+            instance.get_physical_device_properties2(device, &mut device_properties);
+            instance.get_physical_device_features2(device, &mut device_features);
         }
 
         Ok(device_properties.properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU &&
@@ -22,11 +24,13 @@ impl<'v> VulkanRHI<'v> {
 }
 
 impl<'v> Adapter for VulkanRHI<'v> {
-    fn pick_physical_device(&self) -> Result<'_, ()> {
-        let mut devices: Vec<PhysicalDevice>;
+    fn pick_physical_device(&mut self) -> Result<'_, ()> {
+        // TODO: Get rid of Vec for no_std.
+        let devices: Vec<PhysicalDevice>;
         
         unsafe {
-            let e_devices = self.instance.enumerate_physical_devices();
+            let instance = self.try_get_instance()?;
+            let e_devices = instance.enumerate_physical_devices();
             devices = match e_devices {
                 Ok(d) => {
                     d
@@ -41,7 +45,7 @@ impl<'v> Adapter for VulkanRHI<'v> {
                 }
             };
         }
-        
+
         if devices.len() == 0 {
             return Err(RHIError {
                 rhi: "Vulkan",
@@ -49,14 +53,17 @@ impl<'v> Adapter for VulkanRHI<'v> {
                 message: "No physical devices found."
             });
         }
-        
+
         let mut examined_devices: Vec<PhysicalDevice> = Vec::new();
         for device in devices {
-            if self.is_device_suitable(device)? {
-                examined_devices.push(device);
+            let result = self.is_device_suitable(device);
+            if result.is_ok() {
+                if result.is_ok_and({|r| r == true }) {
+                    examined_devices.push(device);
+                }
             }
         }
-        
+
         if examined_devices.len() == 0 {
             return Err(RHIError {
                 rhi: "Vulkan",
@@ -64,8 +71,9 @@ impl<'v> Adapter for VulkanRHI<'v> {
                 message: "No suitable physical devices found."
             });
         }
-        
+
         // TODO: Pick the best device.
+        self.device = Some(examined_devices[0]);
         
         Ok(())
     }

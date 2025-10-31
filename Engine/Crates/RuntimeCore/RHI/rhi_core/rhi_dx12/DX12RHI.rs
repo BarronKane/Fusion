@@ -1,3 +1,5 @@
+mod adapter;
+
 use fusion_rhi_core::{
     AppInfo,
     RHI
@@ -24,21 +26,35 @@ use core::{
 #[derive(Clone)]
 pub struct DX12RHI<'d> {
     rhi_name: &'d str,
-    dxgi_factory: Option<IDXGIFactory4>
+    dxgi_factory: Option<IDXGIFactory4>,
+    adapter: Option<IDXGIAdapter1>
 }
 
 impl<'d> Default for DX12RHI<'d> {
     fn default() -> Self {
         Self {
             rhi_name: "DX12",
-            dxgi_factory: None
+            dxgi_factory: None,
+            adapter: None,
         }
     }
 }
 
 impl<'d> DX12RHI<'d> {
-    pub fn new() -> DX12RHI<'d> {
-        DX12RHI::default()
+    fn try_get_dxgi_factory(&'_ self) -> Result<'_, &IDXGIFactory4> {
+        match &self.dxgi_factory {
+            Some(f) => {
+                return Ok(f);
+            }
+            None => {
+                let error = RHIError {
+                    rhi: self.rhi_name,
+                    kind: &RHIErrorEnum::InitializationError,
+                    message: "DXGI Factory not initialized."
+                };
+                Err(error)
+            }
+        }
     }
 
     fn init_dx12(&self, app_info: &AppInfo) -> Result<'d, DX12RHI<'d>> {

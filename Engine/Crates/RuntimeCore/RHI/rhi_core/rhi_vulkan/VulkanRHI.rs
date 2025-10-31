@@ -22,11 +22,41 @@ use ash::vk;
 #[derive(Clone)]
 pub struct VulkanRHI<'v> {
     rhi_name: &'v str,
-    instance: ash::Instance,
-    //device: ash::Device,
+    instance: Option<ash::Instance>,
+    device: Option<vk::PhysicalDevice>,
+}
+
+impl<'v> Default for VulkanRHI<'v> {
+    fn default() -> Self {
+        Self {
+            rhi_name: "Vulkan",
+            instance: None,
+            device: None,
+        }
+    }
 }
 
 impl<'v> VulkanRHI<'v> {
+    pub fn new() -> VulkanRHI<'v> {
+        VulkanRHI::default()
+    }
+
+    fn try_get_instance(&self) -> Result<'_, &ash::Instance> {
+        match &self.instance {
+            Some(i) => {
+                return Ok(i);
+            }
+            None => {
+                let error = RHIError {
+                    rhi: "Vulkan",
+                    kind: &RHIErrorEnum::InitializationError,
+                    message: "Vulkan instance not initialized."
+                };
+                Err(error)
+            }
+        }
+    }
+
     fn create_instance(app_info: &AppInfo, entry: &ash::Entry) -> Result<'v, ash::Instance> {
         let vk_app_info: vk::ApplicationInfo = vk::ApplicationInfo::default()
             .application_name(app_info.app_name)
@@ -57,29 +87,21 @@ impl<'v> VulkanRHI<'v> {
         }
     }
 
-    fn init_vulkan(app_info: &AppInfo) -> Result<'v, Self> {
+    fn init_vulkan(&self, app_info: &AppInfo) -> Result<'v, Self> {
         let entry = ash::Entry::linked();
         let vk_instance = Self::create_instance(app_info, &entry)?;
 
-        //let device = VulkanRHI::pick_physical_device()
-
-        let mut initialized_vulkan = VulkanRHI {
-            rhi_name: "Vulkan",
-            instance: vk_instance,
-
-        };
-
+        let mut initialized_vulkan = self.clone();
+        initialized_vulkan.instance = Some(vk_instance);
         Ok(initialized_vulkan)
     }
 }
 
 impl<'v> RHI<VulkanRHI<'v>> for VulkanRHI<'v> {
     fn init(&self, app_info: &AppInfo) -> Result<'v, Self> {
-        let initialized_vulkan: VulkanRHI = VulkanRHI::init_vulkan(app_info)?;
+        let initialized_vulkan: VulkanRHI = self.init_vulkan(app_info)?;
         Ok(initialized_vulkan)
     }
-
-
     fn post_init(&mut self) {
         unimplemented!()
     }
