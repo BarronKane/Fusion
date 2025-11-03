@@ -12,3 +12,8 @@ repository.workspace = true
 [[bin]]
 name = "Fusion-Editor"
 path = "editor.rs"
+
+[dependencies]
+fusion-rhi = { path = "../../RuntimeCore/RHI" }
+fusion-rhi-core = { path = "../../RuntimeCore/RHI/rhi_core" }
+fusion-rhi-vulkan = { path = "../../RuntimeCore/RHI/rhi_core/rhi_vulkan" }

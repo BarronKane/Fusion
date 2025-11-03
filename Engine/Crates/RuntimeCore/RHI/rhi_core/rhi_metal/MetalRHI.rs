@@ -3,12 +3,16 @@ use fusion_rhi_core::{
     RHI
 };
 
-#[derive(Clone)]
-pub struct MetalRHI<'m> {
-    rhi_name: &'m str,
+pub struct MetalRHIBuilder {
+    
 }
 
-impl<'m> Default for MetalRHI<'m> {
+#[derive(Clone)]
+pub struct MetalRHI {
+    rhi_name: &'static str,
+}
+
+impl Default for MetalRHI {
     fn default() -> Self {
         Self {
             rhi_name: "Metal"
@@ -16,12 +20,12 @@ impl<'m> Default for MetalRHI<'m> {
     }
 }
 
-impl<'m> MetalRHI<'m> {
+impl<'m> MetalRHI {
 
 }
 
-impl<'m> RHI<MetalRHI<'m>> for MetalRHI<'m> {
-    fn init(&self, app_info: &AppInfo) -> fusion_rhi_core::rhi_error::Result<'_, MetalRHI<'m>> {
+impl<'m> RHI<MetalRHIBuilder, MetalRHI> for MetalRHI {
+    fn init(builder: &MetalRHIBuilder) -> fusion_rhi_core::rhi_error::Result<MetalRHI> {
         todo!()
     }
 

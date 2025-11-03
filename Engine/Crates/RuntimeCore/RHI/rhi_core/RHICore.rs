@@ -12,13 +12,15 @@ use core::{
     ffi::CStr
 };
 
-pub struct AppInfo<'n> {
-    pub app_name: &'n CStr,
-    pub engine_name: &'n CStr,
+#[derive(Default, Clone)]
+pub struct AppInfo {
+    pub app_name: &'static CStr,
+    pub engine_name: &'static CStr,
+    pub with_validation_layers: bool,
 }
 
-pub trait RHI<T: Sized> {
-    fn init(&self, app_info: &AppInfo) -> Result<'_, T>;
+pub trait RHI<B: Sized, T: Sized> {
+    fn init(builder: &B) -> Result<T>;
     fn post_init(&mut self);
     fn shutdown(&mut self);
 }

@@ -17,7 +17,7 @@ use crate::DX12RHI;
 
 
 
-impl<'d> DX12RHI<'d> {
+impl DX12RHI {
     fn is_device_suitable(&self, device: &IDXGIAdapter1) -> bool {
         let desc_result = unsafe { device.GetDesc1() };
         let desc = match desc_result {
@@ -48,10 +48,8 @@ impl<'d> DX12RHI<'d> {
 
         true
     }
-}
 
-impl<'d> Adapter for DX12RHI<'d> {
-    fn pick_physical_device(&mut self) -> Result<'_, ()> {
+    fn pick_physical_device(&mut self) -> Result<()> {
         let factory4 = self.try_get_dxgi_factory()?;
         // TODO: Get rid of Vec.
         let mut devices: Vec<IDXGIAdapter1> = Vec::new();
@@ -75,8 +73,8 @@ impl<'d> Adapter for DX12RHI<'d> {
 
         if devices.len() == 0 {
             return Err(RHIError {
-                rhi: "DX12",
-                kind: &RHIErrorEnum::InitializationError,
+                rhi: self.rhi_name,
+                kind: RHIErrorEnum::InitializationError,
                 message: "No physical devices found."
             });
         }
@@ -90,8 +88,8 @@ impl<'d> Adapter for DX12RHI<'d> {
 
         if examined_devices.len() == 0 {
             return Err(RHIError {
-                rhi: "DX12",
-                kind: &RHIErrorEnum::InitializationError,
+                rhi: self.rhi_name,
+                kind: RHIErrorEnum::InitializationError,
                 message: "No suitable physical devices found."
             });
         }
@@ -101,6 +99,10 @@ impl<'d> Adapter for DX12RHI<'d> {
 
         Ok(())
     }
+}
+
+impl Adapter for DX12RHI {
+
 }
 
 
