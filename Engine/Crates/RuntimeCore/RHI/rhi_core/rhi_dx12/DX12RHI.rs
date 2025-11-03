@@ -23,14 +23,16 @@ use core::{
     option::Option,
 };
 
+pub struct DX12RHIBuilder {}
+
 #[derive(Clone)]
-pub struct DX12RHI<'d> {
-    rhi_name: &'d str,
+pub struct DX12RHI {
+    rhi_name: &'static str,
     dxgi_factory: Option<IDXGIFactory4>,
     adapter: Option<IDXGIAdapter1>
 }
 
-impl<'d> Default for DX12RHI<'d> {
+impl Default for DX12RHI {
     fn default() -> Self {
         Self {
             rhi_name: "DX12",
@@ -40,8 +42,8 @@ impl<'d> Default for DX12RHI<'d> {
     }
 }
 
-impl<'d> DX12RHI<'d> {
-    fn try_get_dxgi_factory(&'_ self) -> Result<'_, &IDXGIFactory4> {
+impl DX12RHI {
+    fn try_get_dxgi_factory(&'_ self) -> Result<&IDXGIFactory4> {
         match &self.dxgi_factory {
             Some(f) => {
                 return Ok(f);
@@ -49,7 +51,7 @@ impl<'d> DX12RHI<'d> {
             None => {
                 let error = RHIError {
                     rhi: self.rhi_name,
-                    kind: &RHIErrorEnum::InitializationError,
+                    kind: RHIErrorEnum::InitializationError,
                     message: "DXGI Factory not initialized."
                 };
                 Err(error)
@@ -57,7 +59,7 @@ impl<'d> DX12RHI<'d> {
         }
     }
 
-    fn init_dx12(&self, app_info: &AppInfo) -> Result<'d, DX12RHI<'d>> {
+    fn init_dx12(&self, app_info: &AppInfo) -> Result<DX12RHI> {
         let dxgi_factory_flags = DXGI_CREATE_FACTORY_FLAGS(0); // TODO: Debug Assertions.
 
         let factory = unsafe {
@@ -73,7 +75,7 @@ impl<'d> DX12RHI<'d> {
             Err(_) => {
                 let error = RHIError {
                     rhi: self.rhi_name,
-                    kind: &RHIErrorEnum::InitializationError,
+                    kind: RHIErrorEnum::InitializationError,
                     message: "Failed to create dxgi_factory." // TODO: Add winapi message?
                 };
                 Result::Err(error)
@@ -82,10 +84,9 @@ impl<'d> DX12RHI<'d> {
     }
 }
 
-impl<'d> RHI<DX12RHI<'d>> for DX12RHI<'d> {
-    fn init(&self, app_info: &AppInfo) -> Result<'d, Self> {
-        let initialized_dx12: DX12RHI = self.init_dx12(app_info)?;
-        Ok(initialized_dx12)
+impl RHI<DX12RHIBuilder, DX12RHI> for DX12RHI {
+    fn init(builder: &DX12RHIBuilder) -> Result<Self> {
+        unimplemented!()
     }
     fn post_init(&mut self) {
         unimplemented!()

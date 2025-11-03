@@ -1,5 +1,5 @@
 [package]
-name = "rusion-rhi"
+name = "fusion-rhi"
 description = ""
 documentation = ""
 version.workspace = true
