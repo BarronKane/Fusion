@@ -1,5 +1,6 @@
 mod adapter;
 mod callbacks;
+mod device;
 
 use fusion_rhi_core::{
     AppInfo,
@@ -32,6 +33,9 @@ pub struct VulkanRHI {
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
     physical_device: vk::PhysicalDevice,
     device: ash::Device,
+
+    swapchain: vk::SwapchainKHR,
+    image_views: Vec<vk::ImageView>,
 }
 
 #[derive(Clone)]
@@ -244,6 +248,8 @@ impl RHI<VulkanRHIBuilder, VulkanRHI> for VulkanRHI {
             debug_messenger: debug_info,
             physical_device,
             device,
+            swapchain: vk::SwapchainKHR::null(),
+            image_views: Vec::new()
         })
     }
 

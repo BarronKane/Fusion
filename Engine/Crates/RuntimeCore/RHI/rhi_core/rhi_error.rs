@@ -8,7 +8,8 @@ pub type Result<T> = core::result::Result<T, RHIError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RHIErrorEnum {
-    InitializationError
+    InitializationError,
+    LogicalDeviceError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
