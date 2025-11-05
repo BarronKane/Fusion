@@ -1,0 +1,42 @@
+[workspace]
+# Must match rust-gpu.
+resolver = "2"
+members = [
+    "Shared"
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Lance Wallis <walance@pvas.me>"]
+# Must match rust-gpu.
+edition = "2021"
+license = ""
+repository = ""
+
+[workspace.dependencies]
+#rust-gpu = { path = "../ThirdParty/rust-gpu", artifact = ["rustc_codegen_spirv"] }
+spirv-std = { path = "../Crates/ThirdParty/rust-gpu/crates/spirv-std"}
+
+
+
+[package]
+build = "Build.rs"
+name = "tritium"
+description = ""
+documentation = ""
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["dylib"]
+path = "tritium.rs"
+
+[dependencies]
+#rust-gpu = { workspace = true }
+spirv-std = { workspace = true }
+
+[build-dependencies]
+escargot = "0.5"

@@ -11,7 +11,7 @@ members = ["Engine/Crates/RuntimeCore/RHI",
     "Engine/Crates/RuntimeCore/RHI/rhi_core/rhi_metal"
 ]
 exclude = [
-
+    "Engine/Shaders"
 ]
 
 [workspace.package]

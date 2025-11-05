@@ -1,0 +1,13 @@
+[build]
+target = "../Crates/ThirdParty/rust-gpu/crates/rustc_codegen_spirv-target-specs/target-specs/spirv-unknown-spv1.6.json"
+rustflags = [
+    "-Zcodegen-backend=../Crates/ThirdParty/rust-gpu/target/release/rustc_codegen_spirv.dll",
+    "-Zbinary-dep-depinfo",
+    "-Csymbol-mangling-version=v0",
+    "-Zcrate-attr=feature(register_tool)",
+    "-Zcrate-attr=register_tool(rust_gpu)"
+]
+
+[unstable]
+build-std=["core"]
+build-std-features=["compiler-builtins-mem"]
