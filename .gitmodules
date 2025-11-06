@@ -1,3 +1,3 @@
-[submodule "Engine/Crates/ThirdParty/rust-gpu"]
-	path = Engine/Crates/ThirdParty/rust-gpu
+[submodule "Engine/ThirdParty/rust-gpu"]
+	path = Engine/ThirdParty/rust-gpu
 	url = https://github.com/Rust-GPU/rust-gpu.git
