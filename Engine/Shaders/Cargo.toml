@@ -15,7 +15,7 @@ repository = ""
 
 [workspace.dependencies]
 #rust-gpu = { path = "../ThirdParty/rust-gpu", artifact = ["rustc_codegen_spirv"] }
-spirv-std = { path = "../Crates/ThirdParty/rust-gpu/crates/spirv-std"}
+spirv-std = { path = "../ThirdParty/rust-gpu/crates/spirv-std"}
 
 
 
