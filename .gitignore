@@ -4,3 +4,6 @@ Cargo.lock
 
 # IDEs
 .idea/
+
+# Generated Config
+Engine/Shaders/.cargo/config.toml
