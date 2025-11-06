@@ -5,7 +5,7 @@ use spirv_std::glam::{vec4, Vec4};
 
 #[spirv(vertex)]
 pub fn main_vs() {
-
+    
 }
 
 #[spirv(fragment)]
