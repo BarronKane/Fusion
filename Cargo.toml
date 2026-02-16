@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["Engine/Crates/RuntimeCore/RHI",
+members = [
+    "Engine/Shaders",
+
     "Engine/Crates/bin/editor",
 
     "Engine/Crates/RuntimeCore/*",
