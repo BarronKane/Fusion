@@ -8,23 +8,13 @@ use rustix::mm::{self, Advice as MmAdvice, MapFlags as MmMapFlags, MprotectFlags
 use rustix::param;
 
 use crate::pal::mem::{
-    Advise, Backing, CachePolicy, IntegrityMode, MapFlags, MapReplaceRequest, MapRequest,
-    MemAdvise, MemAttrsControl, MemBase, MemCaps, MemCommit, MemDevice, MemError, MemErrorKind,
-    MemIntegrityControl, MemLock, MemMap, MemMapReplace, MemPhysical, MemPool, MemProtect,
-    MemQuery, PageInfo, Placement, PoolAccess, PoolBackingKind, PoolBounds, PoolCapabilitySet,
-    PoolError, PoolHandle, PoolHazardSet, PoolLatency, PoolPreference, PoolPreferenceSet,
-    PoolProhibition, PoolRequest, PoolRequirement, PoolSharing, Protect, Region, RegionAttrs,
-    RegionInfo, ReplacePlacement, ResolvedPoolConfig, TagMode,
+    Advise, Backing, CachePolicy, MapFlags, MapReplaceRequest, MapRequest, MemAdvise, MemBase,
+    MemCaps, MemError, MemErrorKind, MemLock, MemMap, MemMapReplace, MemProtect, MemQuery,
+    PageInfo, Placement, Protect, Region, RegionAttrs, RegionInfo, ReplacePlacement,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LinuxMem;
-
-#[derive(Debug)]
-pub struct LinuxPoolHandle {
-    region: Region,
-    page_size: usize,
-}
 
 pub type PlatformMem = LinuxMem;
 
@@ -121,14 +111,6 @@ impl LinuxMem {
 
         if req.flags.contains(MapFlags::POPULATE) {
             flags |= MmMapFlags::POPULATE;
-        }
-
-        if req.flags.contains(MapFlags::STACK) {
-            flags |= MmMapFlags::STACK;
-        }
-
-        if req.flags.contains(MapFlags::GROWSDOWN) {
-            flags |= MmMapFlags::GROWSDOWN;
         }
 
         Ok(flags)
@@ -232,8 +214,17 @@ impl LinuxMem {
         }
     }
 
+    fn mapped_extent(len: usize) -> Result<usize, MemError> {
+        let page = Self::page_size_raw();
+        let mask = page.checked_sub(1).ok_or(MemError::overflow())?;
+        len.checked_add(mask)
+            .map(|rounded| rounded & !mask)
+            .ok_or(MemError::overflow())
+    }
+
     fn coerce_region(ptr: *mut c_void, len: usize) -> Result<Region, MemError> {
         let base = NonNull::new(ptr.cast::<u8>()).ok_or(MemError::invalid_addr())?;
+        let len = Self::mapped_extent(len)?;
         Ok(Region { base, len })
     }
 
@@ -245,16 +236,6 @@ impl LinuxMem {
             }
             _ => Ok(region),
         }
-    }
-}
-
-impl PoolHandle for LinuxPoolHandle {
-    fn region(&self) -> Region {
-        self.region
-    }
-
-    fn page_size(&self) -> usize {
-        self.page_size
     }
 }
 
@@ -347,24 +328,6 @@ impl MemProtect for LinuxMem {
     }
 }
 
-impl MemCommit for LinuxMem {
-    unsafe fn commit(&self, region: Region, protect: Protect) -> Result<(), MemError> {
-        unsafe { self.protect(region, protect) }
-    }
-
-    unsafe fn decommit(&self, region: Region) -> Result<(), MemError> {
-        let _ = unsafe {
-            mm::madvise(
-                region.base.as_ptr().cast::<c_void>(),
-                region.len,
-                MmAdvice::DontNeed,
-            )
-        };
-
-        unsafe { self.protect(region, Protect::NONE) }
-    }
-}
-
 impl MemQuery for LinuxMem {
     fn query(&self, _addr: NonNull<u8>) -> Result<RegionInfo, MemError> {
         Err(MemError::unsupported())
@@ -401,350 +364,10 @@ impl MemLock for LinuxMem {
     }
 }
 
-unsafe impl MemAttrsControl for LinuxMem {
-    unsafe fn set_cache_policy(
-        &self,
-        _region: Region,
-        _policy: CachePolicy,
-    ) -> Result<(), MemError> {
-        Err(MemError::unsupported())
-    }
-}
-
-unsafe impl MemIntegrityControl for LinuxMem {
-    unsafe fn set_tag_mode(&self, _region: Region, _mode: TagMode) -> Result<(), MemError> {
-        Err(MemError::unsupported())
-    }
-
-    unsafe fn set_integrity_mode(
-        &self,
-        _region: Region,
-        _mode: IntegrityMode,
-    ) -> Result<(), MemError> {
-        Err(MemError::unsupported())
-    }
-}
-
-unsafe impl MemPhysical for LinuxMem {}
-unsafe impl MemDevice for LinuxMem {}
-
-impl MemPool for LinuxMem {
-    type PoolHandle = LinuxPoolHandle;
-
-    fn create_pool(
-        &self,
-        request: &PoolRequest<'_>,
-    ) -> Result<(Self::PoolHandle, ResolvedPoolConfig), PoolError> {
-        let page_info = self.page_info();
-        let page_size = page_info.alloc_granule.get();
-
-        let capacity = aligned_capacity(request.bounds, page_size)?;
-        let mut bounds = request.bounds;
-        bounds.initial_capacity = capacity;
-        bounds.max_capacity = Some(capacity);
-        bounds.growable = false;
-
-        if matches!(request.sharing, PoolSharing::Shared) {
-            return Err(PoolError::unsupported_requirement());
-        }
-
-        let mem_caps = self.caps();
-        let mut granted = pool_caps_from_mem(mem_caps);
-        let mut unmet = PoolPreferenceSet::empty();
-        let emulated = PoolCapabilitySet::empty();
-        let mut hazards = PoolHazardSet::empty();
-
-        let protect = match request.access {
-            PoolAccess::ReadWrite => Protect::READ | Protect::WRITE,
-            PoolAccess::ReadWriteExecute => {
-                hazards |= PoolHazardSet::EXECUTABLE;
-                granted |= PoolCapabilitySet::EXECUTABLE;
-                Protect::READ | Protect::WRITE | Protect::EXEC
-            }
-        };
-
-        for prohibition in request.prohibitions {
-            match prohibition {
-                PoolProhibition::Executable => {
-                    if protect.contains(Protect::EXEC) {
-                        return Err(PoolError::prohibition_violated());
-                    }
-                }
-                PoolProhibition::Overcommit => {
-                    return Err(PoolError::unsupported_requirement());
-                }
-                PoolProhibition::Shared => {
-                    if matches!(request.sharing, PoolSharing::Shared) {
-                        return Err(PoolError::prohibition_violated());
-                    }
-                }
-                PoolProhibition::ReplaceMapping
-                | PoolProhibition::DeviceLocal
-                | PoolProhibition::Physical
-                | PoolProhibition::Emulation => {}
-            }
-        }
-
-        let mut required_placement = None;
-        let mut preferred_placement = None;
-        let mut map_flags = MapFlags::PRIVATE;
-        let mut prefer_populate = false;
-        let mut prefer_lock = false;
-
-        match request.latency {
-            PoolLatency::BestEffort => {}
-            PoolLatency::Prefault => {
-                map_flags |= MapFlags::POPULATE;
-                granted |= PoolCapabilitySet::POPULATE;
-            }
-            PoolLatency::Locked => {
-                if !mem_caps.contains(MemCaps::LOCK) {
-                    return Err(PoolError::unsupported_requirement());
-                }
-                map_flags |= MapFlags::LOCKED;
-                granted |= PoolCapabilitySet::LOCKABLE;
-            }
-        }
-
-        for requirement in request.requirements {
-            match *requirement {
-                PoolRequirement::Placement(placement) => {
-                    validate_required_placement(placement, mem_caps)?;
-                    required_placement = Some(placement);
-                }
-                PoolRequirement::Query => {
-                    if !mem_caps.contains(MemCaps::QUERY) {
-                        return Err(PoolError::unsupported_requirement());
-                    }
-                    granted |= PoolCapabilitySet::QUERY;
-                }
-                PoolRequirement::Locked => {
-                    if !mem_caps.contains(MemCaps::LOCK) {
-                        return Err(PoolError::unsupported_requirement());
-                    }
-                    map_flags |= MapFlags::LOCKED;
-                    granted |= PoolCapabilitySet::LOCKABLE;
-                }
-                PoolRequirement::NoOvercommit => {
-                    return Err(PoolError::unsupported_requirement());
-                }
-                PoolRequirement::CachePolicy(policy) => {
-                    if policy != CachePolicy::Default {
-                        return Err(PoolError::unsupported_requirement());
-                    }
-                }
-                PoolRequirement::Integrity(_)
-                | PoolRequirement::DmaVisible
-                | PoolRequirement::PhysicalContiguous
-                | PoolRequirement::DeviceLocal
-                | PoolRequirement::Shared
-                | PoolRequirement::ZeroOnFree => {
-                    return Err(PoolError::unsupported_requirement());
-                }
-            }
-        }
-
-        for preference in request.preferences {
-            match *preference {
-                PoolPreference::Placement(placement) => {
-                    if required_placement.is_none()
-                        && validate_required_placement(placement, mem_caps).is_ok()
-                    {
-                        preferred_placement = Some(placement);
-                    } else {
-                        unmet |= PoolPreferenceSet::PLACEMENT;
-                    }
-                }
-                PoolPreference::Populate => {
-                    if !map_flags.contains(MapFlags::POPULATE) {
-                        prefer_populate = true;
-                    }
-                }
-                PoolPreference::Lock => {
-                    if !map_flags.contains(MapFlags::LOCKED) && mem_caps.contains(MemCaps::LOCK) {
-                        prefer_lock = true;
-                    } else if !mem_caps.contains(MemCaps::LOCK) {
-                        unmet |= PoolPreferenceSet::LOCK;
-                    }
-                }
-                PoolPreference::HugePages => {
-                    unmet |= PoolPreferenceSet::HUGE_PAGES;
-                }
-                PoolPreference::ZeroOnFree => {
-                    unmet |= PoolPreferenceSet::ZERO_ON_FREE;
-                }
-            }
-        }
-
-        let required_request = base_pool_request(capacity, protect, map_flags, required_placement);
-        let mut preferred_flags = map_flags;
-        if prefer_lock {
-            preferred_flags |= MapFlags::LOCKED;
-        }
-        if prefer_populate {
-            preferred_flags |= MapFlags::POPULATE;
-        }
-        let preferred_request = base_pool_request(
-            capacity,
-            protect,
-            preferred_flags,
-            preferred_placement.or(required_placement),
-        );
-
-        let (region, final_placement, final_flags) = match unsafe { self.map(&preferred_request) } {
-            Ok(region) => (region, preferred_request.placement, preferred_request.flags),
-            Err(error) => {
-                if preferred_request.flags == required_request.flags
-                    && preferred_request.placement == required_request.placement
-                {
-                    return Err(error.into());
-                }
-
-                if prefer_lock {
-                    unmet |= PoolPreferenceSet::LOCK;
-                }
-                if prefer_populate {
-                    unmet |= PoolPreferenceSet::POPULATE;
-                }
-                if preferred_placement.is_some() {
-                    unmet |= PoolPreferenceSet::PLACEMENT;
-                }
-
-                let region = unsafe { self.map(&required_request) }?;
-                (region, required_request.placement, required_request.flags)
-            }
-        };
-
-        if final_flags.contains(MapFlags::LOCKED) {
-            granted |= PoolCapabilitySet::LOCKABLE;
-        }
-        if final_flags.contains(MapFlags::POPULATE) {
-            granted |= PoolCapabilitySet::POPULATE;
-        }
-        if let Placement::FixedNoReplace(_) = final_placement {
-            granted |= PoolCapabilitySet::FIXED_NOREPLACE;
-        }
-
-        let resolved = ResolvedPoolConfig {
-            backing: PoolBackingKind::AnonymousPrivate,
-            bounds,
-            granted_capabilities: granted,
-            unmet_preferences: unmet,
-            emulated_capabilities: emulated,
-            residual_hazards: hazards,
-        };
-
-        let handle = LinuxPoolHandle { region, page_size };
-        Ok((handle, resolved))
-    }
-
-    unsafe fn destroy_pool(&self, pool: Self::PoolHandle) -> Result<(), PoolError> {
-        unsafe { self.unmap(pool.region) }.map_err(Into::into)
-    }
-}
-
-fn pool_caps_from_mem(mem_caps: MemCaps) -> PoolCapabilitySet {
-    let mut out = PoolCapabilitySet::PRIVATE_BACKING;
-
-    if mem_caps.contains(MemCaps::LOCK) {
-        out |= PoolCapabilitySet::LOCKABLE;
-    }
-    if mem_caps.contains(MemCaps::MAP_FIXED_NOREPLACE) {
-        out |= PoolCapabilitySet::FIXED_NOREPLACE;
-    }
-    if mem_caps.contains(MemCaps::ADVISE) {
-        out |= PoolCapabilitySet::ADVISE;
-    }
-    if mem_caps.contains(MemCaps::QUERY) {
-        out |= PoolCapabilitySet::QUERY;
-    }
-    if mem_caps.contains(MemCaps::PHYSICAL_MAP) {
-        out |= PoolCapabilitySet::PHYSICAL;
-    }
-    if mem_caps.contains(MemCaps::DEVICE_MAP) {
-        out |= PoolCapabilitySet::DEVICE_LOCAL;
-    }
-    if mem_caps.contains(MemCaps::INTEGRITY_CONTROL) {
-        out |= PoolCapabilitySet::INTEGRITY;
-    }
-    if mem_caps.contains(MemCaps::CACHE_POLICY) {
-        out |= PoolCapabilitySet::CACHE_POLICY;
-    }
-
-    out
-}
-
-fn validate_required_placement(placement: Placement, mem_caps: MemCaps) -> Result<(), PoolError> {
-    match placement {
-        Placement::Anywhere | Placement::Hint(_) => Ok(()),
-        Placement::FixedNoReplace(_) if mem_caps.contains(MemCaps::MAP_FIXED_NOREPLACE) => Ok(()),
-        Placement::FixedNoReplace(_) => Err(PoolError::unsupported_requirement()),
-        Placement::PreferredNode(_) | Placement::RequiredNode(_) | Placement::RegionId(_) => {
-            Err(PoolError::unsupported_requirement())
-        }
-    }
-}
-
-fn aligned_capacity(bounds: PoolBounds, granule: usize) -> Result<usize, PoolError> {
-    if bounds.initial_capacity == 0 {
-        return Err(PoolError::invalid_request());
-    }
-
-    if bounds.growable {
-        return Err(PoolError::unsupported_requirement());
-    }
-
-    if let Some(max) = bounds.max_capacity {
-        if max < bounds.initial_capacity {
-            return Err(PoolError::invalid_request());
-        }
-    }
-
-    align_up(bounds.initial_capacity, granule).ok_or_else(PoolError::invalid_request)
-}
-
-fn base_pool_request(
-    capacity: usize,
-    protect: Protect,
-    mut flags: MapFlags,
-    placement: Option<Placement>,
-) -> MapRequest<'static> {
-    let placement = placement.unwrap_or(Placement::Anywhere);
-    if matches!(
-        placement,
-        Placement::Anywhere | Placement::Hint(_) | Placement::FixedNoReplace(_)
-    ) {
-        flags |= MapFlags::PRIVATE;
-    }
-
-    MapRequest {
-        len: capacity,
-        align: 0,
-        protect,
-        flags,
-        attrs: RegionAttrs::VIRTUAL_ONLY,
-        cache: CachePolicy::Default,
-        placement,
-        backing: Backing::Anonymous,
-    }
-}
-
-fn align_up(value: usize, align: usize) -> Option<usize> {
-    if align == 0 {
-        return Some(value);
-    }
-
-    let mask = align.checked_sub(1)?;
-    value.checked_add(mask).map(|v| v & !mask)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pal::mem::{
-        MapFlags, PoolAccess, PoolErrorKind, PoolProhibition, PoolRequest, PoolRequirement,
-        RegionAttrs,
-    };
+    use crate::pal::mem::{MapFlags, RegionAttrs};
 
     fn anon_request(len: usize) -> MapRequest<'static> {
         MapRequest {
@@ -765,6 +388,17 @@ mod tests {
         let page = mem.page_info().base_page.get();
         let region = unsafe { mem.map(&anon_request(page)) }.expect("map");
         assert_eq!(region.len, page);
+        unsafe { mem.unmap(region) }.expect("unmap");
+    }
+
+    #[test]
+    fn region_len_reports_page_rounded_extent() {
+        let mem = LinuxMem::new();
+        let page = mem.page_info().base_page.get();
+        let region = unsafe { mem.map(&anon_request(page - 1)) }.expect("map");
+
+        assert_eq!(region.len, page);
+
         unsafe { mem.unmap(region) }.expect("unmap");
     }
 
@@ -803,49 +437,5 @@ mod tests {
         assert_eq!(replaced.base, region.base);
 
         unsafe { mem.unmap(replaced) }.expect("cleanup");
-    }
-
-    #[test]
-    fn creates_pool_backing() {
-        let mem = LinuxMem::new();
-        let (pool, resolved) = mem
-            .create_pool(&PoolRequest::anonymous_private(16 * 1024))
-            .expect("pool backing");
-
-        assert_eq!(resolved.backing, PoolBackingKind::AnonymousPrivate);
-        assert_eq!(pool.region().len, 16 * 1024);
-
-        unsafe { mem.destroy_pool(pool) }.expect("destroy");
-    }
-
-    #[test]
-    fn pool_rejects_unsupported_requirement() {
-        let mem = LinuxMem::new();
-        let requirements = [PoolRequirement::DmaVisible];
-        let request = PoolRequest {
-            requirements: &requirements,
-            ..PoolRequest::anonymous_private(16 * 1024)
-        };
-
-        let err = mem
-            .create_pool(&request)
-            .expect_err("dma-visible should fail");
-        assert_eq!(err.kind, PoolErrorKind::UnsupportedRequirement);
-    }
-
-    #[test]
-    fn pool_enforces_executable_prohibition() {
-        let mem = LinuxMem::new();
-        let prohibitions = [PoolProhibition::Executable];
-        let request = PoolRequest {
-            access: PoolAccess::ReadWriteExecute,
-            prohibitions: &prohibitions,
-            ..PoolRequest::anonymous_private(16 * 1024)
-        };
-
-        let err = mem
-            .create_pool(&request)
-            .expect_err("executable should be prohibited");
-        assert_eq!(err.kind, PoolErrorKind::ProhibitionViolated);
     }
 }

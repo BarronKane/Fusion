@@ -14,6 +14,7 @@ path = "fusion-sys.rs"
 
 [dependencies]
 fusion-pal = { workspace = true }
+bitflags.workspace = true
 
 [lints]
 workspace = true
