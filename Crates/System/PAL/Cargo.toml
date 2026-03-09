@@ -19,4 +19,4 @@ workspace = true
 bitflags.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "1.1.4", default-features = false, features = ["mm", "param"] }
+rustix = { version = "1.1.4", default-features = false, features = ["fs", "mm", "param"] }

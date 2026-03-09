@@ -1,16 +1,20 @@
 use core::ffi::c_void;
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
+use core::str;
 
 use rustix::fd::BorrowedFd;
+use rustix::fs::{CWD, Mode, OFlags, openat};
 use rustix::io::Errno;
+use rustix::io::read;
 use rustix::mm::{self, Advice as MmAdvice, MapFlags as MmMapFlags, MprotectFlags, ProtFlags};
 use rustix::param;
 
 use crate::pal::mem::{
-    Advise, Backing, CachePolicy, MapFlags, MapReplaceRequest, MapRequest, MemAdvise, MemBase,
-    MemCaps, MemError, MemErrorKind, MemLock, MemMap, MemMapReplace, MemProtect, MemQuery,
-    PageInfo, Placement, Protect, Region, RegionAttrs, RegionInfo, ReplacePlacement,
+    Advise, Backing, CachePolicy, MapFlags, MapReplaceRequest, MapRequest, MemAdviceCaps,
+    MemAdvise, MemBackingCaps, MemBase, MemCaps, MemCommit, MemError, MemErrorKind, MemLock,
+    MemMap, MemMapReplace, MemPlacementCaps, MemProtect, MemQuery, MemSupport, PageInfo, Placement,
+    Protect, Region, RegionAttrs, RegionInfo, ReplacePlacement,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -237,6 +241,90 @@ impl LinuxMem {
             _ => Ok(region),
         }
     }
+
+    fn query_proc_maps(&self, addr: usize) -> Result<RegionInfo, MemError> {
+        let fd = openat(CWD, "/proc/self/maps", OFlags::RDONLY, Mode::empty())
+            .map_err(Self::map_errno)?;
+        let mut read_buf = [0_u8; 4096];
+        let mut line_buf = [0_u8; 4096];
+        let mut line_len = 0_usize;
+
+        loop {
+            let nread = read(&fd, &mut read_buf).map_err(Self::map_errno)?;
+            if nread == 0 {
+                break;
+            }
+
+            for byte in &read_buf[..nread] {
+                if *byte == b'\n' {
+                    if let Some(info) = Self::parse_maps_line(&line_buf[..line_len], addr) {
+                        return Ok(info);
+                    }
+                    line_len = 0;
+                    continue;
+                }
+
+                if line_len == line_buf.len() {
+                    return Err(MemError::overflow());
+                }
+
+                line_buf[line_len] = *byte;
+                line_len += 1;
+            }
+        }
+
+        if line_len != 0 {
+            if let Some(info) = Self::parse_maps_line(&line_buf[..line_len], addr) {
+                return Ok(info);
+            }
+        }
+
+        Err(MemError::invalid_addr())
+    }
+
+    fn parse_maps_line(line: &[u8], addr: usize) -> Option<RegionInfo> {
+        let text = str::from_utf8(line).ok()?;
+        let mut fields = text.split_ascii_whitespace();
+        let range = fields.next()?;
+        let perms = fields.next()?;
+        let (start, end) = range.split_once('-')?;
+        let start = usize::from_str_radix(start, 16).ok()?;
+        let end = usize::from_str_radix(end, 16).ok()?;
+
+        if addr < start || addr >= end {
+            return None;
+        }
+
+        let base = NonNull::new(start as *mut u8)?;
+        let mut protect = Protect::empty();
+        let perm_bytes = perms.as_bytes();
+        if perm_bytes.first() == Some(&b'r') {
+            protect |= Protect::READ;
+        }
+        if perm_bytes.get(1) == Some(&b'w') {
+            protect |= Protect::WRITE;
+        }
+        if perm_bytes.get(2) == Some(&b'x') {
+            protect |= Protect::EXEC;
+        }
+
+        let mut attrs = RegionAttrs::VIRTUAL_ONLY;
+        if protect.contains(Protect::EXEC) {
+            attrs |= RegionAttrs::EXECUTABLE;
+        }
+
+        Some(RegionInfo {
+            region: Region {
+                base,
+                len: end.checked_sub(start)?,
+            },
+            protect,
+            attrs,
+            cache: CachePolicy::Default,
+            placement: Placement::Anywhere,
+            committed: true,
+        })
+    }
 }
 
 impl MemBase for LinuxMem {
@@ -249,7 +337,31 @@ impl MemBase for LinuxMem {
             | MemCaps::PROTECT
             | MemCaps::ADVISE
             | MemCaps::LOCK
+            | MemCaps::QUERY
             | MemCaps::EXECUTE_MAP
+    }
+
+    fn support(&self) -> MemSupport {
+        MemSupport {
+            caps: self.caps(),
+            map_flags: MapFlags::PRIVATE | MapFlags::SHARED | MapFlags::POPULATE | MapFlags::LOCKED,
+            protect: Protect::READ | Protect::WRITE | Protect::EXEC,
+            backings: MemBackingCaps::ANON_PRIVATE
+                | MemBackingCaps::ANON_SHARED
+                | MemBackingCaps::FILE_PRIVATE
+                | MemBackingCaps::FILE_SHARED,
+            placements: MemPlacementCaps::ANYWHERE
+                | MemPlacementCaps::HINT
+                | MemPlacementCaps::FIXED_NOREPLACE,
+            advice: MemAdviceCaps::NORMAL
+                | MemAdviceCaps::SEQUENTIAL
+                | MemAdviceCaps::RANDOM
+                | MemAdviceCaps::WILL_NEED
+                | MemAdviceCaps::DONT_NEED
+                | MemAdviceCaps::FREE
+                | MemAdviceCaps::NO_HUGE_PAGE
+                | MemAdviceCaps::HUGE_PAGE,
+        }
     }
 
     fn page_info(&self) -> PageInfo {
@@ -328,9 +440,11 @@ impl MemProtect for LinuxMem {
     }
 }
 
+impl MemCommit for LinuxMem {}
+
 impl MemQuery for LinuxMem {
-    fn query(&self, _addr: NonNull<u8>) -> Result<RegionInfo, MemError> {
-        Err(MemError::unsupported())
+    fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, MemError> {
+        self.query_proc_maps(addr.as_ptr() as usize)
     }
 }
 
@@ -342,9 +456,9 @@ impl MemAdvise for LinuxMem {
             Advise::Random => MmAdvice::Random,
             Advise::WillNeed => MmAdvice::WillNeed,
             Advise::DontNeed => MmAdvice::DontNeed,
-            Advise::Free | Advise::NoHugePage | Advise::HugePage => {
-                return Err(MemError::unsupported());
-            }
+            Advise::Free => MmAdvice::LinuxFree,
+            Advise::NoHugePage => MmAdvice::LinuxNoHugepage,
+            Advise::HugePage => MmAdvice::LinuxHugepage,
         };
 
         unsafe { mm::madvise(region.base.as_ptr().cast::<c_void>(), region.len, adv) }
@@ -437,5 +551,31 @@ mod tests {
         assert_eq!(replaced.base, region.base);
 
         unsafe { mem.unmap(replaced) }.expect("cleanup");
+    }
+
+    #[test]
+    fn query_reports_mapped_region() {
+        let mem = LinuxMem::new();
+        let page = mem.page_info().base_page.get();
+        let region = unsafe { mem.map(&anon_request(page)) }.expect("map");
+        let info = mem.query(region.base).expect("query");
+
+        assert!(info.region.contains(region.base.as_ptr() as usize));
+        assert!(info.region.len >= region.len);
+        assert!(info.protect.contains(Protect::READ));
+        assert!(info.protect.contains(Protect::WRITE));
+
+        unsafe { mem.unmap(region) }.expect("cleanup");
+    }
+
+    #[test]
+    fn huge_page_advice_is_supported() {
+        let mem = LinuxMem::new();
+        let page = mem.page_info().base_page.get();
+        let region = unsafe { mem.map(&anon_request(page)) }.expect("map");
+
+        unsafe { mem.advise(region, Advise::HugePage) }.expect("advise");
+
+        unsafe { mem.unmap(region) }.expect("cleanup");
     }
 }
