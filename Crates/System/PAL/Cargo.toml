@@ -1,0 +1,22 @@
+[package]
+name = "fusion-pal"
+description = ""
+documentation = ""
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+path = "fusion-pal.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+bitflags.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.4", default-features = false, features = ["mm", "param"] }

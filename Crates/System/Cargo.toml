@@ -1,0 +1,19 @@
+[package]
+name = "fusion-sys"
+description = ""
+documentation = ""
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+path = "fusion-sys.rs"
+
+[dependencies]
+fusion-pal = { workspace = true }
+
+[lints]
+workspace = true
