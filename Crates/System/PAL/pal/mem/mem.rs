@@ -67,6 +67,66 @@ bitflags::bitflags! {
 }
 
 bitflags::bitflags! {
+    /// Detailed backing combinations supported for ordinary mappings.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct MemBackingCaps: u32 {
+        const ANON_PRIVATE = 1 << 0;
+        const ANON_SHARED  = 1 << 1;
+        const FILE_PRIVATE = 1 << 2;
+        const FILE_SHARED  = 1 << 3;
+        const DEVICE       = 1 << 4;
+        const PHYSICAL     = 1 << 5;
+        const NATIVE_POOL  = 1 << 6;
+        const BORROWED     = 1 << 7;
+    }
+}
+
+bitflags::bitflags! {
+    /// Detailed ordinary placement modes supported by the backend.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct MemPlacementCaps: u32 {
+        const ANYWHERE        = 1 << 0;
+        const HINT            = 1 << 1;
+        const FIXED_NOREPLACE = 1 << 2;
+        const PREFERRED_NODE  = 1 << 3;
+        const REQUIRED_NODE   = 1 << 4;
+        const REGION_ID       = 1 << 5;
+    }
+}
+
+bitflags::bitflags! {
+    /// Detailed advisory operations supported by the backend.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct MemAdviceCaps: u32 {
+        const NORMAL       = 1 << 0;
+        const SEQUENTIAL   = 1 << 1;
+        const RANDOM       = 1 << 2;
+        const WILL_NEED    = 1 << 3;
+        const DONT_NEED    = 1 << 4;
+        const FREE         = 1 << 5;
+        const NO_HUGE_PAGE = 1 << 6;
+        const HUGE_PAGE    = 1 << 7;
+    }
+}
+
+/// Detailed backend support surface for memory operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemSupport {
+    /// Coarse backend-native capabilities.
+    pub caps: MemCaps,
+    /// Mapping-construction flags supported for ordinary mappings.
+    pub map_flags: MapFlags,
+    /// Ordinary protection bits supported for mappings and protection changes.
+    pub protect: Protect,
+    /// Detailed supported backing combinations for ordinary mappings.
+    pub backings: MemBackingCaps,
+    /// Detailed supported ordinary placement modes.
+    pub placements: MemPlacementCaps,
+    /// Detailed supported advisory operations.
+    pub advice: MemAdviceCaps,
+}
+
+bitflags::bitflags! {
     /// Access-protection bits for a mapped or reserved region.
     ///
     /// These flags describe the intended access model of a region. Support for a specific
@@ -488,6 +548,9 @@ impl MemError {
 pub trait MemBase {
     /// Returns backend-native memory capabilities.
     fn caps(&self) -> MemCaps;
+
+    /// Returns detailed backend support information.
+    fn support(&self) -> MemSupport;
 
     /// Returns page-size and allocation-granule information for this provider.
     fn page_info(&self) -> PageInfo;

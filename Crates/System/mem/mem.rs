@@ -1,2 +1,2 @@
-#[path = "pool/pool.rs"]
-pub mod pool;
+#[path = "resource/resource.rs"]
+pub mod resource;

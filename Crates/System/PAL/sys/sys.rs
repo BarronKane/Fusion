@@ -30,5 +30,4 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows as platform;
 
-#[cfg(target_os = "linux")]
 pub mod mem;
