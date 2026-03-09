@@ -1,19 +1,19 @@
 [workspace]
 resolver = "3"
 members = [
-    "Engine/Shaders",
+    # System stack: safe facade over a compile-time-selected PAL.
+    "Crates/System",
+    "Crates/System/PAL",
 
-    "Engine/Crates/bin/editor",
-
-    "Engine/Crates/RuntimeCore/*",
-    "Engine/Crates/RuntimeCore/RHI/",
-    "Engine/Crates/RuntimeCore/RHI/rhi_core/",
-    "Engine/Crates/RuntimeCore/RHI/rhi_core/rhi_vulkan",
-    "Engine/Crates/RuntimeCore/RHI/rhi_core/rhi_dx12",
-    "Engine/Crates/RuntimeCore/RHI/rhi_core/rhi_metal"
-]
-exclude = [
-    "Engine/Shaders"
+    # Engine stack.
+    "Crates/Engine/Shaders",
+    "Crates/Engine/Shaders/Shared",
+    "Crates/Engine/bin/editor",
+    "Crates/Engine/lib/RuntimeCore/RHI",
+    "Crates/Engine/lib/RuntimeCore/RHI/rhi_core",
+    "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_vulkan",
+    "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_dx12",
+    "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_metal",
 ]
 
 [workspace.package]
@@ -22,3 +22,31 @@ edition = "2024"
 authors = ["Lance Wallis <walance@pvas.me>"]
 license = ""
 repository = ""
+
+[workspace.dependencies]
+# System stack:
+# `fusion-sys` is the consumer-facing facade.
+# `fusion-pal` exposes contract modules and compile-time-selected system modules.
+fusion-sys = { path = "Crates/System" }
+fusion-pal = { path = "Crates/System/PAL" }
+
+# RHI stack:
+# `fusion-rhi` presents a unified API while selecting backends at runtime.
+fusion-rhi = { path = "Crates/Engine/lib/RuntimeCore/RHI" }
+fusion-rhi-core = { path = "Crates/Engine/lib/RuntimeCore/RHI/rhi_core" }
+fusion-rhi-vulkan = { path = "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_vulkan" }
+fusion-rhi-dx12 = { path = "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_dx12" }
+fusion-rhi-metal = { path = "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_metal" }
+
+ash = { version = "0.38.0", default-features = false, features = ["linked"] }
+bitflags = "2.11.0"
+escargot = "0.5.15"
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu.git", branch = "main" }
+windows = "0.62.2"
+
+[workspace.lints.clippy]
+pedantic = "warn"
+nursery = "warn"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }

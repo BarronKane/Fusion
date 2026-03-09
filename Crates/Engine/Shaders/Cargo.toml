@@ -1,0 +1,23 @@
+[package]
+version.workspace = true
+authors.workspace = true
+# Must match rust-gpu.
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+name = "tritium"
+description = ""
+documentation = ""
+
+[lib]
+crate-type = ["dylib"]
+path = "tritium.rs"
+
+[dependencies]
+spirv-std = { workspace = true }
+
+[build-dependencies]
+escargot = { workspace = true }
+
+[lints]
+workspace = true
