@@ -289,19 +289,6 @@ impl VirtualMemoryResource {
             unmet |= ResourcePreferenceSet::PLACEMENT;
         }
 
-        if request.preferences.contains(ResourcePreferenceSet::LOCK)
-            && !preferred_flags.contains(MapFlags::LOCKED)
-        {
-            if resource_support
-                .residency
-                .contains(ResourceResidencySupport::LOCKED)
-            {
-                preferred_flags |= MapFlags::LOCKED;
-            } else {
-                unmet |= ResourcePreferenceSet::LOCK;
-            }
-        }
-
         if request
             .preferences
             .contains(ResourcePreferenceSet::PREFAULT)
@@ -314,6 +301,17 @@ impl VirtualMemoryResource {
                 preferred_flags |= MapFlags::POPULATE;
             } else {
                 unmet |= ResourcePreferenceSet::PREFAULT;
+            }
+        }
+
+        if request
+            .preferences
+            .contains(ResourcePreferenceSet::HUGE_PAGES)
+        {
+            if supports_map_time_huge_pages(mem_support) {
+                preferred_flags |= MapFlags::HUGE_PAGE;
+            } else if !supports_huge_page_advice(mem_support) {
+                unmet |= ResourcePreferenceSet::HUGE_PAGES;
             }
         }
 
@@ -332,20 +330,20 @@ impl VirtualMemoryResource {
 
         let (region, actual_flags) = if has_preferred_attempt {
             if let Ok(region) = unsafe { provider.map(&preferred_request) } {
-                if !placement_preference_honored(request.initial.placement, region) {
+                if !placement_preference_honored(provider, request.initial.placement, region) {
                     unmet |= ResourcePreferenceSet::PLACEMENT;
                 }
                 (region, preferred_flags)
             } else {
-                if preferred_flags.contains(MapFlags::LOCKED)
-                    && !base_flags.contains(MapFlags::LOCKED)
-                {
-                    unmet |= ResourcePreferenceSet::LOCK;
-                }
                 if preferred_flags.contains(MapFlags::POPULATE)
                     && !base_flags.contains(MapFlags::POPULATE)
                 {
                     unmet |= ResourcePreferenceSet::PREFAULT;
+                }
+                if preferred_flags.contains(MapFlags::HUGE_PAGE)
+                    && !base_flags.contains(MapFlags::HUGE_PAGE)
+                {
+                    unmet |= ResourcePreferenceSet::HUGE_PAGES;
                 }
                 if preferred_placement.is_some() {
                     unmet |= ResourcePreferenceSet::PLACEMENT;
@@ -365,19 +363,22 @@ impl VirtualMemoryResource {
             )
         };
 
-        verify_required_placement(region, request.contract.required_placement)?;
-        apply_resource_preferences_after_map(
+        verify_required_placement(provider, region, request.contract.required_placement)?;
+        let actual_locked = match finalize_post_map_state(
             provider,
             region,
             request,
-            acquire_support,
+            mem_support,
+            actual_flags,
             &mut unmet,
-        );
-        let initial_state = ResourceState::tracked(
-            request.initial.protect,
-            actual_flags.contains(MapFlags::LOCKED),
-            true,
-        );
+        ) {
+            Ok(actual_locked) => actual_locked,
+            Err(err) => {
+                let _ = unsafe { provider.unmap(region) };
+                return Err(err);
+            }
+        };
+        let initial_state = ResourceState::tracked(request.initial.protect, actual_locked, true);
 
         Ok(Self::from_parts(
             provider,
@@ -629,6 +630,10 @@ impl QueryableResource for VirtualMemoryResource {
             return Err(ResourceError::unsupported_operation());
         }
 
+        if !self.contains(addr.as_ptr()) {
+            return Err(ResourceError::invalid_range());
+        }
+
         self.provider
             .query(addr)
             .map_err(ResourceError::from_operation_error)
@@ -808,7 +813,6 @@ pub(super) fn initial_map_flags(
             if !support.residency.contains(ResourceResidencySupport::LOCKED) {
                 return Err(ResourceError::unsupported_request());
             }
-            flags |= MapFlags::LOCKED;
         }
     }
 
@@ -910,8 +914,17 @@ pub(super) const fn required_placement_to_mem(
             }
             Ok(Some(Placement::FixedNoReplace(addr)))
         }
-        Some(RequiredPlacement::RequiredNode(_) | RequiredPlacement::RegionId(_)) => {
-            Err(ResourceError::unsupported_request())
+        Some(RequiredPlacement::RequiredNode(node)) => {
+            if !supported.contains(MemPlacementCaps::REQUIRED_NODE) {
+                return Err(ResourceError::unsupported_request());
+            }
+            Ok(Some(Placement::RequiredNode(node)))
+        }
+        Some(RequiredPlacement::RegionId(region_id)) => {
+            if !supported.contains(MemPlacementCaps::REGION_ID) {
+                return Err(ResourceError::unsupported_request());
+            }
+            Ok(Some(Placement::RegionId(region_id)))
         }
     }
 }
@@ -965,16 +978,21 @@ const fn base_map_request(
 }
 
 pub(super) fn placement_preference_honored(
+    provider: fusion_pal::sys::mem::PlatformMem,
     preference: PlacementPreference,
     region: Region,
 ) -> bool {
     match preference {
-        PlacementPreference::Anywhere | PlacementPreference::PreferredNode(_) => true,
+        PlacementPreference::Anywhere => true,
         PlacementPreference::Hint(addr) => region.base.as_ptr() as usize == addr,
+        PlacementPreference::PreferredNode(node) => provider
+            .query(region.base)
+            .is_ok_and(|info| placement_matches_node(info.placement, node)),
     }
 }
 
 pub(super) fn verify_required_placement(
+    provider: fusion_pal::sys::mem::PlatformMem,
     region: Region,
     placement: Option<RequiredPlacement>,
 ) -> Result<(), ResourceError> {
@@ -983,11 +1001,25 @@ pub(super) fn verify_required_placement(
         Some(RequiredPlacement::FixedNoReplace(addr)) if region.base.as_ptr() as usize == addr => {
             Ok(())
         }
-        Some(
-            RequiredPlacement::FixedNoReplace(_)
-            | RequiredPlacement::RequiredNode(_)
-            | RequiredPlacement::RegionId(_),
-        ) => Err(ResourceError::unsupported_request()),
+        Some(RequiredPlacement::FixedNoReplace(_)) => Err(ResourceError::unsupported_request()),
+        Some(RequiredPlacement::RequiredNode(node)) => {
+            provider.query(region.base).map_or(Ok(()), |info| {
+                if placement_contradicts_node(info.placement, node) {
+                    Err(ResourceError::unsupported_request())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+        Some(RequiredPlacement::RegionId(region_id)) => {
+            provider.query(region.base).map_or(Ok(()), |info| {
+                if placement_contradicts_region_id(info.placement, region_id) {
+                    Err(ResourceError::unsupported_request())
+                } else {
+                    Ok(())
+                }
+            })
+        }
     }
 }
 
@@ -1021,8 +1053,7 @@ pub(super) fn resource_instance_support_from_mem_support(
     if mem_support.map_flags.contains(MapFlags::POPULATE) {
         residency |= ResourceResidencySupport::PREFAULT;
     }
-    if mem_support.map_flags.contains(MapFlags::LOCKED) && mem_support.caps.contains(MemCaps::LOCK)
-    {
+    if mem_support.caps.contains(MemCaps::LOCK) {
         residency |= ResourceResidencySupport::LOCKED;
     }
 
@@ -1056,8 +1087,7 @@ pub(super) fn resource_acquire_support_from_mem_support(
     if mem_support.map_flags.contains(MapFlags::POPULATE) {
         preferences |= ResourcePreferenceSet::PREFAULT;
     }
-    if mem_support.map_flags.contains(MapFlags::LOCKED) && mem_support.caps.contains(MemCaps::LOCK)
-    {
+    if mem_support.caps.contains(MemCaps::LOCK) {
         preferences |= ResourcePreferenceSet::LOCK;
     }
     if mem_support.map_flags.contains(MapFlags::HUGE_PAGE)
@@ -1076,32 +1106,46 @@ pub(super) fn resource_acquire_support_from_mem_support(
     }
 }
 
-pub(super) fn apply_resource_preferences_after_map(
+pub(super) fn finalize_post_map_state(
     provider: fusion_pal::sys::mem::PlatformMem,
     region: Region,
     request: &ResourceRequest<'_>,
-    support: ResourceAcquireSupport,
+    mem_support: MemSupport,
+    actual_flags: MapFlags,
     unmet: &mut ResourcePreferenceSet,
-) {
-    if !request
-        .preferences
-        .contains(ResourcePreferenceSet::HUGE_PAGES)
-    {
-        return;
+) -> Result<bool, ResourceError> {
+    let mut actual_locked = false;
+
+    if matches!(request.initial.residency, InitialResidency::Locked) {
+        unsafe { provider.lock(region) }.map_err(ResourceError::from_operation_error)?;
+        actual_locked = true;
+    } else if request.preferences.contains(ResourcePreferenceSet::LOCK) {
+        if mem_support.caps.contains(MemCaps::LOCK) {
+            if unsafe { provider.lock(region) }.is_ok() {
+                actual_locked = true;
+            } else {
+                *unmet |= ResourcePreferenceSet::LOCK;
+            }
+        } else {
+            *unmet |= ResourcePreferenceSet::LOCK;
+        }
     }
 
-    if !support
+    if request
         .preferences
         .contains(ResourcePreferenceSet::HUGE_PAGES)
-        || !support.instance.ops.contains(ResourceOpSet::ADVISE)
+        && !actual_flags.contains(MapFlags::HUGE_PAGE)
     {
-        *unmet |= ResourcePreferenceSet::HUGE_PAGES;
-        return;
+        if supports_huge_page_advice(mem_support) {
+            if unsafe { provider.advise(region, Advise::HugePage) }.is_err() {
+                *unmet |= ResourcePreferenceSet::HUGE_PAGES;
+            }
+        } else {
+            *unmet |= ResourcePreferenceSet::HUGE_PAGES;
+        }
     }
 
-    if unsafe { provider.advise(region, Advise::HugePage) }.is_err() {
-        *unmet |= ResourcePreferenceSet::HUGE_PAGES;
-    }
+    Ok(actual_locked)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1201,6 +1245,47 @@ fn align_up(value: usize, align: usize) -> Option<usize> {
     value.checked_add(mask).map(|rounded| rounded & !mask)
 }
 
+pub(super) const fn supports_map_time_huge_pages(mem_support: MemSupport) -> bool {
+    mem_support.caps.contains(MemCaps::HUGE_PAGES)
+        && mem_support.map_flags.contains(MapFlags::HUGE_PAGE)
+}
+
+pub(super) const fn supports_huge_page_advice(mem_support: MemSupport) -> bool {
+    mem_support.caps.contains(MemCaps::ADVISE)
+        && mem_support.advice.contains(MemAdviceCaps::HUGE_PAGE)
+}
+
+const fn placement_matches_node(placement: Placement, node: u32) -> bool {
+    match placement {
+        Placement::PreferredNode(actual) | Placement::RequiredNode(actual) => actual == node,
+        Placement::Anywhere
+        | Placement::Hint(_)
+        | Placement::FixedNoReplace(_)
+        | Placement::RegionId(_) => false,
+    }
+}
+
+const fn placement_contradicts_node(placement: Placement, node: u32) -> bool {
+    match placement {
+        Placement::PreferredNode(actual) | Placement::RequiredNode(actual) => actual != node,
+        Placement::Anywhere
+        | Placement::Hint(_)
+        | Placement::FixedNoReplace(_)
+        | Placement::RegionId(_) => false,
+    }
+}
+
+const fn placement_contradicts_region_id(placement: Placement, region_id: u64) -> bool {
+    match placement {
+        Placement::RegionId(actual) => actual != region_id,
+        Placement::Anywhere
+        | Placement::Hint(_)
+        | Placement::FixedNoReplace(_)
+        | Placement::PreferredNode(_)
+        | Placement::RequiredNode(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1292,6 +1377,19 @@ mod tests {
     }
 
     #[test]
+    fn query_rejects_foreign_resource_address() {
+        let request = ResourceRequest::anonymous_private(16 * 1024);
+        let first = VirtualMemoryResource::create(&request).expect("first resource");
+        let second = VirtualMemoryResource::create(&request).expect("second resource");
+
+        let err = first
+            .query(second.region().base)
+            .expect_err("foreign address should be rejected");
+
+        assert_eq!(err.kind, ResourceErrorKind::InvalidRange);
+    }
+
+    #[test]
     fn creates_address_reservation_and_materializes_private_resource() {
         let reservation =
             AddressReservation::create(&ReservationRequest::new(16 * 1024)).expect("reservation");
@@ -1351,6 +1449,19 @@ mod tests {
     }
 
     #[test]
+    fn reservation_query_rejects_foreign_address() {
+        let first = AddressReservation::create(&ReservationRequest::new(16 * 1024)).expect("first");
+        let second =
+            AddressReservation::create(&ReservationRequest::new(16 * 1024)).expect("second");
+
+        let err = first
+            .query(second.region().base)
+            .expect_err("foreign address should be rejected");
+
+        assert_eq!(err.kind, ResourceErrorKind::InvalidRange);
+    }
+
+    #[test]
     fn bound_memory_resource_represents_non_vm_region_honestly() {
         let request = ResourceRequest::anonymous_private(16 * 1024);
         let resource = VirtualMemoryResource::create(&request).expect("resource");
@@ -1401,6 +1512,55 @@ mod tests {
         assert!(info.attrs.contains(RegionAttrs::DMA_VISIBLE));
         assert!(info.attrs.contains(RegionAttrs::STATIC_REGION));
         assert_eq!(info.protect, Protect::READ | Protect::WRITE);
+    }
+
+    #[test]
+    fn bound_query_requires_precise_summary_state() {
+        let request = ResourceRequest::anonymous_private(16 * 1024);
+        let resource = VirtualMemoryResource::create(&request).expect("resource");
+        let support = ResourceSupport {
+            protect: Protect::READ | Protect::WRITE,
+            ops: ResourceOpSet::QUERY,
+            advice: MemAdviceCaps::empty(),
+            residency: ResourceResidencySupport::empty(),
+        };
+        let contract = ResourceContract {
+            allowed_protect: Protect::READ | Protect::WRITE,
+            write_xor_execute: true,
+            sharing: SharingPolicy::Private,
+            overcommit: OvercommitPolicy::Disallow,
+            cache_policy: CachePolicy::Default,
+            integrity: None,
+            required_placement: None,
+        };
+        let spec = BoundResourceSpec::new(
+            resource.region(),
+            MemoryDomain::StaticRegion,
+            ResourceBackingKind::StaticRegion,
+            ResourceAttrs::ALLOCATABLE | ResourceAttrs::STATIC_REGION,
+            resource.geometry(),
+            contract,
+            support,
+            ResourceState::static_state(
+                StateValue::Unknown,
+                StateValue::Unknown,
+                StateValue::Uniform(true),
+            ),
+        );
+
+        let err = BoundMemoryResource::new(spec).expect_err("imprecise query state should fail");
+        assert_eq!(err.kind, ResourceErrorKind::InvalidRequest);
+    }
+
+    #[test]
+    fn initial_locked_residency_tracks_verified_lock_state() {
+        let page = system_mem().page_info().base_page.get();
+        let mut request = ResourceRequest::anonymous_private(page);
+        request.initial.residency = InitialResidency::Locked;
+
+        let resource = VirtualMemoryResource::create(&request).expect("resource");
+
+        assert_eq!(resource.state().locked, StateValue::Uniform(true));
     }
 
     #[test]
@@ -1503,5 +1663,27 @@ mod tests {
 
         unsafe { resource.advise(ResourceRange::new(0, page), Advise::HugePage) }
             .expect("huge page advice should succeed");
+    }
+
+    #[test]
+    fn required_node_and_region_id_translate_when_supported() {
+        assert_eq!(
+            required_placement_to_mem(
+                Some(RequiredPlacement::RequiredNode(7)),
+                4096,
+                MemPlacementCaps::REQUIRED_NODE,
+            )
+            .expect("required node"),
+            Some(Placement::RequiredNode(7))
+        );
+        assert_eq!(
+            required_placement_to_mem(
+                Some(RequiredPlacement::RegionId(42)),
+                4096,
+                MemPlacementCaps::REGION_ID,
+            )
+            .expect("region id"),
+            Some(Placement::RegionId(42))
+        );
     }
 }

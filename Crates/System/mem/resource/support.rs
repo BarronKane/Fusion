@@ -10,8 +10,11 @@ bitflags::bitflags! {
         /// Ordinary best-effort residency is supported.
         const BEST_EFFORT = 1 << 0;
         /// Prefault or eager population can be requested.
+        ///
+        /// Some backends may still treat this as best-effort rather than a postcondition that
+        /// can be proven after acquisition.
         const PREFAULT    = 1 << 1;
-        /// Locking or pinning resident pages is supported.
+        /// A verified lock or pin operation is supported.
         const LOCKED      = 1 << 2;
     }
 }

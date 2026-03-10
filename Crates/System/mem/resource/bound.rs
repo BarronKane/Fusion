@@ -29,6 +29,9 @@ pub struct BoundResourceSpec {
     /// Additional hazards not inferred from contract and attributes alone.
     pub additional_hazards: ResourceHazardSet,
     /// Initial summary state for the range.
+    ///
+    /// When [`ResourceOpSet::QUERY`] is advertised, this must be precise enough to synthesize
+    /// a truthful point query for the whole bound range.
     pub initial_state: ResourceState,
 }
 
@@ -114,11 +117,12 @@ impl MemoryResource for BoundMemoryResource {
 }
 
 impl QueryableResource for BoundMemoryResource {
-    /// Returns a best-effort query record synthesized from the bound resource's own metadata.
+    /// Returns a query record synthesized from the bound resource's own metadata.
     ///
     /// # Errors
-    /// Returns an error when query is not supported for this bound resource or when `addr`
-    /// does not lie within the governed range.
+    /// Returns an error when query is not supported for this bound resource, when `addr`
+    /// does not lie within the governed range, or when the bound state is not precise enough
+    /// to answer the point query truthfully.
     fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, ResourceError> {
         if !self.ops().contains(ResourceOpSet::QUERY) {
             return Err(ResourceError::unsupported_operation());
@@ -132,12 +136,19 @@ impl QueryableResource for BoundMemoryResource {
             region: self.range(),
             protect: match self.state().current_protect {
                 StateValue::Uniform(protect) => protect,
-                StateValue::Asymmetric | StateValue::Unknown => Protect::NONE,
+                StateValue::Asymmetric | StateValue::Unknown => {
+                    return Err(ResourceError::unsupported_operation());
+                }
             },
             attrs: resource_region_attrs_from_attrs(self.attrs()),
             cache: self.contract().cache_policy,
             placement: Placement::Anywhere,
-            committed: !matches!(self.state().committed, StateValue::Uniform(false)),
+            committed: match self.state().committed {
+                StateValue::Uniform(committed) => committed,
+                StateValue::Asymmetric | StateValue::Unknown => {
+                    return Err(ResourceError::unsupported_operation());
+                }
+            },
         })
     }
 }
@@ -154,6 +165,15 @@ fn validate_bound_spec(spec: &BoundResourceSpec) -> Result<(), ResourceError> {
     let supported_ops = ResourceOpSet::QUERY;
     if !(spec.support.ops - supported_ops).is_empty() {
         return Err(ResourceError::invalid_request());
+    }
+
+    if spec.support.ops.contains(ResourceOpSet::QUERY) {
+        if !matches!(spec.initial_state.current_protect, StateValue::Uniform(_)) {
+            return Err(ResourceError::invalid_request());
+        }
+        if !matches!(spec.initial_state.committed, StateValue::Uniform(_)) {
+            return Err(ResourceError::invalid_request());
+        }
     }
 
     if let StateValue::Uniform(protect) = spec.initial_state.current_protect

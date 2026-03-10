@@ -29,9 +29,14 @@ pub enum RequiredPlacement {
 pub enum InitialResidency {
     /// Accept ordinary lazy faulting behavior.
     BestEffort,
-    /// Prefer eager population of backing pages.
+    /// Request eager population of backing pages when the backend exposes that path.
+    ///
+    /// This improves acquisition intent but does not, by itself, prove that every page is
+    /// resident after creation on all platforms.
     Prefault,
-    /// Require locked or pinned residency at creation time.
+    /// Require a verified lock or pin step at creation time.
+    ///
+    /// Creation fails if the backend cannot establish the requested locked residency.
     Locked,
 }
 
