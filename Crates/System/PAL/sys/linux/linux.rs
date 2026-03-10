@@ -1,2 +1,3 @@
 #[path = "mem/mem.rs"]
-pub(crate) mod mem;
+/// Linux PAL memory backend implementation.
+pub mod mem;

@@ -8,33 +8,48 @@ use super::request::ResourceContract;
 use super::state::ResourceState;
 use super::support::ResourceSupport;
 
+/// Immutable descriptive information for a live memory resource instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResourceInfo {
+    /// Contiguous governed range represented by the resource.
     pub range: Region,
+    /// Memory domain classification for the range.
     pub domain: MemoryDomain,
+    /// Concrete backing shape for the range.
     pub backing: ResourceBackingKind,
+    /// Intrinsic attributes of the range.
     pub attrs: ResourceAttrs,
+    /// Operation granularity information.
     pub geometry: MemoryGeometry,
+    /// Immutable lifetime contract the resource must continue to satisfy.
     pub contract: ResourceContract,
+    /// Runtime support surface of this instance.
     pub support: ResourceSupport,
+    /// Inherent hazards that apply to the range.
     pub hazards: ResourceHazardSet,
 }
 
 impl ResourceInfo {
+    /// Returns the operation set advertised by this resource instance.
     #[must_use]
     pub const fn ops(self) -> super::ops::ResourceOpSet {
         self.support.ops
     }
 }
 
+/// Creation-time resolution record for a resource instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResolvedResource {
+    /// Immutable descriptive information for the created resource.
     pub info: ResourceInfo,
+    /// Initial runtime state after creation and post-map preference application.
     pub initial_state: ResourceState,
+    /// Soft preferences that could not be honored during creation.
     pub unmet_preferences: ResourcePreferenceSet,
 }
 
 impl ResolvedResource {
+    /// Returns the immutable descriptive information for the resolved resource.
     #[must_use]
     pub const fn info(self) -> ResourceInfo {
         self.info

@@ -70,13 +70,21 @@ bitflags::bitflags! {
     /// Detailed backing combinations supported for ordinary mappings.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct MemBackingCaps: u32 {
+        /// Supports private anonymous mappings.
         const ANON_PRIVATE = 1 << 0;
+        /// Supports shared anonymous mappings.
         const ANON_SHARED  = 1 << 1;
+        /// Supports privately mapped file-backed memory.
         const FILE_PRIVATE = 1 << 2;
+        /// Supports shared file-backed memory.
         const FILE_SHARED  = 1 << 3;
+        /// Supports device-local or device-identified backing.
         const DEVICE       = 1 << 4;
+        /// Supports direct physical-memory backing.
         const PHYSICAL     = 1 << 5;
+        /// Supports backend-native pool-backed mappings.
         const NATIVE_POOL  = 1 << 6;
+        /// Supports bindings to borrowed pre-existing regions.
         const BORROWED     = 1 << 7;
     }
 }
@@ -85,11 +93,17 @@ bitflags::bitflags! {
     /// Detailed ordinary placement modes supported by the backend.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct MemPlacementCaps: u32 {
+        /// Supports unconstrained placement chosen by the backend.
         const ANYWHERE        = 1 << 0;
+        /// Supports non-binding address hints.
         const HINT            = 1 << 1;
+        /// Supports exact-address placement that fails rather than replacing.
         const FIXED_NOREPLACE = 1 << 2;
+        /// Supports soft NUMA-node preference.
         const PREFERRED_NODE  = 1 << 3;
+        /// Supports hard NUMA-node requirement.
         const REQUIRED_NODE   = 1 << 4;
+        /// Supports backend-defined region identifiers.
         const REGION_ID       = 1 << 5;
     }
 }
@@ -98,13 +112,21 @@ bitflags::bitflags! {
     /// Detailed advisory operations supported by the backend.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct MemAdviceCaps: u32 {
+        /// Supports clearing special access-pattern advice.
         const NORMAL       = 1 << 0;
+        /// Supports sequential-access advice.
         const SEQUENTIAL   = 1 << 1;
+        /// Supports random-access advice.
         const RANDOM       = 1 << 2;
+        /// Supports "will need soon" advice.
         const WILL_NEED    = 1 << 3;
+        /// Supports "do not need soon" advice.
         const DONT_NEED    = 1 << 4;
+        /// Supports discard-or-free style advice.
         const FREE         = 1 << 5;
+        /// Supports disabling huge-page treatment for a region.
         const NO_HUGE_PAGE = 1 << 6;
+        /// Supports preferring huge-page treatment for a region.
         const HUGE_PAGE    = 1 << 7;
     }
 }
@@ -270,15 +292,34 @@ pub enum Backing<'a> {
     /// Fresh anonymous memory with no external backing object.
     Anonymous,
     /// File-backed memory using a raw file descriptor and byte offset.
-    File { fd: i32, offset: u64 },
+    File {
+        /// Raw file descriptor that names the backing object.
+        fd: i32,
+        /// Byte offset into the backing object.
+        offset: u64,
+    },
     /// Device-local or device-owned backing identified by a backend-specific id and offset.
-    Device { id: u64, offset: u64 },
+    Device {
+        /// Backend-defined device or heap identifier.
+        id: u64,
+        /// Byte offset into the device-local backing.
+        offset: u64,
+    },
     /// Physical memory at the given address.
-    Physical { addr: usize },
+    Physical {
+        /// Physical base address of the requested range.
+        addr: usize,
+    },
     /// A backend-native pool object identified by a backend-specific id.
-    NativePool { id: u64 },
+    NativePool {
+        /// Backend-defined pool identifier.
+        id: u64,
+    },
     /// A pre-existing named region borrowed from the surrounding platform environment.
-    BorrowedRegion { name: &'a str },
+    BorrowedRegion {
+        /// Backend- or provider-defined borrowed region name.
+        name: &'a str,
+    },
 }
 
 /// Safe placement intent for ordinary mappings.
@@ -417,8 +458,10 @@ impl Region {
 
     /// Returns a checked subrange of this region.
     ///
-    /// Fails if the requested range overflows or falls outside the original region.
-    pub fn subrange(self, offset: usize, len: usize) -> Result<Region, MemError> {
+    /// # Errors
+    /// Returns an error when the requested range overflows or falls outside the original
+    /// region.
+    pub fn subrange(self, offset: usize, len: usize) -> Result<Self, MemError> {
         let end = offset.checked_add(len).ok_or(MemError::overflow())?;
         if end > self.len {
             return Err(MemError::out_of_bounds());
@@ -426,7 +469,7 @@ impl Region {
 
         let ptr = unsafe { self.base.as_ptr().add(offset) };
         let base = NonNull::new(ptr).ok_or(MemError::invalid())?;
-        Ok(Region { base, len })
+        Ok(Self { base, len })
     }
 }
 
@@ -481,6 +524,7 @@ pub struct MemError {
 
 impl MemError {
     /// Returns an unsupported-operation error.
+    #[must_use]
     pub const fn unsupported() -> Self {
         Self {
             kind: MemErrorKind::Unsupported,
@@ -488,6 +532,7 @@ impl MemError {
     }
 
     /// Returns an invalid-input error.
+    #[must_use]
     pub const fn invalid() -> Self {
         Self {
             kind: MemErrorKind::InvalidInput,
@@ -495,6 +540,7 @@ impl MemError {
     }
 
     /// Returns an invalid-address error.
+    #[must_use]
     pub const fn invalid_addr() -> Self {
         Self {
             kind: MemErrorKind::InvalidAddress,
@@ -502,6 +548,7 @@ impl MemError {
     }
 
     /// Returns a misaligned-input error.
+    #[must_use]
     pub const fn misaligned() -> Self {
         Self {
             kind: MemErrorKind::Misaligned,
@@ -509,6 +556,7 @@ impl MemError {
     }
 
     /// Returns an out-of-memory error.
+    #[must_use]
     pub const fn oom() -> Self {
         Self {
             kind: MemErrorKind::OutOfMemory,
@@ -516,6 +564,7 @@ impl MemError {
     }
 
     /// Returns an out-of-bounds error.
+    #[must_use]
     pub const fn out_of_bounds() -> Self {
         Self {
             kind: MemErrorKind::OutOfBounds,
@@ -523,6 +572,7 @@ impl MemError {
     }
 
     /// Returns a busy-range error.
+    #[must_use]
     pub const fn busy() -> Self {
         Self {
             kind: MemErrorKind::Busy,
@@ -530,6 +580,7 @@ impl MemError {
     }
 
     /// Returns an overflow error.
+    #[must_use]
     pub const fn overflow() -> Self {
         Self {
             kind: MemErrorKind::Overflow,
@@ -537,6 +588,7 @@ impl MemError {
     }
 
     /// Returns a platform-specific error code wrapper.
+    #[must_use]
     pub const fn platform(errno: i32) -> Self {
         Self {
             kind: MemErrorKind::Platform(errno),
@@ -562,11 +614,18 @@ pub trait MemMap: MemBase {
     /// Caller is responsible for aliasing, lifetime, and ownership discipline of the
     /// returned region. The backend only acquires the region; it does not prove higher-level
     /// synchronization or exclusivity.
+    ///
+    /// # Errors
+    /// Returns an error when the request is invalid, unsupported, or the backend cannot
+    /// acquire the requested mapping.
     unsafe fn map(&self, req: &MapRequest<'_>) -> Result<Region, MemError>;
 
     /// # Safety
     /// Caller must ensure no live references, aliases, or dependent objects remain in the
     /// region being unmapped.
+    ///
+    /// # Errors
+    /// Returns an error when the region is invalid or the backend rejects the unmap.
     unsafe fn unmap(&self, region: Region) -> Result<(), MemError>;
 }
 
@@ -574,10 +633,19 @@ pub trait MemMap: MemBase {
 ///
 /// This trait is separate because replacement mapping can destroy existing address-space
 /// state and is therefore not ordinary placement.
+///
+/// # Safety
+/// Implementors must only expose replacement mapping when overwriting existing address-space
+/// contents is a real backend capability and callers can be held to the corresponding unsafe
+/// preconditions.
 pub unsafe trait MemMapReplace: MemBase {
     /// # Safety
     /// Caller must ensure the replacement range is fully owned and that destroying any
     /// overlapping mapping is valid for the current address space and synchronization model.
+    ///
+    /// # Errors
+    /// Returns an error when replacement mapping is unsupported, invalid, or rejected by the
+    /// backend.
     unsafe fn map_replace(&self, _req: &MapReplaceRequest<'_>) -> Result<Region, MemError> {
         Err(MemError::unsupported())
     }
@@ -588,6 +656,10 @@ pub trait MemProtect: MemBase {
     /// # Safety
     /// Caller must ensure protection changes do not invalidate live references, executable
     /// assumptions, or synchronization guarantees relied on elsewhere in the program.
+    ///
+    /// # Errors
+    /// Returns an error when protection changes are unsupported, invalid, or rejected by the
+    /// backend.
     unsafe fn protect(&self, region: Region, protect: Protect) -> Result<(), MemError>;
 }
 
@@ -596,6 +668,10 @@ pub trait MemCommit: MemBase {
     /// # Safety
     /// Caller must ensure the region is valid for commit and that making the backing
     /// accessible under `protect` does not violate higher-level invariants.
+    ///
+    /// # Errors
+    /// Returns an error when commit control is unsupported, invalid, or rejected by the
+    /// backend.
     unsafe fn commit(&self, _region: Region, _protect: Protect) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
@@ -603,6 +679,10 @@ pub trait MemCommit: MemBase {
     /// # Safety
     /// Caller must ensure the region is valid for decommit and that discarding backing does
     /// not invalidate live references or required residency guarantees.
+    ///
+    /// # Errors
+    /// Returns an error when decommit control is unsupported, invalid, or rejected by the
+    /// backend.
     unsafe fn decommit(&self, _region: Region) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
@@ -613,6 +693,9 @@ pub trait MemQuery: MemBase {
     /// Returns information about the region containing `addr`.
     ///
     /// The default implementation reports [`MemErrorKind::Unsupported`].
+    ///
+    /// # Errors
+    /// Returns an error when query is unsupported or the backend cannot describe `addr`.
     fn query(&self, _addr: NonNull<u8>) -> Result<RegionInfo, MemError> {
         Err(MemError::unsupported())
     }
@@ -625,6 +708,10 @@ pub trait MemAdvise: MemBase {
     ///
     /// The default implementation succeeds and ignores the hint, because advisory behavior
     /// can legitimately be a no-op without violating correctness.
+    ///
+    /// # Errors
+    /// Returns an error when the advisory update is invalid or explicitly rejected by the
+    /// backend.
     unsafe fn advise(&self, _region: Region, _advice: Advise) -> Result<(), MemError> {
         Ok(())
     }
@@ -635,22 +722,36 @@ pub trait MemLock: MemBase {
     /// # Safety
     /// Caller must ensure the region is valid and that pinning it is legal in the current
     /// execution context and process policy.
+    ///
+    /// # Errors
+    /// Returns an error when locking is unsupported, invalid, or rejected by the backend.
     unsafe fn lock(&self, _region: Region) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
 
     /// # Safety
     /// Caller must ensure the region is valid and was previously locked in a compatible way.
+    ///
+    /// # Errors
+    /// Returns an error when unlocking is unsupported, invalid, or rejected by the backend.
     unsafe fn unlock(&self, _region: Region) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
 }
 
 /// Hazardous control over region cache-policy attributes.
+///
+/// # Safety
+/// Implementors must only expose cache-policy mutation when the backend can actually change
+/// cache behavior and callers can be held to the required coherency preconditions.
 pub unsafe trait MemAttrsControl: MemBase {
     /// # Safety
     /// Caller must ensure cache changes are legal for the region and coherent with any
     /// active users of the mapping.
+    ///
+    /// # Errors
+    /// Returns an error when cache-policy control is unsupported, invalid, or rejected by the
+    /// backend.
     unsafe fn set_cache_policy(
         &self,
         _region: Region,
@@ -661,15 +762,27 @@ pub unsafe trait MemAttrsControl: MemBase {
 }
 
 /// Hazardous control over integrity and tag-mode state.
+///
+/// # Safety
+/// Implementors must only expose integrity control when the backend can enforce the requested
+/// transitions and callers can satisfy the corresponding platform rules.
 pub unsafe trait MemIntegrityControl: MemBase {
     /// # Safety
     /// Caller must ensure tag-mode transitions respect platform integrity rules.
+    ///
+    /// # Errors
+    /// Returns an error when tag-mode control is unsupported, invalid, or rejected by the
+    /// backend.
     unsafe fn set_tag_mode(&self, _region: Region, _mode: TagMode) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
 
     /// # Safety
     /// Caller must ensure integrity-mode transitions respect platform integrity rules.
+    ///
+    /// # Errors
+    /// Returns an error when integrity-mode control is unsupported, invalid, or rejected by
+    /// the backend.
     unsafe fn set_integrity_mode(
         &self,
         _region: Region,
@@ -680,18 +793,34 @@ pub unsafe trait MemIntegrityControl: MemBase {
 }
 
 /// Hazardous direct physical-memory mapping operations.
+///
+/// # Safety
+/// Implementors must only expose physical mapping when the backend can safely bind physical
+/// memory into the process and callers can uphold ownership and side-effect requirements.
 pub unsafe trait MemPhysical: MemBase {
     /// # Safety
     /// Caller must ensure mapping the requested physical memory is legal and owned.
+    ///
+    /// # Errors
+    /// Returns an error when physical mapping is unsupported, invalid, or rejected by the
+    /// backend.
     unsafe fn map_physical(&self, _req: &PhysicalMapRequest) -> Result<Region, MemError> {
         Err(MemError::unsupported())
     }
 }
 
 /// Hazardous device-memory or MMIO mapping operations.
+///
+/// # Safety
+/// Implementors must only expose device mapping when the backend can legally create the
+/// mapping and callers can uphold device-specific ownership and synchronization rules.
 pub unsafe trait MemDevice: MemBase {
     /// # Safety
     /// Caller must ensure the device-local or MMIO mapping is legal for the target device.
+    ///
+    /// # Errors
+    /// Returns an error when device mapping is unsupported, invalid, or rejected by the
+    /// backend.
     unsafe fn map_device(&self, _req: &DeviceMapRequest) -> Result<Region, MemError> {
         Err(MemError::unsupported())
     }

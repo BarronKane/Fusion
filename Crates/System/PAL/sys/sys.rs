@@ -1,3 +1,9 @@
+//! Selected platform backend wiring for the PAL.
+//!
+//! Each supported target has a private `sys::<platform>` module that implements the PAL
+//! contracts. The public `sys::<module>` exports re-export the chosen backend through a
+//! uniform path such as `fusion_pal::sys::mem`.
+
 #[cfg(not(any(
     target_os = "ios",
     target_os = "linux",
@@ -30,4 +36,5 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows as platform;
 
+/// Public memory module re-exported from the selected private platform backend.
 pub mod mem;

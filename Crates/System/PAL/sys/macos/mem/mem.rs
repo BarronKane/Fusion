@@ -1,3 +1,9 @@
+//! macOS PAL memory backend stub.
+//!
+//! This keeps the PAL memory contract present on macOS-targeted builds until
+//! the real backend is implemented. Operations fail explicitly with
+//! `Unsupported`.
+
 use core::num::NonZeroUsize;
 
 use crate::pal::mem::{
@@ -6,17 +12,21 @@ use crate::pal::mem::{
     MemProtect, MemQuery, MemSupport, PageInfo, Protect, Region, RegionInfo,
 };
 
+/// Placeholder macOS implementation of the PAL memory provider contract.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MacOsMem;
 
+/// Target-selected PAL memory provider alias for macOS builds.
 pub type PlatformMem = MacOsMem;
 
+/// Returns the process-wide macOS memory provider handle.
 #[must_use]
 pub const fn system_mem() -> PlatformMem {
     PlatformMem::new()
 }
 
 impl MacOsMem {
+    /// Creates a new macOS PAL memory provider handle.
     #[must_use]
     pub const fn new() -> Self {
         Self

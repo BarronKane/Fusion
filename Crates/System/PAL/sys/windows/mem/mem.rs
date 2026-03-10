@@ -1,3 +1,9 @@
+//! Windows PAL memory backend stub.
+//!
+//! This module preserves the public PAL surface on Windows-targeted builds
+//! before the real backend exists. Every operation reports `Unsupported`
+//! rather than inventing behavior.
+
 use core::num::NonZeroUsize;
 
 use crate::pal::mem::{
@@ -6,17 +12,21 @@ use crate::pal::mem::{
     MemProtect, MemQuery, MemSupport, PageInfo, Protect, Region, RegionInfo,
 };
 
+/// Placeholder Windows implementation of the PAL memory provider contract.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WindowsMem;
 
+/// Target-selected PAL memory provider alias for Windows builds.
 pub type PlatformMem = WindowsMem;
 
+/// Returns the process-wide Windows memory provider handle.
 #[must_use]
 pub const fn system_mem() -> PlatformMem {
     PlatformMem::new()
 }
 
 impl WindowsMem {
+    /// Creates a new Windows PAL memory provider handle.
     #[must_use]
     pub const fn new() -> Self {
         Self

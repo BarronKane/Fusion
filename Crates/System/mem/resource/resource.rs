@@ -57,51 +57,68 @@ pub use support::{
 
 use self::core::ResourceCore;
 
+/// Base contract for all contiguous governed memory resources.
 pub trait MemoryResource {
+    /// Returns immutable descriptive information for the resource instance.
     fn info(&self) -> &ResourceInfo;
 
+    /// Returns the current resource-wide summary state.
     fn state(&self) -> ResourceState;
 
+    /// Returns the governed contiguous range of the resource.
     fn range(&self) -> Region {
         self.info().range
     }
 
+    /// Returns the concrete backing kind represented by the resource.
     fn backing_kind(&self) -> ResourceBackingKind {
         self.info().backing
     }
 
+    /// Returns the domain classification of the resource.
     fn domain(&self) -> MemoryDomain {
         self.info().domain
     }
 
+    /// Returns intrinsic attributes of the resource's backing.
     fn attrs(&self) -> ResourceAttrs {
         self.info().attrs
     }
 
+    /// Returns operation granularity information for the resource.
     fn geometry(&self) -> MemoryGeometry {
         self.info().geometry
     }
 
+    /// Returns the immutable lifetime contract of the resource.
     fn contract(&self) -> ResourceContract {
         self.info().contract
     }
 
+    /// Returns the runtime support surface of this live resource instance.
     fn support(&self) -> ResourceSupport {
         self.info().support
     }
 
+    /// Returns the legal operation set for the resource.
     fn ops(&self) -> ResourceOpSet {
         self.info().ops()
     }
 
+    /// Returns inherent hazards associated with the resource.
     fn hazards(&self) -> ResourceHazardSet {
         self.info().hazards
     }
 
+    /// Returns `true` when `ptr` lies within the governed range.
     fn contains(&self, ptr: *const u8) -> bool {
         self.range().contains(ptr as usize)
     }
 
+    /// Returns a checked subrange of the resource.
+    ///
+    /// # Errors
+    /// Returns an error when the requested range is empty or falls outside the resource.
     fn subrange(&self, range: ResourceRange) -> Result<Region, ResourceError> {
         if range.len == 0 {
             return Err(ResourceError::invalid_range());
@@ -113,58 +130,96 @@ pub trait MemoryResource {
     }
 }
 
+/// Extension trait for resources that can answer point queries.
 pub trait QueryableResource: MemoryResource {
+    /// Returns metadata about the region containing `addr`.
+    ///
+    /// # Errors
+    /// Returns an error when querying is unsupported or `addr` is not valid for the resource.
     fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, ResourceError>;
 }
 
+/// Extension trait for resources that support protection changes.
 pub trait ProtectableResource: MemoryResource {
     /// # Safety
     /// Caller must ensure the target range is not actively referenced in ways that would
     /// violate the requested protection change.
+    ///
+    /// # Errors
+    /// Returns an error when the range is invalid, the requested protection is unsupported,
+    /// or the change would violate the resource contract.
     unsafe fn protect(&self, range: ResourceRange, protect: Protect) -> Result<(), ResourceError>;
 }
 
+/// Extension trait for resources that accept advisory usage hints.
 pub trait AdvisableResource: MemoryResource {
     /// # Safety
     /// Caller must ensure the target range is valid for the requested advisory update.
+    ///
+    /// # Errors
+    /// Returns an error when the range is invalid or the advisory hint is unsupported.
     unsafe fn advise(&self, range: ResourceRange, advice: Advise) -> Result<(), ResourceError>;
 }
 
+/// Extension trait for resources that can semantically discard their contents.
 pub trait DiscardableResource: MemoryResource {
     /// # Safety
     /// Caller must ensure discarding the target range is valid for the resource's backing
     /// and does not violate higher-level lifetime assumptions.
+    ///
+    /// # Errors
+    /// Returns an error when discard is unsupported or the range is invalid.
     unsafe fn discard(&self, range: ResourceRange) -> Result<(), ResourceError>;
 }
 
+/// Extension trait for resources that support explicit flush-style operations.
 pub trait FlushableResource: MemoryResource {
     /// # Safety
     /// Caller must ensure flushing the target range is meaningful for the resource's
     /// backing and ordering model.
+    ///
+    /// # Errors
+    /// Returns an error when flush is unsupported or the range is invalid.
     unsafe fn flush(&self, range: ResourceRange) -> Result<(), ResourceError>;
 }
 
+/// Extension trait for resources that expose reserve/commit style backing control.
 pub trait CommitControlledResource: MemoryResource {
     /// # Safety
     /// Caller must ensure committing the target range is valid for this resource's backing
     /// and contract.
+    ///
+    /// # Errors
+    /// Returns an error when commit is unsupported, the range is invalid, or the request
+    /// would violate the resource contract.
     unsafe fn commit(&self, range: ResourceRange, protect: Protect) -> Result<(), ResourceError>;
 
     /// # Safety
     /// Caller must ensure decommitting the target range does not invalidate live references.
+    ///
+    /// # Errors
+    /// Returns an error when decommit is unsupported or the range is invalid.
     unsafe fn decommit(&self, range: ResourceRange) -> Result<(), ResourceError>;
 }
 
+/// Extension trait for resources that support residency locking.
 pub trait LockableResource: MemoryResource {
     /// # Safety
     /// Caller must ensure locking the target range is legal in the current execution context.
+    ///
+    /// # Errors
+    /// Returns an error when locking is unsupported or the range is invalid.
     unsafe fn lock(&self, range: ResourceRange) -> Result<(), ResourceError>;
 
     /// # Safety
     /// Caller must ensure the target range was previously locked in a compatible way.
+    ///
+    /// # Errors
+    /// Returns an error when unlocking is unsupported or the range is invalid.
     unsafe fn unlock(&self, range: ResourceRange) -> Result<(), ResourceError>;
 }
 
+/// Concrete virtual-memory resource acquired from the current PAL backend.
 #[derive(Debug)]
 pub struct VirtualMemoryResource {
     provider: fusion_pal::sys::mem::PlatformMem,
@@ -174,12 +229,19 @@ pub struct VirtualMemoryResource {
 }
 
 impl VirtualMemoryResource {
+    /// Returns system-wide acquisition support for virtual memory resources on this backend.
     #[must_use]
     pub fn system_acquire_support() -> ResourceAcquireSupport {
         let provider = system_mem();
         resource_acquire_support_from_mem_support(provider.support())
     }
 
+    /// Creates a new virtual memory resource from a request.
+    ///
+    /// # Errors
+    /// Returns an error when the request is invalid, unsupported, violates its contract, or
+    /// the backend cannot create the resource.
+    #[allow(clippy::too_many_lines)]
     pub fn create(request: &ResourceRequest<'_>) -> Result<Self, ResourceError> {
         let provider = system_mem();
         let page_info = provider.page_info();
@@ -269,34 +331,31 @@ impl VirtualMemoryResource {
             || preferred_request.placement != required_request.placement;
 
         let (region, actual_flags) = if has_preferred_attempt {
-            match unsafe { provider.map(&preferred_request) } {
-                Ok(region) => {
-                    if !placement_preference_honored(request.initial.placement, region) {
-                        unmet |= ResourcePreferenceSet::PLACEMENT;
-                    }
-                    (region, preferred_flags)
+            if let Ok(region) = unsafe { provider.map(&preferred_request) } {
+                if !placement_preference_honored(request.initial.placement, region) {
+                    unmet |= ResourcePreferenceSet::PLACEMENT;
                 }
-                Err(_) => {
-                    if preferred_flags.contains(MapFlags::LOCKED)
-                        && !base_flags.contains(MapFlags::LOCKED)
-                    {
-                        unmet |= ResourcePreferenceSet::LOCK;
-                    }
-                    if preferred_flags.contains(MapFlags::POPULATE)
-                        && !base_flags.contains(MapFlags::POPULATE)
-                    {
-                        unmet |= ResourcePreferenceSet::PREFAULT;
-                    }
-                    if preferred_placement.is_some() {
-                        unmet |= ResourcePreferenceSet::PLACEMENT;
-                    }
+                (region, preferred_flags)
+            } else {
+                if preferred_flags.contains(MapFlags::LOCKED)
+                    && !base_flags.contains(MapFlags::LOCKED)
+                {
+                    unmet |= ResourcePreferenceSet::LOCK;
+                }
+                if preferred_flags.contains(MapFlags::POPULATE)
+                    && !base_flags.contains(MapFlags::POPULATE)
+                {
+                    unmet |= ResourcePreferenceSet::PREFAULT;
+                }
+                if preferred_placement.is_some() {
+                    unmet |= ResourcePreferenceSet::PLACEMENT;
+                }
 
-                    (
-                        unsafe { provider.map(&required_request) }
-                            .map_err(ResourceError::from_request_error)?,
-                        base_flags,
-                    )
-                }
+                (
+                    unsafe { provider.map(&required_request) }
+                        .map_err(ResourceError::from_request_error)?,
+                    base_flags,
+                )
             }
         } else {
             (
@@ -308,7 +367,7 @@ impl VirtualMemoryResource {
 
         verify_required_placement(region, request.contract.required_placement)?;
         apply_resource_preferences_after_map(
-            &provider,
+            provider,
             region,
             request,
             acquire_support,
@@ -338,6 +397,7 @@ impl VirtualMemoryResource {
         ))
     }
 
+    /// Creates a virtual memory resource from already-resolved parts.
     pub(super) const fn from_parts(
         provider: fusion_pal::sys::mem::PlatformMem,
         region: Region,
@@ -353,21 +413,28 @@ impl VirtualMemoryResource {
         }
     }
 
+    /// Returns the page and granule information of the creating backend.
     #[must_use]
     pub const fn page_info(&self) -> PageInfo {
         self.page_info
     }
 
+    /// Returns creation-time resolution metadata for the resource.
     #[must_use]
     pub const fn resolved(&self) -> ResolvedResource {
         self.core.resolved()
     }
 
+    /// Returns the resource's governed region.
     #[must_use]
     pub fn region(&self) -> Region {
         self.range()
     }
 
+    /// Returns a checked subrange of the resource.
+    ///
+    /// # Errors
+    /// Returns an error when the requested range is empty or falls outside the resource.
     pub fn subregion(&self, range: ResourceRange) -> Result<Region, ResourceError> {
         self.subrange(range)
     }
@@ -378,7 +445,7 @@ impl VirtualMemoryResource {
         }
 
         let page = self.page_info.base_page.get();
-        if range.offset % page != 0 || range.len % page != 0 {
+        if !range.offset.is_multiple_of(page) || !range.len.is_multiple_of(page) {
             return Err(ResourceError::invalid_range());
         }
 
@@ -665,7 +732,7 @@ pub(super) fn normalize_len(len: usize, granule: usize) -> Result<usize, Resourc
     align_up(len, granule).ok_or_else(ResourceError::invalid_request)
 }
 
-fn supports_backing(
+const fn supports_backing(
     backing: ResourceBackingRequest,
     sharing: SharingPolicy,
     support: MemBackingCaps,
@@ -694,7 +761,7 @@ fn supports_protect(supported: Protect, requested: Protect) -> bool {
     supported.contains(requested - Protect::GUARD)
 }
 
-fn supports_advice(supported: MemAdviceCaps, advice: Advise) -> bool {
+const fn supports_advice(supported: MemAdviceCaps, advice: Advise) -> bool {
     match advice {
         Advise::Normal => supported.contains(MemAdviceCaps::NORMAL),
         Advise::Sequential => supported.contains(MemAdviceCaps::SEQUENTIAL),
@@ -707,7 +774,7 @@ fn supports_advice(supported: MemAdviceCaps, advice: Advise) -> bool {
     }
 }
 
-fn preferred_discard_advice(supported: MemAdviceCaps) -> Option<Advise> {
+const fn preferred_discard_advice(supported: MemAdviceCaps) -> Option<Advise> {
     if supported.contains(MemAdviceCaps::FREE) {
         Some(Advise::Free)
     } else if supported.contains(MemAdviceCaps::DONT_NEED) {
@@ -748,14 +815,14 @@ pub(super) fn initial_map_flags(
     Ok(flags)
 }
 
-pub(super) fn request_backing_to_mem(backing: ResourceBackingRequest) -> Backing<'static> {
+pub(super) const fn request_backing_to_mem(backing: ResourceBackingRequest) -> Backing<'static> {
     match backing {
         ResourceBackingRequest::Anonymous => Backing::Anonymous,
         ResourceBackingRequest::File { fd, offset } => Backing::File { fd, offset },
     }
 }
 
-pub(super) fn backing_kind_from_request(
+pub(super) const fn backing_kind_from_request(
     backing: ResourceBackingRequest,
     sharing: SharingPolicy,
 ) -> ResourceBackingKind {
@@ -827,7 +894,7 @@ pub(super) fn resource_region_attrs_from_attrs(attrs: ResourceAttrs) -> RegionAt
     region_attrs
 }
 
-pub(super) fn required_placement_to_mem(
+pub(super) const fn required_placement_to_mem(
     placement: Option<RequiredPlacement>,
     granule: usize,
     supported: MemPlacementCaps,
@@ -843,13 +910,13 @@ pub(super) fn required_placement_to_mem(
             }
             Ok(Some(Placement::FixedNoReplace(addr)))
         }
-        Some(RequiredPlacement::RequiredNode(_)) | Some(RequiredPlacement::RegionId(_)) => {
+        Some(RequiredPlacement::RequiredNode(_) | RequiredPlacement::RegionId(_)) => {
             Err(ResourceError::unsupported_request())
         }
     }
 }
 
-pub(super) fn preferred_placement_to_mem(
+pub(super) const fn preferred_placement_to_mem(
     placement: PlacementPreference,
     granule: usize,
     supported: MemPlacementCaps,
@@ -876,7 +943,7 @@ pub(super) fn preferred_placement_to_mem(
     }
 }
 
-fn base_map_request(
+const fn base_map_request(
     len: usize,
     protect: Protect,
     flags: MapFlags,
@@ -916,9 +983,11 @@ pub(super) fn verify_required_placement(
         Some(RequiredPlacement::FixedNoReplace(addr)) if region.base.as_ptr() as usize == addr => {
             Ok(())
         }
-        Some(RequiredPlacement::FixedNoReplace(_))
-        | Some(RequiredPlacement::RequiredNode(_))
-        | Some(RequiredPlacement::RegionId(_)) => Err(ResourceError::unsupported_request()),
+        Some(
+            RequiredPlacement::FixedNoReplace(_)
+            | RequiredPlacement::RequiredNode(_)
+            | RequiredPlacement::RegionId(_),
+        ) => Err(ResourceError::unsupported_request()),
     }
 }
 
@@ -1008,7 +1077,7 @@ pub(super) fn resource_acquire_support_from_mem_support(
 }
 
 pub(super) fn apply_resource_preferences_after_map(
-    provider: &fusion_pal::sys::mem::PlatformMem,
+    provider: fusion_pal::sys::mem::PlatformMem,
     region: Region,
     request: &ResourceRequest<'_>,
     support: ResourceAcquireSupport,
@@ -1035,6 +1104,7 @@ pub(super) fn apply_resource_preferences_after_map(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_resolved_resource(
     range: Region,
     request: &ResourceRequest<'_>,
