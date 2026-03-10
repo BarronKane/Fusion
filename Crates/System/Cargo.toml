@@ -16,5 +16,9 @@ path = "fusion-sys.rs"
 fusion-pal = { workspace = true }
 bitflags.workspace = true
 
+[dev-dependencies]
+libc = "0.2.183"
+rustix = { version = "1.1.4", default-features = false, features = ["fs"] }
+
 [lints]
 workspace = true

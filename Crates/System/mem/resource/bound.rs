@@ -1,3 +1,42 @@
+//! Bound-resource support for externally governed contiguous memory ranges.
+//!
+//! This module is the honest path for memory that already exists and is not actively acquired
+//! through the virtual-memory creation flow in [`super::VirtualMemoryResource`]. The caller
+//! supplies a `BoundResourceSpec` describing an existing CPU-addressable range, and the result
+//! is a `BoundMemoryResource` that carries the same `MemoryResource`-level contract as any
+//! other resource instance.
+//!
+//! This matters for future non-VM targets. On bare-metal, RTOS, firmware, or board-specific
+//! deployments, many resources will be discovered rather than created:
+//!
+//! - linker-defined SRAM regions
+//! - DMA-visible carveouts
+//! - fixed static partitions
+//! - mapped physical windows
+//! - MMIO-like apertures with device-visible side effects
+//!
+//! Those ranges should not be funneled through a virtual-memory request shape just because the
+//! hosted path uses one. A future `MemoryProvider` should inventory the hardware or firmware
+//! topology, decide which concrete ranges exist, and bind them through this module when they
+//! are already present. The provider can then expose allocator-relevant semantics such as
+//! `DMA_VISIBLE`, `PHYS_CONTIGUOUS`, `COHERENT`, `INTEGRITY_MANAGED`, or `HAZARDOUS_IO`
+//! without implying that the range was freshly allocated here.
+//!
+//! Bound resources are still subject to the same core rule as the rest of this subsystem: the
+//! metadata must remain truthful. Support bits, state summaries, and hazards should describe
+//! only what the environment can actually prove. This module intentionally rejects internally
+//! inconsistent specifications rather than normalizing them into something prettier and less
+//! honest.
+//!
+//! The current bound-resource implementation is deliberately conservative. It is primarily for
+//! describing externally governed ranges, and today it only accepts the `QUERY` operation when
+//! the bound state is precise enough to answer point queries truthfully. That is enough for the
+//! initial inventory-and-govern use case. If future targets need MPU protection changes, cache
+//! maintenance, flush, or lock-style operations on bound ranges, those capabilities can be
+//! added here later without changing the more important architectural split: created virtual
+//! memory and pre-existing board memory are different acquisition stories, even when both end
+//! up represented as `MemoryResource`s.
+
 use core::ptr::NonNull;
 
 use fusion_pal::sys::mem::{Placement, Protect, Region, RegionInfo};
