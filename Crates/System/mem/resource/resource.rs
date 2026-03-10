@@ -1,3 +1,46 @@
+//! Core `fusion-sys::mem::resource` surface for governed contiguous memory ranges.
+//!
+//! This module defines the common `MemoryResource` contract and the concrete virtual-memory
+//! acquisition path used when the selected PAL backend can actively create a CPU-addressable
+//! range on behalf of the caller. The important boundary is intentional:
+//!
+//! - `MemoryResource` is the common result type for a governed contiguous range.
+//! - `VirtualMemoryResource` is one concrete acquisition strategy for virtual-memory backends.
+//! - `BoundMemoryResource` is a different strategy for ranges that already exist and are
+//!   governed externally.
+//!
+//! `VirtualMemoryResource::create` is therefore not meant to be the universal memory
+//! acquisition API for every target. It is specifically the virtual-memory path. Today that
+//! means requests shaped like ordinary user-space VM acquisition, such as anonymous or
+//! file-backed mappings. If a future target has no useful virtual-memory model, this type
+//! should simply not be used there.
+//!
+//! The intended higher-level architecture is that `MemoryProvider` sits above the concrete
+//! resource constructors and selects the appropriate path using two inputs:
+//!
+//! - PAL capability truth: what operations and acquisition modes the current platform backend
+//!   can actually support.
+//! - Topology or board truth: what memory physically exists on the machine, board, SoC, or
+//!   firmware environment.
+//!
+//! On Linux or another hosted OS, that may lead to `VirtualMemoryResource::create`. On
+//! bare-metal, RTOS, or firmware-driven targets, the provider may instead inventory static
+//! SRAM windows, DMA carveouts, physical regions, or MMIO apertures and bind those through a
+//! different resource constructor. The provider should expose resource semantics, not leak the
+//! acquisition mechanism upward.
+//!
+//! This module also assumes that a `MemoryResource` names a CPU-addressable contiguous range.
+//! The core region model is a `Region { base, len }`, so the resource contract is currently
+//! aimed at memory that can be named by an address range in the current execution context.
+//! That fits ordinary VM, fixed board-level carveouts, mapped physical ranges, and MMIO
+//! windows. If future work needs to model non-addressable device-local heaps or opaque memory
+//! objects, that should likely become a sibling abstraction rather than forcing this module to
+//! lie about having a meaningful `*mut u8` base pointer.
+//!
+//! In short: keep `MemoryResource` as the common governed-range contract, keep
+//! `VirtualMemoryResource` strictly VM-shaped, and let future provider layers unify multiple
+//! concrete memory domains without pretending they all originate from the same create call.
+
 use ::core::ptr::NonNull;
 
 use fusion_pal::sys::mem::{
