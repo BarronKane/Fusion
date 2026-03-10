@@ -9,20 +9,32 @@ use super::{
     core::ResourceCore, infer_resource_hazards, resource_region_attrs_from_attrs,
 };
 
+/// Specification for binding an externally governed range into a `MemoryResource`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BoundResourceSpec {
+    /// Contiguous governed range represented by the bound resource.
     pub range: Region,
+    /// Domain classification for the bound range.
     pub domain: MemoryDomain,
+    /// Concrete backing kind for the bound range.
     pub backing: ResourceBackingKind,
+    /// Intrinsic attributes of the bound range.
     pub attrs: ResourceAttrs,
+    /// Operation granularity metadata for the range.
     pub geometry: MemoryGeometry,
+    /// Immutable contract that higher layers must continue to honor.
     pub contract: ResourceContract,
+    /// Runtime support surface the bound resource may expose.
     pub support: ResourceSupport,
+    /// Additional hazards not inferred from contract and attributes alone.
     pub additional_hazards: ResourceHazardSet,
+    /// Initial summary state for the range.
     pub initial_state: ResourceState,
 }
 
 impl BoundResourceSpec {
+    /// Creates a bound-resource specification with no additional hazards.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub const fn new(
         range: Region,
@@ -48,12 +60,18 @@ impl BoundResourceSpec {
     }
 }
 
+/// Concrete memory resource for externally governed ranges that are not actively acquired here.
 #[derive(Debug)]
 pub struct BoundMemoryResource {
     core: ResourceCore,
 }
 
 impl BoundMemoryResource {
+    /// Binds a specification into a concrete resource handle.
+    ///
+    /// # Errors
+    /// Returns an error when the supplied range, domain, contract, or support surface is
+    /// internally inconsistent.
     pub fn new(spec: BoundResourceSpec) -> Result<Self, ResourceError> {
         validate_bound_spec(&spec)?;
 
@@ -78,6 +96,7 @@ impl BoundMemoryResource {
         })
     }
 
+    /// Returns the creation-time resolution metadata for the bound resource.
     #[must_use]
     pub const fn resolved(&self) -> ResolvedResource {
         self.core.resolved()
@@ -95,6 +114,11 @@ impl MemoryResource for BoundMemoryResource {
 }
 
 impl QueryableResource for BoundMemoryResource {
+    /// Returns a best-effort query record synthesized from the bound resource's own metadata.
+    ///
+    /// # Errors
+    /// Returns an error when query is not supported for this bound resource or when `addr`
+    /// does not lie within the governed range.
     fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, ResourceError> {
         if !self.ops().contains(ResourceOpSet::QUERY) {
             return Err(ResourceError::unsupported_operation());
@@ -132,12 +156,11 @@ fn validate_bound_spec(spec: &BoundResourceSpec) -> Result<(), ResourceError> {
         return Err(ResourceError::invalid_request());
     }
 
-    if let StateValue::Uniform(protect) = spec.initial_state.current_protect {
-        if !spec.contract.allowed_protect.contains(protect)
-            || !spec.support.protect.contains(protect)
-        {
-            return Err(ResourceError::invalid_request());
-        }
+    if let StateValue::Uniform(protect) = spec.initial_state.current_protect
+        && (!spec.contract.allowed_protect.contains(protect)
+            || !spec.support.protect.contains(protect))
+    {
+        return Err(ResourceError::invalid_request());
     }
 
     if spec.contract.write_xor_execute
@@ -153,7 +176,7 @@ fn validate_bound_spec(spec: &BoundResourceSpec) -> Result<(), ResourceError> {
     Ok(())
 }
 
-fn backing_matches_domain(backing: ResourceBackingKind, domain: MemoryDomain) -> bool {
+const fn backing_matches_domain(backing: ResourceBackingKind, domain: MemoryDomain) -> bool {
     match backing {
         ResourceBackingKind::AnonymousPrivate
         | ResourceBackingKind::AnonymousShared

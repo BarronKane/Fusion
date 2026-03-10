@@ -1,2 +1,3 @@
 #[path = "mem/mem.rs"]
-pub(crate) mod mem;
+/// Windows PAL memory backend implementation.
+pub mod mem;

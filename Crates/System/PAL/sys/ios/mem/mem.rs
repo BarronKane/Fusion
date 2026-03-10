@@ -1,3 +1,8 @@
+//! iOS PAL memory backend stub.
+//!
+//! This preserves the PAL memory contract on iOS-targeted builds until a real
+//! implementation exists. Operations fail explicitly with `Unsupported`.
+
 use core::num::NonZeroUsize;
 
 use crate::pal::mem::{
@@ -6,17 +11,21 @@ use crate::pal::mem::{
     MemProtect, MemQuery, MemSupport, PageInfo, Protect, Region, RegionInfo,
 };
 
+/// Placeholder iOS implementation of the PAL memory provider contract.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IosMem;
 
+/// Target-selected PAL memory provider alias for iOS builds.
 pub type PlatformMem = IosMem;
 
+/// Returns the process-wide iOS memory provider handle.
 #[must_use]
 pub const fn system_mem() -> PlatformMem {
     PlatformMem::new()
 }
 
 impl IosMem {
+    /// Creates a new iOS PAL memory provider handle.
     #[must_use]
     pub const fn new() -> Self {
         Self

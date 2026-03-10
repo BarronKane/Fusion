@@ -1,3 +1,9 @@
+//! Linux PAL implementation of the low-level memory contract.
+//!
+//! This backend exposes only Linux semantics it can actually perform through
+//! `mmap`, `mprotect`, `madvise`, `mlock`, and `/proc/self/maps`. Anything
+//! stronger or more exotic is rejected rather than quietly emulated.
+
 use core::ffi::c_void;
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
@@ -17,23 +23,27 @@ use crate::pal::mem::{
     Protect, Region, RegionAttrs, RegionInfo, ReplacePlacement,
 };
 
+/// Linux implementation of the PAL memory provider contract.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LinuxMem;
 
+/// Target-selected PAL memory provider alias for Linux builds.
 pub type PlatformMem = LinuxMem;
 
+/// Returns the process-wide Linux memory provider handle.
 #[must_use]
 pub const fn system_mem() -> PlatformMem {
     PlatformMem::new()
 }
 
 impl LinuxMem {
+    /// Creates a new Linux PAL memory provider handle.
     #[must_use]
     pub const fn new() -> Self {
         Self
     }
 
-    fn map_errno(errno: Errno) -> MemError {
+    const fn map_errno(errno: Errno) -> MemError {
         match errno {
             Errno::NOMEM => MemError::oom(),
             Errno::INVAL => MemError::invalid(),
@@ -99,8 +109,7 @@ impl LinuxMem {
         }
 
         match req.backing {
-            Backing::Anonymous => {}
-            Backing::File { .. } => {}
+            Backing::Anonymous | Backing::File { .. } => {}
             Backing::Device { .. }
             | Backing::Physical { .. }
             | Backing::NativePool { .. }
@@ -120,7 +129,7 @@ impl LinuxMem {
         Ok(flags)
     }
 
-    fn validate_common<P>(&self, req: &MapRequest<'_, P>) -> Result<(), MemError> {
+    fn validate_common<P>(req: &MapRequest<'_, P>) -> Result<(), MemError> {
         if req.len == 0 {
             return Err(MemError::invalid());
         }
@@ -162,7 +171,8 @@ impl LinuxMem {
         }
 
         if let Backing::File { offset, .. } = req.backing {
-            if offset as usize % page != 0 {
+            let offset = usize::try_from(offset).map_err(|_| MemError::overflow())?;
+            if !offset.is_multiple_of(page) {
                 return Err(MemError::misaligned());
             }
         }
@@ -170,7 +180,7 @@ impl LinuxMem {
         Ok(())
     }
 
-    fn validate_safe_placement(&self, placement: Placement) -> Result<(), MemError> {
+    fn validate_safe_placement(placement: Placement) -> Result<(), MemError> {
         let page = Self::page_size_raw();
 
         match placement {
@@ -188,7 +198,7 @@ impl LinuxMem {
         }
     }
 
-    fn validate_replace_placement(&self, placement: ReplacePlacement) -> Result<(), MemError> {
+    fn validate_replace_placement(placement: ReplacePlacement) -> Result<(), MemError> {
         let page = Self::page_size_raw();
 
         match placement {
@@ -202,7 +212,7 @@ impl LinuxMem {
         }
     }
 
-    fn addr_hint(placement: Placement) -> Result<*mut c_void, MemError> {
+    const fn addr_hint(placement: Placement) -> Result<*mut c_void, MemError> {
         match placement {
             Placement::Anywhere => Ok(core::ptr::null_mut()),
             Placement::Hint(addr) | Placement::FixedNoReplace(addr) => Ok(addr as *mut c_void),
@@ -212,7 +222,7 @@ impl LinuxMem {
         }
     }
 
-    fn replace_addr(placement: ReplacePlacement) -> *mut c_void {
+    const fn replace_addr(placement: ReplacePlacement) -> *mut c_void {
         match placement {
             ReplacePlacement::FixedReplace(addr) => addr as *mut c_void,
         }
@@ -242,7 +252,7 @@ impl LinuxMem {
         }
     }
 
-    fn query_proc_maps(&self, addr: usize) -> Result<RegionInfo, MemError> {
+    fn query_proc_maps(addr: usize) -> Result<RegionInfo, MemError> {
         let fd = openat(CWD, "/proc/self/maps", OFlags::RDONLY, Mode::empty())
             .map_err(Self::map_errno)?;
         let mut read_buf = [0_u8; 4096];
@@ -273,10 +283,10 @@ impl LinuxMem {
             }
         }
 
-        if line_len != 0 {
-            if let Some(info) = Self::parse_maps_line(&line_buf[..line_len], addr) {
-                return Ok(info);
-            }
+        if line_len != 0
+            && let Some(info) = Self::parse_maps_line(&line_buf[..line_len], addr)
+        {
+            return Ok(info);
         }
 
         Err(MemError::invalid_addr())
@@ -377,8 +387,8 @@ impl MemBase for LinuxMem {
 
 impl MemMap for LinuxMem {
     unsafe fn map(&self, req: &MapRequest<'_>) -> Result<Region, MemError> {
-        self.validate_common(req)?;
-        self.validate_safe_placement(req.placement)?;
+        Self::validate_common(req)?;
+        Self::validate_safe_placement(req.placement)?;
 
         let prot = Self::to_mmap_prot(req.protect)?;
         let mut flags = Self::to_common_mmap_flags(req)?;
@@ -410,8 +420,8 @@ impl MemMap for LinuxMem {
 
 unsafe impl MemMapReplace for LinuxMem {
     unsafe fn map_replace(&self, req: &MapReplaceRequest<'_>) -> Result<Region, MemError> {
-        self.validate_common(req)?;
-        self.validate_replace_placement(req.placement)?;
+        Self::validate_common(req)?;
+        Self::validate_replace_placement(req.placement)?;
 
         let prot = Self::to_mmap_prot(req.protect)?;
         let mut flags = Self::to_common_mmap_flags(req)?;
@@ -444,7 +454,7 @@ impl MemCommit for LinuxMem {}
 
 impl MemQuery for LinuxMem {
     fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, MemError> {
-        self.query_proc_maps(addr.as_ptr() as usize)
+        Self::query_proc_maps(addr.as_ptr() as usize)
     }
 }
 

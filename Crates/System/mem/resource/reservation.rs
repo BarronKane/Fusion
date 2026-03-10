@@ -17,55 +17,83 @@ use super::{
 };
 
 bitflags::bitflags! {
+    /// Operations that an address reservation may support before materialization.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct ReservationOpSet: u32 {
+        /// Best-effort query of the reserved address range is supported.
         const QUERY                 = 1 << 0;
+        /// Anonymous private materialization can occur in place.
         const MATERIALIZE_IN_PLACE  = 1 << 1;
+        /// Replacement materialization can swap another backing into the reserved range.
         const MATERIALIZE_REPLACE   = 1 << 2;
     }
 }
 
 bitflags::bitflags! {
+    /// Hazards inherent to reservation materialization paths.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct ReservationHazardSet: u32 {
+        /// Some materialization flows require hazardous replace mapping.
         const REPLACE_MATERIALIZATION = 1 << 0;
     }
 }
 
+/// Support surface for acquiring and materializing an address reservation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReservationSupport {
+    /// Backings that may be reserved or later materialized from this reservation flow.
     pub backings: MemBackingCaps,
+    /// Placement modes supported while acquiring the reservation.
     pub placements: MemPlacementCaps,
+    /// Backings that can be materialized without replacing the reservation mapping.
     pub in_place_backings: MemBackingCaps,
+    /// Backings that can be materialized through replacement mapping.
     pub replace_backings: MemBackingCaps,
+    /// Reservation operations supported by the backend.
     pub ops: ReservationOpSet,
+    /// Hazards inherent to the supported materialization paths.
     pub hazards: ReservationHazardSet,
 }
 
+/// Creation-time resolution metadata for an address reservation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResolvedAddressReservation {
+    /// Contiguous reserved address range.
     pub range: Region,
+    /// Geometry of the reservation and any future materialized resources.
     pub geometry: MemoryGeometry,
+    /// Support surface for the reservation instance.
     pub support: ReservationSupport,
+    /// Soft preferences that were not honored when the reservation was created.
     pub unmet_preferences: ResourcePreferenceSet,
 }
 
+/// Result of materializing a subrange of an address reservation.
 #[derive(Debug)]
 pub struct MaterializedReservation {
+    /// Remaining reservation that precedes the materialized resource, if any.
     pub leading: Option<AddressReservation>,
+    /// Newly materialized resource covering the requested subrange.
     pub resource: VirtualMemoryResource,
+    /// Remaining reservation that follows the materialized resource, if any.
     pub trailing: Option<AddressReservation>,
 }
 
+/// Request for acquiring a raw address reservation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReservationRequest<'a> {
+    /// Optional human-readable name for diagnostics or provider-specific bookkeeping.
     pub name: Option<&'a str>,
+    /// Requested reservation length in bytes before backend rounding.
     pub len: usize,
+    /// Soft placement preference for the reservation.
     pub placement: PlacementPreference,
+    /// Hard placement requirement for the reservation.
     pub required_placement: Option<RequiredPlacement>,
 }
 
-impl<'a> ReservationRequest<'a> {
+impl ReservationRequest<'_> {
+    /// Returns a default reservation request for `len` bytes.
     #[must_use]
     pub const fn new(len: usize) -> Self {
         Self {
@@ -77,6 +105,7 @@ impl<'a> ReservationRequest<'a> {
     }
 }
 
+/// Reserved address-space range that can later be materialized into one or more resources.
 #[derive(Debug)]
 pub struct AddressReservation {
     provider: fusion_pal::sys::mem::PlatformMem,
@@ -86,7 +115,8 @@ pub struct AddressReservation {
 }
 
 impl AddressReservation {
-    fn from_parts(
+    /// Creates a reservation handle from already-resolved parts.
+    const fn from_parts(
         provider: fusion_pal::sys::mem::PlatformMem,
         region: Region,
         page_info: PageInfo,
@@ -100,11 +130,17 @@ impl AddressReservation {
         }
     }
 
+    /// Returns system-wide reservation acquisition support for the current backend.
     #[must_use]
     pub fn system_support() -> ReservationSupport {
         reservation_support_from_mem_support(system_mem().support())
     }
 
+    /// Acquires a new address reservation.
+    ///
+    /// # Errors
+    /// Returns an error when the request is invalid, unsupported by the backend, or the
+    /// reservation cannot be created.
     pub fn create(request: &ReservationRequest<'_>) -> Result<Self, ResourceError> {
         let provider = system_mem();
         let page_info = provider.page_info();
@@ -152,18 +188,15 @@ impl AddressReservation {
 
         let has_preferred_attempt = preferred_request.placement != required_request.placement;
         let region = if has_preferred_attempt {
-            match unsafe { provider.map(&preferred_request) } {
-                Ok(region) => {
-                    if !super::placement_preference_honored(request.placement, region) {
-                        unmet |= ResourcePreferenceSet::PLACEMENT;
-                    }
-                    region
-                }
-                Err(_) => {
+            if let Ok(region) = unsafe { provider.map(&preferred_request) } {
+                if !super::placement_preference_honored(request.placement, region) {
                     unmet |= ResourcePreferenceSet::PLACEMENT;
-                    unsafe { provider.map(&required_request) }
-                        .map_err(ResourceError::from_request_error)?
                 }
+                region
+            } else {
+                unmet |= ResourcePreferenceSet::PLACEMENT;
+                unsafe { provider.map(&required_request) }
+                    .map_err(ResourceError::from_request_error)?
             }
         } else {
             unsafe { provider.map(&required_request) }.map_err(ResourceError::from_request_error)?
@@ -184,32 +217,46 @@ impl AddressReservation {
         ))
     }
 
+    /// Returns page and granule information associated with the reservation backend.
     #[must_use]
-    pub fn page_info(&self) -> PageInfo {
+    pub const fn page_info(&self) -> PageInfo {
         self.page_info
     }
 
+    /// Returns the reservation support surface for this instance.
     #[must_use]
-    pub fn support(&self) -> ReservationSupport {
+    pub const fn support(&self) -> ReservationSupport {
         self.resolved.support
     }
 
+    /// Returns the creation-time resolution metadata for the reservation.
     #[must_use]
-    pub fn resolved(&self) -> ResolvedAddressReservation {
+    pub const fn resolved(&self) -> ResolvedAddressReservation {
         self.resolved
     }
 
+    /// Returns the reserved address range governed by this handle.
+    ///
+    /// # Panics
+    /// Panics only if internal materialization logic has already consumed the reservation's
+    /// owned range while this handle is still being used.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn region(&self) -> Region {
         self.region
             .expect("reservation region missing during active use")
     }
 
+    /// Returns `true` when `ptr` lies within the reserved range.
     #[must_use]
     pub fn contains(&self, ptr: *const u8) -> bool {
         self.region().contains(ptr as usize)
     }
 
+    /// Returns a checked subrange of the reservation.
+    ///
+    /// # Errors
+    /// Returns an error when the requested range is empty or falls outside the reservation.
     pub fn subregion(&self, range: super::ResourceRange) -> Result<Region, ResourceError> {
         if range.len == 0 {
             return Err(ResourceError::invalid_range());
@@ -220,6 +267,11 @@ impl AddressReservation {
             .map_err(|_| ResourceError::invalid_range())
     }
 
+    /// Queries reservation metadata for the region containing `addr`.
+    ///
+    /// # Errors
+    /// Returns an error when query is unsupported for this reservation or when the backend
+    /// rejects the query.
     pub fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, ResourceError> {
         if !self.support().ops.contains(ReservationOpSet::QUERY) {
             return Err(ResourceError::unsupported_operation());
@@ -230,6 +282,11 @@ impl AddressReservation {
             .map_err(ResourceError::from_operation_error)
     }
 
+    /// Materializes the entire reservation into a single virtual memory resource.
+    ///
+    /// # Errors
+    /// Returns an error when the request is incompatible with the reservation or when the
+    /// backend cannot materialize the requested backing.
     pub fn into_resource(
         self,
         request: &ResourceRequest<'_>,
@@ -244,6 +301,12 @@ impl AddressReservation {
         Ok(materialized.resource)
     }
 
+    /// Materializes a subrange of the reservation and returns any leading or trailing remains.
+    ///
+    /// # Errors
+    /// Returns an error when the range is invalid, when the request is incompatible with the
+    /// chosen subrange, or when the backend cannot materialize the requested backing.
+    #[allow(clippy::too_many_lines)]
     pub fn materialize_range(
         mut self,
         range: super::ResourceRange,
@@ -327,7 +390,7 @@ impl AddressReservation {
         };
 
         apply_resource_preferences_after_map(
-            &self.provider,
+            self.provider,
             region,
             request,
             acquire_support,
@@ -472,7 +535,7 @@ fn validate_materialization_request(
         None => {}
         Some(RequiredPlacement::FixedNoReplace(addr)) if addr == base => {}
         Some(RequiredPlacement::FixedNoReplace(_)) => return Err(ResourceError::invalid_request()),
-        Some(RequiredPlacement::RequiredNode(_)) | Some(RequiredPlacement::RegionId(_)) => {
+        Some(RequiredPlacement::RequiredNode(_) | RequiredPlacement::RegionId(_)) => {
             return Err(ResourceError::unsupported_request());
         }
     }
@@ -487,7 +550,7 @@ fn validate_materialization_request(
     Ok(())
 }
 
-fn materialization_requires_replace(request: &ResourceRequest<'_>) -> bool {
+const fn materialization_requires_replace(request: &ResourceRequest<'_>) -> bool {
     !matches!(
         (
             request.backing,
@@ -507,7 +570,8 @@ fn materialization_region(
     range: super::ResourceRange,
     granule: usize,
 ) -> Result<Region, ResourceError> {
-    if range.len == 0 || range.offset % granule != 0 || range.len % granule != 0 {
+    if range.len == 0 || !range.offset.is_multiple_of(granule) || !range.len.is_multiple_of(granule)
+    {
         return Err(ResourceError::invalid_range());
     }
 
