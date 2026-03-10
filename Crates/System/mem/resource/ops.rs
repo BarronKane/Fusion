@@ -31,7 +31,7 @@ bitflags::bitflags! {
         const PREFAULT   = 1 << 1;
         /// Prefer initial residency locking.
         const LOCK       = 1 << 2;
-        /// Prefer huge-page treatment when available.
+        /// Prefer large-page backing at acquisition time or huge-page advice after mapping.
         const HUGE_PAGES = 1 << 3;
     }
 }

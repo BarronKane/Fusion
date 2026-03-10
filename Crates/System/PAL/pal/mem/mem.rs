@@ -186,8 +186,14 @@ bitflags::bitflags! {
         /// Prefer or require huge pages for this mapping.
         const HUGE_PAGE       = 1 << 2;
         /// Request eager population or prefaulting rather than lazy fault-on-access.
+        ///
+        /// On some backends this remains a best-effort acquisition hint rather than a proof
+        /// that the full region is resident after mapping.
         const POPULATE        = 1 << 3;
-        /// Request that the mapping be locked or pinned on creation.
+        /// Request a backend-specific "locked on create" mapping hint.
+        ///
+        /// This is not equivalent to a successful explicit [`MemLock::lock`] call unless the
+        /// backend documents that stronger guarantee.
         const LOCKED          = 1 << 4;
         /// Request reservation without immediate commit where that model exists.
         const RESERVE_ONLY    = 1 << 5;

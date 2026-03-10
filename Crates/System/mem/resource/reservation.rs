@@ -2,18 +2,18 @@ use core::ptr::NonNull;
 
 use fusion_pal::sys::mem::{
     Backing, CachePolicy, MapFlags, MapReplaceRequest, MapRequest, MemBackingCaps, MemBase,
-    MemCaps, MemLock, MemMap, MemMapReplace, MemPlacementCaps, MemProtect, MemQuery, PageInfo,
-    Placement, Protect, Region, RegionAttrs, RegionInfo, ReplacePlacement, system_mem,
+    MemCaps, MemMap, MemMapReplace, MemPlacementCaps, MemProtect, MemQuery, PageInfo, Placement,
+    Protect, Region, RegionAttrs, RegionInfo, ReplacePlacement, system_mem,
 };
 
 use super::{
     InitialResidency, MemoryGeometry, PlacementPreference, RequiredPlacement, ResourceError,
     ResourceOpSet, ResourcePreferenceSet, ResourceRequest, ResourceState, VirtualMemoryResource,
-    apply_resource_preferences_after_map, backing_kind_from_request, build_resolved_resource,
+    backing_kind_from_request, build_resolved_resource, finalize_post_map_state,
     geometry_from_page_info, initial_map_flags, normalize_len, preferred_placement_to_mem,
     request_backing_to_mem, required_placement_to_mem, resource_acquire_support_from_mem_support,
-    resource_attrs_for_request, resource_attrs_from_request, validate_request,
-    verify_required_placement,
+    resource_attrs_for_request, resource_attrs_from_request, supports_huge_page_advice,
+    supports_map_time_huge_pages, validate_request, verify_required_placement,
 };
 
 bitflags::bitflags! {
@@ -144,7 +144,8 @@ impl AddressReservation {
     pub fn create(request: &ReservationRequest<'_>) -> Result<Self, ResourceError> {
         let provider = system_mem();
         let page_info = provider.page_info();
-        let support = reservation_support_from_mem_support(provider.support());
+        let mem_support = provider.support();
+        let support = reservation_support_from_mem_support(mem_support);
         let len = normalize_len(request.len, page_info.alloc_granule.get())?;
 
         validate_reservation_request(request, support, page_info.alloc_granule.get())?;
@@ -189,7 +190,7 @@ impl AddressReservation {
         let has_preferred_attempt = preferred_request.placement != required_request.placement;
         let region = if has_preferred_attempt {
             if let Ok(region) = unsafe { provider.map(&preferred_request) } {
-                if !super::placement_preference_honored(request.placement, region) {
+                if !super::placement_preference_honored(provider, request.placement, region) {
                     unmet |= ResourcePreferenceSet::PLACEMENT;
                 }
                 region
@@ -202,7 +203,7 @@ impl AddressReservation {
             unsafe { provider.map(&required_request) }.map_err(ResourceError::from_request_error)?
         };
 
-        verify_required_placement(region, request.required_placement)?;
+        verify_required_placement(provider, region, request.required_placement)?;
 
         Ok(Self::from_parts(
             provider,
@@ -270,11 +271,15 @@ impl AddressReservation {
     /// Queries reservation metadata for the region containing `addr`.
     ///
     /// # Errors
-    /// Returns an error when query is unsupported for this reservation or when the backend
-    /// rejects the query.
+    /// Returns an error when query is unsupported for this reservation, when `addr` lies
+    /// outside the reserved range, or when the backend rejects the query.
     pub fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, ResourceError> {
         if !self.support().ops.contains(ReservationOpSet::QUERY) {
             return Err(ResourceError::unsupported_operation());
+        }
+
+        if !self.contains(addr.as_ptr()) {
+            return Err(ResourceError::invalid_range());
         }
 
         self.provider
@@ -312,7 +317,8 @@ impl AddressReservation {
         range: super::ResourceRange,
         request: &ResourceRequest<'_>,
     ) -> Result<MaterializedReservation, ResourceError> {
-        let acquire_support = resource_acquire_support_from_mem_support(self.provider.support());
+        let mem_support = self.provider.support();
+        let acquire_support = resource_acquire_support_from_mem_support(mem_support);
         let resource_support = acquire_support.instance;
         let reserved = self.region();
         let region = materialization_region(reserved, range, self.page_info.alloc_granule.get())?;
@@ -322,9 +328,7 @@ impl AddressReservation {
         let use_replace = materialization_requires_replace(request);
         let backing_kind = backing_kind_from_request(request.backing, request.contract.sharing);
         let mut unmet = ResourcePreferenceSet::empty();
-        let mut actual_locked = false;
-
-        let region = if use_replace {
+        let (region, actual_flags) = if use_replace {
             if !self
                 .support()
                 .ops
@@ -333,21 +337,76 @@ impl AddressReservation {
                 return Err(ResourceError::unsupported_request());
             }
 
-            let flags = initial_map_flags(request, resource_support)?;
-            let replace_request = MapReplaceRequest {
+            let base_flags = initial_map_flags(request, resource_support)?;
+            let mut preferred_flags = base_flags;
+
+            if request
+                .preferences
+                .contains(ResourcePreferenceSet::PREFAULT)
+                && !preferred_flags.contains(MapFlags::POPULATE)
+            {
+                if resource_support
+                    .residency
+                    .contains(super::ResourceResidencySupport::PREFAULT)
+                {
+                    preferred_flags |= MapFlags::POPULATE;
+                } else {
+                    unmet |= ResourcePreferenceSet::PREFAULT;
+                }
+            }
+
+            if request
+                .preferences
+                .contains(ResourcePreferenceSet::HUGE_PAGES)
+            {
+                if supports_map_time_huge_pages(mem_support) {
+                    preferred_flags |= MapFlags::HUGE_PAGE;
+                } else if !supports_huge_page_advice(mem_support) {
+                    unmet |= ResourcePreferenceSet::HUGE_PAGES;
+                }
+            }
+
+            let base_request = MapReplaceRequest {
                 len: region.len,
                 align: 0,
                 protect: request.initial.protect,
-                flags,
+                flags: base_flags,
                 attrs: resource_attrs_for_request(request.backing),
                 cache: request.contract.cache_policy,
                 placement: ReplacePlacement::FixedReplace(region.base.as_ptr() as usize),
                 backing: request_backing_to_mem(request.backing),
             };
-            actual_locked = flags.contains(MapFlags::LOCKED);
+            let preferred_request = MapReplaceRequest {
+                flags: preferred_flags,
+                ..base_request
+            };
 
-            unsafe { self.provider.map_replace(&replace_request) }
-                .map_err(ResourceError::from_request_error)?
+            if preferred_request.flags == base_request.flags {
+                (
+                    unsafe { self.provider.map_replace(&base_request) }
+                        .map_err(ResourceError::from_request_error)?,
+                    base_flags,
+                )
+            } else if let Ok(region) = unsafe { self.provider.map_replace(&preferred_request) } {
+                (region, preferred_flags)
+            } else {
+                if preferred_flags.contains(MapFlags::POPULATE)
+                    && !base_flags.contains(MapFlags::POPULATE)
+                {
+                    unmet |= ResourcePreferenceSet::PREFAULT;
+                }
+                if preferred_flags.contains(MapFlags::HUGE_PAGE)
+                    && !base_flags.contains(MapFlags::HUGE_PAGE)
+                {
+                    unmet |= ResourcePreferenceSet::HUGE_PAGES;
+                }
+
+                (
+                    unsafe { self.provider.map_replace(&base_request) }
+                        .map_err(ResourceError::from_request_error)?,
+                    base_flags,
+                )
+            }
         } else {
             if !self
                 .support()
@@ -362,23 +421,6 @@ impl AddressReservation {
                     .map_err(ResourceError::from_operation_error)?;
             }
 
-            if matches!(request.initial.residency, InitialResidency::Locked) {
-                unsafe { self.provider.lock(region) }
-                    .map_err(ResourceError::from_operation_error)?;
-                actual_locked = true;
-            }
-
-            if request.preferences.contains(ResourcePreferenceSet::LOCK)
-                && !matches!(request.initial.residency, InitialResidency::Locked)
-            {
-                match unsafe { self.provider.lock(region) } {
-                    Ok(()) => {
-                        actual_locked = true;
-                    }
-                    Err(_) => unmet |= ResourcePreferenceSet::LOCK,
-                }
-            }
-
             if request
                 .preferences
                 .contains(ResourcePreferenceSet::PREFAULT)
@@ -386,16 +428,17 @@ impl AddressReservation {
                 unmet |= ResourcePreferenceSet::PREFAULT;
             }
 
-            region
+            (region, MapFlags::empty())
         };
 
-        apply_resource_preferences_after_map(
+        let actual_locked = finalize_post_map_state(
             self.provider,
             region,
             request,
-            acquire_support,
+            mem_support,
+            actual_flags,
             &mut unmet,
-        );
+        )?;
 
         let leading = remainder_reservation(
             self.provider,
