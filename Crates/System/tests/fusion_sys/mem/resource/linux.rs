@@ -9,7 +9,7 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::ptr::{read_volatile, write_bytes, write_volatile};
 
-use fusion_pal::sys::mem::Protect;
+use fusion_pal::sys::mem::{BorrowedBackingHandle, Protect};
 use fusion_sys::mem::resource::{
     AddressReservation, InitialResidency, MemoryResource, ProtectableResource, QueryableResource,
     RequiredPlacement, ReservationRequest, ResourceBackingKind, ResourceHazardSet,
@@ -59,7 +59,9 @@ fn current_minor_faults() -> libc::c_long {
 fn baseline_private_heap_profile_maps_and_queries() {
     let resource = VirtualMemoryResource::create(&baseline_heap_request(page_len(4)))
         .expect("baseline heap should map");
-    let info = resource.query(resource.region().base).expect("query");
+    let info = resource
+        .query(unsafe { resource.view().base() })
+        .expect("query");
 
     // The default Linux heap profile should be anonymous private RW memory with query support.
     assert_eq!(
@@ -111,7 +113,7 @@ fn locked_low_latency_profile_verifies_lock_state() {
 fn staged_executable_profile_allows_wxorx_transition() {
     let resource = VirtualMemoryResource::create(&staged_executable_request(page_len(2)))
         .expect("staged executable resource should map");
-    let whole = ResourceRange::whole(resource.region().len);
+    let whole = ResourceRange::whole(resource.len());
 
     // The initial contract allows EXEC, but W^X means we stage the transition instead of
     // mapping RWX up front.
@@ -130,12 +132,14 @@ fn reservation_materialization_profile_lands_in_reserved_window() {
     let reservation =
         AddressReservation::create(&ReservationRequest::new(page * 3)).expect("reservation");
     let target = reservation
-        .subregion(ResourceRange::new(page, page))
-        .expect("target subrange");
+        .subview(ResourceRange::new(page, page))
+        .expect("target subview");
+    let target_base = unsafe { target.base() };
+    let target_len = target.len();
 
     let mut request = baseline_heap_request(page);
-    request.contract.required_placement = Some(RequiredPlacement::FixedNoReplace(
-        target.base.as_ptr() as usize,
+    request.required_placement = Some(RequiredPlacement::FixedNoReplace(
+        target_base.as_ptr() as usize
     ));
 
     // Materialization should land exactly in the requested hole and split the reservation
@@ -144,15 +148,15 @@ fn reservation_materialization_profile_lands_in_reserved_window() {
         .materialize_range(ResourceRange::new(page, page), &request)
         .expect("materialized");
 
-    assert_eq!(materialized.resource.region().base, target.base);
-    assert_eq!(materialized.resource.region().len, page);
+    assert_eq!(unsafe { materialized.resource.view().base() }, target_base);
+    assert_eq!(materialized.resource.len(), target_len);
     assert_eq!(
         materialized
             .leading
             .as_ref()
             .expect("leading reservation")
-            .region()
-            .len,
+            .view()
+            .len(),
         page
     );
     assert_eq!(
@@ -160,8 +164,8 @@ fn reservation_materialization_profile_lands_in_reserved_window() {
             .trailing
             .as_ref()
             .expect("trailing reservation")
-            .region()
-            .len,
+            .view()
+            .len(),
         page
     );
 }
@@ -173,9 +177,16 @@ fn file_backed_private_profile_maps_memfd_object() {
 
     // `file_private` exercises the file-backed path without depending on a visible path or
     // shared filesystem state.
-    let request = ResourceRequest::file_private(page, file.as_raw_fd(), 0);
+    let request = ResourceRequest::file_private(
+        page,
+        unsafe { BorrowedBackingHandle::borrow_raw_fd(file.as_raw_fd()) }
+            .expect("valid memfd handle"),
+        0,
+    );
     let resource = VirtualMemoryResource::create(&request).expect("file-backed resource");
-    let info = resource.query(resource.region().base).expect("query");
+    let info = resource
+        .query(unsafe { resource.view().base() })
+        .expect("query");
 
     assert_eq!(resource.backing_kind(), ResourceBackingKind::FilePrivate);
     assert_eq!(
@@ -199,14 +210,19 @@ fn gigabyte_huge_page_memfd_profile_tracks_asymmetric_protection() {
     // Linux only exposes huge pages here as a preference/advice path, so this test focuses on
     // state tracking over a large file-backed range rather than trying to prove huge-page
     // backing itself.
-    let mut request = ResourceRequest::file_private(GIB, file.as_raw_fd(), 0);
+    let mut request = ResourceRequest::file_private(
+        GIB,
+        unsafe { BorrowedBackingHandle::borrow_raw_fd(file.as_raw_fd()) }
+            .expect("valid memfd handle"),
+        0,
+    );
     request.preferences = ResourcePreferenceSet::HUGE_PAGES;
 
     let resource = VirtualMemoryResource::create(&request).expect("gigabyte file-backed resource");
     let first_half = ResourceRange::new(0, GIB / 2);
     let second_half = resource
-        .region()
-        .subrange(GIB / 2, page)
+        .view()
+        .subrange(ResourceRange::new(GIB / 2, page))
         .expect("second-half subrange");
 
     // A partial protection update should force the summary state to become asymmetric while
@@ -216,8 +232,12 @@ fn gigabyte_huge_page_memfd_profile_tracks_asymmetric_protection() {
     assert_eq!(resource.backing_kind(), ResourceBackingKind::FilePrivate);
     assert_eq!(resource.state().current_protect, StateValue::Asymmetric);
 
-    let first_info = resource.query(resource.region().base).expect("first query");
-    let second_info = resource.query(second_half.base).expect("second query");
+    let first_info = resource
+        .query(unsafe { resource.view().base() })
+        .expect("first query");
+    let second_info = resource
+        .query(unsafe { second_half.base() })
+        .expect("second query");
 
     assert_eq!(first_info.protect, Protect::READ);
     assert_eq!(second_info.protect, Protect::READ | Protect::WRITE);
@@ -247,10 +267,10 @@ fn gigabyte_heap_profile_touches_pages_and_tracks_asymmetric_state() {
     let half = GIB / 2;
     let upper_half = ResourceRange::new(half, half);
     let upper_page = resource
-        .region()
-        .subrange(half, page)
+        .view()
+        .subrange(ResourceRange::new(half, page))
         .expect("upper-half subrange");
-    let base = resource.region().base.as_ptr();
+    let base = unsafe { resource.view().base() }.as_ptr();
     let tail_write_start = GIB - TAIL_WRITE_BYTES;
     let tail_write_probe = tail_write_start + page * 4;
 
@@ -287,8 +307,12 @@ fn gigabyte_heap_profile_touches_pages_and_tracks_asymmetric_state() {
     );
     assert_eq!(resource.state().current_protect, StateValue::Asymmetric);
 
-    let lower_info = resource.query(resource.region().base).expect("lower query");
-    let upper_info = resource.query(upper_page.base).expect("upper query");
+    let lower_info = resource
+        .query(unsafe { resource.view().base() })
+        .expect("lower query");
+    let upper_info = resource
+        .query(unsafe { upper_page.base() })
+        .expect("upper query");
 
     assert_eq!(lower_info.protect, Protect::READ | Protect::WRITE);
     assert_eq!(upper_info.protect, Protect::READ);
@@ -315,7 +339,7 @@ fn anonymous_mapping_touch_loop_increases_minor_fault_count() {
 
     let resource =
         VirtualMemoryResource::create(&ResourceRequest::anonymous_private(len)).expect("resource");
-    let base = resource.region().base.as_ptr();
+    let base = unsafe { resource.view().base() }.as_ptr();
     let before = current_minor_faults();
 
     // Anonymous private memory is mapped lazily. The first write into each untouched page should

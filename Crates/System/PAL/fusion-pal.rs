@@ -1,8 +1,9 @@
 //! Platform abstraction layer for low-level Fusion system contracts.
 //!
-//! The PAL exposes the exact memory behavior a selected backend can support without
-//! synthesizing fake portability. Higher layers are expected to negotiate from this truth
-//! rather than assume that every operating system behaves like every other one.
+//! The PAL exposes the exact memory behavior and normalized memory inventory a selected
+//! backend can support without synthesizing fake portability. Higher layers are expected to
+//! negotiate from this truth rather than assume that every operating system behaves like
+//! every other one.
 
 #![no_std]
 

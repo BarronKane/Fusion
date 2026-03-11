@@ -1,3 +1,5 @@
+use core::fmt;
+
 use fusion_pal::sys::mem::{MemError, MemErrorKind};
 
 /// Resource-layer error categories derived from request validation and PAL failures.
@@ -24,6 +26,26 @@ pub enum ResourceErrorKind {
 pub struct ResourceError {
     /// Machine-readable reason for the failure.
     pub kind: ResourceErrorKind,
+}
+
+impl fmt::Display for ResourceErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRequest => f.write_str("invalid resource request"),
+            Self::UnsupportedRequest => f.write_str("unsupported resource request"),
+            Self::UnsupportedOperation => f.write_str("unsupported resource operation"),
+            Self::ContractViolation => f.write_str("resource contract violation"),
+            Self::InvalidRange => f.write_str("invalid resource range"),
+            Self::OutOfMemory => f.write_str("resource allocation exhausted memory"),
+            Self::Platform(kind) => write!(f, "platform resource failure ({kind})"),
+        }
+    }
+}
+
+impl fmt::Display for ResourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.kind)
+    }
 }
 
 impl ResourceError {

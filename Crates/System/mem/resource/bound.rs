@@ -28,6 +28,10 @@
 //! inconsistent specifications rather than normalizing them into something prettier and less
 //! honest.
 //!
+//! Like the rest of `fusion-sys::mem::resource`, bound resources expose borrowed range views as
+//! the primary safe surface. The underlying PAL `Region` remains crate-internal metadata rather
+//! than a public ownership-adjacent token that callers can copy and squirrel away forever.
+//!
 //! The current bound-resource implementation is deliberately conservative. It is primarily for
 //! describing externally governed ranges, and today it only accepts the `QUERY` operation when
 //! the bound state is precise enough to answer point queries truthfully. That is enough for the
@@ -167,12 +171,12 @@ impl QueryableResource for BoundMemoryResource {
             return Err(ResourceError::unsupported_operation());
         }
 
-        if !self.range().contains(addr.as_ptr() as usize) {
+        if !self.range().contains(addr.as_ptr()) {
             return Err(ResourceError::invalid_range());
         }
 
         Ok(RegionInfo {
-            region: self.range(),
+            region: self.info().range,
             protect: match self.state().current_protect {
                 StateValue::Uniform(protect) => protect,
                 StateValue::Asymmetric | StateValue::Unknown => {

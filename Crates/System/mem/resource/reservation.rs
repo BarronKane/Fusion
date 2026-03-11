@@ -59,7 +59,7 @@ pub struct ReservationSupport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResolvedAddressReservation {
     /// Contiguous reserved address range.
-    pub range: Region,
+    pub(crate) range: Region,
     /// Geometry of the reservation and any future materialized resources.
     pub geometry: MemoryGeometry,
     /// Support surface for the reservation instance.
@@ -236,14 +236,18 @@ impl AddressReservation {
         self.resolved
     }
 
-    /// Returns the reserved address range governed by this handle.
+    /// Returns a borrowed view of the reserved address range governed by this handle.
     ///
     /// # Panics
     /// Panics only if internal materialization logic has already consumed the reservation's
     /// owned range while this handle is still being used.
     #[must_use]
+    pub fn view(&self) -> super::RangeView<'_> {
+        super::RangeView::new(self.raw_region())
+    }
+
     #[allow(clippy::missing_const_for_fn)]
-    pub fn region(&self) -> Region {
+    fn raw_region(&self) -> Region {
         self.region
             .expect("reservation region missing during active use")
     }
@@ -251,21 +255,18 @@ impl AddressReservation {
     /// Returns `true` when `ptr` lies within the reserved range.
     #[must_use]
     pub fn contains(&self, ptr: *const u8) -> bool {
-        self.region().contains(ptr as usize)
+        self.view().contains(ptr)
     }
 
-    /// Returns a checked subrange of the reservation.
+    /// Returns a checked borrowed subrange of the reservation.
     ///
     /// # Errors
     /// Returns an error when the requested range is empty or falls outside the reservation.
-    pub fn subregion(&self, range: super::ResourceRange) -> Result<Region, ResourceError> {
-        if range.len == 0 {
-            return Err(ResourceError::invalid_range());
-        }
-
-        self.region()
-            .subrange(range.offset, range.len)
-            .map_err(|_| ResourceError::invalid_range())
+    pub fn subview(
+        &self,
+        range: super::ResourceRange,
+    ) -> Result<super::RangeView<'_>, ResourceError> {
+        self.view().subrange(range)
     }
 
     /// Queries reservation metadata for the region containing `addr`.
@@ -296,7 +297,7 @@ impl AddressReservation {
         self,
         request: &ResourceRequest<'_>,
     ) -> Result<VirtualMemoryResource, ResourceError> {
-        let region = self.region();
+        let region = self.raw_region();
         let materialized =
             self.materialize_range(super::ResourceRange::new(0, region.len), request)?;
 
@@ -320,7 +321,7 @@ impl AddressReservation {
         let mem_support = self.provider.support();
         let acquire_support = resource_acquire_support_from_mem_support(mem_support);
         let resource_support = acquire_support.instance;
-        let reserved = self.region();
+        let reserved = self.raw_region();
         let region = materialization_region(reserved, range, self.page_info.alloc_granule.get())?;
         validate_request(request, acquire_support)?;
         validate_materialization_request(request, region, self.page_info.alloc_granule.get())?;
@@ -574,7 +575,7 @@ fn validate_materialization_request(
         return Err(ResourceError::invalid_request());
     }
 
-    match request.contract.required_placement {
+    match request.required_placement {
         None => {}
         Some(RequiredPlacement::FixedNoReplace(addr)) if addr == base => {}
         Some(RequiredPlacement::FixedNoReplace(_)) => return Err(ResourceError::invalid_request()),

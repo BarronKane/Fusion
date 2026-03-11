@@ -1,7 +1,7 @@
 //! Public memory export for the selected platform backend.
 //!
 //! This module forwards the chosen private backend's memory implementation together with
-//! the backend-neutral PAL memory contract types.
+//! the backend-neutral PAL memory contract, inventory, and topology types.
 
 /// Concrete memory provider type and constructor for the selected platform.
 pub use super::platform::mem::{PlatformMem, system_mem};

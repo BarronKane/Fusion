@@ -97,7 +97,7 @@ fn preferred_node_profile_degrades_to_unmet_preference_when_needed() {
 #[test]
 fn required_node_profile_is_capability_gated() {
     let mut request = ResourceRequest::anonymous_private(page_len(2));
-    request.contract.required_placement = Some(RequiredPlacement::RequiredNode(0));
+    request.required_placement = Some(RequiredPlacement::RequiredNode(0));
     let support = VirtualMemoryResource::system_acquire_support();
 
     // Required placement is not allowed to degrade. The backend either supports it or rejects
@@ -122,7 +122,7 @@ fn explicit_commit_control_is_capability_gated() {
                 return;
             }
         };
-    let whole = ResourceRange::whole(resource.region().len);
+    let whole = ResourceRange::whole(resource.len());
 
     // Commit/decommit control is reported per live instance. If those ops are present, they
     // must work on the whole range; otherwise the resource should reject them cleanly.

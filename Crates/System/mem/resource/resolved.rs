@@ -12,7 +12,7 @@ use super::support::ResourceSupport;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResourceInfo {
     /// Contiguous governed range represented by the resource.
-    pub range: Region,
+    pub(crate) range: Region,
     /// Memory domain classification for the range.
     pub domain: MemoryDomain,
     /// Concrete backing shape for the range.
@@ -30,6 +30,31 @@ pub struct ResourceInfo {
 }
 
 impl ResourceInfo {
+    /// Creates immutable descriptive information for a resource instance.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub const fn new(
+        range: Region,
+        domain: MemoryDomain,
+        backing: ResourceBackingKind,
+        attrs: ResourceAttrs,
+        geometry: MemoryGeometry,
+        contract: ResourceContract,
+        support: ResourceSupport,
+        hazards: ResourceHazardSet,
+    ) -> Self {
+        Self {
+            range,
+            domain,
+            backing,
+            attrs,
+            geometry,
+            contract,
+            support,
+            hazards,
+        }
+    }
+
     /// Returns the operation set advertised by this resource instance.
     #[must_use]
     pub const fn ops(self) -> super::ops::ResourceOpSet {
