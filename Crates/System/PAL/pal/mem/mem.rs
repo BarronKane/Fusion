@@ -9,8 +9,15 @@
 //! explicit unsafe trait boundary.
 
 use core::fmt;
+use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
+
+mod catalog;
+mod topology;
+
+pub use catalog::*;
+pub use topology::*;
 
 bitflags::bitflags! {
     /// Backend-native capabilities reported by a [`MemBase`] provider.
@@ -292,15 +299,83 @@ pub enum TagMode {
     Unchecked,
 }
 
+/// Lifetime-bound borrowed handle naming a file-like backing object.
+///
+/// This keeps the PAL memory contract platform-independent while still forcing safe callers to
+/// acknowledge that a file-backed mapping request borrows an external handle whose lifetime must
+/// outlive the mapping call that consumes it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BorrowedBackingHandle<'a> {
+    raw: usize,
+    _lifetime: PhantomData<&'a ()>,
+}
+
+impl fmt::Debug for BorrowedBackingHandle<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BorrowedBackingHandle")
+            .field("raw", &self.raw)
+            .finish()
+    }
+}
+
+impl BorrowedBackingHandle<'_> {
+    /// Borrows a raw platform handle for a file-backed mapping request.
+    ///
+    /// # Safety
+    /// The caller must ensure the supplied handle remains valid, open, and names the intended
+    /// backing object for the entire duration of any request that borrows it. Reusing or closing
+    /// the handle before the request is consumed violates the contract.
+    #[must_use]
+    pub const unsafe fn borrow_raw(raw: usize) -> Self {
+        Self {
+            raw,
+            _lifetime: PhantomData,
+        }
+    }
+
+    /// Returns the borrowed raw platform handle value.
+    #[must_use]
+    pub const fn as_raw(self) -> usize {
+        self.raw
+    }
+
+    /// Borrows a raw Unix file descriptor for a file-backed mapping request.
+    ///
+    /// # Safety
+    /// The caller must ensure the descriptor remains valid, open, and names the intended backing
+    /// object for the entire duration of any request that borrows it.
+    ///
+    /// # Errors
+    /// Returns [`MemErrorKind::InvalidInput`] when `fd` is negative.
+    #[cfg(unix)]
+    pub unsafe fn borrow_raw_fd(fd: i32) -> Result<Self, MemError> {
+        let raw = usize::try_from(fd).map_err(|_| MemError::invalid())?;
+        Ok(Self {
+            raw,
+            _lifetime: PhantomData,
+        })
+    }
+
+    /// Returns the borrowed Unix file descriptor value.
+    ///
+    /// # Errors
+    /// Returns [`MemErrorKind::InvalidInput`] when this borrowed backing handle does not fit in
+    /// an `i32` Unix file descriptor.
+    #[cfg(unix)]
+    pub fn as_raw_fd(self) -> Result<i32, MemError> {
+        i32::try_from(self.raw).map_err(|_| MemError::invalid())
+    }
+}
+
 /// Backing object or memory domain for a map request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Backing<'a> {
     /// Fresh anonymous memory with no external backing object.
     Anonymous,
-    /// File-backed memory using a raw file descriptor and byte offset.
+    /// File-backed memory using a borrowed platform handle and byte offset.
     File {
-        /// Raw file descriptor that names the backing object.
-        fd: i32,
+        /// Borrowed platform handle that names the backing object.
+        fd: BorrowedBackingHandle<'a>,
         /// Byte offset into the backing object.
         offset: u64,
     },
@@ -449,17 +524,37 @@ impl fmt::Debug for Region {
     }
 }
 
+// SAFETY: `Region` is a passive address-range descriptor. Sending or sharing it across threads
+// does not, by itself, dereference memory or transfer ownership of the backing. Correct
+// lifetime, synchronization, and mapping validity remain the responsibility of the higher-level
+// owner that governs the region.
+unsafe impl Send for Region {}
+
+// SAFETY: See the `Send` rationale above. A shared `Region` is still just immutable address
+// metadata, not a synchronization bypass.
+unsafe impl Sync for Region {}
+
 impl Region {
-    /// Returns the exclusive end address of the region.
+    /// Returns the exclusive end address of the region when it does not overflow the address
+    /// space.
     #[must_use]
-    pub fn end_addr(self) -> usize {
-        self.base.as_ptr() as usize + self.len
+    pub fn checked_end_addr(self) -> Option<usize> {
+        (self.base.as_ptr() as usize).checked_add(self.len)
+    }
+
+    /// Returns the exclusive end address of the region when it does not overflow the address
+    /// space.
+    #[must_use]
+    pub fn end_addr(self) -> Option<usize> {
+        self.checked_end_addr()
     }
 
     /// Returns `true` if the address lies within the region.
     #[must_use]
     pub fn contains(self, addr: usize) -> bool {
-        addr >= self.base.as_ptr() as usize && addr < self.end_addr()
+        let start = self.base.as_ptr() as usize;
+        self.checked_end_addr()
+            .is_some_and(|end| addr >= start && addr < end)
     }
 
     /// Returns a checked subrange of this region.
@@ -526,6 +621,29 @@ pub enum MemErrorKind {
 pub struct MemError {
     /// Classified reason for the failure.
     pub kind: MemErrorKind,
+}
+
+impl fmt::Display for MemErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unsupported => f.write_str("unsupported operation or semantic"),
+            Self::InvalidInput => f.write_str("invalid input"),
+            Self::InvalidAddress => f.write_str("invalid address"),
+            Self::Misaligned => f.write_str("misaligned input"),
+            Self::OutOfMemory => f.write_str("out of memory"),
+            Self::OutOfBounds => f.write_str("out of bounds"),
+            Self::PermissionDenied => f.write_str("permission denied"),
+            Self::Busy => f.write_str("target range is busy"),
+            Self::Overflow => f.write_str("integer overflow"),
+            Self::Platform(errno) => write!(f, "platform error {errno}"),
+        }
+    }
+}
+
+impl fmt::Display for MemError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "memory operation failed: {}", self.kind)
+    }
 }
 
 impl MemError {
@@ -829,5 +947,27 @@ pub unsafe trait MemDevice: MemBase {
     /// backend.
     unsafe fn map_device(&self, _req: &DeviceMapRequest) -> Result<Region, MemError> {
         Err(MemError::unsupported())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protect_none_remains_a_vacuous_subset() {
+        assert!(Protect::READ.contains(Protect::NONE));
+        assert!(Protect::READ | Protect::WRITE != Protect::NONE);
+    }
+
+    #[test]
+    fn region_checked_end_addr_fails_closed_on_overflow() {
+        let region = Region {
+            base: NonNull::new((usize::MAX - 1) as *mut u8).expect("non-null pointer"),
+            len: 8,
+        };
+
+        assert_eq!(region.checked_end_addr(), None);
+        assert!(!region.contains((usize::MAX - 1) as *const u8 as usize));
     }
 }

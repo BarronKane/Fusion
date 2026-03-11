@@ -37,6 +37,16 @@
 //! objects, that should likely become a sibling abstraction rather than forcing this module to
 //! lie about having a meaningful `*mut u8` base pointer.
 //!
+//! Downstream callers are therefore given borrowed [`RangeView`] values rather than naked PAL
+//! [`Region`] descriptors as the primary safe surface. A raw address range is still the truth
+//! underneath, but that truth is lifetime-bound to the owning resource and should not be
+//! treated like a durable ownership token by higher layers.
+//!
+//! Live resources are also intended to support concurrent allocator and maintenance code. Their
+//! summary state is published atomically, and backing-mutating operations serialize through a
+//! small internal guard so background work cannot race resource-wide state transitions into
+//! fiction.
+//!
 //! In short: keep `MemoryResource` as the common governed-range contract, keep
 //! `VirtualMemoryResource` strictly VM-shaped, and let future provider layers unify multiple
 //! concrete memory domains without pretending they all originate from the same create call.
@@ -49,32 +59,20 @@ use fusion_pal::sys::mem::{
     MemSupport, PageInfo, Placement, Protect, Region, RegionAttrs, RegionInfo, system_mem,
 };
 
-#[path = "attrs.rs"]
 mod attrs;
-#[path = "bound.rs"]
 mod bound;
-#[path = "core.rs"]
 mod core;
-#[path = "domain.rs"]
 mod domain;
-#[path = "error.rs"]
 mod error;
-#[path = "geometry.rs"]
 mod geometry;
-#[path = "ops.rs"]
 mod ops;
-#[path = "range.rs"]
 mod range;
-#[path = "request.rs"]
 mod request;
-#[path = "reservation.rs"]
 mod reservation;
-#[path = "resolved.rs"]
 mod resolved;
-#[path = "state.rs"]
 mod state;
-#[path = "support.rs"]
 mod support;
+mod view;
 
 pub use attrs::ResourceAttrs;
 pub use bound::{BoundMemoryResource, BoundResourceSpec};
@@ -97,6 +95,7 @@ pub use state::{ResourceState, ResourceStateProvenance, StateValue};
 pub use support::{
     ResourceAcquireSupport, ResourceFeatureSupport, ResourceResidencySupport, ResourceSupport,
 };
+pub use view::RangeView;
 
 use self::core::ResourceCore;
 
@@ -108,9 +107,22 @@ pub trait MemoryResource {
     /// Returns the current resource-wide summary state.
     fn state(&self) -> ResourceState;
 
-    /// Returns the governed contiguous range of the resource.
-    fn range(&self) -> Region {
-        self.info().range
+    /// Returns a borrowed view of the governed contiguous range.
+    ///
+    /// Raw address extraction stays tied to this borrow so downstream layers do not casually
+    /// treat a copied `Region` descriptor as an ownership-bearing handle.
+    fn range(&self) -> RangeView<'_> {
+        RangeView::new(self.info().range)
+    }
+
+    /// Returns the length of the governed range.
+    fn len(&self) -> usize {
+        self.info().range.len
+    }
+
+    /// Returns `true` when the governed range is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Returns the concrete backing kind represented by the resource.
@@ -155,21 +167,15 @@ pub trait MemoryResource {
 
     /// Returns `true` when `ptr` lies within the governed range.
     fn contains(&self, ptr: *const u8) -> bool {
-        self.range().contains(ptr as usize)
+        self.range().contains(ptr)
     }
 
-    /// Returns a checked subrange of the resource.
+    /// Returns a checked borrowed subrange of the resource.
     ///
     /// # Errors
     /// Returns an error when the requested range is empty or falls outside the resource.
-    fn subrange(&self, range: ResourceRange) -> Result<Region, ResourceError> {
-        if range.len == 0 {
-            return Err(ResourceError::invalid_range());
-        }
-
-        self.range()
-            .subrange(range.offset, range.len)
-            .map_err(|_| ResourceError::invalid_range())
+    fn subrange(&self, range: ResourceRange) -> Result<RangeView<'_>, ResourceError> {
+        self.range().subrange(range)
     }
 }
 
@@ -297,7 +303,7 @@ impl VirtualMemoryResource {
 
         let base_flags = initial_map_flags(request, resource_support)?;
         let required_placement = required_placement_to_mem(
-            request.contract.required_placement,
+            request.required_placement,
             page_info.alloc_granule.get(),
             acquire_support.placements,
         )?;
@@ -406,7 +412,7 @@ impl VirtualMemoryResource {
             )
         };
 
-        verify_required_placement(provider, region, request.contract.required_placement)?;
+        verify_required_placement(provider, region, request.required_placement)?;
         let actual_locked = match finalize_post_map_state(
             provider,
             region,
@@ -469,18 +475,23 @@ impl VirtualMemoryResource {
         self.core.resolved()
     }
 
-    /// Returns the resource's governed region.
+    /// Returns a borrowed view of the resource's governed range.
     #[must_use]
-    pub fn region(&self) -> Region {
+    pub fn view(&self) -> RangeView<'_> {
         self.range()
     }
 
-    /// Returns a checked subrange of the resource.
+    /// Returns a checked borrowed subrange of the resource.
     ///
     /// # Errors
     /// Returns an error when the requested range is empty or falls outside the resource.
-    pub fn subregion(&self, range: ResourceRange) -> Result<Region, ResourceError> {
+    pub fn subview(&self, range: ResourceRange) -> Result<RangeView<'_>, ResourceError> {
         self.subrange(range)
+    }
+
+    const fn raw_region(&self) -> Region {
+        self.region
+            .expect("resource region missing during active use")
     }
 
     fn operation_region(&self, range: ResourceRange) -> Result<Region, ResourceError> {
@@ -493,7 +504,9 @@ impl VirtualMemoryResource {
             return Err(ResourceError::invalid_range());
         }
 
-        self.subrange(range)
+        self.raw_region()
+            .subrange(range.offset, range.len)
+            .map_err(|_| ResourceError::invalid_range())
     }
 
     fn validate_protect_contract(&self, protect: Protect) -> Result<(), ResourceError> {
@@ -515,32 +528,8 @@ impl VirtualMemoryResource {
         Ok(())
     }
 
-    fn set_current_protect(&self, protect: Protect) {
-        self.core.set_current_protect(protect);
-    }
-
-    fn mark_protect_asymmetric(&self) {
-        self.core.mark_protect_asymmetric();
-    }
-
-    fn set_locked_state(&self, locked: bool) {
-        self.core.set_locked_state(locked);
-    }
-
-    fn mark_locked_asymmetric(&self) {
-        self.core.mark_locked_asymmetric();
-    }
-
-    fn set_committed_state(&self, committed: bool) {
-        self.core.set_committed_state(committed);
-    }
-
-    fn mark_committed_asymmetric(&self) {
-        self.core.mark_committed_asymmetric();
-    }
-
     fn is_full_resource_range(&self, range: ResourceRange) -> bool {
-        range.offset == 0 && range.len == self.range().len
+        range.offset == 0 && range.len == self.len()
     }
 }
 
@@ -562,12 +551,13 @@ impl ProtectableResource for VirtualMemoryResource {
 
         self.validate_protect_contract(protect)?;
         let region = self.operation_region(range)?;
+        let mutation = self.core.begin_mutation();
         unsafe { self.provider.protect(region, protect) }
             .map_err(ResourceError::from_operation_error)?;
         if self.is_full_resource_range(range) {
-            self.set_current_protect(protect);
+            mutation.set_current_protect(protect);
         } else {
-            self.mark_protect_asymmetric();
+            mutation.mark_protect_asymmetric();
         }
         Ok(())
     }
@@ -582,6 +572,7 @@ impl AdvisableResource for VirtualMemoryResource {
         }
 
         let region = self.operation_region(range)?;
+        let _mutation = self.core.begin_mutation();
         unsafe { self.provider.advise(region, advice) }.map_err(ResourceError::from_operation_error)
     }
 }
@@ -595,6 +586,7 @@ impl DiscardableResource for VirtualMemoryResource {
         let advice = preferred_discard_advice(self.support().advice)
             .ok_or_else(ResourceError::unsupported_operation)?;
         let region = self.operation_region(range)?;
+        let _mutation = self.core.begin_mutation();
         unsafe { self.provider.advise(region, advice) }.map_err(ResourceError::from_operation_error)
     }
 }
@@ -607,14 +599,15 @@ impl CommitControlledResource for VirtualMemoryResource {
 
         self.validate_protect_contract(protect)?;
         let region = self.operation_region(range)?;
+        let mutation = self.core.begin_mutation();
         unsafe { self.provider.commit(region, protect) }
             .map_err(ResourceError::from_operation_error)?;
         if self.is_full_resource_range(range) {
-            self.set_current_protect(protect);
-            self.set_committed_state(true);
+            mutation.set_current_protect(protect);
+            mutation.set_committed_state(true);
         } else {
-            self.mark_protect_asymmetric();
-            self.mark_committed_asymmetric();
+            mutation.mark_protect_asymmetric();
+            mutation.mark_committed_asymmetric();
         }
         Ok(())
     }
@@ -625,11 +618,12 @@ impl CommitControlledResource for VirtualMemoryResource {
         }
 
         let region = self.operation_region(range)?;
+        let mutation = self.core.begin_mutation();
         unsafe { self.provider.decommit(region) }.map_err(ResourceError::from_operation_error)?;
         if self.is_full_resource_range(range) {
-            self.set_committed_state(false);
+            mutation.set_committed_state(false);
         } else {
-            self.mark_committed_asymmetric();
+            mutation.mark_committed_asymmetric();
         }
         Ok(())
     }
@@ -642,11 +636,12 @@ impl LockableResource for VirtualMemoryResource {
         }
 
         let region = self.operation_region(range)?;
+        let mutation = self.core.begin_mutation();
         unsafe { self.provider.lock(region) }.map_err(ResourceError::from_operation_error)?;
         if self.is_full_resource_range(range) {
-            self.set_locked_state(true);
+            mutation.set_locked_state(true);
         } else {
-            self.mark_locked_asymmetric();
+            mutation.mark_locked_asymmetric();
         }
         Ok(())
     }
@@ -657,11 +652,12 @@ impl LockableResource for VirtualMemoryResource {
         }
 
         let region = self.operation_region(range)?;
+        let mutation = self.core.begin_mutation();
         unsafe { self.provider.unlock(region) }.map_err(ResourceError::from_operation_error)?;
         if self.is_full_resource_range(range) {
-            self.set_locked_state(false);
+            mutation.set_locked_state(false);
         } else {
-            self.mark_locked_asymmetric();
+            mutation.mark_locked_asymmetric();
         }
         Ok(())
     }
@@ -781,7 +777,7 @@ pub(super) fn normalize_len(len: usize, granule: usize) -> Result<usize, Resourc
 }
 
 const fn supports_backing(
-    backing: ResourceBackingRequest,
+    backing: ResourceBackingRequest<'_>,
     sharing: SharingPolicy,
     support: MemBackingCaps,
 ) -> bool {
@@ -862,7 +858,7 @@ pub(super) fn initial_map_flags(
     Ok(flags)
 }
 
-pub(super) const fn request_backing_to_mem(backing: ResourceBackingRequest) -> Backing<'static> {
+pub(super) const fn request_backing_to_mem(backing: ResourceBackingRequest<'_>) -> Backing<'_> {
     match backing {
         ResourceBackingRequest::Anonymous => Backing::Anonymous,
         ResourceBackingRequest::File { fd, offset } => Backing::File { fd, offset },
@@ -870,7 +866,7 @@ pub(super) const fn request_backing_to_mem(backing: ResourceBackingRequest) -> B
 }
 
 pub(super) const fn backing_kind_from_request(
-    backing: ResourceBackingRequest,
+    backing: ResourceBackingRequest<'_>,
     sharing: SharingPolicy,
 ) -> ResourceBackingKind {
     match (backing, sharing) {
@@ -889,7 +885,9 @@ pub(super) const fn backing_kind_from_request(
     }
 }
 
-pub(super) const fn resource_attrs_for_request(_backing: ResourceBackingRequest) -> RegionAttrs {
+pub(super) const fn resource_attrs_for_request(
+    _backing: ResourceBackingRequest<'_>,
+) -> RegionAttrs {
     RegionAttrs::VIRTUAL_ONLY
 }
 
@@ -1006,8 +1004,8 @@ const fn base_map_request(
     placement: Placement,
     attrs: RegionAttrs,
     cache: CachePolicy,
-    backing: Backing<'static>,
-) -> MapRequest<'static> {
+    backing: Backing<'_>,
+) -> MapRequest<'_> {
     MapRequest {
         len,
         align: 0,
@@ -1374,7 +1372,7 @@ mod tests {
             resource.resolved().info.backing,
             ResourceBackingKind::AnonymousPrivate
         );
-        assert_eq!(resource.region().len, 16 * 1024);
+        assert_eq!(resource.len(), 16 * 1024);
         assert!(resource.attrs().contains(
             ResourceAttrs::ALLOCATABLE | ResourceAttrs::CACHEABLE | ResourceAttrs::COHERENT
         ));
@@ -1408,13 +1406,15 @@ mod tests {
     fn queries_resource_region_snapshot() {
         let request = ResourceRequest::anonymous_private(16 * 1024);
         let resource = VirtualMemoryResource::create(&request).expect("resource");
-        let info = resource.query(resource.region().base).expect("query");
+        let info = resource
+            .query(unsafe { resource.view().base() })
+            .expect("query");
 
         assert!(
             info.region
-                .contains(resource.region().base.as_ptr() as usize)
+                .contains(unsafe { resource.view().base() }.as_ptr() as usize)
         );
-        assert!(info.region.len >= resource.region().len);
+        assert!(info.region.len >= resource.len());
         assert!(info.protect.contains(Protect::READ));
         assert!(info.protect.contains(Protect::WRITE));
     }
@@ -1426,7 +1426,7 @@ mod tests {
         let second = VirtualMemoryResource::create(&request).expect("second resource");
 
         let err = first
-            .query(second.region().base)
+            .query(unsafe { second.view().base() })
             .expect_err("foreign address should be rejected");
 
         assert_eq!(err.kind, ResourceErrorKind::InvalidRange);
@@ -1443,7 +1443,7 @@ mod tests {
             resource.resolved().info.backing,
             ResourceBackingKind::AnonymousPrivate
         );
-        assert_eq!(resource.region().len, 16 * 1024);
+        assert_eq!(resource.len(), 16 * 1024);
     }
 
     #[test]
@@ -1478,16 +1478,16 @@ mod tests {
         let trailing = materialized.trailing.expect("trailing reservation");
         let resource = materialized.resource;
 
-        assert_eq!(leading.region().len, page);
-        assert_eq!(resource.region().len, page);
-        assert_eq!(trailing.region().len, page);
+        assert_eq!(leading.view().len(), page);
+        assert_eq!(resource.len(), page);
+        assert_eq!(trailing.view().len(), page);
         assert_eq!(
-            leading.region().end_addr(),
-            resource.region().base.as_ptr() as usize
+            leading.view().checked_end_addr(),
+            Some(unsafe { resource.view().base() }.as_ptr() as usize)
         );
         assert_eq!(
-            resource.region().end_addr(),
-            trailing.region().base.as_ptr() as usize
+            resource.view().checked_end_addr(),
+            Some(unsafe { trailing.view().base() }.as_ptr() as usize)
         );
     }
 
@@ -1498,7 +1498,7 @@ mod tests {
             AddressReservation::create(&ReservationRequest::new(16 * 1024)).expect("second");
 
         let err = first
-            .query(second.region().base)
+            .query(unsafe { second.view().base() })
             .expect_err("foreign address should be rejected");
 
         assert_eq!(err.kind, ResourceErrorKind::InvalidRange);
@@ -1521,10 +1521,9 @@ mod tests {
             overcommit: OvercommitPolicy::Disallow,
             cache_policy: CachePolicy::Default,
             integrity: None,
-            required_placement: None,
         };
         let mut spec = BoundResourceSpec::new(
-            resource.region(),
+            unsafe { resource.view().raw_region() },
             MemoryDomain::StaticRegion,
             ResourceBackingKind::StaticRegion,
             ResourceAttrs::ALLOCATABLE | ResourceAttrs::STATIC_REGION | ResourceAttrs::DMA_VISIBLE,
@@ -1540,7 +1539,7 @@ mod tests {
         spec.additional_hazards = ResourceHazardSet::EXTERNAL_MUTATION;
 
         let bound = BoundMemoryResource::new(spec).expect("bound resource");
-        let info = bound.query(bound.range().base).expect("query");
+        let info = bound.query(unsafe { bound.range().base() }).expect("query");
 
         assert_eq!(bound.domain(), MemoryDomain::StaticRegion);
         assert_eq!(bound.backing_kind(), ResourceBackingKind::StaticRegion);
@@ -1574,10 +1573,9 @@ mod tests {
             overcommit: OvercommitPolicy::Disallow,
             cache_policy: CachePolicy::Default,
             integrity: None,
-            required_placement: None,
         };
         let spec = BoundResourceSpec::new(
-            resource.region(),
+            unsafe { resource.view().raw_region() },
             MemoryDomain::StaticRegion,
             ResourceBackingKind::StaticRegion,
             ResourceAttrs::ALLOCATABLE | ResourceAttrs::STATIC_REGION,
@@ -1592,6 +1590,81 @@ mod tests {
         );
 
         let err = BoundMemoryResource::new(spec).expect_err("imprecise query state should fail");
+        assert_eq!(err.kind, ResourceErrorKind::InvalidRequest);
+    }
+
+    #[test]
+    fn bound_spec_rejects_unsupported_live_ops() {
+        let request = ResourceRequest::anonymous_private(16 * 1024);
+        let resource = VirtualMemoryResource::create(&request).expect("resource");
+        let support = ResourceSupport {
+            protect: Protect::READ | Protect::WRITE,
+            ops: ResourceOpSet::QUERY | ResourceOpSet::PROTECT,
+            advice: MemAdviceCaps::empty(),
+            residency: ResourceResidencySupport::empty(),
+        };
+        let contract = ResourceContract {
+            allowed_protect: Protect::READ | Protect::WRITE,
+            write_xor_execute: true,
+            sharing: SharingPolicy::Private,
+            overcommit: OvercommitPolicy::Disallow,
+            cache_policy: CachePolicy::Default,
+            integrity: None,
+        };
+        let spec = BoundResourceSpec::new(
+            unsafe { resource.view().raw_region() },
+            MemoryDomain::StaticRegion,
+            ResourceBackingKind::StaticRegion,
+            ResourceAttrs::ALLOCATABLE | ResourceAttrs::STATIC_REGION,
+            resource.geometry(),
+            contract,
+            support,
+            ResourceState::static_state(
+                StateValue::Uniform(Protect::READ | Protect::WRITE),
+                StateValue::Unknown,
+                StateValue::Uniform(true),
+            ),
+        );
+
+        let err = BoundMemoryResource::new(spec).expect_err("unsupported ops should fail");
+        assert_eq!(err.kind, ResourceErrorKind::InvalidRequest);
+    }
+
+    #[test]
+    fn bound_spec_rejects_domain_backing_mismatch() {
+        let request = ResourceRequest::anonymous_private(16 * 1024);
+        let resource = VirtualMemoryResource::create(&request).expect("resource");
+        let support = ResourceSupport {
+            protect: Protect::READ | Protect::WRITE,
+            ops: ResourceOpSet::QUERY,
+            advice: MemAdviceCaps::empty(),
+            residency: ResourceResidencySupport::empty(),
+        };
+        let contract = ResourceContract {
+            allowed_protect: Protect::READ | Protect::WRITE,
+            write_xor_execute: true,
+            sharing: SharingPolicy::Private,
+            overcommit: OvercommitPolicy::Disallow,
+            cache_policy: CachePolicy::Default,
+            integrity: None,
+        };
+        let spec = BoundResourceSpec::new(
+            unsafe { resource.view().raw_region() },
+            MemoryDomain::StaticRegion,
+            ResourceBackingKind::AnonymousPrivate,
+            ResourceAttrs::ALLOCATABLE | ResourceAttrs::STATIC_REGION,
+            resource.geometry(),
+            contract,
+            support,
+            ResourceState::static_state(
+                StateValue::Uniform(Protect::READ | Protect::WRITE),
+                StateValue::Unknown,
+                StateValue::Uniform(true),
+            ),
+        );
+
+        let err =
+            BoundMemoryResource::new(spec).expect_err("mismatched domain/backing should fail");
         assert_eq!(err.kind, ResourceErrorKind::InvalidRequest);
     }
 
@@ -1626,7 +1699,7 @@ mod tests {
     fn full_range_mutation_preserves_uniform_state() {
         let request = ResourceRequest::anonymous_private(16 * 1024);
         let resource = VirtualMemoryResource::create(&request).expect("resource");
-        let whole = ResourceRange::whole(resource.region().len);
+        let whole = ResourceRange::whole(resource.len());
 
         unsafe { resource.protect(whole, Protect::READ) }.expect("protect");
         assert_eq!(
@@ -1656,13 +1729,13 @@ mod tests {
         let resource = VirtualMemoryResource::create(&request).expect("resource");
         let page = resource.page_info().base_page.get();
         let region = resource
-            .subregion(ResourceRange::new(page, page * 2))
-            .expect("subregion");
+            .subview(ResourceRange::new(page, page * 2))
+            .expect("subview");
 
-        assert_eq!(region.len, page * 2);
+        assert_eq!(region.len(), page * 2);
         assert!(
             resource
-                .subregion(ResourceRange::new(resource.region().len, page))
+                .subview(ResourceRange::new(resource.len(), page))
                 .is_err()
         );
     }
@@ -1728,5 +1801,14 @@ mod tests {
             .expect("region id"),
             Some(Placement::RegionId(42))
         );
+    }
+
+    #[test]
+    fn live_resource_types_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<VirtualMemoryResource>();
+        assert_send_sync::<AddressReservation>();
+        assert_send_sync::<BoundMemoryResource>();
     }
 }

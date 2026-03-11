@@ -103,3 +103,5 @@ impl MemLock for IosMem {
         Err(MemError::unsupported())
     }
 }
+
+impl crate::pal::mem::MemCatalog for IosMem {}

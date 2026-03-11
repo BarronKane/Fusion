@@ -1,14 +1,52 @@
-use core::cell::Cell;
+//! Thread-safe composed storage for immutable resource metadata and mutable summary state.
+//!
+//! Resource state is intentionally summarized, not page-tracked. Readers observe it through an
+//! atomic snapshot, while backing-mutating operations serialize through a small spin guard so
+//! concurrent allocator maintenance does not corrupt resource-wide truth claims.
+//!
+//! TODO: Replace the current spin-based mutation guard with a more native PAL/sys-backed mutex
+//! or equivalent once the lower layers expose idiomatic concurrency primitives. The spin guard
+//! is acceptable for the current narrow critical sections, but it is not the intended end-state
+//! for a broader safety-aware runtime.
+
+use core::hint::spin_loop;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use fusion_pal::sys::mem::Protect;
 
-use super::{ResolvedResource, ResourceInfo, ResourceState, StateValue};
+use super::{ResolvedResource, ResourceInfo, ResourceState, ResourceStateProvenance, StateValue};
 
-/// Shared composed storage for immutable resource info and mutable state summary.
+const PROVENANCE_SHIFT: u32 = 0;
+const PROTECT_TAG_SHIFT: u32 = 2;
+const PROTECT_BITS_SHIFT: u32 = 4;
+const LOCKED_SHIFT: u32 = 8;
+const COMMITTED_SHIFT: u32 = 10;
+
+const PROTECT_MASK: u32 = 0xF;
+const SUMMARY_MASK: u32 = 0x3;
+
+const SUMMARY_UNIFORM: u32 = 0;
+const SUMMARY_ASYMMETRIC: u32 = 1;
+const SUMMARY_UNKNOWN: u32 = 2;
+
+const BOOL_FALSE: u32 = 0;
+const BOOL_TRUE: u32 = 1;
+const BOOL_ASYMMETRIC: u32 = 2;
+const BOOL_UNKNOWN: u32 = 3;
+
+/// Shared composed storage for immutable resource info and thread-safe mutable state summary.
+///
+/// Summary state is published atomically so readers can inspect it without locks. Backing-
+/// mutating operations additionally take a small spin guard so full-resource state transitions
+/// cannot race each other into fiction.
+///
+/// TODO: Upgrade `mutation_lock` to a more native mutex abstraction once `fusion-pal` /
+/// `fusion-sys` exposes the concurrency primitives needed to do that portably and honestly.
 #[derive(Debug)]
 pub struct ResourceCore {
     resolved: ResolvedResource,
-    state: Cell<ResourceState>,
+    state_bits: AtomicU32,
+    mutation_lock: AtomicBool,
 }
 
 impl ResourceCore {
@@ -17,7 +55,8 @@ impl ResourceCore {
     pub const fn new(resolved: ResolvedResource, state: ResourceState) -> Self {
         Self {
             resolved,
-            state: Cell::new(state),
+            state_bits: AtomicU32::new(encode_state(state)),
+            mutation_lock: AtomicBool::new(false),
         }
     }
 
@@ -35,50 +74,185 @@ impl ResourceCore {
 
     /// Returns the current summary state.
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
     pub fn state(&self) -> ResourceState {
-        self.state.get()
+        decode_state(self.state_bits.load(Ordering::Acquire))
     }
 
+    /// Serializes a backing-mutating operation against other mutating operations on this
+    /// resource.
+    ///
+    /// TODO: Replace this spin acquisition path with a native mutex-backed guard once PAL/sys
+    /// provides the right platform-independent concurrency primitives.
+    pub fn begin_mutation(&self) -> ResourceMutationGuard<'_> {
+        while self
+            .mutation_lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spin_loop();
+        }
+
+        ResourceMutationGuard {
+            core: self,
+            lock: &self.mutation_lock,
+        }
+    }
+
+    fn update_state(&self, update: impl Fn(ResourceState) -> ResourceState) {
+        let mut current = self.state_bits.load(Ordering::Acquire);
+        loop {
+            let next = encode_state(update(decode_state(current)));
+            match self.state_bits.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+/// Guard returned while a resource mutation is serialized.
+///
+/// TODO: This guard should eventually be backed by a proper native mutex primitive rather than
+/// the current spin-based fallback.
+///
+/// Summary-state mutation methods live on this guard so callers cannot update resource-wide
+/// tracked state without first acquiring the mutation serialization path.
+#[must_use]
+pub struct ResourceMutationGuard<'a> {
+    core: &'a ResourceCore,
+    lock: &'a AtomicBool,
+}
+
+impl ResourceMutationGuard<'_> {
     /// Records a uniform protection state for the full resource.
     pub fn set_current_protect(&self, protect: Protect) {
-        let mut state = self.state.get();
-        state.current_protect = StateValue::Uniform(protect);
-        self.state.set(state);
+        self.core.update_state(|mut state| {
+            state.current_protect = StateValue::Uniform(protect);
+            state
+        });
     }
 
     /// Marks protection state as non-uniform across the resource.
     pub fn mark_protect_asymmetric(&self) {
-        let mut state = self.state.get();
-        state.current_protect = StateValue::Asymmetric;
-        self.state.set(state);
+        self.core.update_state(|mut state| {
+            state.current_protect = StateValue::Asymmetric;
+            state
+        });
     }
 
     /// Records a uniform lock state for the full resource.
     pub fn set_locked_state(&self, locked: bool) {
-        let mut state = self.state.get();
-        state.locked = StateValue::Uniform(locked);
-        self.state.set(state);
+        self.core.update_state(|mut state| {
+            state.locked = StateValue::Uniform(locked);
+            state
+        });
     }
 
     /// Marks lock state as non-uniform across the resource.
     pub fn mark_locked_asymmetric(&self) {
-        let mut state = self.state.get();
-        state.locked = StateValue::Asymmetric;
-        self.state.set(state);
+        self.core.update_state(|mut state| {
+            state.locked = StateValue::Asymmetric;
+            state
+        });
     }
 
     /// Records a uniform commitment state for the full resource.
     pub fn set_committed_state(&self, committed: bool) {
-        let mut state = self.state.get();
-        state.committed = StateValue::Uniform(committed);
-        self.state.set(state);
+        self.core.update_state(|mut state| {
+            state.committed = StateValue::Uniform(committed);
+            state
+        });
     }
 
     /// Marks commitment state as non-uniform across the resource.
     pub fn mark_committed_asymmetric(&self) {
-        let mut state = self.state.get();
-        state.committed = StateValue::Asymmetric;
-        self.state.set(state);
+        self.core.update_state(|mut state| {
+            state.committed = StateValue::Asymmetric;
+            state
+        });
+    }
+}
+
+impl Drop for ResourceMutationGuard<'_> {
+    fn drop(&mut self) {
+        self.lock.store(false, Ordering::Release);
+    }
+}
+
+const fn encode_state(state: ResourceState) -> u32 {
+    encode_provenance(state.provenance)
+        | encode_protect_state(state.current_protect)
+        | encode_bool_state(state.locked, LOCKED_SHIFT)
+        | encode_bool_state(state.committed, COMMITTED_SHIFT)
+}
+
+const fn encode_provenance(provenance: ResourceStateProvenance) -> u32 {
+    let encoded = match provenance {
+        ResourceStateProvenance::Static => 0,
+        ResourceStateProvenance::Tracked => 1,
+        ResourceStateProvenance::Snapshot => 2,
+    };
+    encoded << PROVENANCE_SHIFT
+}
+
+const fn encode_protect_state(state: StateValue<Protect>) -> u32 {
+    match state {
+        StateValue::Uniform(protect) => {
+            (SUMMARY_UNIFORM << PROTECT_TAG_SHIFT)
+                | ((protect.bits() & PROTECT_MASK) << PROTECT_BITS_SHIFT)
+        }
+        StateValue::Asymmetric => SUMMARY_ASYMMETRIC << PROTECT_TAG_SHIFT,
+        StateValue::Unknown => SUMMARY_UNKNOWN << PROTECT_TAG_SHIFT,
+    }
+}
+
+const fn encode_bool_state(state: StateValue<bool>, shift: u32) -> u32 {
+    let encoded = match state {
+        StateValue::Uniform(false) => BOOL_FALSE,
+        StateValue::Uniform(true) => BOOL_TRUE,
+        StateValue::Asymmetric => BOOL_ASYMMETRIC,
+        StateValue::Unknown => BOOL_UNKNOWN,
+    };
+    encoded << shift
+}
+
+const fn decode_state(bits: u32) -> ResourceState {
+    ResourceState {
+        provenance: decode_provenance(bits),
+        current_protect: decode_protect_state(bits),
+        locked: decode_bool_state(bits, LOCKED_SHIFT),
+        committed: decode_bool_state(bits, COMMITTED_SHIFT),
+    }
+}
+
+const fn decode_provenance(bits: u32) -> ResourceStateProvenance {
+    match bits & SUMMARY_MASK {
+        0 => ResourceStateProvenance::Static,
+        1 => ResourceStateProvenance::Tracked,
+        _ => ResourceStateProvenance::Snapshot,
+    }
+}
+
+const fn decode_protect_state(bits: u32) -> StateValue<Protect> {
+    match (bits >> PROTECT_TAG_SHIFT) & SUMMARY_MASK {
+        SUMMARY_UNIFORM => StateValue::Uniform(Protect::from_bits_retain(
+            (bits >> PROTECT_BITS_SHIFT) & PROTECT_MASK,
+        )),
+        SUMMARY_ASYMMETRIC => StateValue::Asymmetric,
+        _ => StateValue::Unknown,
+    }
+}
+
+const fn decode_bool_state(bits: u32, shift: u32) -> StateValue<bool> {
+    match (bits >> shift) & SUMMARY_MASK {
+        BOOL_FALSE => StateValue::Uniform(false),
+        BOOL_TRUE => StateValue::Uniform(true),
+        BOOL_ASYMMETRIC => StateValue::Asymmetric,
+        _ => StateValue::Unknown,
     }
 }

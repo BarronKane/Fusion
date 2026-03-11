@@ -104,3 +104,5 @@ impl MemLock for MacOsMem {
         Err(MemError::unsupported())
     }
 }
+
+impl crate::pal::mem::MemCatalog for MacOsMem {}

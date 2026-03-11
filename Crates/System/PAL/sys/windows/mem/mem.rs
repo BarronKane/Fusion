@@ -104,3 +104,5 @@ impl MemLock for WindowsMem {
         Err(MemError::unsupported())
     }
 }
+
+impl crate::pal::mem::MemCatalog for WindowsMem {}

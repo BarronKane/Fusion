@@ -1,4 +1,4 @@
-use fusion_pal::sys::mem::{CachePolicy, IntegrityMode, Protect, TagMode};
+use fusion_pal::sys::mem::{BorrowedBackingHandle, CachePolicy, IntegrityMode, Protect, TagMode};
 
 use super::ops::ResourcePreferenceSet;
 
@@ -69,13 +69,13 @@ pub struct IntegrityConstraints {
 
 /// Backing object requested when creating a virtual memory resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ResourceBackingRequest {
+pub enum ResourceBackingRequest<'a> {
     /// Fresh anonymous backing with no external object.
     Anonymous,
-    /// File-backed memory using the supplied descriptor and byte offset.
+    /// File-backed memory using the supplied borrowed handle and byte offset.
     File {
-        /// Raw file descriptor naming the backing object.
-        fd: i32,
+        /// Borrowed platform handle naming the backing object.
+        fd: BorrowedBackingHandle<'a>,
         /// Byte offset into the file-backed object.
         offset: u64,
     },
@@ -96,8 +96,6 @@ pub struct ResourceContract {
     pub cache_policy: CachePolicy,
     /// Optional integrity/tag-mode constraints.
     pub integrity: Option<IntegrityConstraints>,
-    /// Optional hard placement requirement.
-    pub required_placement: Option<RequiredPlacement>,
 }
 
 /// Requested initial runtime state for a newly created resource.
@@ -119,16 +117,18 @@ pub struct ResourceRequest<'a> {
     /// Requested length in bytes before backend rounding.
     pub len: usize,
     /// Requested backing object or backing class.
-    pub backing: ResourceBackingRequest,
+    pub backing: ResourceBackingRequest<'a>,
     /// Requested initial runtime state.
     pub initial: InitialResourceState,
+    /// Hard placement requirement that must be satisfied or creation fails.
+    pub required_placement: Option<RequiredPlacement>,
     /// Immutable lifetime contract for the created resource.
     pub contract: ResourceContract,
     /// Soft preferences the backend may try to honor.
     pub preferences: ResourcePreferenceSet,
 }
 
-impl ResourceRequest<'_> {
+impl<'a> ResourceRequest<'a> {
     /// Returns a default anonymous private resource request for `len` bytes.
     #[must_use]
     pub fn anonymous_private(len: usize) -> Self {
@@ -141,6 +141,7 @@ impl ResourceRequest<'_> {
                 placement: PlacementPreference::Anywhere,
                 residency: InitialResidency::BestEffort,
             },
+            required_placement: None,
             contract: ResourceContract {
                 allowed_protect: Protect::READ | Protect::WRITE,
                 write_xor_execute: true,
@@ -148,7 +149,6 @@ impl ResourceRequest<'_> {
                 overcommit: OvercommitPolicy::Allow,
                 cache_policy: CachePolicy::Default,
                 integrity: None,
-                required_placement: None,
             },
             preferences: ResourcePreferenceSet::empty(),
         }
@@ -164,7 +164,7 @@ impl ResourceRequest<'_> {
 
     /// Returns a default privately mapped file-backed resource request.
     #[must_use]
-    pub fn file_private(len: usize, fd: i32, offset: u64) -> Self {
+    pub fn file_private(len: usize, fd: BorrowedBackingHandle<'a>, offset: u64) -> Self {
         let mut request = Self::anonymous_private(len);
         request.backing = ResourceBackingRequest::File { fd, offset };
         request
@@ -172,7 +172,7 @@ impl ResourceRequest<'_> {
 
     /// Returns a default shared file-backed resource request.
     #[must_use]
-    pub fn file_shared(len: usize, fd: i32, offset: u64) -> Self {
+    pub fn file_shared(len: usize, fd: BorrowedBackingHandle<'a>, offset: u64) -> Self {
         let mut request = Self::file_private(len, fd, offset);
         request.contract.sharing = SharingPolicy::Shared;
         request

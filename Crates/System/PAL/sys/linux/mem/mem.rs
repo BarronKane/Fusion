@@ -245,6 +245,8 @@ impl LinuxMem {
     fn enforce_no_replace(region: Region, requested: Placement) -> Result<Region, MemError> {
         match requested {
             Placement::FixedNoReplace(addr) if region.base.as_ptr() as usize != addr => {
+                // Older kernels may ignore `MAP_FIXED_NOREPLACE` as a non-binding placement hint.
+                // If that happens, the returned address will not match and we fail closed here.
                 let _ = unsafe { mm::munmap(region.base.as_ptr().cast::<c_void>(), region.len) };
                 Err(MemError::busy())
             }
@@ -256,6 +258,9 @@ impl LinuxMem {
         let fd = openat(CWD, "/proc/self/maps", OFlags::RDONLY, Mode::empty())
             .map_err(Self::map_errno)?;
         let mut read_buf = [0_u8; 4096];
+        // Linux maps lines are usually far shorter than this, but deeply nested or synthetic
+        // pathnames can exceed the buffer. In that case we fail closed with `overflow` rather
+        // than risk parsing a truncated line into fiction.
         let mut line_buf = [0_u8; 4096];
         let mut line_len = 0_usize;
 
@@ -401,7 +406,8 @@ impl MemMap for LinuxMem {
         let ptr = match req.backing {
             Backing::Anonymous => unsafe { mm::mmap_anonymous(addr_hint, req.len, prot, flags) },
             Backing::File { fd, offset } => {
-                let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+                let raw_fd = fd.as_raw_fd().map_err(|_| MemError::invalid())?;
+                let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
                 unsafe { mm::mmap(addr_hint, req.len, prot, flags, fd, offset) }
             }
             _ => return Err(MemError::unsupported()),
@@ -431,7 +437,8 @@ unsafe impl MemMapReplace for LinuxMem {
         let ptr = match req.backing {
             Backing::Anonymous => unsafe { mm::mmap_anonymous(addr, req.len, prot, flags) },
             Backing::File { fd, offset } => {
-                let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+                let raw_fd = fd.as_raw_fd().map_err(|_| MemError::invalid())?;
+                let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
                 unsafe { mm::mmap(addr, req.len, prot, flags, fd, offset) }
             }
             _ => return Err(MemError::unsupported()),
@@ -487,6 +494,8 @@ impl MemLock for LinuxMem {
             .map_err(Self::map_errno)
     }
 }
+
+impl crate::pal::mem::MemCatalog for LinuxMem {}
 
 #[cfg(test)]
 mod tests {
