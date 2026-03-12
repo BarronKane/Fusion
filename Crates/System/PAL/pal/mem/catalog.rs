@@ -216,6 +216,69 @@ pub struct MemIntegrityConstraints {
     pub tag: Option<TagMode>,
 }
 
+/// Overcommit regime described by a cataloged memory object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MemOvercommitPolicy {
+    /// The platform may rely on lazy commitment or overcommit.
+    Allow,
+    /// The platform can provide stronger no-overcommit semantics.
+    Disallow,
+}
+
+/// Granularity information for a cataloged pool-capable resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemGeometry {
+    /// Smallest meaningful granule for the domain, usually the base page size.
+    pub base_granule: NonZeroUsize,
+    /// Minimum acquisition or materialization granule.
+    pub alloc_granule: NonZeroUsize,
+    /// Protection-change granule when protection control exists.
+    pub protect_granule: Option<NonZeroUsize>,
+    /// Commit/decommit granule when commitment control exists.
+    pub commit_granule: Option<NonZeroUsize>,
+    /// Lock/unlock granule when residency locking exists.
+    pub lock_granule: Option<NonZeroUsize>,
+    /// Larger granule such as huge-page size when the backend exposes one.
+    pub large_granule: Option<NonZeroUsize>,
+}
+
+/// Per-property summary for a resource-wide catalog state value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MemStateValue<T> {
+    /// The property is uniform across the described resource.
+    Uniform(T),
+    /// The property differs across subranges of the resource.
+    Asymmetric,
+    /// The catalog cannot currently prove a resource-wide answer.
+    Unknown,
+}
+
+/// Catalog-visible runtime state summary for a pool-capable resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemResourceStateSummary {
+    /// Resource-wide summary of the current protection state.
+    pub current_protect: MemStateValue<Protect>,
+    /// Resource-wide summary of lock state.
+    pub locked: MemStateValue<bool>,
+    /// Resource-wide summary of commitment state.
+    pub committed: MemStateValue<bool>,
+}
+
+/// Current readiness of a cataloged pool-capable resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MemPoolResourceReadiness {
+    /// The resource is immediately usable for pooling.
+    ReadyNow,
+    /// The resource exists but requires commit-like backing activation first.
+    RequiresCommit,
+    /// The resource exists descriptively but must be materialized first.
+    RequiresMaterialization,
+    /// The resource exists but requires some other legal state transition first.
+    RequiresStateTransition,
+    /// The catalog cannot presently make this resource pool-usable.
+    Unavailable,
+}
+
 /// Runtime support surface of a cataloged memory object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MemResourceSupport {
@@ -238,10 +301,31 @@ pub struct MemResourceContract {
     pub write_xor_execute: bool,
     /// Sharing behavior the object must preserve.
     pub sharing: MemSharingPolicy,
+    /// Overcommit policy expected for the object.
+    pub overcommit: MemOvercommitPolicy,
     /// Cache policy expected for the object.
     pub cache_policy: CachePolicy,
     /// Optional integrity/tag-mode constraints.
     pub integrity: Option<MemIntegrityConstraints>,
+}
+
+/// Pool-visible envelope of a cataloged pool-capable resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemResourceEnvelope {
+    /// Domain classification for the object.
+    pub domain: MemDomain,
+    /// Concrete backing kind for the object.
+    pub backing: MemResourceBackingKind,
+    /// Intrinsic attributes of the object.
+    pub attrs: MemResourceAttrs,
+    /// Operation granularity information.
+    pub geometry: MemGeometry,
+    /// Immutable contract of the object.
+    pub contract: MemResourceContract,
+    /// Runtime support surface of the object.
+    pub support: MemResourceSupport,
+    /// Inherent hazards of the object.
+    pub hazards: MemResourceHazardSet,
 }
 
 /// Stable identifier for a catalog-known resource record.
@@ -309,25 +393,32 @@ pub struct MemCatalogSupport {
 pub struct MemCatalogResource {
     /// Stable catalog-local resource identifier.
     pub id: MemCatalogResourceId,
-    /// Domain classification for the object.
-    pub domain: MemDomain,
-    /// Concrete backing kind for the object.
-    pub backing: MemResourceBackingKind,
+    /// Pool-visible envelope for the object when it is CPU-addressable and pool-capable.
+    pub envelope: MemResourceEnvelope,
     /// CPU-addressable range when one exists in the current execution context.
     pub cpu_range: Option<Region>,
-    /// Bytes the catalog considers pool-usable from this object.
-    pub usable_len: usize,
-    /// Intrinsic attributes of the object.
-    pub attrs: MemResourceAttrs,
-    /// Immutable contract of the object.
-    pub contract: MemResourceContract,
-    /// Runtime support surface of the object.
-    pub support: MemResourceSupport,
-    /// Inherent hazards of the object.
-    pub hazards: MemResourceHazardSet,
+    /// Bytes the catalog considers immediately pool-usable from this object.
+    pub usable_now_len: usize,
+    /// Maximum bytes the catalog considers potentially pool-usable after legal preparation.
+    pub usable_max_len: usize,
+    /// Runtime state summary for the object when it is CPU-addressable and pool-capable.
+    pub state: MemResourceStateSummary,
+    /// Current readiness classification for pool use.
+    pub readiness: MemPoolResourceReadiness,
     /// Source story for the object.
     pub origin: MemCatalogResourceOrigin,
     /// Optional topology node associated with the object.
+    pub topology_node: Option<MemTopologyNodeId>,
+}
+
+/// Pool-capable output envelope of a cataloged acquisition strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemCatalogStrategyOutput {
+    /// Pool-visible output envelope this strategy can produce in this mode.
+    pub envelope: MemResourceEnvelope,
+    /// Readiness expected on the created or materialized resource.
+    pub readiness: MemPoolResourceReadiness,
+    /// Optional topology node naturally associated with the output.
     pub topology_node: Option<MemTopologyNodeId>,
 }
 
@@ -344,16 +435,15 @@ pub struct MemCatalogStrategy {
     pub backings: MemBackingCaps,
     /// Placement modes the strategy can accept.
     pub placements: MemPlacementCaps,
-    /// Runtime support surface expected on created objects.
-    pub instance: MemResourceSupport,
     /// Optional acquisition-only feature support.
     pub features: MemStrategyFeatureSupport,
     /// Soft preferences the strategy may try to honor.
     pub preferences: MemStrategyPreferenceSet,
     /// Capacity limits or granularity for the strategy.
     pub capacity: MemCatalogStrategyCapacity,
-    /// Optional topology node naturally associated with the strategy.
-    pub topology_node: Option<MemTopologyNodeId>,
+    /// Pool-capable output envelope when this strategy can create a CPU-addressable pool
+    /// resource.
+    pub output: Option<MemCatalogStrategyOutput>,
 }
 
 /// Backend-neutral catalog of memory inventory and topology.

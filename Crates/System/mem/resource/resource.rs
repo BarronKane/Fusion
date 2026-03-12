@@ -490,8 +490,7 @@ impl VirtualMemoryResource {
     }
 
     const fn raw_region(&self) -> Region {
-        self.region
-            .expect("resource region missing during active use")
+        self.core.info().range
     }
 
     fn operation_region(&self, range: ResourceRange) -> Result<Region, ResourceError> {

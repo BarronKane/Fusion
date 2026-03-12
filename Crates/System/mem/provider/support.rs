@@ -1,32 +1,34 @@
-use super::MemoryTopologyNodeId;
-use super::inventory::{MemoryPoolClassId, MemoryResourceDescriptor, MemoryStrategyDescriptor};
+use super::inventory::MemoryProviderInventory;
 use super::request::MemoryPoolRequest;
-use crate::mem::resource::{
-    MemoryDomainSet, ResourceHazardSet, ResourceOpSet, ResourceResidencySupport,
-};
+use super::{MemoryObjectEnvelope, MemoryTopologyNodeId};
+use crate::mem::resource::{MemoryDomainSet, ResourceAttrs, ResourceHazardSet};
 
 bitflags::bitflags! {
     /// Coarse capabilities of a provider implementation.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct MemoryProviderCaps: u32 {
-        /// Exposes an inventory of concrete resource descriptors.
-        const RESOURCE_INVENTORY   = 1 << 0;
+        /// Exposes an inventory of provider-known memory objects.
+        const OBJECT_INVENTORY      = 1 << 0;
+        /// Exposes an inventory of concrete pool-capable resources.
+        const RESOURCE_INVENTORY    = 1 << 1;
         /// Exposes an inventory of acquisition strategies.
-        const STRATEGY_INVENTORY   = 1 << 1;
+        const STRATEGY_INVENTORY    = 1 << 2;
         /// Exposes a normalized topology view.
-        const TOPOLOGY             = 1 << 2;
+        const TOPOLOGY              = 1 << 3;
         /// Exposes provider-defined pool-compatibility classes.
-        const POOL_CLASSES         = 1 << 3;
+        const POOL_CLASSES          = 1 << 4;
         /// Supports pool-request assessment.
-        const POOL_ASSESSMENT      = 1 << 4;
+        const POOL_ASSESSMENT       = 1 << 5;
+        /// Supports pool provisioning-plan generation.
+        const POOL_PLANNING         = 1 << 6;
         /// Can bind or inventory externally governed ranges.
-        const BIND_EXISTING        = 1 << 5;
+        const BIND_EXISTING         = 1 << 7;
         /// Can actively acquire new resources.
-        const ACQUIRE_NEW          = 1 << 6;
+        const ACQUIRE_NEW           = 1 << 8;
         /// Inventory is expected to cover the full reachable memory picture.
-        const EXHAUSTIVE_INVENTORY = 1 << 7;
+        const EXHAUSTIVE_INVENTORY  = 1 << 9;
         /// Topology view is expected to cover the full locality picture.
-        const EXHAUSTIVE_TOPOLOGY  = 1 << 8;
+        const EXHAUSTIVE_TOPOLOGY   = 1 << 10;
     }
 }
 
@@ -65,22 +67,24 @@ bitflags::bitflags! {
     /// Coarse reasons why a pool request could not be satisfied as requested.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct MemoryPoolAssessmentIssues: u32 {
-        /// No compatible allocatable resource matched the request.
+        /// No compatible allocatable resource class or resource group matched the request.
         const RESOURCE_COMPATIBILITY = 1 << 0;
-        /// Compatible present resources existed, but not enough capacity was available.
+        /// Compatible present resources existed, but not enough immediately usable capacity was available.
         const CAPACITY               = 1 << 1;
         /// Available resources or strategies did not satisfy topology constraints.
         const TOPOLOGY               = 1 << 2;
-        /// Present resources violated the required safety envelope.
+        /// Available resources or strategies violated the required safety envelope.
         const SAFETY                 = 1 << 3;
-        /// Present resources violated explicit contract requirements.
+        /// Available resources or strategies violated explicit contract requirements.
         const CONTRACT               = 1 << 4;
         /// Required operations or residency controls were unavailable.
         const SUPPORT                = 1 << 5;
-        /// No acquisition strategy could plausibly satisfy the request later.
-        const STRATEGY               = 1 << 6;
+        /// Present resources matched statically but required preparation before pool use.
+        const STATE                  = 1 << 6;
+        /// No acquisition or preparation path could plausibly satisfy the request later.
+        const STRATEGY               = 1 << 7;
         /// Provider cannot prove the full answer from its current inventory surface.
-        const INCOMPLETE_INVENTORY   = 1 << 7;
+        const INCOMPLETE_INVENTORY   = 1 << 8;
     }
 }
 
@@ -95,69 +99,104 @@ pub struct MemoryProviderSupport {
     pub acquirable_domains: MemoryDomainSet,
 }
 
-pub(super) fn has_required_support(
-    resources: &[MemoryResourceDescriptor],
-    strategies: &[MemoryStrategyDescriptor],
+/// Candidate counts at successive request-filtering stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct CandidateStageCounts {
+    pub topology_agnostic_objects: usize,
+    pub compatible_objects: usize,
+    pub compatible_resources: usize,
+    pub contract_resources: usize,
+    pub safety_resources: usize,
+    pub support_resources: usize,
+    pub compatible_strategies: usize,
+    pub contract_strategies: usize,
+    pub safety_strategies: usize,
+    pub support_strategies: usize,
+    pub compatible_classes: usize,
+    pub contract_classes: usize,
+    pub safety_classes: usize,
+}
+
+pub(super) fn candidate_stage_counts(
+    inventory: MemoryProviderInventory<'_>,
     request: &MemoryPoolRequest<'_>,
-) -> bool {
-    if request.required_ops == ResourceOpSet::empty()
-        && request.required_residency == ResourceResidencySupport::BEST_EFFORT
-    {
-        return true;
+) -> CandidateStageCounts {
+    let mut counts = CandidateStageCounts::default();
+
+    for object in inventory.objects {
+        if matches_object_envelope_without_topology(object.envelope, *request) {
+            counts.topology_agnostic_objects += 1;
+        }
+        if request.matches_object_base(object) {
+            counts.compatible_objects += 1;
+        }
     }
 
-    let resources_support = resources.iter().any(|resource| {
-        resource.info.support.ops.contains(request.required_ops)
-            && resource
-                .info
-                .support
-                .residency
-                .contains(request.required_residency)
-    });
-    let strategies_support = strategies.iter().any(|strategy| {
-        strategy.acquire.instance.ops.contains(request.required_ops)
-            && strategy
-                .acquire
-                .instance
-                .residency
-                .contains(request.required_residency)
-    });
+    for resource in inventory.resources {
+        if request.matches_resource_base(resource) {
+            counts.compatible_resources += 1;
+            if request.matches_resource_contract(resource) {
+                counts.contract_resources += 1;
+                if request.matches_resource_safety(resource) {
+                    counts.safety_resources += 1;
+                    if request.matches_resource_support(resource) {
+                        counts.support_resources += 1;
+                    }
+                }
+            }
+        }
+    }
 
-    resources_support || strategies_support
+    for class in inventory.pool_classes {
+        if request.matches_pool_class_base(class) {
+            counts.compatible_classes += 1;
+            if request.matches_pool_class_contract(class) {
+                counts.contract_classes += 1;
+                if request.matches_pool_class_safety(class) {
+                    counts.safety_classes += 1;
+                }
+            }
+        }
+    }
+
+    for strategy in inventory.strategies {
+        if request.matches_strategy_base(strategy) {
+            counts.compatible_strategies += 1;
+            if request.matches_strategy_contract(strategy) {
+                counts.contract_strategies += 1;
+                if request.matches_strategy_safety(strategy) {
+                    counts.safety_strategies += 1;
+                    if request.matches_strategy_support(strategy) {
+                        counts.support_strategies += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    counts
 }
 
-pub(super) fn has_contract_candidate(
-    resources: &[MemoryResourceDescriptor],
-    pool_classes: &[super::MemoryPoolClass],
-    request: &MemoryPoolRequest<'_>,
-) -> bool {
-    let resources_match = resources
-        .iter()
-        .any(|resource| request.contract.matches(resource.info.contract));
-    let classes_match = pool_classes
-        .iter()
-        .any(|class| request.contract.matches(class.envelope.contract));
-
-    resources_match || classes_match
-}
-
-pub(super) fn matches_safety(
-    resource: &MemoryResourceDescriptor,
+pub(super) fn matches_safety_envelope(
+    envelope: MemoryObjectEnvelope,
     required_safety: CriticalSafetyRequirements,
 ) -> bool {
-    let info = resource.info;
-    let attrs = info.attrs;
-    let hazards = info.hazards;
-    let contract = info.contract;
+    let attrs = envelope.attrs;
+    let hazards = envelope.hazards;
+    let contract = envelope.contract;
 
     if required_safety.contains(CriticalSafetyRequirements::POOLABLE)
-        && !attrs.contains(crate::mem::resource::ResourceAttrs::ALLOCATABLE)
+        && !attrs.contains(ResourceAttrs::ALLOCATABLE)
     {
         return false;
     }
 
     if required_safety.contains(CriticalSafetyRequirements::DETERMINISTIC_CAPACITY)
-        && hazards.contains(ResourceHazardSet::OVERCOMMIT)
+        && (hazards.contains(ResourceHazardSet::OVERCOMMIT)
+            || matches!(
+                contract.overcommit,
+                crate::mem::resource::OvercommitPolicy::Allow
+            ))
     {
         return false;
     }
@@ -187,14 +226,14 @@ pub(super) fn matches_safety(
     }
 
     if required_safety.contains(CriticalSafetyRequirements::REQUIRE_COHERENT)
-        && (!attrs.contains(crate::mem::resource::ResourceAttrs::COHERENT)
+        && (!attrs.contains(ResourceAttrs::COHERENT)
             || hazards.contains(ResourceHazardSet::NON_COHERENT))
     {
         return false;
     }
 
     if required_safety.contains(CriticalSafetyRequirements::NO_HAZARDOUS_IO)
-        && (attrs.contains(crate::mem::resource::ResourceAttrs::HAZARDOUS_IO)
+        && (attrs.contains(ResourceAttrs::HAZARDOUS_IO)
             || hazards.contains(ResourceHazardSet::MMIO_SIDE_EFFECTS))
     {
         return false;
@@ -210,8 +249,7 @@ pub(super) fn matches_safety(
     }
 
     if required_safety.contains(CriticalSafetyRequirements::INTEGRITY_MANAGED)
-        && (!attrs.contains(crate::mem::resource::ResourceAttrs::INTEGRITY_MANAGED)
-            && contract.integrity.is_none())
+        && (!attrs.contains(ResourceAttrs::INTEGRITY_MANAGED) && contract.integrity.is_none())
     {
         return false;
     }
@@ -230,12 +268,26 @@ pub(super) fn matches_node_requirement(
     }
 }
 
-pub(super) fn preferred_class_id(
-    classes: &[super::MemoryPoolClass],
-    request: &MemoryPoolRequest<'_>,
-) -> Option<MemoryPoolClassId> {
-    classes
-        .iter()
-        .find(|class| request.matches_pool_class(class))
-        .map(|class| class.id)
+const fn matches_object_envelope_without_topology(
+    envelope: MemoryObjectEnvelope,
+    request: MemoryPoolRequest<'_>,
+) -> bool {
+    request
+        .required_domains
+        .contains(domain_to_set(envelope.domain))
+        && envelope.attrs.contains(request.required_attrs)
+        && !envelope.attrs.intersects(request.forbidden_attrs)
+        && !envelope.hazards.intersects(request.forbidden_hazards)
+}
+
+const fn domain_to_set(domain: crate::mem::resource::MemoryDomain) -> MemoryDomainSet {
+    match domain {
+        crate::mem::resource::MemoryDomain::VirtualAddressSpace => {
+            MemoryDomainSet::VIRTUAL_ADDRESS_SPACE
+        }
+        crate::mem::resource::MemoryDomain::DeviceLocal => MemoryDomainSet::DEVICE_LOCAL,
+        crate::mem::resource::MemoryDomain::Physical => MemoryDomainSet::PHYSICAL,
+        crate::mem::resource::MemoryDomain::StaticRegion => MemoryDomainSet::STATIC_REGION,
+        crate::mem::resource::MemoryDomain::Mmio => MemoryDomainSet::MMIO,
+    }
 }

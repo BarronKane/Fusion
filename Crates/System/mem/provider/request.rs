@@ -1,10 +1,10 @@
 use fusion_pal::sys::mem::{CachePolicy, Protect};
 
 use super::{
-    CriticalSafetyRequirements, MemoryPoolClass, MemoryResourceDescriptor,
-    MemoryStrategyDescriptor, MemoryTopologyPreference,
+    CriticalSafetyRequirements, MemoryObjectDescriptor, MemoryObjectEnvelope, MemoryPoolClass,
+    MemoryResourceDescriptor, MemoryStrategyDescriptor, MemoryTopologyPreference,
 };
-use crate::mem::provider::support::{matches_node_requirement, matches_safety};
+use crate::mem::provider::support::{matches_node_requirement, matches_safety_envelope};
 use crate::mem::resource::{
     IntegrityConstraints, MemoryDomain, MemoryDomainSet, OvercommitPolicy, ResourceAttrs,
     ResourceFeatureSupport, ResourceHazardSet, ResourceOpSet, ResourceResidencySupport,
@@ -104,13 +104,19 @@ pub struct MemoryPoolRequest<'a> {
 
 impl MemoryPoolRequest<'_> {
     /// Creates a conservative general-purpose request for allocator-usable private memory.
+    ///
+    /// The default domain set intentionally excludes MMIO and opaque device-local memory so
+    /// "general purpose" does not quietly widen into side-effecting or non-CPU-addressable
+    /// space if other safety filters are relaxed later.
     #[must_use]
     pub fn general_purpose(minimum_capacity: usize) -> Self {
         Self {
             name: None,
             minimum_capacity,
             preferred_capacity: minimum_capacity,
-            required_domains: MemoryDomainSet::all(),
+            required_domains: MemoryDomainSet::VIRTUAL_ADDRESS_SPACE
+                | MemoryDomainSet::PHYSICAL
+                | MemoryDomainSet::STATIC_REGION,
             required_attrs: ResourceAttrs::ALLOCATABLE,
             forbidden_attrs: ResourceAttrs::HAZARDOUS_IO | ResourceAttrs::READ_ONLY_BACKING,
             required_ops: ResourceOpSet::empty(),
@@ -130,98 +136,101 @@ impl MemoryPoolRequest<'_> {
         }
     }
 
-    /// Returns `true` when `resource` satisfies the hard filters in this request.
+    /// Returns `true` when the object falls within the request's broad compatibility
+    /// envelope, independent of whether it is currently CPU-addressable or pool-ready.
+    #[must_use]
+    pub fn matches_object(self, object: &MemoryObjectDescriptor) -> bool {
+        self.matches_object_base(object)
+            && self.contract.matches(object.envelope.contract)
+            && matches_safety_envelope(object.envelope, self.required_safety)
+    }
+
+    /// Returns `true` when `object` satisfies the broad request shape before contract and
+    /// safety filtering.
+    #[must_use]
+    pub(super) fn matches_object_base(self, object: &MemoryObjectDescriptor) -> bool {
+        self.matches_object_envelope(object.envelope, object.topology_node)
+    }
+
+    /// Returns `true` when `resource` satisfies the broad compatibility envelope in this
+    /// request, ignoring current readiness.
     #[must_use]
     pub fn matches_resource(self, resource: &MemoryResourceDescriptor) -> bool {
-        let info = resource.info;
-
-        if self.minimum_capacity > resource.usable_len {
-            return false;
-        }
-
-        if !self.required_domains.contains(domain_to_set(info.domain)) {
-            return false;
-        }
-
-        if !info.attrs.contains(self.required_attrs) || info.attrs.intersects(self.forbidden_attrs)
-        {
-            return false;
-        }
-
-        if !info.support.ops.contains(self.required_ops) {
-            return false;
-        }
-
-        if !info.support.residency.contains(self.required_residency) {
-            return false;
-        }
-
-        if info.hazards.intersects(self.forbidden_hazards) {
-            return false;
-        }
-
-        if !self.contract.matches(info.contract) {
-            return false;
-        }
-
-        if !matches_safety(resource, self.required_safety) {
-            return false;
-        }
-
-        matches_node_requirement(self.topology, resource.topology_node)
+        self.matches_resource_envelope(resource) && self.matches_resource_support(resource)
     }
 
-    /// Returns `true` when `class` describes a resource envelope compatible with this request.
+    /// Returns `true` when `resource` satisfies the request's static compatibility
+    /// envelope, ignoring current readiness and runtime operation support.
+    #[must_use]
+    pub fn matches_resource_envelope(self, resource: &MemoryResourceDescriptor) -> bool {
+        self.matches_resource_base(resource)
+            && self.contract.matches(resource.info.contract)
+            && matches_safety_envelope(resource.object_envelope(), self.required_safety)
+    }
+
+    /// Returns `true` when `resource` satisfies the broad request shape before contract,
+    /// safety, and support filtering.
+    #[must_use]
+    pub(super) fn matches_resource_base(self, resource: &MemoryResourceDescriptor) -> bool {
+        self.matches_object_envelope(resource.object_envelope(), resource.topology_node)
+    }
+
+    /// Returns `true` when `resource` is immediately usable for pooling in this request.
+    #[must_use]
+    pub fn matches_resource_ready_now(self, resource: &MemoryResourceDescriptor) -> bool {
+        self.matches_resource_envelope(resource)
+            && self.matches_resource_support(resource)
+            && resource.is_ready_now()
+    }
+
+    /// Returns `true` when `resource` can become pool-usable without discovering a new
+    /// backing object.
+    #[must_use]
+    pub fn matches_resource_transitionable(self, resource: &MemoryResourceDescriptor) -> bool {
+        self.matches_resource_envelope(resource)
+            && self.matches_resource_support(resource)
+            && resource.is_present_transitionable()
+    }
+
+    /// Returns `true` when `class` describes a resource envelope compatible with this
+    /// request.
     #[must_use]
     pub fn matches_pool_class(self, class: &MemoryPoolClass) -> bool {
-        if !self
-            .required_domains
-            .contains(domain_to_set(class.envelope.domain))
-        {
-            return false;
-        }
-
-        if !class.envelope.attrs.contains(self.required_attrs)
-            || class.envelope.attrs.intersects(self.forbidden_attrs)
-        {
-            return false;
-        }
-
-        if !class.envelope.support.ops.contains(self.required_ops) {
-            return false;
-        }
-
-        if !class
-            .envelope
-            .support
-            .residency
-            .contains(self.required_residency)
-        {
-            return false;
-        }
-
-        if class.envelope.hazards.intersects(self.forbidden_hazards) {
-            return false;
-        }
-
-        if !self.contract.matches(class.envelope.contract) {
-            return false;
-        }
-
-        if !class.assurance.contains(self.required_safety) {
-            return false;
-        }
-
-        matches_node_requirement(self.topology, class.topology_node)
+        self.matches_pool_class_base(class)
+            && self.contract.matches(class.envelope.contract)
+            && matches_safety_envelope(class.envelope.object_envelope(), self.required_safety)
+            && self.matches_pool_class_support(class)
+            && class.assurance.contains(self.required_safety)
     }
 
-    /// Returns `true` when `strategy` can plausibly serve the hard filters in this request.
-    ///
-    /// This is intentionally coarse. Strategies are assessed by what they can produce and what
-    /// acquisition controls they support, not by pretending every final resource property is
-    /// already fixed before a concrete request is issued.
+    /// Returns `true` when `class` satisfies the broad request shape before contract,
+    /// safety, and support filtering.
+    #[must_use]
+    pub(super) fn matches_pool_class_base(self, class: &MemoryPoolClass) -> bool {
+        self.matches_object_envelope(class.envelope.object_envelope(), class.topology_node)
+    }
+
+    /// Returns `true` when `strategy` can honestly produce a compatible pool resource.
     #[must_use]
     pub fn matches_strategy(self, strategy: &MemoryStrategyDescriptor) -> bool {
+        if !self.matches_strategy_base(strategy) {
+            return false;
+        }
+
+        let Some(output) = strategy.output else {
+            return false;
+        };
+
+        self.matches_strategy_support(strategy)
+            && self.contract.matches(output.envelope.contract)
+            && matches_safety_envelope(output.envelope.object_envelope(), self.required_safety)
+            && output.assurance.contains(self.required_safety)
+    }
+
+    /// Returns `true` when `strategy` satisfies the broad request shape before contract and
+    /// safety filtering.
+    #[must_use]
+    pub(super) fn matches_strategy_base(self, strategy: &MemoryStrategyDescriptor) -> bool {
         if self.minimum_capacity < strategy.capacity.min_len {
             return false;
         }
@@ -232,32 +241,118 @@ impl MemoryPoolRequest<'_> {
             return false;
         }
 
-        if !strategy.acquire.domains.intersects(self.required_domains) {
+        let Some(output) = strategy.output else {
             return false;
-        }
+        };
 
-        if !strategy.acquire.instance.ops.contains(self.required_ops) {
+        self.matches_object_envelope(output.envelope.object_envelope(), output.topology_node)
+    }
+
+    /// Returns `true` when `resource` satisfies the request's immutable contract filters.
+    #[must_use]
+    pub fn matches_resource_contract(self, resource: &MemoryResourceDescriptor) -> bool {
+        self.contract.matches(resource.info.contract)
+    }
+
+    /// Returns `true` when `class` satisfies the request's immutable contract filters.
+    #[must_use]
+    pub fn matches_pool_class_contract(self, class: &MemoryPoolClass) -> bool {
+        self.contract.matches(class.envelope.contract)
+    }
+
+    /// Returns `true` when `strategy` can produce a resource satisfying the immutable
+    /// contract filters.
+    #[must_use]
+    pub fn matches_strategy_contract(self, strategy: &MemoryStrategyDescriptor) -> bool {
+        strategy
+            .output
+            .is_some_and(|output| self.contract.matches(output.envelope.contract))
+    }
+
+    /// Returns `true` when `resource` satisfies the explicit safety requirements.
+    #[must_use]
+    pub fn matches_resource_safety(self, resource: &MemoryResourceDescriptor) -> bool {
+        matches_safety_envelope(resource.object_envelope(), self.required_safety)
+    }
+
+    /// Returns `true` when `resource` satisfies the explicit runtime support requirements.
+    #[must_use]
+    pub const fn matches_resource_support(self, resource: &MemoryResourceDescriptor) -> bool {
+        resource.info.support.ops.contains(self.required_ops)
+            && resource
+                .info
+                .support
+                .residency
+                .contains(self.required_residency)
+    }
+
+    /// Returns `true` when `class` satisfies the explicit safety requirements.
+    #[must_use]
+    pub fn matches_pool_class_safety(self, class: &MemoryPoolClass) -> bool {
+        matches_safety_envelope(class.envelope.object_envelope(), self.required_safety)
+            && class.assurance.contains(self.required_safety)
+    }
+
+    /// Returns `true` when `class` satisfies the explicit runtime support requirements.
+    #[must_use]
+    pub const fn matches_pool_class_support(self, class: &MemoryPoolClass) -> bool {
+        class.envelope.support.ops.contains(self.required_ops)
+            && class
+                .envelope
+                .support
+                .residency
+                .contains(self.required_residency)
+    }
+
+    /// Returns `true` when `strategy` can produce a resource satisfying the explicit safety
+    /// requirements.
+    #[must_use]
+    pub fn matches_strategy_safety(self, strategy: &MemoryStrategyDescriptor) -> bool {
+        strategy.output.is_some_and(|output| {
+            matches_safety_envelope(output.envelope.object_envelope(), self.required_safety)
+                && output.assurance.contains(self.required_safety)
+        })
+    }
+
+    /// Returns `true` when `strategy` satisfies the explicit support requirements.
+    #[must_use]
+    pub const fn matches_strategy_support(self, strategy: &MemoryStrategyDescriptor) -> bool {
+        let Some(output) = strategy.output else {
             return false;
-        }
+        };
 
-        if !strategy
-            .acquire
-            .instance
-            .residency
-            .contains(self.required_residency)
+        strategy.acquire.features.contains(self.required_features)
+            && output.envelope.support.ops.contains(self.required_ops)
+            && output
+                .envelope
+                .support
+                .residency
+                .contains(self.required_residency)
+    }
+
+    fn matches_object_envelope(
+        self,
+        envelope: MemoryObjectEnvelope,
+        topology_node: Option<super::MemoryTopologyNodeId>,
+    ) -> bool {
+        if !self
+            .required_domains
+            .contains(domain_to_set(envelope.domain))
         {
             return false;
         }
 
-        if !strategy.acquire.features.contains(self.required_features) {
+        if !envelope.attrs.contains(self.required_attrs)
+            || envelope.attrs.intersects(self.forbidden_attrs)
+        {
             return false;
         }
 
-        if !strategy.assurance.contains(self.required_safety) {
+        if envelope.hazards.intersects(self.forbidden_hazards) {
             return false;
         }
 
-        matches_node_requirement(self.topology, strategy.topology_node)
+        matches_node_requirement(self.topology, topology_node)
     }
 }
 

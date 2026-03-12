@@ -18,6 +18,8 @@ pub struct IosMem;
 /// Target-selected PAL memory provider alias for iOS builds.
 pub type PlatformMem = IosMem;
 
+const STUB_PAGE_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4096) };
+
 /// Returns the process-wide iOS memory provider handle.
 #[must_use]
 pub const fn system_mem() -> PlatformMem {
@@ -49,10 +51,9 @@ impl MemBase for IosMem {
     }
 
     fn page_info(&self) -> PageInfo {
-        let base = NonZeroUsize::new(4096).expect("stub page size must be non-zero");
         PageInfo {
-            base_page: base,
-            alloc_granule: base,
+            base_page: STUB_PAGE_SIZE,
+            alloc_granule: STUB_PAGE_SIZE,
             huge_page: None,
         }
     }
