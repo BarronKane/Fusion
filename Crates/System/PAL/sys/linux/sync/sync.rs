@@ -144,7 +144,7 @@ impl LinuxRawMutex {
             if state == UNLOCKED {
                 match self.state.compare_exchange_weak(
                     UNLOCKED,
-                    LOCKED,
+                    CONTENDED,
                     Ordering::Acquire,
                     Ordering::Relaxed,
                 ) {
@@ -157,9 +157,17 @@ impl LinuxRawMutex {
             }
 
             if state != CONTENDED {
-                state = self.state.swap(CONTENDED, Ordering::Acquire);
-                if state == UNLOCKED {
-                    return Ok(());
+                match self.state.compare_exchange_weak(
+                    LOCKED,
+                    CONTENDED,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {}
+                    Err(observed) => {
+                        state = observed;
+                        continue;
+                    }
                 }
             }
 
@@ -388,6 +396,35 @@ mod tests {
         }
 
         assert_eq!(counter.load(Ordering::Relaxed), 2_000);
+    }
+
+    #[test]
+    fn linux_raw_mutex_wakes_waiter_chain_under_contention() {
+        let lock = Arc::new(LinuxRawMutex::new());
+        let completed = Arc::new(AtomicU32::new(0));
+        lock.lock().expect("main thread should lock mutex");
+
+        let mut waiters = self::std::vec::Vec::new();
+        for _ in 0..3 {
+            let lock = Arc::clone(&lock);
+            let completed = Arc::clone(&completed);
+            waiters.push(thread::spawn(move || {
+                lock.lock().expect("waiter should acquire mutex");
+                completed.fetch_add(1, Ordering::Relaxed);
+                // SAFETY: this thread currently holds the mutex.
+                unsafe { lock.unlock_unchecked() };
+            }));
+        }
+
+        thread::sleep(StdDuration::from_millis(10));
+        // SAFETY: the main thread currently holds the mutex.
+        unsafe { lock.unlock_unchecked() };
+
+        for waiter in waiters {
+            waiter.join().expect("waiter should finish");
+        }
+
+        assert_eq!(completed.load(Ordering::Relaxed), 3);
     }
 
     #[test]

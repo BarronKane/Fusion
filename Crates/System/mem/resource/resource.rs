@@ -65,6 +65,7 @@ mod core;
 mod domain;
 mod error;
 mod geometry;
+mod handle;
 mod ops;
 mod range;
 mod request;
@@ -79,6 +80,7 @@ pub use bound::{BoundMemoryResource, BoundResourceSpec};
 pub use domain::{MemoryDomain, MemoryDomainSet, ResourceBackingKind};
 pub use error::{ResourceError, ResourceErrorKind};
 pub use geometry::MemoryGeometry;
+pub use handle::MemoryResourceHandle;
 pub use ops::{ResourceHazardSet, ResourceOpSet, ResourcePreferenceSet};
 pub use range::ResourceRange;
 pub use request::{

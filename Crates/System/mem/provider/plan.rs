@@ -6,6 +6,7 @@ use super::{
     MemoryPoolAssessmentIssues, MemoryPoolClassId, MemoryPoolRequest, MemoryProviderInventory,
     MemoryProviderSupport,
 };
+use crate::mem::resource::ResourceRange;
 
 /// Coarse result of building a pool provisioning plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,18 +47,18 @@ pub enum MemoryPoolPlanStep {
     /// Consume a present resource immediately.
     UsePresentResource {
         resource_id: super::MemoryResourceId,
-        len: usize,
+        range: ResourceRange,
     },
     /// Prepare a present resource, then consume the prepared range.
     PreparePresentResource {
         resource_id: super::MemoryResourceId,
-        len: usize,
+        range: ResourceRange,
         preparation: MemoryPoolPreparationKind,
     },
     /// Acquire a new compatible resource through a strategy.
     CreateResource {
         strategy_id: super::MemoryStrategyId,
-        len: usize,
+        range: ResourceRange,
     },
 }
 
@@ -176,7 +177,7 @@ fn append_ready_resource_steps(
                 out_steps,
                 MemoryPoolPlanStep::UsePresentResource {
                     resource_id: resource.id,
-                    len,
+                    range: ResourceRange::whole(len),
                 },
                 len,
             );
@@ -214,7 +215,7 @@ fn append_preparation_steps(
                 out_steps,
                 MemoryPoolPlanStep::PreparePresentResource {
                     resource_id: resource.id,
-                    len,
+                    range: ResourceRange::whole(len),
                     preparation: preparation_kind(resource.readiness),
                 },
                 len,
@@ -253,7 +254,7 @@ fn append_strategy_steps(
                 out_steps,
                 MemoryPoolPlanStep::CreateResource {
                     strategy_id: strategy.id,
-                    len,
+                    range: ResourceRange::whole(len),
                 },
                 len,
             );
