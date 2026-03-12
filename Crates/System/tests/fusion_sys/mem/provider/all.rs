@@ -31,8 +31,8 @@ use fusion_sys::mem::provider::{
 use fusion_sys::mem::resource::{
     MemoryDomain, MemoryDomainSet, MemoryGeometry, OvercommitPolicy, ResourceAcquireSupport,
     ResourceAttrs, ResourceBackingKind, ResourceContract, ResourceFeatureSupport,
-    ResourceHazardSet, ResourceInfo, ResourceOpSet, ResourceResidencySupport, ResourceState,
-    ResourceSupport, SharingPolicy, StateValue,
+    ResourceHazardSet, ResourceInfo, ResourceOpSet, ResourceRange, ResourceResidencySupport,
+    ResourceState, ResourceSupport, SharingPolicy, StateValue,
 };
 
 struct MockProvider<'a> {
@@ -451,7 +451,7 @@ fn pool_plan_prefers_ready_resources_then_preparation_steps() {
     let request = MemoryPoolRequest::general_purpose(256 * 1024);
     let mut steps = [MemoryPoolPlanStep::CreateResource {
         strategy_id: MemoryStrategyId(0),
-        len: 0,
+        range: ResourceRange::whole(0),
     }; 4];
     let plan = provider.plan_pool(&request, &mut steps);
 
@@ -465,14 +465,14 @@ fn pool_plan_prefers_ready_resources_then_preparation_steps() {
         steps[0],
         MemoryPoolPlanStep::UsePresentResource {
             resource_id: ready.id,
-            len: 128 * 1024,
+            range: ResourceRange::whole(128 * 1024),
         }
     );
     assert_eq!(
         steps[1],
         MemoryPoolPlanStep::PreparePresentResource {
             resource_id: staged.id,
-            len: 128 * 1024,
+            range: ResourceRange::whole(128 * 1024),
             preparation: MemoryPoolPreparationKind::StateTransition,
         }
     );
@@ -791,7 +791,7 @@ fn provider_plan_uses_split_descriptors_for_partially_ready_object() {
     let request = MemoryPoolRequest::general_purpose(half * 2);
     let mut steps = [MemoryPoolPlanStep::UsePresentResource {
         resource_id: MemoryResourceId(0),
-        len: 0,
+        range: ResourceRange::whole(0),
     }; 4];
     let plan = provider.plan_pool(&request, &mut steps);
 
@@ -805,14 +805,14 @@ fn provider_plan_uses_split_descriptors_for_partially_ready_object() {
         steps[0],
         MemoryPoolPlanStep::UsePresentResource {
             resource_id: ready.id,
-            len: half,
+            range: ResourceRange::whole(half),
         }
     );
     assert_eq!(
         steps[1],
         MemoryPoolPlanStep::PreparePresentResource {
             resource_id: staged.id,
-            len: half,
+            range: ResourceRange::whole(half),
             preparation: MemoryPoolPreparationKind::Commit,
         }
     );
