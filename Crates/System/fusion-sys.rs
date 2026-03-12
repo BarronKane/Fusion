@@ -12,3 +12,6 @@ pub use fusion_pal::{Platform, TARGET_PLATFORM};
 #[path = "mem/mem.rs"]
 /// System memory contracts and resource abstractions.
 pub mod mem;
+#[path = "sync/sync.rs"]
+/// System synchronization primitives and wrappers.
+pub mod sync;

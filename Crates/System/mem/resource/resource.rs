@@ -550,7 +550,10 @@ impl ProtectableResource for VirtualMemoryResource {
 
         self.validate_protect_contract(protect)?;
         let region = self.operation_region(range)?;
-        let mutation = self.core.begin_mutation();
+        let mutation = self
+            .core
+            .begin_mutation()
+            .map_err(|error| ResourceError::from_sync_error(error.kind))?;
         unsafe { self.provider.protect(region, protect) }
             .map_err(ResourceError::from_operation_error)?;
         if self.is_full_resource_range(range) {
@@ -571,7 +574,10 @@ impl AdvisableResource for VirtualMemoryResource {
         }
 
         let region = self.operation_region(range)?;
-        let _mutation = self.core.begin_mutation();
+        let _mutation = self
+            .core
+            .begin_mutation()
+            .map_err(|error| ResourceError::from_sync_error(error.kind))?;
         unsafe { self.provider.advise(region, advice) }.map_err(ResourceError::from_operation_error)
     }
 }
@@ -585,7 +591,10 @@ impl DiscardableResource for VirtualMemoryResource {
         let advice = preferred_discard_advice(self.support().advice)
             .ok_or_else(ResourceError::unsupported_operation)?;
         let region = self.operation_region(range)?;
-        let _mutation = self.core.begin_mutation();
+        let _mutation = self
+            .core
+            .begin_mutation()
+            .map_err(|error| ResourceError::from_sync_error(error.kind))?;
         unsafe { self.provider.advise(region, advice) }.map_err(ResourceError::from_operation_error)
     }
 }
@@ -598,7 +607,10 @@ impl CommitControlledResource for VirtualMemoryResource {
 
         self.validate_protect_contract(protect)?;
         let region = self.operation_region(range)?;
-        let mutation = self.core.begin_mutation();
+        let mutation = self
+            .core
+            .begin_mutation()
+            .map_err(|error| ResourceError::from_sync_error(error.kind))?;
         unsafe { self.provider.commit(region, protect) }
             .map_err(ResourceError::from_operation_error)?;
         if self.is_full_resource_range(range) {
@@ -617,7 +629,10 @@ impl CommitControlledResource for VirtualMemoryResource {
         }
 
         let region = self.operation_region(range)?;
-        let mutation = self.core.begin_mutation();
+        let mutation = self
+            .core
+            .begin_mutation()
+            .map_err(|error| ResourceError::from_sync_error(error.kind))?;
         unsafe { self.provider.decommit(region) }.map_err(ResourceError::from_operation_error)?;
         if self.is_full_resource_range(range) {
             mutation.set_committed_state(false);
@@ -635,7 +650,10 @@ impl LockableResource for VirtualMemoryResource {
         }
 
         let region = self.operation_region(range)?;
-        let mutation = self.core.begin_mutation();
+        let mutation = self
+            .core
+            .begin_mutation()
+            .map_err(|error| ResourceError::from_sync_error(error.kind))?;
         unsafe { self.provider.lock(region) }.map_err(ResourceError::from_operation_error)?;
         if self.is_full_resource_range(range) {
             mutation.set_locked_state(true);
@@ -651,7 +669,10 @@ impl LockableResource for VirtualMemoryResource {
         }
 
         let region = self.operation_region(range)?;
-        let mutation = self.core.begin_mutation();
+        let mutation = self
+            .core
+            .begin_mutation()
+            .map_err(|error| ResourceError::from_sync_error(error.kind))?;
         unsafe { self.provider.unlock(region) }.map_err(ResourceError::from_operation_error)?;
         if self.is_full_resource_range(range) {
             mutation.set_locked_state(false);

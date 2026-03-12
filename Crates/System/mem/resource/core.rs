@@ -1,17 +1,17 @@
 //! Thread-safe composed storage for immutable resource metadata and mutable summary state.
 //!
 //! Resource state is intentionally summarized, not page-tracked. Readers observe it through an
-//! atomic snapshot, while backing-mutating operations serialize through a small spin guard so
+//! atomic snapshot, while backing-mutating operations serialize through a thin mutex so
 //! concurrent allocator maintenance does not corrupt resource-wide truth claims.
 //!
-//! TODO: Replace the current spin-based mutation guard with a more native PAL/sys-backed mutex
-//! or equivalent once the lower layers expose idiomatic concurrency primitives. The spin guard
-//! is acceptable for the current narrow critical sections, but it is not the intended end-state
-//! for a broader safety-aware runtime.
+//! The current mutex path is chosen through `fusion-sys::sync::ThinMutex`, which prefers a
+//! PAL-backed native mutex where available and falls back to a small spin mutex elsewhere.
+//! That keeps the runtime panic-free and no-alloc today without pretending every target already
+//! exposes the same native synchronization substrate.
 
-use core::hint::spin_loop;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::sync::{ThinMutex, ThinMutexGuard};
 use fusion_pal::sys::mem::Protect;
 
 use super::{ResolvedResource, ResourceInfo, ResourceState, ResourceStateProvenance, StateValue};
@@ -37,16 +37,13 @@ const BOOL_UNKNOWN: u32 = 3;
 /// Shared composed storage for immutable resource info and thread-safe mutable state summary.
 ///
 /// Summary state is published atomically so readers can inspect it without locks. Backing-
-/// mutating operations additionally take a small spin guard so full-resource state transitions
-/// cannot race each other into fiction.
-///
-/// TODO: Upgrade `mutation_lock` to a more native mutex abstraction once `fusion-pal` /
-/// `fusion-sys` exposes the concurrency primitives needed to do that portably and honestly.
+/// mutating operations additionally take a thin mutex so full-resource state transitions cannot
+/// race each other into fiction.
 #[derive(Debug)]
 pub struct ResourceCore {
     resolved: ResolvedResource,
     state_bits: AtomicU32,
-    mutation_lock: AtomicBool,
+    mutation_lock: ThinMutex,
 }
 
 impl ResourceCore {
@@ -56,7 +53,7 @@ impl ResourceCore {
         Self {
             resolved,
             state_bits: AtomicU32::new(encode_state(state)),
-            mutation_lock: AtomicBool::new(false),
+            mutation_lock: ThinMutex::new(),
         }
     }
 
@@ -80,22 +77,11 @@ impl ResourceCore {
 
     /// Serializes a backing-mutating operation against other mutating operations on this
     /// resource.
-    ///
-    /// TODO: Replace this spin acquisition path with a native mutex-backed guard once PAL/sys
-    /// provides the right platform-independent concurrency primitives.
-    pub fn begin_mutation(&self) -> ResourceMutationGuard<'_> {
-        while self
-            .mutation_lock
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            spin_loop();
-        }
-
-        ResourceMutationGuard {
+    pub fn begin_mutation(&self) -> Result<ResourceMutationGuard<'_>, crate::sync::SyncError> {
+        Ok(ResourceMutationGuard {
             core: self,
-            lock: &self.mutation_lock,
-        }
+            _lock: self.mutation_lock.lock()?,
+        })
     }
 
     fn update_state(&self, update: impl Fn(ResourceState) -> ResourceState) {
@@ -117,15 +103,12 @@ impl ResourceCore {
 
 /// Guard returned while a resource mutation is serialized.
 ///
-/// TODO: This guard should eventually be backed by a proper native mutex primitive rather than
-/// the current spin-based fallback.
-///
 /// Summary-state mutation methods live on this guard so callers cannot update resource-wide
 /// tracked state without first acquiring the mutation serialization path.
 #[must_use]
 pub struct ResourceMutationGuard<'a> {
     core: &'a ResourceCore,
-    lock: &'a AtomicBool,
+    _lock: ThinMutexGuard<'a>,
 }
 
 impl ResourceMutationGuard<'_> {
@@ -175,12 +158,6 @@ impl ResourceMutationGuard<'_> {
             state.committed = StateValue::Asymmetric;
             state
         });
-    }
-}
-
-impl Drop for ResourceMutationGuard<'_> {
-    fn drop(&mut self) {
-        self.lock.store(false, Ordering::Release);
     }
 }
 
