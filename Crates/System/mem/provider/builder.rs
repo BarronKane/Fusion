@@ -1,6 +1,6 @@
 use super::{
-    MemoryPoolClass, MemoryResourceDescriptor, MemoryStrategyDescriptor, MemoryTopologyLink,
-    MemoryTopologyNode,
+    MemoryObjectDescriptor, MemoryPoolClass, MemoryResourceDescriptor, MemoryStrategyDescriptor,
+    MemoryTopologyLink, MemoryTopologyNode,
 };
 
 /// Policy for how a provider should obtain its initial inventory.
@@ -38,6 +38,8 @@ pub struct MemoryProviderBuildSpec<'a> {
     pub discovery: MemoryProviderDiscoveryPolicy,
     /// How conflicts between discovered and explicit descriptors should be resolved.
     pub conflict_policy: MemoryProviderConflictPolicy,
+    /// Explicit memory objects to merge into the provider inventory.
+    pub explicit_objects: &'a [MemoryObjectDescriptor],
     /// Explicit concrete resources to merge into the provider inventory.
     pub explicit_resources: &'a [MemoryResourceDescriptor],
     /// Explicit acquisition strategies to merge into the provider inventory.
@@ -57,6 +59,7 @@ impl MemoryProviderBuildSpec<'_> {
         Self {
             discovery: MemoryProviderDiscoveryPolicy::MergePalWithExplicit,
             conflict_policy: MemoryProviderConflictPolicy::Reject,
+            explicit_objects: &[],
             explicit_resources: &[],
             explicit_strategies: &[],
             explicit_pool_classes: &[],

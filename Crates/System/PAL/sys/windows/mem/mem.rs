@@ -19,6 +19,8 @@ pub struct WindowsMem;
 /// Target-selected PAL memory provider alias for Windows builds.
 pub type PlatformMem = WindowsMem;
 
+const STUB_PAGE_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4096) };
+
 /// Returns the process-wide Windows memory provider handle.
 #[must_use]
 pub const fn system_mem() -> PlatformMem {
@@ -50,10 +52,9 @@ impl MemBase for WindowsMem {
     }
 
     fn page_info(&self) -> PageInfo {
-        let base = NonZeroUsize::new(4096).expect("stub page size must be non-zero");
         PageInfo {
-            base_page: base,
-            alloc_granule: base,
+            base_page: STUB_PAGE_SIZE,
+            alloc_granule: STUB_PAGE_SIZE,
             huge_page: None,
         }
     }

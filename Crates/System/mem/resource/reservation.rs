@@ -237,10 +237,6 @@ impl AddressReservation {
     }
 
     /// Returns a borrowed view of the reserved address range governed by this handle.
-    ///
-    /// # Panics
-    /// Panics only if internal materialization logic has already consumed the reservation's
-    /// owned range while this handle is still being used.
     #[must_use]
     pub fn view(&self) -> super::RangeView<'_> {
         super::RangeView::new(self.raw_region())
@@ -248,8 +244,7 @@ impl AddressReservation {
 
     #[allow(clippy::missing_const_for_fn)]
     fn raw_region(&self) -> Region {
-        self.region
-            .expect("reservation region missing during active use")
+        self.resolved.range
     }
 
     /// Returns `true` when `ptr` lies within the reserved range.
@@ -301,8 +296,9 @@ impl AddressReservation {
         let materialized =
             self.materialize_range(super::ResourceRange::new(0, region.len), request)?;
 
-        debug_assert!(materialized.leading.is_none());
-        debug_assert!(materialized.trailing.is_none());
+        if materialized.leading.is_some() || materialized.trailing.is_some() {
+            return Err(ResourceError::invalid_range());
+        }
 
         Ok(materialized.resource)
     }

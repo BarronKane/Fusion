@@ -30,6 +30,9 @@ pub struct LinuxMem;
 /// Target-selected PAL memory provider alias for Linux builds.
 pub type PlatformMem = LinuxMem;
 
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const DEFAULT_PAGE_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4096) };
+
 /// Returns the process-wide Linux memory provider handle.
 #[must_use]
 pub const fn system_mem() -> PlatformMem {
@@ -380,8 +383,7 @@ impl MemBase for LinuxMem {
     }
 
     fn page_info(&self) -> PageInfo {
-        let base = NonZeroUsize::new(Self::page_size_raw())
-            .unwrap_or_else(|| NonZeroUsize::new(4096).unwrap());
+        let base = NonZeroUsize::new(Self::page_size_raw()).unwrap_or(DEFAULT_PAGE_SIZE);
         PageInfo {
             base_page: base,
             alloc_granule: base,
