@@ -1,5 +1,6 @@
 use core::fmt;
 
+use crate::sync::SyncErrorKind;
 use fusion_pal::sys::mem::{MemError, MemErrorKind};
 
 /// Resource-layer error categories derived from request validation and PAL failures.
@@ -19,6 +20,8 @@ pub enum ResourceErrorKind {
     OutOfMemory,
     /// Backend-specific PAL failure classification.
     Platform(MemErrorKind),
+    /// Internal synchronization failure while coordinating resource state.
+    SynchronizationFailure(SyncErrorKind),
 }
 
 /// Error returned by memory-resource creation and operations.
@@ -38,6 +41,9 @@ impl fmt::Display for ResourceErrorKind {
             Self::InvalidRange => f.write_str("invalid resource range"),
             Self::OutOfMemory => f.write_str("resource allocation exhausted memory"),
             Self::Platform(kind) => write!(f, "platform resource failure ({kind})"),
+            Self::SynchronizationFailure(kind) => {
+                write!(f, "resource synchronization failure ({kind})")
+            }
         }
     }
 }
@@ -105,6 +111,14 @@ impl ResourceError {
         }
     }
 
+    /// Wraps an internal synchronization failure category.
+    #[must_use]
+    pub const fn synchronization(kind: SyncErrorKind) -> Self {
+        Self {
+            kind: ResourceErrorKind::SynchronizationFailure(kind),
+        }
+    }
+
     #[must_use]
     /// Converts a PAL request-time error into a resource-layer error.
     pub const fn from_request_error(value: MemError) -> Self {
@@ -127,5 +141,11 @@ impl ResourceError {
             MemErrorKind::Unsupported => Self::unsupported_operation(),
             other => Self::platform(other),
         }
+    }
+
+    #[must_use]
+    /// Converts an internal synchronization failure into a resource-layer error.
+    pub const fn from_sync_error(kind: SyncErrorKind) -> Self {
+        Self::synchronization(kind)
     }
 }
