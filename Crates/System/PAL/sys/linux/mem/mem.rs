@@ -8,6 +8,7 @@ use core::ffi::c_void;
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 use core::str;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use rustix::fd::BorrowedFd;
 use rustix::fs::{CWD, Mode, OFlags, openat};
@@ -15,6 +16,7 @@ use rustix::io::Errno;
 use rustix::io::read;
 use rustix::mm::{self, Advice as MmAdvice, MapFlags as MmMapFlags, MprotectFlags, ProtFlags};
 use rustix::param;
+use rustix::system;
 
 use crate::pal::mem::{
     Advise, Backing, CachePolicy, MapFlags, MapReplaceRequest, MapRequest, MemAdviceCaps,
@@ -32,6 +34,46 @@ pub type PlatformMem = LinuxMem;
 
 #[allow(clippy::useless_nonzero_new_unchecked)]
 const DEFAULT_PAGE_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4096) };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct KernelVersion {
+    major: u16,
+    minor: u16,
+    patch: u16,
+}
+
+const LINUX_2_5_37: KernelVersion = KernelVersion {
+    major: 2,
+    minor: 5,
+    patch: 37,
+};
+const LINUX_2_6_23: KernelVersion = KernelVersion {
+    major: 2,
+    minor: 6,
+    patch: 23,
+};
+const LINUX_2_6_38: KernelVersion = KernelVersion {
+    major: 2,
+    minor: 6,
+    patch: 38,
+};
+const LINUX_4_5_0: KernelVersion = KernelVersion {
+    major: 4,
+    minor: 5,
+    patch: 0,
+};
+const LINUX_4_17_0: KernelVersion = KernelVersion {
+    major: 4,
+    minor: 17,
+    patch: 0,
+};
+
+const KERNEL_VERSION_UNINITIALIZED: u64 = u64::MAX;
+const KERNEL_VERSION_UNAVAILABLE: u64 = 0;
+
+// TODO: Replace this ad hoc atomic cache with a PAL-native mutex/once primitive once
+// concurrency primitives exist at the PAL layer.
+static KERNEL_VERSION_CACHE: AtomicU64 = AtomicU64::new(KERNEL_VERSION_UNINITIALIZED);
 
 /// Returns the process-wide Linux memory provider handle.
 #[must_use]
@@ -60,6 +102,26 @@ impl LinuxMem {
 
     fn page_size_raw() -> usize {
         param::page_size()
+    }
+
+    fn kernel_version() -> Option<KernelVersion> {
+        let cached = KERNEL_VERSION_CACHE.load(Ordering::Relaxed);
+        if cached != KERNEL_VERSION_UNINITIALIZED {
+            return decode_kernel_version(cached);
+        }
+
+        let detected = parse_kernel_release(system::uname().release().to_bytes());
+        let encoded = encode_kernel_version(detected);
+
+        match KERNEL_VERSION_CACHE.compare_exchange(
+            KERNEL_VERSION_UNINITIALIZED,
+            encoded,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => detected,
+            Err(actual) => decode_kernel_version(actual),
+        }
     }
 
     fn to_mmap_prot(prot: Protect) -> Result<ProtFlags, MemError> {
@@ -133,6 +195,8 @@ impl LinuxMem {
     }
 
     fn validate_common<P>(req: &MapRequest<'_, P>) -> Result<(), MemError> {
+        let version = Self::kernel_version();
+
         if req.len == 0 {
             return Err(MemError::invalid());
         }
@@ -154,6 +218,14 @@ impl LinuxMem {
         }
 
         if req.cache != CachePolicy::Default {
+            return Err(MemError::unsupported());
+        }
+
+        if req.flags.contains(MapFlags::LOCKED) && !supports_map_locked_at(version) {
+            return Err(MemError::unsupported());
+        }
+
+        if req.flags.contains(MapFlags::POPULATE) && !supports_map_populate_at(version) {
             return Err(MemError::unsupported());
         }
 
@@ -184,11 +256,17 @@ impl LinuxMem {
     }
 
     fn validate_safe_placement(placement: Placement) -> Result<(), MemError> {
+        let version = Self::kernel_version();
         let page = Self::page_size_raw();
 
         match placement {
             Placement::Anywhere => Ok(()),
             Placement::Hint(addr) | Placement::FixedNoReplace(addr) => {
+                if matches!(placement, Placement::FixedNoReplace(_))
+                    && !supports_fixed_noreplace_at(version)
+                {
+                    return Err(MemError::unsupported());
+                }
                 if addr % page == 0 {
                     Ok(())
                 } else {
@@ -347,38 +425,61 @@ impl LinuxMem {
 
 impl MemBase for LinuxMem {
     fn caps(&self) -> MemCaps {
-        MemCaps::MAP_ANON
+        let version = Self::kernel_version();
+        let mut caps = MemCaps::MAP_ANON
             | MemCaps::MAP_FILE
-            | MemCaps::MAP_FIXED_NOREPLACE
             | MemCaps::MAP_FIXED_REPLACE
             | MemCaps::MAP_HINT
             | MemCaps::PROTECT
             | MemCaps::ADVISE
             | MemCaps::LOCK
             | MemCaps::QUERY
-            | MemCaps::EXECUTE_MAP
+            | MemCaps::EXECUTE_MAP;
+
+        if supports_fixed_noreplace_at(version) {
+            caps |= MemCaps::MAP_FIXED_NOREPLACE;
+        }
+
+        caps
     }
 
     fn support(&self) -> MemSupport {
+        let version = Self::kernel_version();
+        let mut map_flags = MapFlags::PRIVATE | MapFlags::SHARED;
+        if supports_map_populate_at(version) {
+            map_flags |= MapFlags::POPULATE;
+        }
+        if supports_map_locked_at(version) {
+            map_flags |= MapFlags::LOCKED;
+        }
+
+        let mut placements = MemPlacementCaps::ANYWHERE | MemPlacementCaps::HINT;
+        if supports_fixed_noreplace_at(version) {
+            placements |= MemPlacementCaps::FIXED_NOREPLACE;
+        }
+
+        let mut advice = MemAdviceCaps::NORMAL
+            | MemAdviceCaps::SEQUENTIAL
+            | MemAdviceCaps::RANDOM
+            | MemAdviceCaps::WILL_NEED
+            | MemAdviceCaps::DONT_NEED;
+        if supports_advise_free_at(version) {
+            advice |= MemAdviceCaps::FREE;
+        }
+        if supports_thp_advice_at(version) {
+            advice |= MemAdviceCaps::NO_HUGE_PAGE | MemAdviceCaps::HUGE_PAGE;
+        }
+
         MemSupport {
             caps: self.caps(),
-            map_flags: MapFlags::PRIVATE | MapFlags::SHARED | MapFlags::POPULATE | MapFlags::LOCKED,
+            map_flags,
             protect: Protect::READ | Protect::WRITE | Protect::EXEC,
             backings: MemBackingCaps::ANON_PRIVATE
                 | MemBackingCaps::ANON_SHARED
                 | MemBackingCaps::FILE_PRIVATE
                 | MemBackingCaps::FILE_SHARED,
-            placements: MemPlacementCaps::ANYWHERE
-                | MemPlacementCaps::HINT
-                | MemPlacementCaps::FIXED_NOREPLACE,
-            advice: MemAdviceCaps::NORMAL
-                | MemAdviceCaps::SEQUENTIAL
-                | MemAdviceCaps::RANDOM
-                | MemAdviceCaps::WILL_NEED
-                | MemAdviceCaps::DONT_NEED
-                | MemAdviceCaps::FREE
-                | MemAdviceCaps::NO_HUGE_PAGE
-                | MemAdviceCaps::HUGE_PAGE,
+            placements,
+            advice,
         }
     }
 
@@ -469,6 +570,17 @@ impl MemQuery for LinuxMem {
 
 impl MemAdvise for LinuxMem {
     unsafe fn advise(&self, region: Region, advice: Advise) -> Result<(), MemError> {
+        let version = Self::kernel_version();
+        match advice {
+            Advise::Free if !supports_advise_free_at(version) => {
+                return Err(MemError::unsupported());
+            }
+            Advise::NoHugePage | Advise::HugePage if !supports_thp_advice_at(version) => {
+                return Err(MemError::unsupported());
+            }
+            _ => {}
+        }
+
         let adv = match advice {
             Advise::Normal => MmAdvice::Normal,
             Advise::Sequential => MmAdvice::Sequential,
@@ -499,10 +611,107 @@ impl MemLock for LinuxMem {
 
 impl crate::pal::mem::MemCatalog for LinuxMem {}
 
+fn parse_kernel_release(release: &[u8]) -> Option<KernelVersion> {
+    let (major, rest) = parse_release_component(release)?;
+    let (minor, rest) = parse_optional_release_component(rest)?;
+    let (patch, _) = parse_optional_release_component(rest)?;
+
+    Some(KernelVersion {
+        major: u16::try_from(major).ok()?,
+        minor: u16::try_from(minor).ok()?,
+        patch: u16::try_from(patch).ok()?,
+    })
+}
+
+fn parse_optional_release_component(bytes: &[u8]) -> Option<(u32, &[u8])> {
+    if bytes.first().copied() != Some(b'.') {
+        return Some((0, bytes));
+    }
+
+    parse_release_component(&bytes[1..])
+}
+
+fn parse_release_component(bytes: &[u8]) -> Option<(u32, &[u8])> {
+    let mut value = 0u32;
+    let mut index = 0usize;
+
+    while let Some(byte) = bytes.get(index).copied() {
+        match byte {
+            b'0'..=b'9' => {
+                value = value.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+
+    if index == 0 {
+        return None;
+    }
+
+    Some((value, &bytes[index..]))
+}
+
+const fn encode_kernel_version(version: Option<KernelVersion>) -> u64 {
+    match version {
+        Some(version) => {
+            ((version.major as u64) << 32) | ((version.minor as u64) << 16) | version.patch as u64
+        }
+        None => KERNEL_VERSION_UNAVAILABLE,
+    }
+}
+
+const fn decode_kernel_version(encoded: u64) -> Option<KernelVersion> {
+    if encoded == KERNEL_VERSION_UNAVAILABLE || encoded == KERNEL_VERSION_UNINITIALIZED {
+        return None;
+    }
+
+    Some(KernelVersion {
+        major: ((encoded >> 32) & 0xffff) as u16,
+        minor: ((encoded >> 16) & 0xffff) as u16,
+        patch: (encoded & 0xffff) as u16,
+    })
+}
+
+const fn kernel_at_least(actual: Option<KernelVersion>, required: KernelVersion) -> bool {
+    match actual {
+        Some(version) => {
+            version.major > required.major
+                || (version.major == required.major
+                    && (version.minor > required.minor
+                        || (version.minor == required.minor && version.patch >= required.patch)))
+        }
+        None => false,
+    }
+}
+
+const fn supports_map_locked_at(version: Option<KernelVersion>) -> bool {
+    kernel_at_least(version, LINUX_2_5_37)
+}
+
+const fn supports_map_populate_at(version: Option<KernelVersion>) -> bool {
+    // Linux added MAP_POPULATE in 2.5.46, but private mappings were not covered until 2.6.23.
+    // This PAL exposes POPULATE generically across private and shared mappings, so stay
+    // conservative and only advertise it once both common cases are covered.
+    kernel_at_least(version, LINUX_2_6_23)
+}
+
+const fn supports_fixed_noreplace_at(version: Option<KernelVersion>) -> bool {
+    kernel_at_least(version, LINUX_4_17_0)
+}
+
+const fn supports_advise_free_at(version: Option<KernelVersion>) -> bool {
+    kernel_at_least(version, LINUX_4_5_0)
+}
+
+const fn supports_thp_advice_at(version: Option<KernelVersion>) -> bool {
+    kernel_at_least(version, LINUX_2_6_38)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pal::mem::{MapFlags, RegionAttrs};
+    use crate::pal::mem::{MapFlags, MemAdviceCaps, MemPlacementCaps, RegionAttrs};
 
     fn anon_request(len: usize) -> MapRequest<'static> {
         MapRequest {
@@ -540,6 +749,13 @@ mod tests {
     #[test]
     fn fixed_no_replace_rejects_overlap() {
         let mem = LinuxMem::new();
+        if !mem
+            .support()
+            .placements
+            .contains(MemPlacementCaps::FIXED_NOREPLACE)
+        {
+            return;
+        }
         let page = mem.page_info().base_page.get();
         let region = unsafe { mem.map(&anon_request(page)) }.expect("seed map");
 
@@ -592,11 +808,146 @@ mod tests {
     #[test]
     fn huge_page_advice_is_supported() {
         let mem = LinuxMem::new();
+        if !mem.support().advice.contains(MemAdviceCaps::HUGE_PAGE) {
+            return;
+        }
         let page = mem.page_info().base_page.get();
         let region = unsafe { mem.map(&anon_request(page)) }.expect("map");
 
         unsafe { mem.advise(region, Advise::HugePage) }.expect("advise");
 
         unsafe { mem.unmap(region) }.expect("cleanup");
+    }
+
+    #[test]
+    fn parses_kernel_release_with_distribution_suffix() {
+        let version = parse_kernel_release(b"6.8.12-arch1-1").expect("version");
+
+        assert_eq!(
+            version,
+            KernelVersion {
+                major: 6,
+                minor: 8,
+                patch: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_bare_major_kernel_release() {
+        let version = parse_kernel_release(b"3").expect("version");
+
+        assert_eq!(
+            version,
+            KernelVersion {
+                major: 3,
+                minor: 0,
+                patch: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_empty_kernel_release() {
+        assert_eq!(parse_kernel_release(b""), None);
+    }
+
+    #[test]
+    fn parses_centos_legacy_kernel_release() {
+        let version = parse_kernel_release(b"2.6.32-696.el6.x86_64").expect("version");
+
+        assert_eq!(
+            version,
+            KernelVersion {
+                major: 2,
+                minor: 6,
+                patch: 32,
+            }
+        );
+    }
+
+    #[test]
+    fn version_gates_linux_capabilities_conservatively() {
+        let before_fixed = Some(KernelVersion {
+            major: 4,
+            minor: 16,
+            patch: 9,
+        });
+        let fixed = Some(KernelVersion {
+            major: 4,
+            minor: 17,
+            patch: 0,
+        });
+        let before_free = Some(KernelVersion {
+            major: 4,
+            minor: 4,
+            patch: 302,
+        });
+        let free = Some(KernelVersion {
+            major: 4,
+            minor: 5,
+            patch: 0,
+        });
+        let before_thp = Some(KernelVersion {
+            major: 2,
+            minor: 6,
+            patch: 37,
+        });
+        let thp = Some(LINUX_2_6_38);
+        let before_populate = Some(KernelVersion {
+            major: 2,
+            minor: 6,
+            patch: 22,
+        });
+        let populate = Some(LINUX_2_6_23);
+
+        assert!(!supports_fixed_noreplace_at(before_fixed));
+        assert!(supports_fixed_noreplace_at(fixed));
+        assert!(!supports_advise_free_at(before_free));
+        assert!(supports_advise_free_at(free));
+        assert!(!supports_thp_advice_at(before_thp));
+        assert!(supports_thp_advice_at(thp));
+        assert!(!supports_map_populate_at(before_populate));
+        assert!(supports_map_populate_at(populate));
+        assert!(supports_map_locked_at(Some(LINUX_2_5_37)));
+    }
+
+    #[test]
+    fn runtime_support_matches_kernel_version_gates() {
+        let mem = LinuxMem::new();
+        let version = LinuxMem::kernel_version();
+        let support = mem.support();
+        let caps = mem.caps();
+
+        assert_eq!(
+            caps.contains(MemCaps::MAP_FIXED_NOREPLACE),
+            supports_fixed_noreplace_at(version)
+        );
+        assert_eq!(
+            support
+                .placements
+                .contains(MemPlacementCaps::FIXED_NOREPLACE),
+            supports_fixed_noreplace_at(version)
+        );
+        assert_eq!(
+            support.map_flags.contains(MapFlags::LOCKED),
+            supports_map_locked_at(version)
+        );
+        assert_eq!(
+            support.map_flags.contains(MapFlags::POPULATE),
+            supports_map_populate_at(version)
+        );
+        assert_eq!(
+            support.advice.contains(MemAdviceCaps::FREE),
+            supports_advise_free_at(version)
+        );
+        assert_eq!(
+            support.advice.contains(MemAdviceCaps::HUGE_PAGE),
+            supports_thp_advice_at(version)
+        );
+        assert_eq!(
+            support.advice.contains(MemAdviceCaps::NO_HUGE_PAGE),
+            supports_thp_advice_at(version)
+        );
     }
 }

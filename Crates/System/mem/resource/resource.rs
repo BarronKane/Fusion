@@ -1339,22 +1339,8 @@ mod tests {
         assert!(support.backings.contains(MemBackingCaps::FILE_PRIVATE));
         assert!(support.backings.contains(MemBackingCaps::FILE_SHARED));
         assert!(support.placements.contains(MemPlacementCaps::HINT));
-        assert!(
-            support
-                .instance
-                .residency
-                .contains(ResourceResidencySupport::PREFAULT)
-        );
-        assert!(
-            support
-                .instance
-                .residency
-                .contains(ResourceResidencySupport::LOCKED)
-        );
         assert!(support.instance.ops.contains(ResourceOpSet::ADVISE));
         assert!(support.instance.ops.contains(ResourceOpSet::QUERY));
-        assert!(support.instance.advice.contains(MemAdviceCaps::FREE));
-        assert!(support.instance.advice.contains(MemAdviceCaps::HUGE_PAGE));
     }
 
     #[test]
