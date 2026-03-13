@@ -65,3 +65,5 @@ use windows as platform;
 pub mod mem;
 /// Public synchronization module re-exported from the selected private platform backend.
 pub mod sync;
+/// Public thread module re-exported from the selected private platform backend.
+pub mod thread;

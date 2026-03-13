@@ -4,3 +4,6 @@ pub mod mem;
 #[path = "sync/sync.rs"]
 /// Linux PAL synchronization backend implementation.
 pub mod sync;
+#[path = "thread/thread.rs"]
+/// Linux PAL thread backend implementation.
+pub mod thread;

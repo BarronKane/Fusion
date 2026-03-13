@@ -24,6 +24,7 @@ mod id;
 mod placement;
 mod scheduler;
 mod stack;
+mod unsupported;
 
 pub use caps::*;
 pub use config::*;
@@ -32,6 +33,7 @@ pub use id::*;
 pub use placement::*;
 pub use scheduler::*;
 pub use stack::*;
+pub use unsupported::*;
 
 use core::time::Duration;
 
