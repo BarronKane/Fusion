@@ -1,5 +1,5 @@
-use crate::mem::resource::ResourceRange;
 use crate::mem::resource::RangeView;
+use crate::mem::resource::ResourceRange;
 use core::marker::PhantomData;
 
 /// Unique identifier for a live extent lease returned by a pool.
