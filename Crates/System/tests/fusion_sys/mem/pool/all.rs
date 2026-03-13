@@ -63,11 +63,16 @@ fn general_support() -> ResourceSupport {
     }
 }
 
-fn bound_resource(len: usize, attrs: ResourceAttrs) -> BoundMemoryResource {
+fn bound_resource_with_shape(
+    len: usize,
+    domain: MemoryDomain,
+    backing: ResourceBackingKind,
+    attrs: ResourceAttrs,
+) -> BoundMemoryResource {
     BoundMemoryResource::new(BoundResourceSpec::new(
         aligned_region(len, 4096),
-        MemoryDomain::StaticRegion,
-        ResourceBackingKind::StaticRegion,
+        domain,
+        backing,
         attrs,
         general_geometry(),
         general_contract(),
@@ -81,8 +86,24 @@ fn bound_resource(len: usize, attrs: ResourceAttrs) -> BoundMemoryResource {
     .expect("bound resource should build")
 }
 
+fn bound_resource(len: usize, attrs: ResourceAttrs) -> BoundMemoryResource {
+    bound_resource_with_shape(
+        len,
+        MemoryDomain::StaticRegion,
+        ResourceBackingKind::StaticRegion,
+        attrs,
+    )
+}
+
 fn poolable_attrs() -> ResourceAttrs {
     ResourceAttrs::ALLOCATABLE | ResourceAttrs::CACHEABLE | ResourceAttrs::COHERENT
+}
+
+fn device_local_poolable_attrs() -> ResourceAttrs {
+    ResourceAttrs::ALLOCATABLE
+        | ResourceAttrs::DEVICE_LOCAL
+        | ResourceAttrs::CACHEABLE
+        | ResourceAttrs::COHERENT
 }
 
 #[test]
@@ -385,3 +406,68 @@ fn pool_serializes_concurrent_acquire_release_cycles() {
     assert_eq!(stats.leased_bytes, 0);
     assert_eq!(stats.free_bytes, 32 * 1024);
 }
+
+
+// Look this is just for fun.
+// I realized VRAM is a valid target for CPU addressable memory space.
+// Leaving commented out because it's a lousy test path.
+/*
+#[test]
+fn device_local_vram_like_pool_tracks_large_addressable_capacity() {
+    const VRAM_BYTES: usize = 200 * 1024 * 1024;
+    const FIRST_LEASE: usize = 64 * 1024 * 1024;
+    const SECOND_LEASE: usize = 32 * 1024 * 1024;
+
+    let contributor = MemoryPoolContributor::explicit_ready(MemoryResourceHandle::from(
+        bound_resource_with_shape(
+            VRAM_BYTES,
+            MemoryDomain::DeviceLocal,
+            ResourceBackingKind::DeviceLocal,
+            device_local_poolable_attrs(),
+        ),
+    ));
+    let mut builder = MemoryPool::<1, 8>::builder(MemoryPoolPolicy::ready_only());
+    builder
+        .add_contributor(contributor)
+        .expect("device-local contributor should fit");
+    let pool = builder.build().expect("device-local pool should build");
+
+    assert_eq!(pool.compatibility().domain, MemoryDomain::DeviceLocal);
+    assert_eq!(pool.compatibility().backing, ResourceBackingKind::DeviceLocal);
+    assert!(pool.compatibility().attrs.contains(ResourceAttrs::DEVICE_LOCAL));
+
+    let first = pool
+        .acquire_extent(&MemoryPoolExtentRequest {
+            len: FIRST_LEASE,
+            align: 4096,
+        })
+        .expect("first vram-like extent should allocate");
+    let second = pool
+        .acquire_extent(&MemoryPoolExtentRequest {
+            len: SECOND_LEASE,
+            align: 64 * 1024,
+        })
+        .expect("second vram-like extent should allocate");
+
+    assert_eq!(
+        pool.lease_view(&first)
+            .expect("first lease should remain viewable")
+            .len(),
+        FIRST_LEASE
+    );
+    assert_eq!(
+        pool.lease_view(&second)
+            .expect("second lease should remain viewable")
+            .len(),
+        SECOND_LEASE
+    );
+
+    let stats = pool.stats().expect("pool stats should be available");
+    assert_eq!(stats.total_bytes, VRAM_BYTES);
+    assert_eq!(stats.leased_bytes, FIRST_LEASE + SECOND_LEASE);
+    assert_eq!(
+        stats.free_bytes,
+        VRAM_BYTES - FIRST_LEASE - SECOND_LEASE
+    );
+}
+ */
