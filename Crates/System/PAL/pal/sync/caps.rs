@@ -69,6 +69,19 @@ bitflags! {
 }
 
 bitflags! {
+    /// Capability flags for a raw once primitive.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct OnceCaps: u32 {
+        /// Supports blocking wait while another thread initializes.
+        const WAITING          = 1 << 0;
+        /// Supports static initialization without heap allocation.
+        const STATIC_INIT      = 1 << 1;
+        /// Failed initialization can reset the primitive for a future retry.
+        const RESET_ON_FAILURE = 1 << 2;
+    }
+}
+
+bitflags! {
     /// Capability flags for a raw wait/wake primitive.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct WaitCaps: u32 {
@@ -81,6 +94,40 @@ bitflags! {
         /// Wait operations may return spuriously and require caller-side rechecking.
         const SPURIOUS_WAKE    = 1 << 3;
     }
+}
+
+bitflags! {
+    /// Capability flags for a raw rwlock primitive.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct RwLockCaps: u32 {
+        /// Supports non-blocking shared/read acquisition attempts.
+        const TRY_READ    = 1 << 0;
+        /// Supports non-blocking exclusive/write acquisition attempts.
+        const TRY_WRITE   = 1 << 1;
+        /// Supports blocking shared/read acquisition.
+        const BLOCKING_READ  = 1 << 2;
+        /// Supports blocking exclusive/write acquisition.
+        const BLOCKING_WRITE = 1 << 3;
+        /// Supports relative-timeout shared/read acquisition attempts.
+        const READ_FOR    = 1 << 4;
+        /// Supports relative-timeout exclusive/write acquisition attempts.
+        const WRITE_FOR   = 1 << 5;
+        /// Supports static initialization without heap allocation.
+        const STATIC_INIT = 1 << 6;
+    }
+}
+
+/// Fairness or starvation policy offered by a backend rwlock primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RwLockFairnessSupport {
+    /// No stronger fairness or starvation guarantee is provided.
+    None,
+    /// New readers may be favored over waiting writers.
+    ReaderPreferred,
+    /// Waiting writers block new readers and are favored over reader barging.
+    WriterPreferred,
+    /// The backend advertises a stronger fair or FIFO-like policy.
+    Fair,
 }
 
 bitflags! {
@@ -174,6 +221,29 @@ impl MutexSupport {
     }
 }
 
+/// Once support offered by a backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OnceSupport {
+    /// Fine-grained once capability flags.
+    pub caps: OnceCaps,
+    /// Process-sharing semantics, if any.
+    pub process_scope: ProcessScopeSupport,
+    /// Whether the backend implementation is native, emulated, or unavailable.
+    pub implementation: SyncImplementationKind,
+}
+
+impl OnceSupport {
+    /// Returns an explicitly unsupported once surface.
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self {
+            caps: OnceCaps::empty(),
+            process_scope: ProcessScopeSupport::LocalOnly,
+            implementation: SyncImplementationKind::Unsupported,
+        }
+    }
+}
+
 /// Counting semaphore support offered by a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SemaphoreSupport {
@@ -200,6 +270,35 @@ impl SemaphoreSupport {
     }
 }
 
+/// Read/write lock support offered by a backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RwLockSupport {
+    /// Fine-grained rwlock capability flags.
+    pub caps: RwLockCaps,
+    /// Supported timeout models for acquisition attempts.
+    pub timeout: TimeoutCaps,
+    /// Fairness or starvation policy of this rwlock primitive.
+    pub fairness: RwLockFairnessSupport,
+    /// Process-sharing semantics, if any.
+    pub process_scope: ProcessScopeSupport,
+    /// Whether the backend implementation is native, emulated, or unavailable.
+    pub implementation: SyncImplementationKind,
+}
+
+impl RwLockSupport {
+    /// Returns an explicitly unsupported rwlock surface.
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self {
+            caps: RwLockCaps::empty(),
+            timeout: TimeoutCaps::empty(),
+            fairness: RwLockFairnessSupport::None,
+            process_scope: ProcessScopeSupport::LocalOnly,
+            implementation: SyncImplementationKind::Unsupported,
+        }
+    }
+}
+
 /// Aggregated synchronization support surface for a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SyncSupport {
@@ -207,8 +306,12 @@ pub struct SyncSupport {
     pub wait: WaitSupport,
     /// Raw mutex support.
     pub mutex: MutexSupport,
+    /// Raw once support.
+    pub once: OnceSupport,
     /// Counting semaphore support.
     pub semaphore: SemaphoreSupport,
+    /// Raw read/write lock support.
+    pub rwlock: RwLockSupport,
 }
 
 impl SyncSupport {
@@ -218,7 +321,9 @@ impl SyncSupport {
         Self {
             wait: WaitSupport::unsupported(),
             mutex: MutexSupport::unsupported(),
+            once: OnceSupport::unsupported(),
             semaphore: SemaphoreSupport::unsupported(),
+            rwlock: RwLockSupport::unsupported(),
         }
     }
 }

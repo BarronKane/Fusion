@@ -18,15 +18,19 @@ use rustix::io::Errno;
 use rustix::thread::futex;
 
 use crate::pal::sync::{
-    MutexCaps, MutexSupport, PriorityInheritanceSupport, ProcessScopeSupport, RawMutex,
-    RawSemaphore, RecursionSupport, RobustnessSupport, SemaphoreCaps, SemaphoreSupport, SyncBase,
-    SyncError, SyncErrorKind, SyncImplementationKind, SyncSupport, TimeoutCaps, WaitCaps,
-    WaitOutcome, WaitPrimitive, WaitSupport,
+    MutexCaps, MutexSupport, OnceBeginResult, OnceCaps, OnceState, OnceSupport,
+    PriorityInheritanceSupport, ProcessScopeSupport, RawMutex, RawOnce, RawRwLock, RawSemaphore,
+    RecursionSupport, RobustnessSupport, RwLockCaps, RwLockFairnessSupport, RwLockSupport,
+    SemaphoreCaps, SemaphoreSupport, SyncBase, SyncError, SyncErrorKind, SyncImplementationKind,
+    SyncSupport, TimeoutCaps, WaitCaps, WaitOutcome, WaitPrimitive, WaitSupport,
 };
 
 const UNLOCKED: u32 = 0;
 const LOCKED: u32 = 1;
 const CONTENDED: u32 = 2;
+const ONCE_UNINITIALIZED: u32 = 0;
+const ONCE_RUNNING: u32 = 1;
+const ONCE_COMPLETE: u32 = 2;
 
 const LINUX_WAIT_SUPPORT: WaitSupport = WaitSupport {
     caps: WaitCaps::WAIT_WHILE_EQUAL
@@ -59,6 +63,26 @@ const LINUX_SEMAPHORE_SUPPORT: SemaphoreSupport = SemaphoreSupport {
     implementation: SyncImplementationKind::Emulated,
 };
 
+const LINUX_ONCE_SUPPORT: OnceSupport = OnceSupport {
+    caps: OnceCaps::WAITING
+        .union(OnceCaps::STATIC_INIT)
+        .union(OnceCaps::RESET_ON_FAILURE),
+    process_scope: ProcessScopeSupport::LocalOnly,
+    implementation: SyncImplementationKind::Emulated,
+};
+
+const LINUX_RWLOCK_SUPPORT: RwLockSupport = RwLockSupport {
+    caps: RwLockCaps::TRY_READ
+        .union(RwLockCaps::TRY_WRITE)
+        .union(RwLockCaps::BLOCKING_READ)
+        .union(RwLockCaps::BLOCKING_WRITE)
+        .union(RwLockCaps::STATIC_INIT),
+    timeout: TimeoutCaps::empty(),
+    fairness: RwLockFairnessSupport::WriterPreferred,
+    process_scope: ProcessScopeSupport::LocalOnly,
+    implementation: SyncImplementationKind::Emulated,
+};
+
 /// Linux synchronization provider handle.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LinuxSync;
@@ -69,12 +93,26 @@ pub type PlatformRawMutex = LinuxRawMutex;
 /// Selected semaphore type for Linux builds.
 pub type PlatformSemaphore = LinuxSemaphore;
 
+/// Selected raw once type for Linux builds.
+pub type PlatformRawOnce = LinuxRawOnce;
+
+/// Selected raw rwlock type for Linux builds.
+pub type PlatformRawRwLock = LinuxRawRwLock;
+
 /// Target-selected synchronization provider alias for Linux builds.
 pub type PlatformSync = LinuxSync;
 
 /// Backend truth for the selected raw mutex implementation on Linux.
 pub const PLATFORM_RAW_MUTEX_IMPLEMENTATION: SyncImplementationKind =
     SyncImplementationKind::Native;
+
+/// Backend truth for the selected raw once implementation on Linux.
+pub const PLATFORM_RAW_ONCE_IMPLEMENTATION: SyncImplementationKind =
+    SyncImplementationKind::Emulated;
+
+/// Backend truth for the selected raw rwlock implementation on Linux.
+pub const PLATFORM_RAW_RWLOCK_IMPLEMENTATION: SyncImplementationKind =
+    SyncImplementationKind::Emulated;
 
 /// Returns the process-wide Linux synchronization provider handle.
 #[must_use]
@@ -95,7 +133,9 @@ impl SyncBase for LinuxSync {
         SyncSupport {
             wait: LINUX_WAIT_SUPPORT,
             mutex: LINUX_MUTEX_SUPPORT,
+            once: LINUX_ONCE_SUPPORT,
             semaphore: LINUX_SEMAPHORE_SUPPORT,
+            rwlock: LINUX_RWLOCK_SUPPORT,
         }
     }
 }
@@ -120,6 +160,85 @@ impl WaitPrimitive for LinuxSync {
 
     fn wake_all(&self, word: &AtomicU32) -> Result<usize, SyncError> {
         futex::wake(word, futex::Flags::PRIVATE, u32::MAX).map_err(map_errno)
+    }
+}
+
+/// Linux raw once primitive backed by a futex word.
+#[derive(Debug)]
+pub struct LinuxRawOnce {
+    state: AtomicU32,
+}
+
+impl LinuxRawOnce {
+    /// Creates a new uninitialized Linux raw once primitive.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: AtomicU32::new(ONCE_UNINITIALIZED),
+        }
+    }
+}
+
+impl RawOnce for LinuxRawOnce {
+    fn support(&self) -> OnceSupport {
+        LINUX_ONCE_SUPPORT
+    }
+
+    fn state(&self) -> OnceState {
+        match self.state.load(Ordering::Acquire) {
+            ONCE_RUNNING => OnceState::Running,
+            ONCE_COMPLETE => OnceState::Complete,
+            _ => OnceState::Uninitialized,
+        }
+    }
+
+    fn begin(&self) -> Result<OnceBeginResult, SyncError> {
+        loop {
+            match self.state.load(Ordering::Acquire) {
+                ONCE_COMPLETE => return Ok(OnceBeginResult::Complete),
+                ONCE_RUNNING => return Ok(OnceBeginResult::InProgress),
+                ONCE_UNINITIALIZED => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            ONCE_UNINITIALIZED,
+                            ONCE_RUNNING,
+                            Ordering::Acquire,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        return Ok(OnceBeginResult::Initialize);
+                    }
+                }
+                _ => return Err(SyncError::invalid()),
+            }
+        }
+    }
+
+    fn wait(&self) -> Result<(), SyncError> {
+        loop {
+            match self.state.load(Ordering::Acquire) {
+                ONCE_COMPLETE | ONCE_UNINITIALIZED => return Ok(()),
+                ONCE_RUNNING => match futex_wait_private(&self.state, ONCE_RUNNING, None)? {
+                    WaitOutcome::Woken
+                    | WaitOutcome::Mismatch
+                    | WaitOutcome::Interrupted
+                    | WaitOutcome::TimedOut => {}
+                },
+                _ => return Err(SyncError::invalid()),
+            }
+        }
+    }
+
+    unsafe fn complete_unchecked(&self) {
+        self.state.store(ONCE_COMPLETE, Ordering::Release);
+        let _ = futex::wake(&self.state, futex::Flags::PRIVATE, u32::MAX);
+    }
+
+    unsafe fn reset_unchecked(&self) {
+        self.state.store(ONCE_UNINITIALIZED, Ordering::Release);
+        let _ = futex::wake(&self.state, futex::Flags::PRIVATE, u32::MAX);
     }
 }
 
@@ -316,6 +435,167 @@ impl RawSemaphore for LinuxSemaphore {
 
     fn max_permits(&self) -> u32 {
         self.max
+    }
+}
+
+/// Linux raw rwlock built from a local mutex plus futex-backed epoch waits.
+#[derive(Debug)]
+pub struct LinuxRawRwLock {
+    gate: LinuxRawMutex,
+    epoch: AtomicU32,
+    readers: AtomicU32,
+    waiting_writers: AtomicU32,
+    writer_active: AtomicU32,
+}
+
+impl LinuxRawRwLock {
+    /// Creates a new unlocked Linux raw rwlock.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            gate: LinuxRawMutex::new(),
+            epoch: AtomicU32::new(0),
+            readers: AtomicU32::new(0),
+            waiting_writers: AtomicU32::new(0),
+            writer_active: AtomicU32::new(0),
+        }
+    }
+
+    fn wake_waiters(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        let _ = futex::wake(&self.epoch, futex::Flags::PRIVATE, u32::MAX);
+    }
+
+    fn lock_gate(&self) -> Result<(), SyncError> {
+        self.gate.lock()
+    }
+
+    unsafe fn unlock_gate_unchecked(&self) {
+        // SAFETY: callers only route here immediately after a successful `lock_gate`.
+        unsafe { self.gate.unlock_unchecked() };
+    }
+
+    fn lock_gate_for_release_assumed_infallible(&self) {
+        // The internal gate is a LinuxRawMutex over a valid process-local futex word that
+        // this type constructed itself. On this backend, treating acquisition here as
+        // infallible is the contract assumption that keeps release paths compatible with
+        // `unsafe fn ..._unlock_unchecked` and guard `Drop`. If a future backend cannot
+        // uphold that assumption, the release protocol needs a different design rather than
+        // pretending an error can be surfaced from a `Drop`-driven unlock path.
+        let _ = self.gate.lock();
+    }
+}
+
+// SAFETY: `LinuxRawRwLock` serializes state transitions through an internal raw mutex and
+// uses acquire/release operations for read and write ownership publication.
+unsafe impl RawRwLock for LinuxRawRwLock {
+    fn support(&self) -> RwLockSupport {
+        LINUX_RWLOCK_SUPPORT
+    }
+
+    fn read_lock(&self) -> Result<(), SyncError> {
+        loop {
+            self.lock_gate()?;
+            if self.writer_active.load(Ordering::Relaxed) == 0
+                && self.waiting_writers.load(Ordering::Relaxed) == 0
+            {
+                self.readers.fetch_add(1, Ordering::Acquire);
+                // SAFETY: this thread currently holds the gate mutex.
+                unsafe { self.unlock_gate_unchecked() };
+                return Ok(());
+            }
+            let observed = self.epoch.load(Ordering::Acquire);
+            // SAFETY: this thread currently holds the gate mutex.
+            unsafe { self.unlock_gate_unchecked() };
+            match futex_wait_private(&self.epoch, observed, None)? {
+                WaitOutcome::Woken
+                | WaitOutcome::Mismatch
+                | WaitOutcome::Interrupted
+                | WaitOutcome::TimedOut => {}
+            }
+        }
+    }
+
+    fn try_read_lock(&self) -> Result<bool, SyncError> {
+        self.lock_gate()?;
+        let acquired = if self.writer_active.load(Ordering::Relaxed) == 0
+            && self.waiting_writers.load(Ordering::Relaxed) == 0
+        {
+            self.readers.fetch_add(1, Ordering::Acquire);
+            true
+        } else {
+            false
+        };
+        // SAFETY: this thread currently holds the gate mutex.
+        unsafe { self.unlock_gate_unchecked() };
+        Ok(acquired)
+    }
+
+    fn write_lock(&self) -> Result<(), SyncError> {
+        loop {
+            self.lock_gate()?;
+            if self.writer_active.load(Ordering::Relaxed) == 0
+                && self.readers.load(Ordering::Relaxed) == 0
+            {
+                self.writer_active.store(1, Ordering::Relaxed);
+                // SAFETY: this thread currently holds the gate mutex.
+                unsafe { self.unlock_gate_unchecked() };
+                return Ok(());
+            }
+
+            self.waiting_writers.fetch_add(1, Ordering::Relaxed);
+            let observed = self.epoch.load(Ordering::Acquire);
+            // SAFETY: this thread currently holds the gate mutex.
+            unsafe { self.unlock_gate_unchecked() };
+            let wait_result = futex_wait_private(&self.epoch, observed, None);
+            self.lock_gate()?;
+            self.waiting_writers.fetch_sub(1, Ordering::Relaxed);
+            // SAFETY: this thread currently holds the gate mutex.
+            unsafe { self.unlock_gate_unchecked() };
+            match wait_result? {
+                WaitOutcome::Woken
+                | WaitOutcome::Mismatch
+                | WaitOutcome::Interrupted
+                | WaitOutcome::TimedOut => {}
+            }
+        }
+    }
+
+    fn try_write_lock(&self) -> Result<bool, SyncError> {
+        self.lock_gate()?;
+        let acquired = if self.writer_active.load(Ordering::Relaxed) == 0
+            && self.readers.load(Ordering::Relaxed) == 0
+        {
+            self.writer_active.store(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        };
+        // SAFETY: this thread currently holds the gate mutex.
+        unsafe { self.unlock_gate_unchecked() };
+        Ok(acquired)
+    }
+
+    unsafe fn read_unlock_unchecked(&self) {
+        self.lock_gate_for_release_assumed_infallible();
+        let remaining = self
+            .readers
+            .fetch_sub(1, Ordering::Release)
+            .saturating_sub(1);
+        let should_wake = remaining == 0 && self.waiting_writers.load(Ordering::Relaxed) != 0;
+        // SAFETY: this thread currently holds the gate mutex.
+        unsafe { self.unlock_gate_unchecked() };
+        if should_wake {
+            self.wake_waiters();
+        }
+    }
+
+    unsafe fn write_unlock_unchecked(&self) {
+        self.lock_gate_for_release_assumed_infallible();
+        self.writer_active.store(0, Ordering::Release);
+        // SAFETY: this thread currently holds the gate mutex.
+        unsafe { self.unlock_gate_unchecked() };
+        self.wake_waiters();
     }
 }
 
@@ -546,6 +826,118 @@ mod tests {
                 .try_acquire()
                 .expect("no third permit should exist")
         );
+    }
+
+    #[test]
+    fn linux_raw_once_initializes_only_once_across_threads() {
+        let once = Arc::new(LinuxRawOnce::new());
+        let runs = Arc::new(AtomicU32::new(0));
+        let mut threads = self::std::vec::Vec::new();
+
+        for _ in 0..6 {
+            let once = Arc::clone(&once);
+            let runs = Arc::clone(&runs);
+            threads.push(thread::spawn(move || {
+                loop {
+                    match once.begin().expect("begin should succeed") {
+                        OnceBeginResult::Initialize => {
+                            runs.fetch_add(1, Ordering::AcqRel);
+                            // SAFETY: this thread won initialization and completes exactly once.
+                            unsafe { once.complete_unchecked() };
+                            break;
+                        }
+                        OnceBeginResult::InProgress => {
+                            once.wait().expect("wait should succeed");
+                        }
+                        OnceBeginResult::Complete => break,
+                    }
+                }
+            }));
+        }
+
+        for thread in threads {
+            thread.join().expect("worker should finish");
+        }
+
+        assert_eq!(runs.load(Ordering::Acquire), 1);
+        assert_eq!(once.state(), OnceState::Complete);
+    }
+
+    #[test]
+    fn linux_raw_once_reset_allows_retry() {
+        let once = LinuxRawOnce::new();
+        assert_eq!(
+            once.begin().expect("begin should succeed"),
+            OnceBeginResult::Initialize
+        );
+        // SAFETY: this thread won initialization and is intentionally resetting it.
+        unsafe { once.reset_unchecked() };
+        assert_eq!(once.state(), OnceState::Uninitialized);
+        assert_eq!(
+            once.begin().expect("second begin should succeed"),
+            OnceBeginResult::Initialize
+        );
+        // SAFETY: this thread again owns initialization and completes it exactly once.
+        unsafe { once.complete_unchecked() };
+        assert_eq!(once.state(), OnceState::Complete);
+    }
+
+    #[test]
+    fn linux_raw_rwlock_allows_multiple_readers() {
+        let lock = Arc::new(LinuxRawRwLock::new());
+        let active = Arc::new(AtomicU32::new(0));
+        let max_seen = Arc::new(AtomicU32::new(0));
+        let mut threads = self::std::vec::Vec::new();
+
+        for _ in 0..4 {
+            let lock = Arc::clone(&lock);
+            let active = Arc::clone(&active);
+            let max_seen = Arc::clone(&max_seen);
+            threads.push(thread::spawn(move || {
+                lock.read_lock().expect("read lock should succeed");
+                let current = active.fetch_add(1, Ordering::AcqRel) + 1;
+                update_max(&max_seen, current);
+                thread::sleep(StdDuration::from_millis(5));
+                active.fetch_sub(1, Ordering::AcqRel);
+                // SAFETY: this thread currently holds a matching read lock.
+                unsafe { lock.read_unlock_unchecked() };
+            }));
+        }
+
+        for thread in threads {
+            thread.join().expect("reader should finish");
+        }
+
+        assert!(max_seen.load(Ordering::Acquire) >= 2);
+    }
+
+    #[test]
+    fn linux_raw_rwlock_writer_blocks_new_readers_when_waiting() {
+        let lock = Arc::new(LinuxRawRwLock::new());
+        let writer_acquired = Arc::new(AtomicU32::new(0));
+
+        lock.read_lock().expect("initial read lock should succeed");
+        let writer = {
+            let lock = Arc::clone(&lock);
+            let writer_acquired = Arc::clone(&writer_acquired);
+            thread::spawn(move || {
+                lock.write_lock().expect("writer should eventually acquire");
+                writer_acquired.store(1, Ordering::Release);
+                // SAFETY: this thread currently holds the write lock.
+                unsafe { lock.write_unlock_unchecked() };
+            })
+        };
+
+        thread::sleep(StdDuration::from_millis(10));
+        assert!(
+            !lock.try_read_lock().expect("try_read should evaluate"),
+            "new readers should not barge ahead of a waiting writer"
+        );
+        // SAFETY: the current thread holds the initial read lock.
+        unsafe { lock.read_unlock_unchecked() };
+
+        writer.join().expect("writer should finish");
+        assert_eq!(writer_acquired.load(Ordering::Acquire), 1);
     }
 
     fn update_max(max_seen: &AtomicU32, candidate: u32) {

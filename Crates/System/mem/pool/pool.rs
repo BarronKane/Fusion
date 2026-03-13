@@ -20,7 +20,9 @@ mod stats;
 
 pub use builder::MemoryPoolBuilder;
 pub use error::{MemoryPoolError, MemoryPoolErrorKind};
-pub use extent::{MemoryPoolExtentRequest, MemoryPoolLease, MemoryPoolLeaseId, MemoryPoolLeaseView};
+pub use extent::{
+    MemoryPoolExtentRequest, MemoryPoolLease, MemoryPoolLeaseId, MemoryPoolLeaseView,
+};
 pub use member::{
     MemoryPoolContributor, MemoryPoolContributorOrigin, MemoryPoolMemberId, MemoryPoolMemberInfo,
 };

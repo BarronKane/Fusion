@@ -8,6 +8,8 @@
 mod caps;
 mod error;
 mod mutex;
+mod once;
+mod rwlock;
 mod semaphore;
 mod unsupported;
 mod wait;
@@ -15,6 +17,8 @@ mod wait;
 pub use caps::*;
 pub use error::*;
 pub use mutex::*;
+pub use once::*;
+pub use rwlock::*;
 pub use semaphore::*;
 pub use unsupported::*;
 pub use wait::*;
