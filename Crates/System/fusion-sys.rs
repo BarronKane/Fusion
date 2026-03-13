@@ -15,3 +15,6 @@ pub mod mem;
 #[path = "sync/sync.rs"]
 /// System synchronization primitives and wrappers.
 pub mod sync;
+#[path = "thread/thread.rs"]
+/// System threading contracts and wrappers.
+pub mod thread;
