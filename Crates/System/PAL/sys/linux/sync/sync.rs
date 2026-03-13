@@ -486,6 +486,31 @@ impl LinuxRawRwLock {
     }
 }
 
+struct WaitingWriterGuard<'a> {
+    lock: &'a LinuxRawRwLock,
+}
+
+impl<'a> WaitingWriterGuard<'a> {
+    fn new(lock: &'a LinuxRawRwLock) -> Self {
+        lock.waiting_writers.fetch_add(1, Ordering::Relaxed);
+        Self { lock }
+    }
+}
+
+impl Drop for WaitingWriterGuard<'_> {
+    fn drop(&mut self) {
+        // Waiting-writer accounting is part of the same internal release path story as the
+        // unlock helpers above: once the writer has joined the wait set, backing that count
+        // out must not be skipped simply because the internal gate reported an impossible
+        // failure on this Linux backend.
+        self.lock.lock_gate_for_release_assumed_infallible();
+        self.lock.waiting_writers.fetch_sub(1, Ordering::Relaxed);
+        // SAFETY: `lock_gate_for_release_assumed_infallible` treats the gate as held under
+        // the same backend-local invariant used by the rwlock release paths.
+        unsafe { self.lock.unlock_gate_unchecked() };
+    }
+}
+
 // SAFETY: `LinuxRawRwLock` serializes state transitions through an internal raw mutex and
 // uses acquire/release operations for read and write ownership publication.
 unsafe impl RawRwLock for LinuxRawRwLock {
@@ -543,15 +568,12 @@ unsafe impl RawRwLock for LinuxRawRwLock {
                 return Ok(());
             }
 
-            self.waiting_writers.fetch_add(1, Ordering::Relaxed);
+            let waiting_writer = WaitingWriterGuard::new(self);
             let observed = self.epoch.load(Ordering::Acquire);
             // SAFETY: this thread currently holds the gate mutex.
             unsafe { self.unlock_gate_unchecked() };
             let wait_result = futex_wait_private(&self.epoch, observed, None);
-            self.lock_gate()?;
-            self.waiting_writers.fetch_sub(1, Ordering::Relaxed);
-            // SAFETY: this thread currently holds the gate mutex.
-            unsafe { self.unlock_gate_unchecked() };
+            drop(waiting_writer);
             match wait_result? {
                 WaitOutcome::Woken
                 | WaitOutcome::Mismatch
