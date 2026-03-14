@@ -185,15 +185,13 @@ pub const FUSION_KN_BOUNDARY_LEDGER: [KernelBoundaryLedgerEntry<'static>; 2] = [
     KernelBoundaryLedgerEntry {
         id: "module.lifecycle",
         kind: KernelBoundaryKind::ModuleLifecycle,
-        rationale:
-            "Module load and unload remain explicit kernel-boundary transitions requiring rollback discipline.",
+        rationale: "Module load and unload remain explicit kernel-boundary transitions requiring rollback discipline.",
         review_required: true,
     },
     KernelBoundaryLedgerEntry {
         id: "kernel.logging",
         kind: KernelBoundaryKind::KernelLogging,
-        rationale:
-            "Kernel logging is retained for controlled observability during early integration and must remain reviewable.",
+        rationale: "Kernel logging is retained for controlled observability during early integration and must remain reviewable.",
         review_required: true,
     },
 ];

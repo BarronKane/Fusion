@@ -42,7 +42,9 @@ impl fmt::Display for LinuxFusionKnTransportError {
             Self::OpenFailed(errno) => write!(f, "device open failed with errno {errno}"),
             Self::WriteFailed(errno) => write!(f, "device write failed with errno {errno}"),
             Self::ReadFailed(errno) => write!(f, "device read failed with errno {errno}"),
-            Self::UnexpectedEndOfStream => f.write_str("device stream ended before a full message arrived"),
+            Self::UnexpectedEndOfStream => {
+                f.write_str("device stream ended before a full message arrived")
+            }
             Self::Wire(error) => write!(f, "response framing failed: {error:?}"),
         }
     }
@@ -77,12 +79,7 @@ impl LinuxFusionKnCharacterDevice {
             return Err(LinuxFusionKnTransportError::InvalidPath);
         }
 
-        let fd = unsafe {
-            libc::open(
-                path.as_ptr().cast(),
-                libc::O_RDWR | libc::O_CLOEXEC,
-            )
-        };
+        let fd = unsafe { libc::open(path.as_ptr().cast(), libc::O_RDWR | libc::O_CLOEXEC) };
         if fd < 0 {
             return Err(LinuxFusionKnTransportError::OpenFailed(last_errno()));
         }
@@ -119,8 +116,9 @@ impl FusionKnTransport for LinuxFusionKnCharacterDevice {
         }
 
         read_exact(self.fd, &mut response[..FusionKnMessageHeader::ENCODED_LEN])?;
-        let header = FusionKnMessageHeader::decode_from(&response[..FusionKnMessageHeader::ENCODED_LEN])
-            .map_err(LinuxFusionKnTransportError::Wire)?;
+        let header =
+            FusionKnMessageHeader::decode_from(&response[..FusionKnMessageHeader::ENCODED_LEN])
+                .map_err(LinuxFusionKnTransportError::Wire)?;
         let payload_bytes = usize::try_from(header.payload_bytes)
             .map_err(|_| LinuxFusionKnTransportError::Wire(FusionKnWireError::BufferTooSmall))?;
         let total = FusionKnMessageHeader::ENCODED_LEN + payload_bytes;
@@ -151,13 +149,8 @@ impl Drop for LinuxFusionKnCharacterDevice {
 fn write_all(fd: c_int, bytes: &[u8]) -> Result<(), LinuxFusionKnTransportError> {
     let mut written = 0;
     while written < bytes.len() {
-        let rc = unsafe {
-            libc::write(
-                fd,
-                bytes[written..].as_ptr().cast(),
-                bytes.len() - written,
-            )
-        };
+        let rc =
+            unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
         if rc < 0 {
             let errno = last_errno();
             if errno == libc::EINTR {
@@ -176,13 +169,7 @@ fn write_all(fd: c_int, bytes: &[u8]) -> Result<(), LinuxFusionKnTransportError>
 fn read_exact(fd: c_int, dst: &mut [u8]) -> Result<(), LinuxFusionKnTransportError> {
     let mut read = 0;
     while read < dst.len() {
-        let rc = unsafe {
-            libc::read(
-                fd,
-                dst[read..].as_mut_ptr().cast(),
-                dst.len() - read,
-            )
-        };
+        let rc = unsafe { libc::read(fd, dst[read..].as_mut_ptr().cast(), dst.len() - read) };
         if rc < 0 {
             let errno = last_errno();
             if errno == libc::EINTR {

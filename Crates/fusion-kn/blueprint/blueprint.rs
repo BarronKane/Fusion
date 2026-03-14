@@ -65,9 +65,8 @@ pub const FUSION_KN_METADATA: KernelModuleMetadata<'static> = KernelModuleMetada
 };
 
 /// Initial kernel blueprint constant for the crate.
-pub const FUSION_KN_BLUEPRINT: KernelModuleBlueprint<'static> =
-    KernelModuleBlueprint::new(
-        FUSION_KN_METADATA,
-        &crate::contract::FUSION_KN_BOUNDARY_CONTRACT,
-        &DO_178C_KERNEL_BASELINE,
-    );
+pub const FUSION_KN_BLUEPRINT: KernelModuleBlueprint<'static> = KernelModuleBlueprint::new(
+    FUSION_KN_METADATA,
+    &crate::contract::FUSION_KN_BOUNDARY_CONTRACT,
+    &DO_178C_KERNEL_BASELINE,
+);
