@@ -6,6 +6,16 @@
 //! consumers do not need to reach below the `fusion-std` boundary just to access the core
 //! synchronization surface.
 //!
+//! # Example
+//!
+//! ```rust
+//! use fusion_std::sync::Mutex;
+//!
+//! let value = Mutex::new(1_u32);
+//! *value.lock().expect("mutex should lock") += 1;
+//! assert_eq!(*value.lock().expect("mutex should lock"), 2);
+//! ```
+//!
 //! Today this module is only a re-export façade. That is deliberate, not lazy theater.
 //! Higher-level synchronization constructs that lean on `alloc`/`std` ergonomics or runtime
 //! policy are expected to grow here later without relocating the primitive source of truth.

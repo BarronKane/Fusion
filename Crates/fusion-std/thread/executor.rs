@@ -1,4 +1,13 @@
 //! Domain 3: public async executor and reactor surface.
+//!
+//! # Example
+//!
+//! ```rust
+//! use fusion_std::thread::{Executor, ExecutorConfig, ExecutorMode};
+//!
+//! let executor = Executor::new(ExecutorConfig::new());
+//! assert_eq!(executor.mode(), ExecutorMode::CurrentThread);
+//! ```
 
 use core::future::Future;
 use core::marker::PhantomData;
