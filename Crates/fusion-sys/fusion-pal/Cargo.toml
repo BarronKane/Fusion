@@ -12,11 +12,16 @@ repository.workspace = true
 crate-type = ["rlib"]
 path = "fusion-pal.rs"
 
+[features]
+default = []
+sys-fusion-kn = ["dep:fusion-kn"]
+
 [lints]
 workspace = true
 
 [dependencies]
 bitflags.workspace = true
+fusion-kn = { path = "../../fusion-kn", optional = true, default-features = false, features = ["client"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2.183", default-features = false }

@@ -1,5 +1,6 @@
 //! High-level kernel blueprint records composed from metadata and evidence plans.
 
+use crate::contract::KernelBoundaryContract;
 use crate::evidence::{DO_178C_KERNEL_BASELINE, KernelEvidenceExpectation};
 use crate::module::{
     KernelBuildRequirements, KernelIntegrationModel, KernelModuleMetadata,
@@ -19,31 +20,6 @@ pub enum KernelBlueprintPhase {
     Qualification,
 }
 
-/// Panic policy expected of the kernel-facing crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum KernelPanicPolicy {
-    /// Panic paths are to be treated as forbidden design outcomes.
-    Forbidden,
-    /// Panic handling is delegated to a kernel-defined abort/fault policy.
-    KernelDefinedAbort,
-}
-
-/// Allocation policy expected of the kernel-facing crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum KernelAllocationPolicy {
-    /// Dynamic allocation is forbidden except where explicitly proven otherwise.
-    Forbidden,
-    /// Allocation is allowed only through explicit kernel-facing policy and review.
-    ExplicitKernelAllocator,
-}
-
-/// Required discipline for unsafe kernel boundaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum KernelUnsafeBoundaryPolicy {
-    /// Unsafe boundaries require explicit ledger entries and justification.
-    ExplicitLedgerRequired,
-}
-
 /// Initial blueprint record for the kernel-facing crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KernelModuleBlueprint<'a> {
@@ -55,12 +31,8 @@ pub struct KernelModuleBlueprint<'a> {
     pub requirements: KernelBuildRequirements,
     /// Current maturity phase.
     pub phase: KernelBlueprintPhase,
-    /// Panic discipline expected of the crate.
-    pub panic_policy: KernelPanicPolicy,
-    /// Allocation discipline expected of the crate.
-    pub allocation_policy: KernelAllocationPolicy,
-    /// Unsafe-boundary handling policy.
-    pub unsafe_boundary_policy: KernelUnsafeBoundaryPolicy,
+    /// Strict boundary contract expected of the crate.
+    pub boundary: &'a KernelBoundaryContract<'a>,
     /// Evidence expectations attached to the blueprint.
     pub evidence: &'a [KernelEvidenceExpectation],
 }
@@ -70,6 +42,7 @@ impl<'a> KernelModuleBlueprint<'a> {
     #[must_use]
     pub const fn new(
         metadata: KernelModuleMetadata<'a>,
+        boundary: &'a KernelBoundaryContract<'a>,
         evidence: &'a [KernelEvidenceExpectation],
     ) -> Self {
         Self {
@@ -77,9 +50,7 @@ impl<'a> KernelModuleBlueprint<'a> {
             integration: KernelIntegrationModel::LinuxOutOfTreeModule,
             requirements: rust_for_linux_out_of_tree_requirements(),
             phase: KernelBlueprintPhase::Blueprint,
-            panic_policy: KernelPanicPolicy::Forbidden,
-            allocation_policy: KernelAllocationPolicy::ExplicitKernelAllocator,
-            unsafe_boundary_policy: KernelUnsafeBoundaryPolicy::ExplicitLedgerRequired,
+            boundary,
             evidence,
         }
     }
@@ -95,4 +66,8 @@ pub const FUSION_KN_METADATA: KernelModuleMetadata<'static> = KernelModuleMetada
 
 /// Initial kernel blueprint constant for the crate.
 pub const FUSION_KN_BLUEPRINT: KernelModuleBlueprint<'static> =
-    KernelModuleBlueprint::new(FUSION_KN_METADATA, &DO_178C_KERNEL_BASELINE);
+    KernelModuleBlueprint::new(
+        FUSION_KN_METADATA,
+        &crate::contract::FUSION_KN_BOUNDARY_CONTRACT,
+        &DO_178C_KERNEL_BASELINE,
+    );

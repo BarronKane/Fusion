@@ -12,21 +12,39 @@
 //! structure that can support a future compliance story without smuggling those decisions
 //! into random module code later.
 
+#[cfg(feature = "client")]
+#[path = "client/client.rs"]
+/// No-alloc client helpers for the mediated Fusion kernel boundary.
+pub mod client;
+#[cfg(feature = "contract")]
 #[path = "blueprint/blueprint.rs"]
 /// High-level kernel blueprint records composed from metadata and evidence.
 pub mod blueprint;
+#[cfg(feature = "contract")]
+#[path = "contract/contract.rs"]
+/// Strict kernel-boundary contract vocabulary.
+pub mod contract;
+#[cfg(feature = "contract")]
 #[path = "evidence/evidence.rs"]
 /// Evidence-planning vocabulary for future assurance work.
 pub mod evidence;
+#[cfg(feature = "contract")]
 #[path = "module/module.rs"]
 /// Kernel integration model and module metadata vocabulary.
 pub mod module;
 
+#[cfg(feature = "contract")]
 pub use blueprint::*;
+#[cfg(feature = "client")]
+pub use client::*;
+#[cfg(feature = "contract")]
+pub use contract::*;
+#[cfg(feature = "contract")]
 pub use evidence::*;
+#[cfg(feature = "contract")]
 pub use module::*;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "contract"))]
 mod tests {
     use super::*;
 
@@ -39,14 +57,20 @@ mod tests {
             FUSION_KN_BLUEPRINT.integration,
             KernelIntegrationModel::LinuxOutOfTreeModule
         );
+        assert_eq!(
+            FUSION_KN_BLUEPRINT.boundary.service_class,
+            KernelServiceClass::Foundation
+        );
     }
 
     #[test]
     fn blueprint_requires_explicit_unsafe_ledger() {
         assert_eq!(
-            FUSION_KN_BLUEPRINT.unsafe_boundary_policy,
+            FUSION_KN_BLUEPRINT.boundary.unsafe_boundary_policy,
             KernelUnsafeBoundaryPolicy::ExplicitLedgerRequired
         );
         assert!(!FUSION_KN_BLUEPRINT.evidence.is_empty());
+        assert!(FUSION_KN_BLUEPRINT.boundary.validate().is_ok());
+        assert!(FUSION_KN_BLUEPRINT.boundary.user_surfaces.is_empty());
     }
 }

@@ -12,6 +12,12 @@ repository.workspace = true
 crate-type = ["rlib"]
 path = "fusion-kn.rs"
 
+[features]
+default = ["contract"]
+contract = []
+client = ["contract"]
+module = ["contract"]
+
 [dependencies]
 bitflags.workspace = true
 

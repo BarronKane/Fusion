@@ -65,6 +65,9 @@ use windows as platform;
 pub mod context;
 /// Public event module re-exported from the selected private platform backend.
 pub mod event;
+#[cfg(feature = "sys-fusion-kn")]
+/// Public mediated Fusion kernel backend module.
+pub mod fusion_kn;
 /// Public hardware module re-exported from the selected private platform backend.
 pub mod hal;
 /// Public memory module re-exported from the selected private platform backend.
