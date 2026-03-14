@@ -99,6 +99,42 @@ bitflags! {
     }
 }
 
+bitflags! {
+    /// Effective SIMD surface available at runtime on the current machine.
+    ///
+    /// These flags describe SIMD/vector features that are both implemented by the
+    /// hardware and usable under the current runtime/OS context-switch model.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct HardwareSimdSet: u64 {
+        /// x86 SSE.
+        const SSE      = 1 << 0;
+        /// x86 SSE2.
+        const SSE2     = 1 << 1;
+        /// x86 SSE3.
+        const SSE3     = 1 << 2;
+        /// x86 SSSE3.
+        const SSSE3    = 1 << 3;
+        /// x86 SSE4.1.
+        const SSE4_1   = 1 << 4;
+        /// x86 SSE4.2.
+        const SSE4_2   = 1 << 5;
+        /// x86 AVX.
+        const AVX      = 1 << 6;
+        /// x86 AVX2.
+        const AVX2     = 1 << 7;
+        /// x86 AVX-512 Foundation.
+        const AVX512F  = 1 << 8;
+        /// Arm/AArch64 Advanced SIMD / NEON.
+        const NEON     = 1 << 9;
+        /// AArch64 Scalable Vector Extension.
+        const SVE      = 1 << 10;
+        /// AArch64 Scalable Vector Extension 2.
+        const SVE2     = 1 << 11;
+        /// RISC-V vector extension.
+        const RVV      = 1 << 12;
+    }
+}
+
 /// Stable CPU-facing execution-model description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HardwareCpuDescription {
@@ -116,6 +152,8 @@ pub struct HardwareCpuDescription {
     pub pointer_width_bits: u16,
     /// Native atomic-width support.
     pub atomic_widths: HardwareAtomicWidthSet,
+    /// Runtime-usable SIMD/vector feature surface.
+    pub simd: HardwareSimdSet,
 }
 
 /// Stack-ABI facts relevant to user-space context setup and green-thread stacks.
@@ -137,18 +175,6 @@ impl From<crate::pal::context::ContextStackDirection> for HardwareStackDirection
             crate::pal::context::ContextStackDirection::Unknown => Self::Unknown,
             crate::pal::context::ContextStackDirection::Down => Self::Down,
             crate::pal::context::ContextStackDirection::Up => Self::Up,
-        }
-    }
-}
-
-impl From<crate::pal::context::ContextGuarantee> for super::HardwareGuarantee {
-    fn from(value: crate::pal::context::ContextGuarantee) -> Self {
-        match value {
-            crate::pal::context::ContextGuarantee::Unsupported => Self::Unsupported,
-            crate::pal::context::ContextGuarantee::Unknown => Self::Unknown,
-            crate::pal::context::ContextGuarantee::Advisory => Self::Advisory,
-            crate::pal::context::ContextGuarantee::Enforced => Self::Enforced,
-            crate::pal::context::ContextGuarantee::Verified => Self::Verified,
         }
     }
 }

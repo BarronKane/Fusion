@@ -4,7 +4,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use fusion_sys::thread::{
     ThreadConfig, ThreadConstraintMode, ThreadIdentityStability, ThreadPlacementPhase,
-    ThreadPlacementRequest, ThreadSchedulerClass, ThreadSchedulerModel, system_thread,
+    ThreadPlacementRequest, ThreadPlacementTarget, ThreadSchedulerClass, ThreadSchedulerModel,
+    system_thread,
 };
 use rustix::thread::{self as rustix_thread, CpuSet};
 
@@ -93,9 +94,10 @@ fn linux_thread_applies_requested_affinity_before_user_entry() {
         group: fusion_sys::thread::ThreadProcessorGroupId(0),
         index: selected_cpu,
     }];
+    let targets = [ThreadPlacementTarget::LogicalCpus(&cpus)];
     let config = ThreadConfig {
         placement: ThreadPlacementRequest {
-            logical_cpus: &cpus,
+            targets: &targets,
             mode: ThreadConstraintMode::Require,
             phase: ThreadPlacementPhase::PreStartRequired,
             ..ThreadPlacementRequest::new()

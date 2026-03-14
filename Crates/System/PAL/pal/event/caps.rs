@@ -2,6 +2,9 @@
 
 use bitflags::bitflags;
 
+/// Shared implementation-category vocabulary specialized for event support.
+pub use crate::pal::caps::ImplementationKind as EventImplementationKind;
+
 bitflags! {
     /// Event-poller features the backend can honestly surface.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,17 +35,6 @@ pub enum EventModel {
     Completion,
     /// Hybrid backend able to surface both models honestly.
     Hybrid,
-    /// Unsupported on this backend.
-    Unsupported,
-}
-
-/// Backend implementation category for event polling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EventImplementationKind {
-    /// Native kernel or platform event source.
-    Native,
-    /// Emulated on top of other primitives.
-    Emulated,
     /// Unsupported on this backend.
     Unsupported,
 }

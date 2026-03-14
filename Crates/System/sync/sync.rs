@@ -20,6 +20,7 @@ pub use fusion_pal::sys::sync::{
     MutexCaps, MutexSupport, OnceBeginResult, OnceCaps, OnceState, OnceSupport,
     PriorityInheritanceSupport, ProcessScopeSupport, RawMutex, RawOnce, RawRwLock, RawSemaphore,
     RecursionSupport, RobustnessSupport, RwLockCaps, RwLockFairnessSupport, RwLockSupport,
-    SemaphoreCaps, SemaphoreSupport, SyncBase, SyncError, SyncErrorKind, SyncImplementationKind,
-    SyncSupport, TimeoutCaps, WaitCaps, WaitOutcome, WaitPrimitive, WaitSupport,
+    SemaphoreCaps, SemaphoreSupport, SyncBase, SyncError, SyncErrorKind, SyncFallbackKind,
+    SyncImplementationKind, SyncSupport, TimeoutCaps, WaitCaps, WaitOutcome, WaitPrimitive,
+    WaitSupport,
 };

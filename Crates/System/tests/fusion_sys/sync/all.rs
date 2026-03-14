@@ -2,7 +2,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use fusion_sys::sync::{
     Mutex, MutexCaps, Once, OnceLock, RawMutex, RwLock, SpinMutex, SyncError, SyncErrorKind,
-    SyncImplementationKind, ThinMutex,
+    SyncFallbackKind, SyncImplementationKind, ThinMutex,
 };
 
 extern crate std;
@@ -26,7 +26,8 @@ fn spin_mutex_reports_spin_only_support_and_try_lock_behavior() {
     let lock = SpinMutex::new();
     let support = lock.support();
 
-    assert_eq!(support.implementation, SyncImplementationKind::SpinOnly);
+    assert_eq!(support.implementation, SyncImplementationKind::Emulated);
+    assert_eq!(support.fallback, SyncFallbackKind::SpinOnly);
     assert!(support.caps.contains(MutexCaps::TRY_LOCK));
 
     assert!(lock.try_lock().expect("first try_lock should succeed"));
