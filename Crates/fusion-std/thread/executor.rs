@@ -11,8 +11,14 @@
 
 use core::future::Future;
 use core::marker::PhantomData;
+use core::time::Duration;
 
-use fusion_sys::event::{EventSupport, EventSystem};
+use fusion_sys::event::EventSystem;
+pub use fusion_sys::event::{
+    EventCompletion, EventCompletionOp, EventCompletionOpKind, EventError, EventErrorKind,
+    EventInterest, EventKey, EventModel, EventNotification, EventPoller as ReactorPoller,
+    EventReadiness, EventRecord, EventSourceHandle, EventSupport,
+};
 
 use super::{GreenPool, ThreadPool};
 
@@ -102,6 +108,79 @@ impl Reactor {
     #[must_use]
     pub fn support(&self) -> EventSupport {
         self.inner.support()
+    }
+
+    /// Creates a backend poller for this reactor.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend failure, including unsupported event polling.
+    pub fn create(&self) -> Result<ReactorPoller, EventError> {
+        self.inner.create()
+    }
+
+    /// Registers a source with the underlying backend reactor.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend registration failure.
+    pub fn register(
+        &self,
+        poller: &mut ReactorPoller,
+        source: EventSourceHandle,
+        interest: EventInterest,
+    ) -> Result<EventKey, EventError> {
+        self.inner.register(poller, source, interest)
+    }
+
+    /// Updates an existing source registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend re-registration failure.
+    pub fn reregister(
+        &self,
+        poller: &mut ReactorPoller,
+        key: EventKey,
+        interest: EventInterest,
+    ) -> Result<(), EventError> {
+        self.inner.reregister(poller, key, interest)
+    }
+
+    /// Removes a source registration from the backend reactor.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend deregistration failure.
+    pub fn deregister(&self, poller: &mut ReactorPoller, key: EventKey) -> Result<(), EventError> {
+        self.inner.deregister(poller, key)
+    }
+
+    /// Submits a completion-style operation when the backend supports it.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend submission failure.
+    pub fn submit(
+        &self,
+        poller: &mut ReactorPoller,
+        operation: EventCompletionOp,
+    ) -> Result<EventKey, EventError> {
+        self.inner.submit(poller, operation)
+    }
+
+    /// Polls the backend for ready or completed events.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend polling failure.
+    pub fn poll(
+        &self,
+        poller: &mut ReactorPoller,
+        events: &mut [EventRecord],
+        timeout: Option<Duration>,
+    ) -> Result<usize, EventError> {
+        self.inner.poll(poller, events, timeout)
     }
 }
 

@@ -330,7 +330,8 @@ impl FusionKnNegotiationRequest {
         }
         let transport = FusionKnTransportKind::from_u16(read_u16(&src[8..10]))
             .ok_or(FusionKnWireError::InvalidTransportKind)?;
-        let requested_capabilities = FusionKnCapabilityFlags::from_bits_retain(read_u32(&src[12..16]));
+        let requested_capabilities =
+            FusionKnCapabilityFlags::from_bits_retain(read_u32(&src[12..16]));
 
         Ok(Self {
             min_version_major: read_u16(&src[0..2]),

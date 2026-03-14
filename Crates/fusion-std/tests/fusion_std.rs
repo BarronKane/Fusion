@@ -1,10 +1,19 @@
 use fusion_std::sync::{Mutex, OnceLock, RwLock};
 use fusion_std::thread::{
-    DeterministicConstraints, Executor, ExecutorConfig, ExecutorError, ExecutorMode, GreenPool,
-    Runtime, RuntimeConfig, RuntimeError, RuntimeProfile, ThreadPool, ThreadPoolConfig,
+    DeterministicConstraints, EventInterest, EventNotification, EventReadiness, EventRecord,
+    EventSourceHandle, Executor, ExecutorConfig, ExecutorError, ExecutorMode, GreenPool, Runtime,
+    RuntimeConfig, RuntimeError, RuntimeProfile, ThreadPool, ThreadPoolConfig,
 };
 use fusion_sys::fiber::FiberSystem;
 use fusion_sys::thread::ThreadErrorKind;
+#[cfg(target_os = "linux")]
+use std::io::Write;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 #[test]
 fn sync_facade_mutex_and_rwlock_round_trip() {
@@ -26,7 +35,8 @@ fn sync_facade_once_lock_initializes_once() {
         .expect("once lock should initialize");
     assert_eq!(*value, 42);
     assert_eq!(
-        *cell.get_or_init(|| 99_u32)
+        *cell
+            .get_or_init(|| 99_u32)
             .expect("once lock should reuse initialized value"),
         42
     );
@@ -69,4 +79,48 @@ fn executor_and_runtime_facades_are_honest_stubs() {
         elastic: None,
     });
     assert!(matches!(runtime, Err(RuntimeError::Unsupported)));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn reactor_facade_exposes_lower_level_readiness_polling() {
+    let executor = Executor::new(ExecutorConfig::new());
+    let reactor = executor.reactor();
+    let mut poller = reactor.create().expect("reactor should create a poller");
+    let (reader, mut writer) = UnixStream::pair().expect("unix stream pair should create");
+
+    let key = reactor
+        .register(
+            &mut poller,
+            EventSourceHandle(
+                usize::try_from(reader.as_raw_fd()).expect("unix stream fd should be non-negative"),
+            ),
+            EventInterest::READABLE | EventInterest::ERROR | EventInterest::HANGUP,
+        )
+        .expect("reactor should register the reader");
+
+    writer
+        .write_all(b"x")
+        .expect("writer should make the reader readable");
+
+    let mut events = [EventRecord {
+        key,
+        notification: EventNotification::Readiness(EventReadiness::empty()),
+    }; 4];
+    let ready = reactor
+        .poll(&mut poller, &mut events, Some(Duration::from_secs(1)))
+        .expect("reactor poll should succeed");
+    assert!(ready >= 1);
+
+    let readiness = match events[0].notification {
+        EventNotification::Readiness(readiness) => readiness,
+        EventNotification::Completion(_) => {
+            panic!("linux reactor façade should surface readiness notifications")
+        }
+    };
+    assert!(readiness.contains(EventReadiness::READABLE));
+
+    reactor
+        .deregister(&mut poller, key)
+        .expect("reactor should deregister the reader");
 }

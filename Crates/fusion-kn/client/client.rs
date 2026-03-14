@@ -116,13 +116,13 @@ where
             FusionKnNegotiationRequest::ENCODED_LEN_U32,
         );
 
-        let mut request = [0_u8;
-            FusionKnMessageHeader::ENCODED_LEN + FusionKnNegotiationRequest::ENCODED_LEN];
+        let mut request =
+            [0_u8; FusionKnMessageHeader::ENCODED_LEN + FusionKnNegotiationRequest::ENCODED_LEN];
         request_header.encode_into(&mut request[..FusionKnMessageHeader::ENCODED_LEN])?;
         request_payload.encode_into(&mut request[FusionKnMessageHeader::ENCODED_LEN..])?;
 
-        let mut response = [0_u8;
-            FusionKnMessageHeader::ENCODED_LEN + FusionKnNegotiationResponse::ENCODED_LEN];
+        let mut response =
+            [0_u8; FusionKnMessageHeader::ENCODED_LEN + FusionKnNegotiationResponse::ENCODED_LEN];
         let response_bytes = self
             .transport
             .transact(&request, &mut response)
@@ -131,7 +131,8 @@ where
             return Err(FusionKnClientError::Wire(FusionKnWireError::BufferTooSmall));
         }
 
-        let header = FusionKnMessageHeader::decode_from(&response[..FusionKnMessageHeader::ENCODED_LEN])?;
+        let header =
+            FusionKnMessageHeader::decode_from(&response[..FusionKnMessageHeader::ENCODED_LEN])?;
         if !header.flags.contains(FusionKnMessageFlags::RESPONSE) {
             return Err(FusionKnClientError::Wire(FusionKnWireError::InvalidFlags));
         }
@@ -146,7 +147,8 @@ where
         }
 
         let required = FusionKnMessageHeader::ENCODED_LEN
-            + usize::try_from(header.payload_bytes).map_err(|_| FusionKnClientError::ResponseTooLarge)?;
+            + usize::try_from(header.payload_bytes)
+                .map_err(|_| FusionKnClientError::ResponseTooLarge)?;
         if required > response.len() || response_bytes < required {
             return Err(FusionKnClientError::ResponseTooLarge);
         }
@@ -244,6 +246,10 @@ mod tests {
         assert_eq!(session.version_minor, FUSION_KN_PROTOCOL_VERSION_MINOR);
         assert_eq!(session.transport, FusionKnTransportKind::CharacterDevice);
         assert_eq!(session.max_payload_bytes, 1024);
-        assert!(session.capabilities.contains(FusionKnCapabilityFlags::NEGOTIATION));
+        assert!(
+            session
+                .capabilities
+                .contains(FusionKnCapabilityFlags::NEGOTIATION)
+        );
     }
 }

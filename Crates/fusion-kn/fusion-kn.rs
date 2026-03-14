@@ -12,14 +12,14 @@
 //! structure that can support a future compliance story without smuggling those decisions
 //! into random module code later.
 
-#[cfg(feature = "client")]
-#[path = "client/client.rs"]
-/// No-alloc client helpers for the mediated Fusion kernel boundary.
-pub mod client;
 #[cfg(feature = "contract")]
 #[path = "blueprint/blueprint.rs"]
 /// High-level kernel blueprint records composed from metadata and evidence.
 pub mod blueprint;
+#[cfg(feature = "client")]
+#[path = "client/client.rs"]
+/// No-alloc client helpers for the mediated Fusion kernel boundary.
+pub mod client;
 #[cfg(feature = "contract")]
 #[path = "contract/contract.rs"]
 /// Strict kernel-boundary contract vocabulary.
