@@ -5,6 +5,11 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+
+    if env::var_os("CARGO_FEATURE_MODULE").is_none() {
+        return;
+    }
+
     println!("cargo:rerun-if-changed=Kbuild");
     println!("cargo:rerun-if-changed=Makefile");
     println!("cargo:rerun-if-changed=fusion_kn.rs");

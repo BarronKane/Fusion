@@ -16,13 +16,27 @@ exists.
 The initial Linux out-of-tree build seam is modeled on the Rust-for-Linux
 `rust-out-of-tree-module` template.
 
-The current sample module registers a flat misc-device node named
-`/dev/fusion_kn_hello_world`. A sample `udev` rule is provided in
-[`99-fusion-kn.rules`](./99-fusion-kn.rules) to expose a friendlier
-`/dev/fusion-kn/hello_world` symlink with group-readable permissions:
+The current kernel module entry is intentionally inert. It registers no user-facing
+device or sysfs surface yet. That is deliberate: the first real deliverable for
+`fusion-kn` is a strict kernel-boundary contract, not a demo interface.
 
-1. Install the rule to `/etc/udev/rules.d/99-fusion-kn.rules`.
-2. Create a system group: `sudo groupadd --system fusionkn`
-3. Add intended users: `sudo usermod -aG fusionkn "$USER"`
-4. Reload rules: `sudo udevadm control --reload`
-5. Trigger the misc device or reload the module.
+The Cargo-visible crate now carries:
+
+- kernel integration metadata and build requirements
+- a strict boundary contract describing allowed contexts, blocking policy, panic policy,
+  allocation policy, and explicitly reviewed boundary crossings
+- a fixed-layout mediated wire protocol for negotiated kernel/user exchange
+- a no-alloc client surface that can be consumed by `fusion-pal`
+- evidence-planning vocabulary for a future assurance story
+
+Only after those rules are stable should user-facing kernel surfaces start to appear.
+
+Feature split:
+
+- `contract`: shared boundary policy, blueprint, evidence, and wire vocabulary
+- `client`: no-alloc protocol client helpers for mediated backends
+- `module`: Rust-for-Linux out-of-tree module build path
+
+The build script is intentionally inert unless `module` is enabled. That keeps
+client-side consumers from accidentally trying to build a kernel module just because
+Cargo woke up feeling malicious.

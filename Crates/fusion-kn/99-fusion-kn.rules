@@ -1,4 +1,0 @@
-# Expose the fusion-kn hello-world misc device with a friendlier nested path.
-# Install to /etc/udev/rules.d/99-fusion-kn.rules, then create the `fusionkn`
-# system group and add intended users to it.
-SUBSYSTEM=="misc", KERNEL=="fusion_kn_hello_world", GROUP="fusionkn", MODE="0440", SYMLINK+="fusion-kn/hello_world"
