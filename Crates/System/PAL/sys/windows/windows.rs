@@ -4,6 +4,9 @@ pub mod context;
 #[path = "event/event.rs"]
 /// Windows PAL event backend implementation.
 pub mod event;
+#[path = "hal/hal.rs"]
+/// Windows PAL hardware backend implementation.
+pub mod hal;
 #[path = "mem/mem.rs"]
 /// Windows PAL memory backend implementation.
 pub mod mem;

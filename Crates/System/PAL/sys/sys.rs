@@ -65,6 +65,8 @@ use windows as platform;
 pub mod context;
 /// Public event module re-exported from the selected private platform backend.
 pub mod event;
+/// Public hardware module re-exported from the selected private platform backend.
+pub mod hal;
 /// Public memory module re-exported from the selected private platform backend.
 pub mod mem;
 /// Public synchronization module re-exported from the selected private platform backend.

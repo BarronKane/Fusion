@@ -1,49 +1,11 @@
 use bitflags::bitflags;
 
-/// Indicates whether a hardware capability is native, emulated, or unavailable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum HardwareImplementationKind {
-    /// The provider uses native platform or ISA truth directly.
-    Native,
-    /// The provider synthesizes the answer from lower-level evidence.
-    Emulated,
-    /// The provider cannot support the query honestly.
-    Unsupported,
-}
-
-/// Strength of the guarantee a hardware provider can honestly claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum HardwareGuarantee {
-    /// The capability is unsupported.
-    Unsupported,
-    /// The provider cannot characterize the capability honestly.
-    Unknown,
-    /// The capability is best-effort or advisory only.
-    Advisory,
-    /// The capability can be requested or constrained but not fully proven.
-    Controllable,
-    /// The capability can be enforced across the relevant authorities.
-    Enforced,
-    /// The capability can be characterized and directly justified.
-    Verified,
-}
-
-bitflags! {
-    /// Authorities that may contribute evidence to a hardware capability record.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct HardwareAuthoritySet: u32 {
-        /// Operating-system or runtime mechanism truth.
-        const OPERATING_SYSTEM = 1 << 0;
-        /// ISA or microarchitectural truth.
-        const ISA              = 1 << 1;
-        /// Machine-topology discovery truth.
-        const TOPOLOGY         = 1 << 2;
-        /// Firmware- or platform-fabric-provided truth.
-        const FIRMWARE         = 1 << 3;
-        /// Hypervisor or virtual-machine mediation truth.
-        const HYPERVISOR       = 1 << 4;
-    }
-}
+/// Shared authority bitset specialized for hardware support.
+pub use crate::pal::caps::AuthoritySet as HardwareAuthoritySet;
+/// Shared guarantee ladder specialized for hardware support.
+pub use crate::pal::caps::Guarantee as HardwareGuarantee;
+/// Shared implementation-category vocabulary specialized for hardware support.
+pub use crate::pal::caps::ImplementationKind as HardwareImplementationKind;
 
 bitflags! {
     /// CPU- and ABI-oriented hardware-query capabilities.
@@ -61,6 +23,8 @@ bitflags! {
         const ATOMIC_WIDTHS    = 1 << 4;
         /// The provider can characterize the relevant stack ABI.
         const STACK_ABI        = 1 << 5;
+        /// The provider can characterize runtime-usable SIMD/vector features.
+        const SIMD             = 1 << 6;
     }
 }
 
@@ -102,6 +66,8 @@ pub struct HardwareCpuSupport {
     pub atomic_widths: HardwareGuarantee,
     /// Strength of the stack-ABI guarantee.
     pub stack_abi: HardwareGuarantee,
+    /// Strength of the runtime SIMD/vector guarantee.
+    pub simd: HardwareGuarantee,
     /// Evidence sources contributing to the CPU support record.
     pub authorities: HardwareAuthoritySet,
     /// Whether the support is native, emulated, or unavailable.
@@ -120,6 +86,7 @@ impl HardwareCpuSupport {
             memory_ordering: HardwareGuarantee::Unsupported,
             atomic_widths: HardwareGuarantee::Unsupported,
             stack_abi: HardwareGuarantee::Unsupported,
+            simd: HardwareGuarantee::Unsupported,
             authorities: HardwareAuthoritySet::empty(),
             implementation: HardwareImplementationKind::Unsupported,
         }

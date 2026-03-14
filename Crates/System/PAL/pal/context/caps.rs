@@ -2,6 +2,20 @@
 
 use bitflags::bitflags;
 
+/// Shared authority bitset specialized for context support.
+///
+/// Context switching does not currently use the `TOPOLOGY` flag, but it reuses the
+/// canonical bit layout so context evidence can be composed safely with thread and
+/// hardware evidence later without manual remapping.
+pub use crate::pal::caps::AuthoritySet as ContextAuthoritySet;
+/// Shared guarantee ladder specialized for context support.
+///
+/// Context providers currently use a subset of this ladder in practice; `Controllable` is
+/// reserved but not presently emitted by the context backends.
+pub use crate::pal::caps::Guarantee as ContextGuarantee;
+/// Shared implementation-category vocabulary specialized for context support.
+pub use crate::pal::caps::ImplementationKind as ContextImplementationKind;
+
 bitflags! {
     /// Set of raw context-switching operations a backend can honestly surface.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,36 +35,6 @@ bitflags! {
         /// The backend can state whether a guard page is required for safe stack setup.
         const GUARD_REQUIRED         = 1 << 6;
     }
-}
-
-bitflags! {
-    /// Authorities contributing truth to a context-switch capability record.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct ContextAuthoritySet: u32 {
-        /// The instruction-set architecture constrains the guarantee.
-        const ISA              = 1 << 0;
-        /// The operating system or ABI contract constrains the guarantee.
-        const OPERATING_SYSTEM = 1 << 1;
-        /// Firmware or loader conventions constrain the guarantee.
-        const FIRMWARE         = 1 << 2;
-        /// A hypervisor or virtual-machine layer constrains the guarantee.
-        const HYPERVISOR       = 1 << 3;
-    }
-}
-
-/// Strength of the guarantee a backend can make about context switching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ContextGuarantee {
-    /// The backend does not support the capability.
-    Unsupported,
-    /// The backend cannot currently characterize the guarantee honestly.
-    Unknown,
-    /// The capability exists only as a best-effort or advisory surface.
-    Advisory,
-    /// The backend can enforce the capability but cannot directly verify the outcome.
-    Enforced,
-    /// The backend can both enforce and observe the capability honestly.
-    Verified,
 }
 
 /// Architectural stack growth direction relevant to raw context setup.
@@ -84,17 +68,6 @@ pub enum ContextMigrationSupport {
     SameCarrierOnly,
     /// The backend can honestly support cross-carrier migration.
     CrossCarrier,
-}
-
-/// Backend implementation category for a context-switch provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ContextImplementationKind {
-    /// Native platform or ISA support.
-    Native,
-    /// Emulated in user space on top of lower primitives.
-    Emulated,
-    /// Unsupported on this backend.
-    Unsupported,
 }
 
 /// Full truthful capability surface for user-space context switching.

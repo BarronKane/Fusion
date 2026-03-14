@@ -26,8 +26,8 @@ use crate::pal::thread::{
     ThreadIdentityStability, ThreadJoinPolicy, ThreadLifecycle, ThreadLifecycleCaps,
     ThreadLifecycleSupport, ThreadLocalitySupport, ThreadMigrationPolicy, ThreadObservation,
     ThreadObservationControl, ThreadPlacementCaps, ThreadPlacementControl, ThreadPlacementOutcome,
-    ThreadPlacementPhase, ThreadPlacementRequest, ThreadPlacementSupport, ThreadPriority,
-    ThreadPriorityOrder, ThreadPriorityRange, ThreadRunState, ThreadSchedulerCaps,
+    ThreadPlacementPhase, ThreadPlacementRequest, ThreadPlacementSupport, ThreadPlacementTarget,
+    ThreadPriority, ThreadPriorityOrder, ThreadPriorityRange, ThreadRunState, ThreadSchedulerCaps,
     ThreadSchedulerClass, ThreadSchedulerControl, ThreadSchedulerModel, ThreadSchedulerObservation,
     ThreadSchedulerRequest, ThreadSchedulerSupport, ThreadStackBacking, ThreadStackCaps,
     ThreadStackLocalityPolicy, ThreadStackLockPolicy, ThreadStackObservation,
@@ -303,26 +303,28 @@ impl ThreadPlacementControl for LinuxThread {
 
 impl ThreadObservationControl for LinuxThread {
     fn observe_current(&self) -> Result<ThreadObservation, ThreadError> {
+        let location = current_execution_location();
         Ok(ThreadObservation {
             id: current_thread_id_linux()?,
             run_state: ThreadRunState::Running,
-            location: current_execution_location(),
+            location,
             scheduler: scheduler_observation_for_pthread(unsafe { libc::pthread_self() })?,
             placement: ThreadPlacementOutcome {
                 guarantee: LINUX_THREAD_SUPPORT.placement.observation,
                 phase: ThreadPlacementPhase::Inherit,
-                location: current_execution_location(),
+                location,
             },
         })
     }
 
     fn observe(&self, handle: &Self::Handle) -> Result<ThreadObservation, ThreadError> {
+        let placement = placement_outcome_for_thread(handle.tid)?;
         Ok(ThreadObservation {
             id: handle.tid,
             run_state: ThreadRunState::Unknown,
-            location: placement_outcome_for_thread(handle.tid)?.location,
+            location: placement.location,
             scheduler: scheduler_observation_for_pthread(handle.pthread)?,
-            placement: placement_outcome_for_thread(handle.tid)?,
+            placement,
         })
     }
 }
@@ -416,7 +418,7 @@ extern "C" fn linux_thread_entry(arg: *mut c_void) -> *mut c_void {
 
         let startup_result = configure_spawned_thread(config);
         let startup_ok = startup_result.is_ok();
-        write_startup_result(startup, startup_result, startup_ok);
+        write_startup_result(startup, startup_result);
 
         if !startup_ok {
             return ptr::null_mut();
@@ -509,23 +511,23 @@ fn validate_stack_request(request: &ThreadStackRequest) -> Result<(), ThreadErro
 }
 
 fn validate_placement_request(request: &ThreadPlacementRequest<'_>) -> Result<(), ThreadError> {
-    if (!request.packages.is_empty()
-        || !request.numa_nodes.is_empty()
-        || !request.core_classes.is_empty())
-        && request.mode == ThreadConstraintMode::Require
-    {
+    if request.has_non_logical_targets() && request.mode == ThreadConstraintMode::Require {
         return Err(ThreadError::placement_denied());
     }
 
     if matches!(request.migration, ThreadMigrationPolicy::Disallow)
-        && request.logical_cpus.len() != 1
+        && request.logical_cpu_count() != 1
     {
         return Err(ThreadError::placement_denied());
     }
 
-    for cpu in request.logical_cpus {
-        if cpu.group.0 != 0 {
-            return Err(ThreadError::placement_denied());
+    for target in request.targets {
+        if let ThreadPlacementTarget::LogicalCpus(cpus) = target {
+            for cpu in *cpus {
+                if cpu.group.0 != 0 {
+                    return Err(ThreadError::placement_denied());
+                }
+            }
         }
     }
 
@@ -607,11 +609,7 @@ fn scheduler_request_is_default(request: &ThreadSchedulerRequest) -> bool {
 }
 
 fn placement_request_is_default(request: &ThreadPlacementRequest<'_>) -> bool {
-    request.logical_cpus.is_empty()
-        && request.packages.is_empty()
-        && request.numa_nodes.is_empty()
-        && request.core_classes.is_empty()
-        && request.migration == ThreadMigrationPolicy::Inherit
+    !request.has_targets() && request.migration == ThreadMigrationPolicy::Inherit
 }
 
 fn placement_request_has_constraints(request: &ThreadPlacementRequest<'_>) -> bool {
@@ -622,7 +620,7 @@ fn apply_affinity_request(
     target: Option<ThreadId>,
     request: &ThreadPlacementRequest<'_>,
 ) -> Result<ThreadPlacementOutcome, ThreadError> {
-    if request.logical_cpus.is_empty() {
+    if request.logical_cpu_count() == 0 {
         if matches!(request.migration, ThreadMigrationPolicy::Disallow) {
             return Err(ThreadError::placement_denied());
         }
@@ -652,11 +650,15 @@ fn apply_affinity_request(
 
 fn cpu_set_from_request(request: &ThreadPlacementRequest<'_>) -> Result<CpuSet, ThreadError> {
     let mut cpuset = CpuSet::new();
-    for cpu in request.logical_cpus {
-        if cpu.group.0 != 0 {
-            return Err(ThreadError::placement_denied());
+    for target in request.targets {
+        if let ThreadPlacementTarget::LogicalCpus(cpus) = target {
+            for cpu in *cpus {
+                if cpu.group.0 != 0 {
+                    return Err(ThreadError::placement_denied());
+                }
+                cpuset.set(usize::from(cpu.index));
+            }
         }
-        cpuset.set(usize::from(cpu.index));
     }
     Ok(cpuset)
 }
@@ -836,11 +838,8 @@ fn wait_for_startup(word: &AtomicU32) -> Result<(), ThreadError> {
     }
 }
 
-fn write_startup_result(
-    startup: &LinuxThreadStartup<'_>,
-    result: Result<ThreadId, ThreadError>,
-    success: bool,
-) {
+fn write_startup_result(startup: &LinuxThreadStartup<'_>, result: Result<ThreadId, ThreadError>) {
+    let success = result.is_ok();
     unsafe {
         *startup.result.get() = result;
     }
@@ -1035,7 +1034,7 @@ mod tests {
         }];
         let config = ThreadConfig {
             placement: ThreadPlacementRequest {
-                logical_cpus: &cpus,
+                targets: &[ThreadPlacementTarget::LogicalCpus(&cpus)],
                 mode: ThreadConstraintMode::Require,
                 phase: ThreadPlacementPhase::PreStartRequired,
                 ..ThreadPlacementRequest::new()

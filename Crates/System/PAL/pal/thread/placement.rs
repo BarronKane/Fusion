@@ -45,16 +45,27 @@ pub enum ThreadPlacementPhase {
 /// surface. Callers should not invent logical CPU, package, or NUMA-node identifiers
 /// locally and hope the backend finds them charming. Placement requests are only as
 /// truthful as the topology model they are built from.
+///
+/// Importantly, this request surface is intentionally narrower than observable execution
+/// location. Core and cluster identifiers may be observable, but they are not requestable
+/// here unless the PAL contract grows explicit support for them. That keeps backends from
+/// pretending they can honor placement domains they can only observe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ThreadPlacementTarget<'a> {
+    /// Request placement against scheduler-visible logical CPU identifiers.
+    LogicalCpus(&'a [ThreadLogicalCpuId]),
+    /// Request placement against package or socket topology identifiers.
+    Packages(&'a [HardwareTopologyNodeId]),
+    /// Request placement against NUMA-node topology identifiers.
+    NumaNodes(&'a [HardwareTopologyNodeId]),
+    /// Request placement against heterogeneous core-class identifiers.
+    CoreClasses(&'a [ThreadCoreClassId]),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ThreadPlacementRequest<'a> {
-    /// Requested logical CPU targets, if any.
-    pub logical_cpus: &'a [ThreadLogicalCpuId],
-    /// Requested package or socket topology nodes, if any.
-    pub packages: &'a [HardwareTopologyNodeId],
-    /// Requested NUMA topology nodes, if any.
-    pub numa_nodes: &'a [HardwareTopologyNodeId],
-    /// Requested heterogeneous core classes, if any.
-    pub core_classes: &'a [ThreadCoreClassId],
+    /// Requested placement target domains and identifiers.
+    pub targets: &'a [ThreadPlacementTarget<'a>],
     /// Strength of the placement request.
     pub mode: ThreadConstraintMode,
     /// When placement must be applied relative to user entry.
@@ -71,14 +82,39 @@ impl ThreadPlacementRequest<'_> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            logical_cpus: &[],
-            packages: &[],
-            numa_nodes: &[],
-            core_classes: &[],
+            targets: &[],
             mode: ThreadConstraintMode::Prefer,
             phase: ThreadPlacementPhase::Inherit,
             migration: ThreadMigrationPolicy::Inherit,
         }
+    }
+
+    /// Returns whether the request contains no explicit placement targets.
+    #[must_use]
+    pub const fn has_targets(&self) -> bool {
+        !self.targets.is_empty()
+    }
+
+    /// Returns whether the request contains any non-logical placement targets.
+    #[must_use]
+    pub fn has_non_logical_targets(&self) -> bool {
+        self.targets
+            .iter()
+            .any(|target| !matches!(target, ThreadPlacementTarget::LogicalCpus(_)))
+    }
+
+    /// Returns the number of logical CPUs requested across every logical-CPU target entry.
+    #[must_use]
+    pub fn logical_cpu_count(&self) -> usize {
+        self.targets
+            .iter()
+            .map(|target| match target {
+                ThreadPlacementTarget::LogicalCpus(cpus) => cpus.len(),
+                ThreadPlacementTarget::Packages(_)
+                | ThreadPlacementTarget::NumaNodes(_)
+                | ThreadPlacementTarget::CoreClasses(_) => 0,
+            })
+            .sum()
     }
 }
 

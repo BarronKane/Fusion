@@ -5,7 +5,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use fusion_pal::pal::sync::{
     MutexCaps, MutexSupport, PriorityInheritanceSupport, ProcessScopeSupport, RawMutex,
-    RecursionSupport, RobustnessSupport, SyncError, SyncImplementationKind, TimeoutCaps,
+    RecursionSupport, RobustnessSupport, SyncError, SyncFallbackKind, SyncImplementationKind,
+    TimeoutCaps,
 };
 
 const SPIN_MUTEX_SUPPORT: MutexSupport = MutexSupport {
@@ -17,7 +18,8 @@ const SPIN_MUTEX_SUPPORT: MutexSupport = MutexSupport {
     recursion: RecursionSupport::None,
     robustness: RobustnessSupport::None,
     process_scope: ProcessScopeSupport::LocalOnly,
-    implementation: SyncImplementationKind::SpinOnly,
+    implementation: SyncImplementationKind::Emulated,
+    fallback: SyncFallbackKind::SpinOnly,
 };
 
 /// Spin-based mutex fallback for internal narrow critical sections.

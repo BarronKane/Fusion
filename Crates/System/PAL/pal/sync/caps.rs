@@ -1,16 +1,15 @@
 use bitflags::bitflags;
 
-/// Indicates whether a capability is native, emulated, spin-based, or unavailable.
+/// Shared implementation-category vocabulary specialized for synchronization support.
+pub use crate::pal::caps::ImplementationKind as SyncImplementationKind;
+
+/// Synchronization-specific fallback or degradation strategy reported alongside implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SyncImplementationKind {
-    /// The backend uses a native operating-system primitive directly.
-    Native,
-    /// The backend emulates the primitive with lower-level facilities.
-    Emulated,
-    /// The backend falls back to a spin-only implementation.
+pub enum SyncFallbackKind {
+    /// No special fallback or degradation applies.
+    None,
+    /// The primitive falls back to a spin-only implementation.
     SpinOnly,
-    /// The backend does not support the primitive at all.
-    Unsupported,
 }
 
 /// Priority inversion handling offered by the backend for a mutex primitive.
@@ -171,6 +170,8 @@ pub struct WaitSupport {
     pub process_scope: ProcessScopeSupport,
     /// Whether the backend implementation is native, emulated, or unavailable.
     pub implementation: SyncImplementationKind,
+    /// Synchronization-specific fallback detail, if any.
+    pub fallback: SyncFallbackKind,
 }
 
 impl WaitSupport {
@@ -182,6 +183,7 @@ impl WaitSupport {
             timeout: TimeoutCaps::empty(),
             process_scope: ProcessScopeSupport::LocalOnly,
             implementation: SyncImplementationKind::Unsupported,
+            fallback: SyncFallbackKind::None,
         }
     }
 }
@@ -203,6 +205,8 @@ pub struct MutexSupport {
     pub process_scope: ProcessScopeSupport,
     /// Whether the backend implementation is native, emulated, or unavailable.
     pub implementation: SyncImplementationKind,
+    /// Synchronization-specific fallback detail, if any.
+    pub fallback: SyncFallbackKind,
 }
 
 impl MutexSupport {
@@ -217,6 +221,7 @@ impl MutexSupport {
             robustness: RobustnessSupport::None,
             process_scope: ProcessScopeSupport::LocalOnly,
             implementation: SyncImplementationKind::Unsupported,
+            fallback: SyncFallbackKind::None,
         }
     }
 }
@@ -230,6 +235,8 @@ pub struct OnceSupport {
     pub process_scope: ProcessScopeSupport,
     /// Whether the backend implementation is native, emulated, or unavailable.
     pub implementation: SyncImplementationKind,
+    /// Synchronization-specific fallback detail, if any.
+    pub fallback: SyncFallbackKind,
 }
 
 impl OnceSupport {
@@ -240,6 +247,7 @@ impl OnceSupport {
             caps: OnceCaps::empty(),
             process_scope: ProcessScopeSupport::LocalOnly,
             implementation: SyncImplementationKind::Unsupported,
+            fallback: SyncFallbackKind::None,
         }
     }
 }
@@ -255,6 +263,8 @@ pub struct SemaphoreSupport {
     pub process_scope: ProcessScopeSupport,
     /// Whether the backend implementation is native, emulated, or unavailable.
     pub implementation: SyncImplementationKind,
+    /// Synchronization-specific fallback detail, if any.
+    pub fallback: SyncFallbackKind,
 }
 
 impl SemaphoreSupport {
@@ -266,6 +276,7 @@ impl SemaphoreSupport {
             timeout: TimeoutCaps::empty(),
             process_scope: ProcessScopeSupport::LocalOnly,
             implementation: SyncImplementationKind::Unsupported,
+            fallback: SyncFallbackKind::None,
         }
     }
 }
@@ -283,6 +294,8 @@ pub struct RwLockSupport {
     pub process_scope: ProcessScopeSupport,
     /// Whether the backend implementation is native, emulated, or unavailable.
     pub implementation: SyncImplementationKind,
+    /// Synchronization-specific fallback detail, if any.
+    pub fallback: SyncFallbackKind,
 }
 
 impl RwLockSupport {
@@ -295,6 +308,7 @@ impl RwLockSupport {
             fairness: RwLockFairnessSupport::None,
             process_scope: ProcessScopeSupport::LocalOnly,
             implementation: SyncImplementationKind::Unsupported,
+            fallback: SyncFallbackKind::None,
         }
     }
 }

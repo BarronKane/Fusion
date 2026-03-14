@@ -4,6 +4,9 @@ pub mod context;
 #[path = "event/event.rs"]
 /// iOS PAL event backend implementation.
 pub mod event;
+#[path = "hal/hal.rs"]
+/// iOS PAL hardware backend implementation.
+pub mod hal;
 #[path = "mem/mem.rs"]
 /// iOS PAL memory backend implementation.
 pub mod mem;

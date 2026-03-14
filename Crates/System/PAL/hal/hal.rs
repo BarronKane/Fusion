@@ -31,37 +31,62 @@ pub const fn system_hardware() -> HardwareSystem {
 
 impl HardwareBase for HardwareSystem {
     fn support(&self) -> HardwareSupport {
+        let platform_support = crate::sys::hal::system_hardware().support();
+        let cache_line_bytes =
+            if platform_support.cpu.cache_line_bytes == HardwareGuarantee::Unsupported {
+                cache_line_size_guarantee()
+            } else {
+                platform_support.cpu.cache_line_bytes
+            };
+
+        let mut caps = HardwareCpuCaps::DESCRIPTOR
+            | HardwareCpuCaps::MEMORY_ORDERING
+            | HardwareCpuCaps::ATOMIC_WIDTHS
+            | HardwareCpuCaps::STACK_ABI;
+
+        if platform_support.cpu.vendor != HardwareGuarantee::Unsupported {
+            caps |= HardwareCpuCaps::VENDOR;
+        }
+        if cache_line_bytes != HardwareGuarantee::Unsupported {
+            caps |= HardwareCpuCaps::CACHE_LINE_BYTES;
+        }
+        if platform_support.cpu.simd != HardwareGuarantee::Unsupported {
+            caps |= HardwareCpuCaps::SIMD;
+        }
+
         HardwareSupport {
             cpu: HardwareCpuSupport {
-                caps: HardwareCpuCaps::DESCRIPTOR
-                    | cache_line_size_cap()
-                    | HardwareCpuCaps::MEMORY_ORDERING
-                    | HardwareCpuCaps::ATOMIC_WIDTHS
-                    | HardwareCpuCaps::STACK_ABI,
+                caps,
                 descriptor: HardwareGuarantee::Verified,
-                vendor: HardwareGuarantee::Unsupported,
-                cache_line_bytes: cache_line_size_guarantee(),
+                vendor: platform_support.cpu.vendor,
+                cache_line_bytes,
                 memory_ordering: HardwareGuarantee::Verified,
                 atomic_widths: HardwareGuarantee::Verified,
                 stack_abi: stack_abi_guarantee(),
-                authorities: HardwareAuthoritySet::ISA | HardwareAuthoritySet::OPERATING_SYSTEM,
-                implementation: HardwareImplementationKind::Native,
+                simd: platform_support.cpu.simd,
+                authorities: platform_support.cpu.authorities | HardwareAuthoritySet::ISA,
+                implementation: normalized_cpu_implementation(platform_support.cpu.implementation),
             },
-            topology: HardwareTopologySupport::unsupported(),
+            topology: platform_support.topology,
         }
     }
 }
 
 impl HardwareCpuQuery for HardwareSystem {
     fn cpu_description(&self) -> Result<HardwareCpuDescription, HardwareError> {
+        let platform_cpu = crate::sys::hal::system_hardware().cpu_description().ok();
+
         Ok(HardwareCpuDescription {
             architecture: selected_architecture(),
-            vendor: HardwareCpuVendor::Unknown,
+            vendor: platform_cpu.map_or(HardwareCpuVendor::Unknown, |cpu| cpu.vendor),
             endianness: selected_endianness(),
-            cache_line_bytes: selected_cache_line_bytes(),
+            cache_line_bytes: platform_cpu
+                .and_then(|cpu| cpu.cache_line_bytes)
+                .or(selected_cache_line_bytes()),
             memory_ordering: selected_memory_ordering(),
             pointer_width_bits: selected_pointer_width_bits(),
             atomic_widths: selected_atomic_widths(),
+            simd: platform_cpu.map_or(HardwareSimdSet::empty(), |cpu| cpu.simd),
         })
     }
 
@@ -82,67 +107,59 @@ impl HardwareCpuQuery for HardwareSystem {
 
 impl HardwareTopologyQuery for HardwareSystem {
     fn topology_summary(&self) -> Result<HardwareTopologySummary, HardwareError> {
-        Err(HardwareError::unsupported())
+        crate::sys::hal::system_hardware().topology_summary()
     }
 
     fn write_logical_cpus(
         &self,
-        _output: &mut [ThreadLogicalCpuId],
+        output: &mut [ThreadLogicalCpuId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
-        Err(HardwareError::unsupported())
+        crate::sys::hal::system_hardware().write_logical_cpus(output)
     }
 
     fn write_cores(
         &self,
-        _output: &mut [ThreadCoreId],
+        output: &mut [ThreadCoreId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
-        Err(HardwareError::unsupported())
+        crate::sys::hal::system_hardware().write_cores(output)
     }
 
     fn write_clusters(
         &self,
-        _output: &mut [ThreadClusterId],
+        output: &mut [ThreadClusterId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
-        Err(HardwareError::unsupported())
+        crate::sys::hal::system_hardware().write_clusters(output)
     }
 
     fn write_packages(
         &self,
-        _output: &mut [HardwareTopologyNodeId],
+        output: &mut [HardwareTopologyNodeId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
-        Err(HardwareError::unsupported())
+        crate::sys::hal::system_hardware().write_packages(output)
     }
 
     fn write_numa_nodes(
         &self,
-        _output: &mut [HardwareTopologyNodeId],
+        output: &mut [HardwareTopologyNodeId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
-        Err(HardwareError::unsupported())
+        crate::sys::hal::system_hardware().write_numa_nodes(output)
     }
 
     fn write_core_classes(
         &self,
-        _output: &mut [ThreadCoreClassId],
+        output: &mut [ThreadCoreClassId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
-        Err(HardwareError::unsupported())
+        crate::sys::hal::system_hardware().write_core_classes(output)
     }
 }
 
-fn stack_abi_guarantee() -> HardwareGuarantee {
+pub(crate) fn stack_abi_guarantee() -> HardwareGuarantee {
     let context_support = crate::sys::context::system_context().support();
     if context_support.implementation != ContextImplementationKind::Unsupported {
-        return context_support.guarantee.into();
+        return context_support.guarantee;
     }
 
     HardwareGuarantee::Verified
-}
-
-const fn cache_line_size_cap() -> HardwareCpuCaps {
-    if selected_cache_line_bytes().is_some() {
-        HardwareCpuCaps::CACHE_LINE_BYTES
-    } else {
-        HardwareCpuCaps::empty()
-    }
 }
 
 const fn cache_line_size_guarantee() -> HardwareGuarantee {
@@ -153,7 +170,7 @@ const fn cache_line_size_guarantee() -> HardwareGuarantee {
     }
 }
 
-fn selected_atomic_widths() -> HardwareAtomicWidthSet {
+pub(crate) fn selected_atomic_widths() -> HardwareAtomicWidthSet {
     let mut widths = HardwareAtomicWidthSet::empty();
 
     #[cfg(target_has_atomic = "8")]
@@ -184,7 +201,7 @@ fn selected_atomic_widths() -> HardwareAtomicWidthSet {
     widths
 }
 
-const fn selected_architecture() -> HardwareCpuArchitecture {
+pub(crate) const fn selected_architecture() -> HardwareCpuArchitecture {
     #[cfg(target_arch = "x86_64")]
     {
         return HardwareCpuArchitecture::X86_64;
@@ -209,7 +226,7 @@ const fn selected_architecture() -> HardwareCpuArchitecture {
     HardwareCpuArchitecture::Other
 }
 
-const fn selected_endianness() -> HardwareEndian {
+pub(crate) const fn selected_endianness() -> HardwareEndian {
     #[cfg(target_endian = "little")]
     {
         return HardwareEndian::Little;
@@ -224,7 +241,7 @@ const fn selected_endianness() -> HardwareEndian {
     HardwareEndian::Unknown
 }
 
-const fn selected_memory_ordering() -> HardwareMemoryOrdering {
+pub(crate) const fn selected_memory_ordering() -> HardwareMemoryOrdering {
     #[cfg(target_arch = "x86_64")]
     {
         return HardwareMemoryOrdering::TotalStoreOrder;
@@ -239,27 +256,17 @@ const fn selected_memory_ordering() -> HardwareMemoryOrdering {
     HardwareMemoryOrdering::Unknown
 }
 
-const fn selected_cache_line_bytes() -> Option<usize> {
+pub(crate) const fn selected_cache_line_bytes() -> Option<usize> {
     #[cfg(target_arch = "x86_64")]
     {
         return Some(64);
-    }
-
-    #[cfg(any(target_arch = "arm", target_arch = "riscv64"))]
-    {
-        return Some(64);
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        return None;
     }
 
     #[allow(unreachable_code)]
     None
 }
 
-const fn selected_pointer_width_bits() -> u16 {
+pub(crate) const fn selected_pointer_width_bits() -> u16 {
     #[cfg(target_pointer_width = "64")]
     {
         return 64;
@@ -309,9 +316,22 @@ const fn fallback_stack_abi() -> HardwareStackAbi {
     }
 }
 
+const fn normalized_cpu_implementation(
+    implementation: HardwareImplementationKind,
+) -> HardwareImplementationKind {
+    match implementation {
+        HardwareImplementationKind::Unsupported => HardwareImplementationKind::Native,
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
+    #[cfg(target_os = "linux")]
+    use rustix::thread::{self as rustix_thread, CpuSet};
 
     #[test]
     fn system_hardware_reports_cpu_support() {
@@ -339,6 +359,8 @@ mod tests {
             assert_eq!(cpu.architecture, HardwareCpuArchitecture::X86_64);
             assert_eq!(cpu.cache_line_bytes, Some(64));
             assert_eq!(stack.red_zone_bytes, 128);
+            assert!(cpu.simd.contains(HardwareSimdSet::SSE));
+            assert!(cpu.simd.contains(HardwareSimdSet::SSE2));
         }
 
         #[cfg(target_arch = "aarch64")]
@@ -353,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn system_hardware_topology_is_honestly_unsupported_for_now() {
         let hardware = system_hardware();
 
@@ -366,6 +389,91 @@ mod tests {
                 .expect_err("topology should be unsupported")
                 .kind(),
             HardwareErrorKind::Unsupported
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn system_hardware_reports_linux_visible_cpu_topology() {
+        let hardware = system_hardware();
+        let support = hardware.support();
+        let summary = hardware.topology_summary().expect("linux topology summary");
+        let cpuset = rustix_thread::sched_getaffinity(None).expect("affinity query should work");
+
+        assert_eq!(
+            support.topology.implementation,
+            HardwareImplementationKind::Native
+        );
+        assert!(
+            support
+                .topology
+                .caps
+                .contains(HardwareTopologyCaps::LOGICAL_CPUS),
+            "linux HAL should enumerate scheduler-visible logical CPUs"
+        );
+        assert_eq!(summary.logical_cpu_count, Some(cpuset.count() as usize));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn system_hardware_writes_linux_visible_cpu_ids() {
+        let hardware = system_hardware();
+        let cpuset = rustix_thread::sched_getaffinity(None).expect("affinity query should work");
+        let mut output = [ThreadLogicalCpuId {
+            group: crate::pal::thread::ThreadProcessorGroupId(0),
+            index: 0,
+        }; CpuSet::MAX_CPU];
+        let summary = hardware
+            .write_logical_cpus(&mut output)
+            .expect("linux logical cpu enumeration");
+
+        assert_eq!(summary.total, cpuset.count() as usize);
+        assert_eq!(summary.written, summary.total);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))]
+    fn system_hardware_runtime_simd_matches_std_x86_detection() {
+        let simd = system_hardware()
+            .cpu_description()
+            .expect("cpu description")
+            .simd;
+
+        assert_eq!(
+            simd.contains(HardwareSimdSet::SSE),
+            std::arch::is_x86_feature_detected!("sse")
+        );
+        assert_eq!(
+            simd.contains(HardwareSimdSet::SSE2),
+            std::arch::is_x86_feature_detected!("sse2")
+        );
+        assert_eq!(
+            simd.contains(HardwareSimdSet::SSE3),
+            std::arch::is_x86_feature_detected!("sse3")
+        );
+        assert_eq!(
+            simd.contains(HardwareSimdSet::SSSE3),
+            std::arch::is_x86_feature_detected!("ssse3")
+        );
+        assert_eq!(
+            simd.contains(HardwareSimdSet::SSE4_1),
+            std::arch::is_x86_feature_detected!("sse4.1")
+        );
+        assert_eq!(
+            simd.contains(HardwareSimdSet::SSE4_2),
+            std::arch::is_x86_feature_detected!("sse4.2")
+        );
+        assert_eq!(
+            simd.contains(HardwareSimdSet::AVX),
+            std::arch::is_x86_feature_detected!("avx")
+        );
+        assert_eq!(
+            simd.contains(HardwareSimdSet::AVX2),
+            std::arch::is_x86_feature_detected!("avx2")
+        );
+        assert_eq!(
+            simd.contains(HardwareSimdSet::AVX512F),
+            std::arch::is_x86_feature_detected!("avx512f")
         );
     }
 }

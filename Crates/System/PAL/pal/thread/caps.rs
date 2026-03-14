@@ -4,51 +4,12 @@ use super::{
     ThreadIdentityStability, scheduler::ThreadPriorityRange, scheduler::ThreadSchedulerModel,
 };
 
-/// Indicates whether a thread capability is native, emulated, or unavailable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ThreadImplementationKind {
-    /// The backend uses native operating-system or runtime support directly.
-    Native,
-    /// The backend emulates the capability using lower-level facilities.
-    Emulated,
-    /// The backend does not support the capability.
-    Unsupported,
-}
-
-/// Strength of the guarantee a backend can honestly claim for a thread capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ThreadGuarantee {
-    /// The capability is not supported at all.
-    Unsupported,
-    /// The backend cannot determine the effective guarantee honestly.
-    Unknown,
-    /// The capability is best-effort or advisory only.
-    Advisory,
-    /// The capability can be requested and controlled, but the backend cannot prove strict
-    /// enforcement under all relevant authorities.
-    Controllable,
-    /// The backend can enforce the capability across the relevant authorities.
-    Enforced,
-    /// The backend can both enforce and directly verify the effective state.
-    Verified,
-}
-
-bitflags! {
-    /// Authorities that may contribute evidence to an effective thread capability.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct ThreadAuthoritySet: u32 {
-        /// Operating-system or runtime mechanism truth.
-        const OPERATING_SYSTEM = 1 << 0;
-        /// ISA or microarchitectural truth.
-        const ISA              = 1 << 1;
-        /// Machine topology discovery truth.
-        const TOPOLOGY         = 1 << 2;
-        /// Firmware- or platform-fabric-provided truth.
-        const FIRMWARE         = 1 << 3;
-        /// Hypervisor or virtual-machine mediation truth.
-        const HYPERVISOR       = 1 << 4;
-    }
-}
+/// Shared authority bitset specialized for thread support.
+pub use crate::pal::caps::AuthoritySet as ThreadAuthoritySet;
+/// Shared guarantee ladder specialized for thread support.
+pub use crate::pal::caps::Guarantee as ThreadGuarantee;
+/// Shared implementation-category vocabulary specialized for thread support.
+pub use crate::pal::caps::ImplementationKind as ThreadImplementationKind;
 
 bitflags! {
     /// Lifecycle capabilities a backend may expose for threads.

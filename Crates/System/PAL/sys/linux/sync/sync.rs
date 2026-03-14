@@ -21,8 +21,9 @@ use crate::pal::sync::{
     MutexCaps, MutexSupport, OnceBeginResult, OnceCaps, OnceState, OnceSupport,
     PriorityInheritanceSupport, ProcessScopeSupport, RawMutex, RawOnce, RawRwLock, RawSemaphore,
     RecursionSupport, RobustnessSupport, RwLockCaps, RwLockFairnessSupport, RwLockSupport,
-    SemaphoreCaps, SemaphoreSupport, SyncBase, SyncError, SyncErrorKind, SyncImplementationKind,
-    SyncSupport, TimeoutCaps, WaitCaps, WaitOutcome, WaitPrimitive, WaitSupport,
+    SemaphoreCaps, SemaphoreSupport, SyncBase, SyncError, SyncErrorKind, SyncFallbackKind,
+    SyncImplementationKind, SyncSupport, TimeoutCaps, WaitCaps, WaitOutcome, WaitPrimitive,
+    WaitSupport,
 };
 
 const UNLOCKED: u32 = 0;
@@ -40,6 +41,7 @@ const LINUX_WAIT_SUPPORT: WaitSupport = WaitSupport {
     timeout: TimeoutCaps::RELATIVE.union(TimeoutCaps::RELATIVE_MONOTONIC),
     process_scope: ProcessScopeSupport::LocalOnly,
     implementation: SyncImplementationKind::Native,
+    fallback: SyncFallbackKind::None,
 };
 
 const LINUX_MUTEX_SUPPORT: MutexSupport = MutexSupport {
@@ -52,6 +54,7 @@ const LINUX_MUTEX_SUPPORT: MutexSupport = MutexSupport {
     robustness: RobustnessSupport::None,
     process_scope: ProcessScopeSupport::LocalOnly,
     implementation: SyncImplementationKind::Native,
+    fallback: SyncFallbackKind::None,
 };
 
 const LINUX_SEMAPHORE_SUPPORT: SemaphoreSupport = SemaphoreSupport {
@@ -61,6 +64,7 @@ const LINUX_SEMAPHORE_SUPPORT: SemaphoreSupport = SemaphoreSupport {
     timeout: TimeoutCaps::empty(),
     process_scope: ProcessScopeSupport::LocalOnly,
     implementation: SyncImplementationKind::Emulated,
+    fallback: SyncFallbackKind::None,
 };
 
 const LINUX_ONCE_SUPPORT: OnceSupport = OnceSupport {
@@ -69,6 +73,7 @@ const LINUX_ONCE_SUPPORT: OnceSupport = OnceSupport {
         .union(OnceCaps::RESET_ON_FAILURE),
     process_scope: ProcessScopeSupport::LocalOnly,
     implementation: SyncImplementationKind::Emulated,
+    fallback: SyncFallbackKind::None,
 };
 
 const LINUX_RWLOCK_SUPPORT: RwLockSupport = RwLockSupport {
@@ -81,6 +86,7 @@ const LINUX_RWLOCK_SUPPORT: RwLockSupport = RwLockSupport {
     fairness: RwLockFairnessSupport::WriterPreferred,
     process_scope: ProcessScopeSupport::LocalOnly,
     implementation: SyncImplementationKind::Emulated,
+    fallback: SyncFallbackKind::None,
 };
 
 /// Linux synchronization provider handle.

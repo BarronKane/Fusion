@@ -4,6 +4,9 @@ pub mod context;
 #[path = "event/event.rs"]
 /// Linux PAL event backend implementation.
 pub mod event;
+#[path = "hal/hal.rs"]
+/// Linux PAL hardware backend implementation.
+pub mod hal;
 #[path = "mem/mem.rs"]
 /// Linux PAL memory backend implementation.
 pub mod mem;

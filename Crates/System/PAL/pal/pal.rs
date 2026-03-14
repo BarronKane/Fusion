@@ -1,3 +1,5 @@
+/// Shared capability vocabulary reused across PAL contract domains.
+pub mod caps;
 #[path = "context/context.rs"]
 /// Backend-neutral user-space execution context vocabulary and PAL traits.
 pub mod context;
