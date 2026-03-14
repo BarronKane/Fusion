@@ -1,0 +1,26 @@
+//! Public system-facing memory and platform contracts for Fusion.
+//!
+//! `fusion-sys` is the narrow, no-std layer that turns fusion-pal-truthful memory behavior into
+//! resource-oriented contracts that higher layers can compose without guessing about the
+//! operating system.
+
+#![no_std]
+
+/// Target platform discriminator re-exported from `fusion-pal`.
+pub use fusion_pal::{Platform, TARGET_PLATFORM};
+
+#[path = "event/event.rs"]
+/// fusion-sys event and reactor contracts.
+pub mod event;
+#[path = "fiber/fiber.rs"]
+/// fusion-sys stackful execution and fiber contracts.
+pub mod fiber;
+#[path = "mem/mem.rs"]
+/// fusion-sys memory contracts and resource abstractions.
+pub mod mem;
+#[path = "sync/sync.rs"]
+/// fusion-sys synchronization primitives and wrappers.
+pub mod sync;
+#[path = "thread/thread.rs"]
+/// fusion-sys threading contracts and wrappers.
+pub mod thread;
