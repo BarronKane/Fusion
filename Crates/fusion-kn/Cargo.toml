@@ -1,0 +1,19 @@
+[package]
+name = "fusion-kn"
+description = ""
+documentation = ""
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+path = "fusion-kn.rs"
+
+[dependencies]
+bitflags.workspace = true
+
+[lints]
+workspace = true

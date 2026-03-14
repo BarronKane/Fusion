@@ -5,6 +5,7 @@ members = [
     "Crates/fusion-sys",
     "Crates/fusion-sys/fusion-pal",
     "Crates/fusion-std",
+    "Crates/fusion-kn",
 
     # Engine stack.
     "Crates/Engine/Shaders",
@@ -31,6 +32,7 @@ repository = ""
 fusion-sys = { path = "Crates/fusion-sys" }
 fusion-pal = { path = "Crates/fusion-sys/fusion-pal" }
 fusion-std = { path = "Crates/fusion-std" }
+fusion-kn = { path = "Crates/fusion-kn" }
 
 # RHI stack:
 # `fusion-rhi` presents a unified API while selecting backends at runtime.
