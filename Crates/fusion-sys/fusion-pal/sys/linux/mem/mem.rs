@@ -24,6 +24,7 @@ use crate::pal::mem::{
     MemMap, MemMapReplace, MemPlacementCaps, MemProtect, MemQuery, MemSupport, PageInfo, Placement,
     Protect, Region, RegionAttrs, RegionInfo, ReplacePlacement,
 };
+use crate::sys::sync::{OnceBeginResult, PlatformRawOnce, RawOnce};
 
 /// Linux implementation of the fusion-pal memory provider contract.
 #[derive(Debug, Clone, Copy, Default)]
@@ -68,12 +69,10 @@ const LINUX_4_17_0: KernelVersion = KernelVersion {
     patch: 0,
 };
 
-const KERNEL_VERSION_UNINITIALIZED: u64 = u64::MAX;
 const KERNEL_VERSION_UNAVAILABLE: u64 = 0;
 
-// TODO: Replace this ad hoc atomic cache with a fusion-pal-native mutex/once primitive once
-// concurrency primitives exist at the fusion-pal layer.
-static KERNEL_VERSION_CACHE: AtomicU64 = AtomicU64::new(KERNEL_VERSION_UNINITIALIZED);
+static KERNEL_VERSION_CACHE: AtomicU64 = AtomicU64::new(KERNEL_VERSION_UNAVAILABLE);
+static KERNEL_VERSION_ONCE: PlatformRawOnce = PlatformRawOnce::new();
 
 /// Returns the process-wide Linux memory provider handle.
 #[must_use]
@@ -105,22 +104,25 @@ impl LinuxMem {
     }
 
     fn kernel_version() -> Option<KernelVersion> {
-        let cached = KERNEL_VERSION_CACHE.load(Ordering::Relaxed);
-        if cached != KERNEL_VERSION_UNINITIALIZED {
-            return decode_kernel_version(cached);
-        }
-
-        let detected = parse_kernel_release(system::uname().release().to_bytes());
-        let encoded = encode_kernel_version(detected);
-
-        match KERNEL_VERSION_CACHE.compare_exchange(
-            KERNEL_VERSION_UNINITIALIZED,
-            encoded,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => detected,
-            Err(actual) => decode_kernel_version(actual),
+        loop {
+            match KERNEL_VERSION_ONCE.begin() {
+                Ok(OnceBeginResult::Complete) => {
+                    return decode_kernel_version(KERNEL_VERSION_CACHE.load(Ordering::Acquire));
+                }
+                Ok(OnceBeginResult::InProgress) => {
+                    if KERNEL_VERSION_ONCE.wait().is_err() {
+                        return parse_kernel_release(system::uname().release().to_bytes());
+                    }
+                }
+                Ok(OnceBeginResult::Initialize) => {
+                    let detected = parse_kernel_release(system::uname().release().to_bytes());
+                    KERNEL_VERSION_CACHE.store(encode_kernel_version(detected), Ordering::Release);
+                    // SAFETY: this path owns the one-time initialization right returned by begin.
+                    unsafe { KERNEL_VERSION_ONCE.complete_unchecked() };
+                    return detected;
+                }
+                Err(_) => return parse_kernel_release(system::uname().release().to_bytes()),
+            }
         }
     }
 
@@ -662,7 +664,7 @@ const fn encode_kernel_version(version: Option<KernelVersion>) -> u64 {
 }
 
 const fn decode_kernel_version(encoded: u64) -> Option<KernelVersion> {
-    if encoded == KERNEL_VERSION_UNAVAILABLE || encoded == KERNEL_VERSION_UNINITIALIZED {
+    if encoded == KERNEL_VERSION_UNAVAILABLE {
         return None;
     }
 
