@@ -1,7 +1,7 @@
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
-use crate::pal::mem::MemTopologyNodeId;
+use crate::pal::hal::HardwareTopologyNodeId;
 
 /// Backing strategy for a thread stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,9 +51,9 @@ pub enum ThreadStackLocalityPolicy {
     /// Follow the thread placement policy when the backend can couple them honestly.
     FollowThreadPlacement,
     /// Prefer stack backing local to the given NUMA topology node.
-    PreferredNumaNode(MemTopologyNodeId),
+    PreferredNumaNode(HardwareTopologyNodeId),
     /// Require stack backing local to the given NUMA topology node.
-    RequiredNumaNode(MemTopologyNodeId),
+    RequiredNumaNode(HardwareTopologyNodeId),
 }
 
 /// Requested stack and startup-memory policy for a thread.

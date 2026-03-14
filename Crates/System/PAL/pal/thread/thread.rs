@@ -13,9 +13,10 @@
 //! name automatically implies a hardware reality.
 //!
 //! Placement requests intentionally consume topology identifiers rather than producing
-//! them. A sibling topology authority is expected to enumerate valid logical CPUs,
-//! packages, NUMA nodes, and heterogeneous core classes before callers construct thread
-//! placement requests.
+//! them. A sibling hardware authority such as [`crate::hal`] or a backend-neutral contract
+//! such as [`crate::pal::hal`] is expected to enumerate valid logical CPUs, packages, NUMA
+//! nodes, and heterogeneous core classes before callers construct thread placement
+//! requests.
 
 mod caps;
 mod config;
@@ -26,6 +27,7 @@ mod scheduler;
 mod stack;
 mod unsupported;
 
+pub use crate::pal::hal::HardwareTopologyNodeId;
 pub use caps::*;
 pub use config::*;
 pub use error::*;

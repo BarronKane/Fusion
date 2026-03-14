@@ -1,3 +1,9 @@
+#[path = "context/context.rs"]
+/// macOS PAL user-space context backend implementation.
+pub mod context;
+#[path = "event/event.rs"]
+/// macOS PAL event backend implementation.
+pub mod event;
 #[path = "mem/mem.rs"]
 /// macOS PAL memory backend implementation.
 pub mod mem;

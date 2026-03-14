@@ -1,3 +1,9 @@
+#[path = "context/context.rs"]
+/// Windows PAL user-space context backend implementation.
+pub mod context;
+#[path = "event/event.rs"]
+/// Windows PAL event backend implementation.
+pub mod event;
 #[path = "mem/mem.rs"]
 /// Windows PAL memory backend implementation.
 pub mod mem;

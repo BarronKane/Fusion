@@ -4,6 +4,7 @@ members = [
     # System stack: safe facade over a compile-time-selected PAL.
     "Crates/System",
     "Crates/System/PAL",
+    "Crates/Std",
 
     # Engine stack.
     "Crates/Engine/Shaders",
@@ -29,6 +30,7 @@ repository = ""
 # `fusion-pal` exposes contract modules and compile-time-selected system modules.
 fusion-sys = { path = "Crates/System" }
 fusion-pal = { path = "Crates/System/PAL" }
+fusion-std = { path = "Crates/Std" }
 
 # RHI stack:
 # `fusion-rhi` presents a unified API while selecting backends at runtime.

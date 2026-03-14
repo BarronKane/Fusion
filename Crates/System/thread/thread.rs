@@ -5,9 +5,11 @@
 //! PAL boundary where it belongs.
 
 mod handle;
+mod pool;
 mod system;
 
 pub use handle::*;
+pub use pool::*;
 pub use system::*;
 
 pub use fusion_pal::sys::thread::{

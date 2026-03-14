@@ -63,7 +63,7 @@ fn spawn_and_join_follow_backend_truth() {
         assert_eq!(touched.load(Ordering::Acquire), 1);
     } else {
         let error = result.expect_err("unsupported backend should reject spawn");
-        assert_eq!(error.kind, ThreadErrorKind::Unsupported);
+        assert_eq!(error.kind(), ThreadErrorKind::Unsupported);
     }
 }
 
@@ -84,14 +84,14 @@ fn current_thread_queries_follow_backend_truth() {
             thread
                 .current_thread_id()
                 .expect_err("unsupported current id")
-                .kind,
+                .kind(),
             ThreadErrorKind::Unsupported
         );
         assert_eq!(
             thread
                 .observe_current()
                 .expect_err("unsupported current observe")
-                .kind,
+                .kind(),
             ThreadErrorKind::Unsupported
         );
     }
@@ -117,14 +117,14 @@ fn detached_threads_follow_backend_truth() {
             thread
                 .join(handle)
                 .expect_err("detached thread should not join")
-                .kind,
+                .kind(),
             ThreadErrorKind::StateConflict
         );
     } else {
         assert_eq!(
             result
                 .expect_err("unsupported backend should reject detached spawn")
-                .kind,
+                .kind(),
             ThreadErrorKind::Unsupported
         );
     }
@@ -145,7 +145,7 @@ fn current_stack_observation_follows_backend_truth() {
             thread
                 .observe_current_stack()
                 .expect_err("unsupported stack observation")
-                .kind,
+                .kind(),
             ThreadErrorKind::Unsupported
         );
     }
@@ -167,7 +167,7 @@ fn sleep_for_is_honest() {
             thread
                 .sleep_for(Duration::from_millis(1))
                 .expect_err("unsupported sleep")
-                .kind,
+                .kind(),
             ThreadErrorKind::Unsupported
         );
     }
