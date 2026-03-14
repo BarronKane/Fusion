@@ -4,10 +4,16 @@ use core::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ThreadError {
     /// Specific thread error kind.
-    pub kind: ThreadErrorKind,
+    kind: ThreadErrorKind,
 }
 
 impl ThreadError {
+    /// Returns the concrete thread error kind.
+    #[must_use]
+    pub const fn kind(self) -> ThreadErrorKind {
+        self.kind
+    }
+
     /// Constructs an unsupported-operation error.
     #[must_use]
     pub const fn unsupported() -> Self {

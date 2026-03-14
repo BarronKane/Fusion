@@ -7,6 +7,9 @@
 
 #![no_std]
 
+#[path = "hal/hal.rs"]
+/// Selected hardware abstraction surface built from PAL contracts and the current backend.
+pub mod hal;
 #[path = "pal/pal.rs"]
 /// Backend-neutral PAL contracts.
 pub mod pal;

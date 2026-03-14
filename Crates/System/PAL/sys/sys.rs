@@ -61,6 +61,10 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows as platform;
 
+/// Public user-space context module re-exported from the selected private platform backend.
+pub mod context;
+/// Public event module re-exported from the selected private platform backend.
+pub mod event;
 /// Public memory module re-exported from the selected private platform backend.
 pub mod mem;
 /// Public synchronization module re-exported from the selected private platform backend.

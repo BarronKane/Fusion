@@ -1,4 +1,4 @@
-use crate::pal::mem::MemTopologyNodeId;
+use crate::pal::hal::HardwareTopologyNodeId;
 
 use super::{
     ThreadClusterId, ThreadCoreClassId, ThreadCoreId, ThreadGuarantee, ThreadLogicalCpuId,
@@ -50,9 +50,9 @@ pub struct ThreadPlacementRequest<'a> {
     /// Requested logical CPU targets, if any.
     pub logical_cpus: &'a [ThreadLogicalCpuId],
     /// Requested package or socket topology nodes, if any.
-    pub packages: &'a [MemTopologyNodeId],
+    pub packages: &'a [HardwareTopologyNodeId],
     /// Requested NUMA topology nodes, if any.
-    pub numa_nodes: &'a [MemTopologyNodeId],
+    pub numa_nodes: &'a [HardwareTopologyNodeId],
     /// Requested heterogeneous core classes, if any.
     pub core_classes: &'a [ThreadCoreClassId],
     /// Strength of the placement request.
@@ -98,9 +98,9 @@ pub struct ThreadExecutionLocation {
     /// Current core cluster or LLC domain, when observable.
     pub cluster: Option<ThreadClusterId>,
     /// Current package or socket topology node, when observable.
-    pub package: Option<MemTopologyNodeId>,
+    pub package: Option<HardwareTopologyNodeId>,
     /// Current NUMA topology node, when observable.
-    pub numa_node: Option<MemTopologyNodeId>,
+    pub numa_node: Option<HardwareTopologyNodeId>,
     /// Current heterogeneous core class, when observable.
     pub core_class: Option<ThreadCoreClassId>,
 }

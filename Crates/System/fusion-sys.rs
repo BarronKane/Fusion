@@ -9,6 +9,12 @@
 /// Target platform discriminator re-exported from `fusion-pal`.
 pub use fusion_pal::{Platform, TARGET_PLATFORM};
 
+#[path = "event/event.rs"]
+/// System event and reactor contracts.
+pub mod event;
+#[path = "fiber/fiber.rs"]
+/// System stackful execution and fiber contracts.
+pub mod fiber;
 #[path = "mem/mem.rs"]
 /// System memory contracts and resource abstractions.
 pub mod mem;
