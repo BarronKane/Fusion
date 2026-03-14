@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
-    # System stack: safe facade over a compile-time-selected PAL.
-    "Crates/System",
-    "Crates/System/PAL",
-    "Crates/Std",
+    # fusion-sys stack: safe facade over a compile-time-selected fusion-pal.
+    "Crates/fusion-sys",
+    "Crates/fusion-sys/fusion-pal",
+    "Crates/fusion-std",
 
     # Engine stack.
     "Crates/Engine/Shaders",
@@ -25,12 +25,12 @@ license = ""
 repository = ""
 
 [workspace.dependencies]
-# System stack:
+# fusion-sys stack:
 # `fusion-sys` is the consumer-facing facade.
 # `fusion-pal` exposes contract modules and compile-time-selected system modules.
-fusion-sys = { path = "Crates/System" }
-fusion-pal = { path = "Crates/System/PAL" }
-fusion-std = { path = "Crates/Std" }
+fusion-sys = { path = "Crates/fusion-sys" }
+fusion-pal = { path = "Crates/fusion-sys/fusion-pal" }
+fusion-std = { path = "Crates/fusion-std" }
 
 # RHI stack:
 # `fusion-rhi` presents a unified API while selecting backends at runtime.
