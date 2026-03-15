@@ -4,9 +4,15 @@ use fusion_sys::fiber::{
 };
 
 #[test]
-fn linux_fiber_support_reports_emulated_same_carrier_contexts() {
+fn linux_fiber_support_reports_expected_same_carrier_contexts() {
     let support = FiberSystem::new().support();
 
+    #[cfg(target_arch = "x86_64")]
+    assert_eq!(
+        support.context.implementation,
+        ContextImplementationKind::Native
+    );
+    #[cfg(target_arch = "aarch64")]
     assert_eq!(
         support.context.implementation,
         ContextImplementationKind::Emulated
@@ -22,5 +28,9 @@ fn linux_fiber_support_reports_emulated_same_carrier_contexts() {
         support.context.migration,
         ContextMigrationSupport::SameCarrierOnly
     );
+    #[cfg(target_arch = "x86_64")]
+    assert_eq!(support.context.red_zone_bytes, 128);
+    #[cfg(target_arch = "aarch64")]
+    assert_eq!(support.context.red_zone_bytes, 0);
     assert!(!support.context.unwind_across_boundary);
 }
