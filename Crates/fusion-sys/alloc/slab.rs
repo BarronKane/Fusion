@@ -1,10 +1,12 @@
 use super::{
-    AllocCapabilities, AllocError, AllocHazards, AllocPolicy, AllocRequest, AllocResult, Allocator,
+    AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
+    AllocResult, AllocationStrategy, AllocatorDomainId,
 };
 
 /// Fixed-size, bounded allocator planned on top of the internal pool substrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Slab<const SIZE: usize, const COUNT: usize> {
+    domain: AllocatorDomainId,
     policy: AllocPolicy,
 }
 
@@ -16,10 +18,20 @@ impl<const SIZE: usize, const COUNT: usize> Slab<SIZE, COUNT> {
     /// Returns `invalid_request` for zero-sized configurations and `unsupported` until the
     /// concrete slab backing lands.
     pub const fn new(policy: AllocPolicy) -> Result<Self, AllocError> {
+        Self::for_domain(AllocatorDomainId(0), policy)
+    }
+
+    pub(super) const fn for_domain(
+        domain: AllocatorDomainId,
+        policy: AllocPolicy,
+    ) -> Result<Self, AllocError> {
         if SIZE == 0 || COUNT == 0 {
             return Err(AllocError::invalid_request());
         }
-        let _ = policy;
+        if !policy.allows(AllocModeSet::SLAB) {
+            return Err(AllocError::policy_denied());
+        }
+        let _ = (domain, policy);
         Err(AllocError::unsupported())
     }
 
@@ -43,9 +55,15 @@ impl<const SIZE: usize, const COUNT: usize> Slab<SIZE, COUNT> {
     pub const fn policy(&self) -> AllocPolicy {
         self.policy
     }
+
+    /// Returns the owning allocator domain.
+    #[must_use]
+    pub const fn domain(&self) -> AllocatorDomainId {
+        self.domain
+    }
 }
 
-impl<const SIZE: usize, const COUNT: usize> Allocator for Slab<SIZE, COUNT> {
+impl<const SIZE: usize, const COUNT: usize> AllocationStrategy for Slab<SIZE, COUNT> {
     fn policy(&self) -> AllocPolicy {
         self.policy
     }

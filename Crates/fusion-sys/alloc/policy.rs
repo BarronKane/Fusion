@@ -1,6 +1,21 @@
 use crate::mem::provider::CriticalSafetyRequirements;
 
 bitflags::bitflags! {
+    /// Allocator families and installation modes permitted by policy.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct AllocModeSet: u32 {
+        /// Permits slab allocation.
+        const SLAB         = 1 << 0;
+        /// Permits bounded arena allocation.
+        const ARENA        = 1 << 1;
+        /// Permits general-purpose heap allocation.
+        const HEAP         = 1 << 2;
+        /// Permits global allocator installation.
+        const GLOBAL_ALLOC = 1 << 3;
+    }
+}
+
+bitflags::bitflags! {
     /// Coarse allocator capabilities that higher layers may gate on.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct AllocCapabilities: u32 {
@@ -45,10 +60,8 @@ bitflags::bitflags! {
 /// Allocation policy controlling which allocator families are legal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AllocPolicy {
-    /// Whether general-purpose heap behavior is permitted.
-    pub heap_allowed: bool,
-    /// Whether installing a global allocator is permitted.
-    pub global_alloc_allowed: bool,
+    /// Allocator families and installation modes permitted by this policy.
+    pub modes: AllocModeSet,
     /// Safety requirements imposed on the backing memory substrate.
     pub safety: CriticalSafetyRequirements,
 }
@@ -64,8 +77,7 @@ impl AllocPolicy {
     #[must_use]
     pub const fn critical_safe() -> Self {
         Self {
-            heap_allowed: false,
-            global_alloc_allowed: false,
+            modes: AllocModeSet::SLAB.union(AllocModeSet::ARENA),
             safety: CriticalSafetyRequirements::POOLABLE
                 .union(CriticalSafetyRequirements::DETERMINISTIC_CAPACITY)
                 .union(CriticalSafetyRequirements::PRIVATE_ONLY)
@@ -78,14 +90,39 @@ impl AllocPolicy {
         }
     }
 
+    /// Returns a conservative slab-only allocation policy.
+    #[must_use]
+    pub const fn slab_only() -> Self {
+        Self {
+            modes: AllocModeSet::SLAB,
+            safety: Self::critical_safe().safety,
+        }
+    }
+
+    /// Returns a conservative bounded-arena-only allocation policy.
+    #[must_use]
+    pub const fn arena_only() -> Self {
+        Self {
+            modes: AllocModeSet::ARENA,
+            safety: Self::critical_safe().safety,
+        }
+    }
+
     /// Returns a more permissive general-purpose allocation policy.
     #[must_use]
     pub const fn general_purpose() -> Self {
         Self {
-            heap_allowed: true,
-            global_alloc_allowed: false,
+            modes: AllocModeSet::SLAB
+                .union(AllocModeSet::ARENA)
+                .union(AllocModeSet::HEAP),
             safety: CriticalSafetyRequirements::empty(),
         }
+    }
+
+    /// Returns `true` when this policy permits `mode`.
+    #[must_use]
+    pub const fn allows(self, mode: AllocModeSet) -> bool {
+        self.modes.contains(mode)
     }
 }
 

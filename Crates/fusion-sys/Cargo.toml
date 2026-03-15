@@ -12,6 +12,10 @@ repository.workspace = true
 crate-type = ["rlib"]
 path = "fusion-sys.rs"
 
+[features]
+default = []
+sys-fusion-kn = ["fusion-pal/sys-fusion-kn"]
+
 [dependencies]
 fusion-pal = { workspace = true }
 bitflags.workspace = true
