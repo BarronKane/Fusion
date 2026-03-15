@@ -273,11 +273,7 @@ fn topology_support() -> HardwareTopologySupport {
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 const fn runtime_vendor_guarantee() -> HardwareGuarantee {
-    if vendor_is_runtime_known() {
-        HardwareGuarantee::Verified
-    } else {
-        HardwareGuarantee::Unsupported
-    }
+    HardwareGuarantee::Verified
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -375,7 +371,7 @@ fn runtime_cache_line_bytes_from_cpu() -> Option<usize> {
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-fn runtime_cache_line_bytes_from_cpu() -> Option<usize> {
+const fn runtime_cache_line_bytes_from_cpu() -> Option<usize> {
     None
 }
 
@@ -410,7 +406,7 @@ fn runtime_vendor() -> HardwareCpuVendor {
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-fn runtime_vendor() -> HardwareCpuVendor {
+const fn runtime_vendor() -> HardwareCpuVendor {
     HardwareCpuVendor::Unknown
 }
 
@@ -511,6 +507,7 @@ fn runtime_simd_set() -> HardwareSimdSet {
     HardwareSimdSet::empty()
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 const fn bit32(value: u32, bit: u32) -> bool {
     (value & (1u32 << bit)) != 0
 }
@@ -669,16 +666,6 @@ fn parse_list_value(bytes: &[u8], cursor: &mut usize) -> Result<u32, HardwareErr
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-const fn vendor_is_runtime_known() -> bool {
-    true
-}
-
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-const fn vendor_is_runtime_known() -> bool {
-    false
-}
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 const fn simd_is_runtime_known() -> bool {
     true
 }
@@ -700,8 +687,8 @@ const fn simd_is_runtime_known() -> bool {
 
 #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
 fn runtime_linux_hwcap() -> Option<(usize, usize)> {
-    let hwcap = unsafe { libc::getauxval(libc::AT_HWCAP) as usize };
-    let hwcap2 = unsafe { libc::getauxval(libc::AT_HWCAP2) as usize };
+    let hwcap = usize::try_from(unsafe { libc::getauxval(libc::AT_HWCAP) }).ok()?;
+    let hwcap2 = usize::try_from(unsafe { libc::getauxval(libc::AT_HWCAP2) }).ok()?;
     if hwcap == 0 && hwcap2 == 0 {
         None
     } else {
