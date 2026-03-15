@@ -1,3 +1,5 @@
+#[path = "fusion_sys/alloc/mod.rs"]
+mod alloc;
 #[path = "fusion_sys/event/mod.rs"]
 mod event;
 #[path = "fusion_sys/fiber/mod.rs"]
