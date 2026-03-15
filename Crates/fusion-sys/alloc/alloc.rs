@@ -13,15 +13,19 @@
 use core::ptr::NonNull;
 
 mod arena;
+mod domain;
 mod error;
 mod heap;
 mod policy;
+mod root;
 mod slab;
 
 pub use arena::BoundedArena;
+pub use domain::{AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind};
 pub use error::{AllocError, AllocErrorKind};
 pub use heap::HeapAllocator;
-pub use policy::{AllocCapabilities, AllocHazards, AllocPolicy};
+pub use policy::{AllocCapabilities, AllocHazards, AllocModeSet, AllocPolicy};
+pub use root::{Allocator, AllocatorBuilder};
 pub use slab::Slab;
 
 pub use crate::mem::pool::{
@@ -87,8 +91,8 @@ pub struct AllocResult {
     pub geometry: MemoryGeometry,
 }
 
-/// Unified low-level allocator contract.
-pub trait Allocator {
+/// Unified low-level allocator strategy contract.
+pub trait AllocationStrategy {
     /// Returns the allocator's governing policy.
     fn policy(&self) -> AllocPolicy;
 

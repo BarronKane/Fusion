@@ -37,17 +37,25 @@
 )))]
 compile_error!("fusion-pal currently supports only Linux, Windows, macOS, and iOS targets.");
 
+#[cfg(all(feature = "sys-fusion-kn", not(target_os = "linux")))]
+compile_error!(
+    "fusion-pal feature `sys-fusion-kn` currently supports only Linux targets."
+);
+
 #[cfg(target_os = "ios")]
 #[path = "ios/ios.rs"]
 mod ios;
 #[cfg(target_os = "ios")]
 use ios as platform;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "sys-fusion-kn")))]
 #[path = "linux/linux.rs"]
 mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "sys-fusion-kn")))]
 use linux as platform;
+
+#[cfg(all(target_os = "linux", feature = "sys-fusion-kn"))]
+use fusion_kn as platform;
 
 #[cfg(target_os = "macos")]
 #[path = "macos/macos.rs"]

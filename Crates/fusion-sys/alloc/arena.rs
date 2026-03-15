@@ -1,11 +1,13 @@
 use super::{
-    AllocCapabilities, AllocError, AllocHazards, AllocPolicy, AllocRequest, AllocResult, Allocator,
+    AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
+    AllocResult, AllocationStrategy, AllocatorDomainId,
 };
 
 /// Bounded lifetime allocator intended for bulk-free or reset-driven use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BoundedArena {
     capacity: usize,
+    domain: AllocatorDomainId,
     policy: AllocPolicy,
 }
 
@@ -17,10 +19,21 @@ impl BoundedArena {
     /// Returns `invalid_request` for zero capacity and `unsupported` until the concrete arena
     /// backing lands.
     pub const fn new(capacity: usize, policy: AllocPolicy) -> Result<Self, AllocError> {
+        Self::for_domain(AllocatorDomainId(0), capacity, policy)
+    }
+
+    pub(super) const fn for_domain(
+        domain: AllocatorDomainId,
+        capacity: usize,
+        policy: AllocPolicy,
+    ) -> Result<Self, AllocError> {
         if capacity == 0 {
             return Err(AllocError::invalid_request());
         }
-        let _ = policy;
+        if !policy.allows(AllocModeSet::ARENA) {
+            return Err(AllocError::policy_denied());
+        }
+        let _ = (domain, policy);
         Err(AllocError::unsupported())
     }
 
@@ -49,9 +62,15 @@ impl BoundedArena {
     pub const fn policy(&self) -> AllocPolicy {
         self.policy
     }
+
+    /// Returns the owning allocator domain.
+    #[must_use]
+    pub const fn domain(&self) -> AllocatorDomainId {
+        self.domain
+    }
 }
 
-impl Allocator for BoundedArena {
+impl AllocationStrategy for BoundedArena {
     fn policy(&self) -> AllocPolicy {
         self.policy
     }

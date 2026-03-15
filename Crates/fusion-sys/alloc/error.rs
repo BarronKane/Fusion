@@ -8,10 +8,14 @@ use crate::mem::resource::{ResourceError, ResourceErrorKind};
 pub enum AllocErrorKind {
     /// The requested allocation shape was invalid.
     InvalidRequest,
+    /// The referenced allocator domain does not exist.
+    InvalidDomain,
     /// The requested allocator operation is unsupported.
     Unsupported,
     /// Current policy forbids the requested allocator mode.
     PolicyDenied,
+    /// Fixed allocator metadata or builder storage was exhausted.
+    MetadataExhausted,
     /// No bounded allocator capacity was available.
     CapacityExhausted,
     /// The request failed because backing memory was exhausted.
@@ -38,6 +42,14 @@ impl AllocError {
         }
     }
 
+    /// Returns an invalid-domain error.
+    #[must_use]
+    pub const fn invalid_domain() -> Self {
+        Self {
+            kind: AllocErrorKind::InvalidDomain,
+        }
+    }
+
     /// Returns an unsupported-operation error.
     #[must_use]
     pub const fn unsupported() -> Self {
@@ -51,6 +63,14 @@ impl AllocError {
     pub const fn policy_denied() -> Self {
         Self {
             kind: AllocErrorKind::PolicyDenied,
+        }
+    }
+
+    /// Returns a metadata-exhausted error.
+    #[must_use]
+    pub const fn metadata_exhausted() -> Self {
+        Self {
+            kind: AllocErrorKind::MetadataExhausted,
         }
     }
 
@@ -99,8 +119,10 @@ impl fmt::Display for AllocErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidRequest => f.write_str("invalid allocation request"),
+            Self::InvalidDomain => f.write_str("invalid allocator domain"),
             Self::Unsupported => f.write_str("allocator operation unsupported"),
             Self::PolicyDenied => f.write_str("allocator policy denied the request"),
+            Self::MetadataExhausted => f.write_str("allocator metadata exhausted"),
             Self::CapacityExhausted => f.write_str("allocator capacity exhausted"),
             Self::OutOfMemory => f.write_str("allocator exhausted backing memory"),
             Self::ResourceFailure(kind) => write!(f, "resource failure ({kind})"),
