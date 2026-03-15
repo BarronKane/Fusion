@@ -1,9 +1,15 @@
 //! Domain 1: public carrier thread-pool surface.
 
+use std::boxed::Box;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+
+use crate::sync::{Mutex as SyncMutex, SyncError, SyncErrorKind};
 use fusion_sys::thread::{
     SystemPoolPlacement, SystemResizePolicy, SystemShutdownPolicy, SystemStealBoundary,
     SystemThreadPool, SystemThreadPoolConfig, SystemThreadPoolError, SystemThreadPoolStats,
-    ThreadLogicalCpuId, ThreadSchedulerRequest, ThreadStackRequest, ThreadSupport, ThreadSystem,
+    SystemWorkItem, ThreadLogicalCpuId, ThreadSchedulerRequest, ThreadStackRequest, ThreadSupport,
+    ThreadSystem,
 };
 
 /// Public placement strategy for carrier workers.
@@ -169,10 +175,15 @@ pub type PoolStats = SystemThreadPoolStats;
 /// Public carrier-pool error.
 pub type ThreadPoolError = SystemThreadPoolError;
 
+#[derive(Debug)]
+struct ThreadPoolShared {
+    inner: SyncMutex<Option<SystemThreadPool>>,
+}
+
 /// Public carrier thread-pool wrapper.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ThreadPool {
-    inner: SystemThreadPool,
+    shared: Arc<ThreadPoolShared>,
 }
 
 impl ThreadPool {
@@ -189,13 +200,119 @@ impl ThreadPool {
     /// Returns any honest lower-level configuration or support failure.
     pub fn new(config: &ThreadPoolConfig<'_>) -> Result<Self, ThreadPoolError> {
         let inner = SystemThreadPool::new(ThreadSystem::new(), &config.to_system())?;
-        Ok(Self { inner })
+        Ok(Self {
+            shared: Arc::new(ThreadPoolShared {
+                inner: SyncMutex::new(Some(inner)),
+            }),
+        })
     }
 
     /// Returns the current pool statistics snapshot.
-    #[must_use]
-    pub const fn stats(&self) -> PoolStats {
-        self.inner.stats()
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the internal pool coordination state cannot be observed honestly.
+    pub fn stats(&self) -> Result<PoolStats, ThreadPoolError> {
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .map_err(thread_pool_error_from_sync)?;
+        Ok(guard.as_ref().map_or(
+            PoolStats {
+                min_threads: 0,
+                max_threads: 0,
+                active_workers: 0,
+                queued_items: 0,
+            },
+            SystemThreadPool::stats,
+        ))
+    }
+
+    /// Returns the current active worker count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the internal pool coordination state cannot be observed honestly.
+    pub fn worker_count(&self) -> Result<usize, ThreadPoolError> {
+        Ok(self.stats()?.active_workers)
+    }
+
+    /// Submits one raw work item to the carrier pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest lower-level submission failure.
+    pub fn submit_raw(&self, work: SystemWorkItem) -> Result<(), ThreadPoolError> {
+        let guard = self
+            .shared
+            .inner
+            .lock()
+            .map_err(thread_pool_error_from_sync)?;
+        let Some(inner) = guard.as_ref() else {
+            return Err(fusion_sys::thread::ThreadError::state_conflict());
+        };
+        inner.submit(work)
+    }
+
+    /// Submits one `Send` closure to the carrier pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest lower-level submission failure.
+    pub fn submit<F>(&self, work: F) -> Result<(), ThreadPoolError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        struct BoxedJob(Box<dyn FnOnce() + Send + 'static>);
+
+        unsafe fn run_boxed_job(context: *mut ()) {
+            let job = unsafe { Box::from_raw(context.cast::<BoxedJob>()) };
+            let _ = catch_unwind(AssertUnwindSafe(|| (job.0)()));
+        }
+
+        let job = Box::new(BoxedJob(Box::new(work)));
+        let context = Box::into_raw(job).cast::<()>();
+        let item = SystemWorkItem::new(run_boxed_job, context);
+
+        match self.submit_raw(item) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                unsafe {
+                    drop(Box::from_raw(context.cast::<BoxedJob>()));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Shuts the carrier pool down according to its configured shutdown policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest lower-level shutdown failure.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn shutdown(self) -> Result<(), ThreadPoolError> {
+        let Some(inner) = self
+            .shared
+            .inner
+            .lock()
+            .map_err(thread_pool_error_from_sync)?
+            .take()
+        else {
+            return Ok(());
+        };
+        inner.shutdown()
+    }
+}
+
+const fn thread_pool_error_from_sync(error: SyncError) -> ThreadPoolError {
+    match error.kind {
+        SyncErrorKind::Unsupported => ThreadPoolError::unsupported(),
+        SyncErrorKind::Invalid | SyncErrorKind::Overflow => ThreadPoolError::invalid(),
+        SyncErrorKind::Busy | SyncErrorKind::PermissionDenied | SyncErrorKind::Platform(_) => {
+            ThreadPoolError::state_conflict()
+        }
     }
 }
 

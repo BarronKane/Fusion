@@ -130,7 +130,7 @@ unsafe impl ContextSwitch for LinuxContext {
         saved.registers.mxcsr = mxcsr;
         saved.registers.x87_cw = x87_cw;
         saved.ready = true;
-        saved.owner_tid = current_tid();
+        saved.owner_tid = 0;
 
         Ok(saved)
     }

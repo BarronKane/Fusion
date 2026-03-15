@@ -11,9 +11,13 @@
 //! ```rust
 //! use fusion_std::sync::Mutex;
 //!
+//! # fn demo() -> Result<(), fusion_std::sync::SyncError> {
 //! let value = Mutex::new(1_u32);
-//! *value.lock().expect("mutex should lock") += 1;
-//! assert_eq!(*value.lock().expect("mutex should lock"), 2);
+//! *value.lock()? += 1;
+//! assert_eq!(*value.lock()?, 2);
+//! # Ok(())
+//! # }
+//! # assert!(demo().is_ok());
 //! ```
 //!
 //! Today this module is only a re-export façade. That is deliberate, not lazy theater.

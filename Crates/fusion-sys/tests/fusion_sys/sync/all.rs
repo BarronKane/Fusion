@@ -1,8 +1,8 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use fusion_sys::sync::{
-    Mutex, MutexCaps, Once, OnceLock, RawMutex, RwLock, SpinMutex, SyncError, SyncErrorKind,
-    SyncFallbackKind, SyncImplementationKind, ThinMutex,
+    Mutex, MutexCaps, Once, OnceLock, RawMutex, RwLock, Semaphore, SpinMutex, SyncError,
+    SyncErrorKind, SyncFallbackKind, SyncImplementationKind, ThinMutex,
 };
 
 extern crate std;
@@ -198,4 +198,34 @@ fn rwlock_supports_readers_and_writers_or_reports_unsupported() {
             .expect("try_write should evaluate")
             .is_some()
     );
+}
+
+#[test]
+fn semaphore_supports_permit_accounting_or_reports_unsupported() {
+    let semaphore = Semaphore::new(1, 2);
+
+    match semaphore {
+        Ok(semaphore) => {
+            assert_ne!(
+                semaphore.support().implementation,
+                SyncImplementationKind::Unsupported
+            );
+            assert_eq!(semaphore.max_permits(), 2);
+            assert!(
+                semaphore
+                    .try_acquire()
+                    .expect("first acquire should evaluate")
+            );
+            assert!(
+                !semaphore
+                    .try_acquire()
+                    .expect("second acquire should evaluate")
+            );
+            semaphore
+                .release(1)
+                .expect("release should restore a permit");
+            assert!(semaphore.try_acquire().expect("reacquire should evaluate"));
+        }
+        Err(error) => assert_eq!(error, SyncError::unsupported()),
+    }
 }

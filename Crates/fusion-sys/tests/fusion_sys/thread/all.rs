@@ -4,8 +4,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 
 use fusion_sys::thread::{
-    ThreadConfig, ThreadEntryReturn, ThreadErrorKind, ThreadLifecycleCaps, ThreadStackCaps,
-    system_thread,
+    SystemThreadPool, SystemThreadPoolConfig, SystemWorkItem, ThreadConfig, ThreadEntryReturn,
+    ThreadErrorKind, ThreadLifecycleCaps, ThreadStackCaps, ThreadSystem, system_thread,
 };
 
 #[repr(C)]
@@ -24,6 +24,11 @@ static DETACHED_TOUCH: AtomicU32 = AtomicU32::new(0);
 unsafe fn detached_entry(_context: *mut ()) -> ThreadEntryReturn {
     DETACHED_TOUCH.store(1, Ordering::Release);
     ThreadEntryReturn::new(0)
+}
+
+unsafe fn pool_entry(context: *mut ()) {
+    let touched = unsafe { &*(context.cast::<AtomicU32>()) };
+    touched.fetch_add(1, Ordering::AcqRel);
 }
 
 #[test]
@@ -171,4 +176,22 @@ fn sleep_for_is_honest() {
             ThreadErrorKind::Unsupported
         );
     }
+}
+
+#[test]
+fn system_thread_pool_executes_submitted_work_and_drains_on_shutdown() {
+    let pool = SystemThreadPool::new(ThreadSystem::new(), &SystemThreadPoolConfig::new())
+        .expect("thread pool should build on supported backend");
+    let completed = AtomicU32::new(0);
+
+    for _ in 0..8 {
+        pool.submit(SystemWorkItem::new(
+            pool_entry,
+            (&raw const completed).cast_mut().cast(),
+        ))
+        .expect("pool should accept submitted work");
+    }
+
+    pool.shutdown().expect("pool should drain queued work");
+    assert_eq!(completed.load(Ordering::Acquire), 8);
 }

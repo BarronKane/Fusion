@@ -154,7 +154,7 @@ unsafe impl ContextSwitch for LinuxContext {
         saved.registers.x20 = arg as usize;
         saved.registers.x30 = fusion_linux_aarch64_context_start as *const () as usize;
         saved.ready = true;
-        saved.owner_tid = current_tid();
+        saved.owner_tid = 0;
 
         Ok(saved)
     }

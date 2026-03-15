@@ -17,6 +17,7 @@ default = []
 sys-fusion-kn = ["fusion-sys/sys-fusion-kn"]
 
 [dependencies]
+fusion-pal = { workspace = true }
 fusion-sys = { workspace = true }
 
 [lints]

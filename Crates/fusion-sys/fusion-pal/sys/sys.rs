@@ -38,9 +38,7 @@
 compile_error!("fusion-pal currently supports only Linux, Windows, macOS, and iOS targets.");
 
 #[cfg(all(feature = "sys-fusion-kn", not(target_os = "linux")))]
-compile_error!(
-    "fusion-pal feature `sys-fusion-kn` currently supports only Linux targets."
-);
+compile_error!("fusion-pal feature `sys-fusion-kn` currently supports only Linux targets.");
 
 #[cfg(target_os = "ios")]
 #[path = "ios/ios.rs"]

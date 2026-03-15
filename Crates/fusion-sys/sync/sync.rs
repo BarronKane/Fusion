@@ -7,12 +7,14 @@
 mod mutex;
 mod once;
 mod rwlock;
+mod semaphore;
 mod spin;
 mod thin_mutex;
 
 pub use mutex::*;
 pub use once::*;
 pub use rwlock::*;
+pub use semaphore::*;
 pub use spin::*;
 pub use thin_mutex::*;
 

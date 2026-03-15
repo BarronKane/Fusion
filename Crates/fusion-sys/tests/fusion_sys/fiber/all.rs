@@ -6,8 +6,8 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use fusion_sys::fiber::{
-    ContextCaps, ContextErrorKind, ContextStackLayout, ContextSwitch, FiberSystem,
-    PlatformSavedContext, system_context,
+    ContextCaps, ContextErrorKind, ContextStackLayout, ContextSwitch, Fiber, FiberReturn,
+    FiberStack, FiberSystem, FiberYield, PlatformSavedContext, system_context, yield_now,
 };
 use std::vec;
 
@@ -35,6 +35,14 @@ unsafe fn yield_once(context: *mut ()) -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+unsafe fn cooperative_fiber(context: *mut ()) -> FiberReturn {
+    let progress = unsafe { &*(context.cast::<AtomicUsize>()) };
+    progress.store(1, Ordering::Release);
+    yield_now().expect("fiber should yield back to its caller");
+    progress.store(2, Ordering::Release);
+    FiberReturn::new(99)
 }
 
 #[test]
@@ -105,4 +113,48 @@ fn raw_context_make_and_swap_follow_backend_truth() {
             .expect("raw context should switch to callee");
     }
     assert_eq!(progress.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn fiber_primitive_yields_and_completes_follow_backend_truth() {
+    let support = FiberSystem::new().support();
+
+    let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
+    let stack = FiberStack::new(
+        unsafe { NonNull::new_unchecked(stack_words.as_mut_ptr().cast::<u8>()) },
+        stack_words.len() * mem::size_of::<u128>(),
+    )
+    .expect("stack should be valid");
+    let progress = AtomicUsize::new(0);
+
+    if !support.context.caps.contains(ContextCaps::MAKE) {
+        assert_eq!(
+            Fiber::new(
+                stack,
+                cooperative_fiber,
+                (&raw const progress).cast_mut().cast()
+            )
+            .expect_err("unsupported backend should reject fiber creation")
+            .kind(),
+            fusion_sys::fiber::FiberErrorKind::Unsupported
+        );
+        return;
+    }
+
+    let mut fiber = Fiber::new(
+        stack,
+        cooperative_fiber,
+        (&raw const progress).cast_mut().cast(),
+    )
+    .expect("fiber should build on supported backends");
+    assert_eq!(
+        fiber.resume().expect("first resume should yield"),
+        FiberYield::Yielded
+    );
+    assert_eq!(progress.load(Ordering::Acquire), 1);
+    assert_eq!(
+        fiber.resume().expect("second resume should complete"),
+        FiberYield::Completed(FiberReturn::new(99))
+    );
+    assert_eq!(progress.load(Ordering::Acquire), 2);
 }

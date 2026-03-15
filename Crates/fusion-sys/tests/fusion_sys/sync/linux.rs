@@ -1,6 +1,6 @@
 use fusion_sys::sync::{
-    MutexCaps, Once, OnceCaps, RwLock, RwLockCaps, RwLockFairnessSupport, SyncFallbackKind,
-    SyncImplementationKind, ThinMutex,
+    MutexCaps, Once, OnceCaps, RwLock, RwLockCaps, RwLockFairnessSupport, Semaphore, SemaphoreCaps,
+    SyncFallbackKind, SyncImplementationKind, ThinMutex,
 };
 
 #[test]
@@ -35,4 +35,16 @@ fn linux_rwlock_reports_writer_preferred_surface() {
     assert!(support.caps.contains(RwLockCaps::BLOCKING_WRITE));
     assert!(support.caps.contains(RwLockCaps::TRY_READ));
     assert!(support.caps.contains(RwLockCaps::TRY_WRITE));
+}
+
+#[test]
+fn linux_semaphore_reports_blocking_and_try_acquire_surface() {
+    let semaphore = Semaphore::new(1, 4).expect("linux semaphore should construct");
+    let support = semaphore.support();
+
+    assert_eq!(support.implementation, SyncImplementationKind::Emulated);
+    assert_eq!(support.fallback, SyncFallbackKind::None);
+    assert!(support.caps.contains(SemaphoreCaps::BLOCKING));
+    assert!(support.caps.contains(SemaphoreCaps::TRY_ACQUIRE));
+    assert_eq!(semaphore.max_permits(), 4);
 }
