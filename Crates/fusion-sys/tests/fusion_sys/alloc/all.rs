@@ -2,9 +2,9 @@ use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
 use fusion_pal::sys::mem::{CachePolicy, Protect, Region};
-use fusion_sys::mem::pool::{
-    MemoryPool, MemoryPoolContributor, MemoryPoolContributorOrigin, MemoryPoolExtentRequest,
-    MemoryPoolPolicy,
+use fusion_sys::alloc::{
+    MemoryPool, MemoryPoolContributor, MemoryPoolContributorOrigin, MemoryPoolErrorKind,
+    MemoryPoolExtentRequest, MemoryPoolPolicy,
 };
 use fusion_sys::mem::provider::{
     MemoryObjectOrigin, MemoryPoolClassId, MemoryResourceDescriptor, MemoryResourceId,
@@ -206,7 +206,7 @@ fn pool_rejects_incompatible_contributors() {
             .build()
             .expect_err("incompatible contributors should be rejected")
             .kind,
-        fusion_sys::mem::pool::MemoryPoolErrorKind::IncompatibleContributor
+        MemoryPoolErrorKind::IncompatibleContributor
     );
 }
 
@@ -251,7 +251,7 @@ fn pool_and_lease_types_are_send_and_sync_where_expected() {
     fn assert_send<T: Send>() {}
 
     assert_send_sync::<MemoryPool<4, 8>>();
-    assert_send::<fusion_sys::mem::pool::MemoryPoolLease>();
+    assert_send::<fusion_sys::alloc::MemoryPoolLease>();
 }
 
 #[test]
@@ -296,7 +296,7 @@ fn pool_rejects_split_that_exceeds_fixed_extent_metadata() {
         })
         .expect_err("split should exceed extent metadata")
         .kind,
-        fusion_sys::mem::pool::MemoryPoolErrorKind::MetadataExhausted
+        MemoryPoolErrorKind::MetadataExhausted
     );
 
     let full = pool
@@ -367,10 +367,7 @@ fn pool_serializes_concurrent_acquire_release_cycles() {
                             lease = Some(acquired);
                             break;
                         }
-                        Err(error)
-                            if error.kind
-                                == fusion_sys::mem::pool::MemoryPoolErrorKind::CapacityExhausted =>
-                        {
+                        Err(error) if error.kind == MemoryPoolErrorKind::CapacityExhausted => {
                             if attempt % 32 == 31 {
                                 thread::sleep(Duration::from_micros(50));
                             } else {

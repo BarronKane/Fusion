@@ -1,4 +1,4 @@
-//! Public system-facing memory and platform contracts for Fusion.
+//! Public system-facing allocation, memory, and platform contracts for Fusion.
 //!
 //! `fusion-sys` is the narrow, no-std layer that turns fusion-pal-truthful memory behavior into
 //! resource-oriented contracts that higher layers can compose without guessing about the
@@ -9,6 +9,9 @@
 /// Target platform discriminator re-exported from `fusion-pal`.
 pub use fusion_pal::{Platform, TARGET_PLATFORM};
 
+#[path = "alloc/alloc.rs"]
+/// fusion-sys allocation contracts and allocator-facing surfaces.
+pub mod alloc;
 #[path = "event/event.rs"]
 /// fusion-sys event and reactor contracts.
 pub mod event;
