@@ -1,10 +1,10 @@
-//! Native `x86_64` Linux context-switch backend.
+//! Native `aarch64` Linux context-switch backend.
 //!
-//! This backend saves the `SysV` callee-saved register set plus the floating-point control words
-//! directly in an ISA-specific record and resumes contexts with a small assembly shim. No libc
-//! coroutine surface is involved, which is the whole point.
+//! This backend saves the `AAPCS64` callee-saved integer register set, the preserved SIMD lanes,
+//! and floating-point control state directly in an ISA-specific record. No libc coroutine layer
+//! is involved.
 
-use core::arch::{asm, global_asm};
+use core::arch::global_asm;
 use core::mem;
 
 use rustix::thread as rustix_thread;
@@ -15,12 +15,12 @@ use crate::pal::context::{
     ContextSupport, ContextSwitch, ContextTlsIsolation, RawContextEntry,
 };
 
-global_asm!(include_str!("x86_64.S"));
+global_asm!(include_str!("aarch64.S"));
 
 const STACK_ALIGNMENT: usize = 16;
-const RED_ZONE_BYTES: usize = 128;
+const RED_ZONE_BYTES: usize = 0;
 
-const X86_64_CONTEXT_SUPPORT: ContextSupport = ContextSupport {
+const AARCH64_CONTEXT_SUPPORT: ContextSupport = ContextSupport {
     caps: ContextCaps::MAKE
         .union(ContextCaps::SWAP)
         .union(ContextCaps::STACK_DIRECTION)
@@ -41,39 +41,52 @@ const X86_64_CONTEXT_SUPPORT: ContextSupport = ContextSupport {
     implementation: ContextImplementationKind::Native,
 };
 
-/// Native `x86_64` Linux context provider.
+/// Native `aarch64` Linux context provider.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LinuxContext;
 
 #[repr(C)]
 #[derive(Debug, Default)]
-struct X86_64Registers {
-    rsp: usize,
-    rbx: usize,
-    rbp: usize,
-    r12: usize,
-    r13: usize,
-    r14: usize,
-    r15: usize,
-    mxcsr: u32,
-    x87_cw: u16,
-    _padding: u16,
+struct Aarch64Registers {
+    sp: usize,
+    x19: usize,
+    x20: usize,
+    x21: usize,
+    x22: usize,
+    x23: usize,
+    x24: usize,
+    x25: usize,
+    x26: usize,
+    x27: usize,
+    x28: usize,
+    x29: usize,
+    x30: usize,
+    fpcr: u64,
+    fpsr: u64,
+    d8: u64,
+    d9: u64,
+    d10: u64,
+    d11: u64,
+    d12: u64,
+    d13: u64,
+    d14: u64,
+    d15: u64,
 }
 
-/// Saved `x86_64` execution context.
+/// Saved `aarch64` execution context.
 #[derive(Debug, Default)]
 pub struct LinuxSavedContext {
-    registers: X86_64Registers,
+    registers: Aarch64Registers,
     ready: bool,
     owner_tid: libc::pid_t,
 }
 
 unsafe extern "C" {
-    fn fusion_linux_x86_64_context_swap(from: *mut X86_64Registers, to: *const X86_64Registers);
+    fn fusion_linux_aarch64_context_swap(from: *mut Aarch64Registers, to: *const Aarch64Registers);
 }
 
 impl LinuxContext {
-    /// Creates a new `x86_64` Linux context provider.
+    /// Creates a new `aarch64` Linux context provider.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -85,17 +98,30 @@ impl LinuxSavedContext {
     #[must_use]
     pub const fn empty() -> Self {
         Self {
-            registers: X86_64Registers {
-                rsp: 0,
-                rbx: 0,
-                rbp: 0,
-                r12: 0,
-                r13: 0,
-                r14: 0,
-                r15: 0,
-                mxcsr: 0,
-                x87_cw: 0,
-                _padding: 0,
+            registers: Aarch64Registers {
+                sp: 0,
+                x19: 0,
+                x20: 0,
+                x21: 0,
+                x22: 0,
+                x23: 0,
+                x24: 0,
+                x25: 0,
+                x26: 0,
+                x27: 0,
+                x28: 0,
+                x29: 0,
+                x30: 0,
+                fpcr: 0,
+                fpsr: 0,
+                d8: 0,
+                d9: 0,
+                d10: 0,
+                d11: 0,
+                d12: 0,
+                d13: 0,
+                d14: 0,
+                d15: 0,
             },
             ready: false,
             owner_tid: 0,
@@ -107,11 +133,11 @@ impl ContextBase for LinuxContext {
     type Context = LinuxSavedContext;
 
     fn support(&self) -> ContextSupport {
-        X86_64_CONTEXT_SUPPORT
+        AARCH64_CONTEXT_SUPPORT
     }
 }
 
-// SAFETY: this backend saves and restores the reported x86_64 context record directly and
+// SAFETY: this backend saves and restores the reported `aarch64` context record directly and
 // enforces same-carrier resume before dispatching into the assembly switch path.
 unsafe impl ContextSwitch for LinuxContext {
     unsafe fn make(
@@ -120,15 +146,13 @@ unsafe impl ContextSwitch for LinuxContext {
         entry: RawContextEntry,
         arg: *mut (),
     ) -> Result<Self::Context, ContextError> {
-        let bootstrap_rsp = validate_stack_layout(stack)?;
+        let bootstrap_sp = validate_stack_layout(stack)?;
         let mut saved = LinuxSavedContext::empty();
-        let (mxcsr, x87_cw) = capture_control_state();
 
-        saved.registers.rsp = bootstrap_rsp;
-        saved.registers.r12 = entry as usize;
-        saved.registers.r13 = arg as usize;
-        saved.registers.mxcsr = mxcsr;
-        saved.registers.x87_cw = x87_cw;
+        saved.registers.sp = bootstrap_sp;
+        saved.registers.x19 = entry as usize;
+        saved.registers.x20 = arg as usize;
+        saved.registers.x30 = fusion_linux_aarch64_context_start as *const () as usize;
         saved.ready = true;
         saved.owner_tid = current_tid();
 
@@ -152,14 +176,14 @@ unsafe impl ContextSwitch for LinuxContext {
         from.ready = true;
         from.owner_tid = current_tid;
         unsafe {
-            fusion_linux_x86_64_context_swap(&raw mut from.registers, &raw const to.registers);
+            fusion_linux_aarch64_context_swap(&raw mut from.registers, &raw const to.registers);
         }
         Ok(())
     }
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn fusion_linux_x86_64_context_bootstrap(entry_bits: usize, arg_bits: usize) -> ! {
+extern "C" fn fusion_linux_aarch64_context_bootstrap(entry_bits: usize, arg_bits: usize) -> ! {
     let entry = unsafe { mem::transmute::<usize, RawContextEntry>(entry_bits) };
     let arg = arg_bits as *mut ();
     unsafe { entry(arg) }
@@ -176,40 +200,11 @@ fn validate_stack_layout(stack: ContextStackLayout) -> Result<usize, ContextErro
     if top % STACK_ALIGNMENT != 0 {
         return Err(ContextError::invalid());
     }
-    if stack.len.get() < STACK_ALIGNMENT + RED_ZONE_BYTES + mem::size_of::<usize>() * 2 {
+    if stack.len.get() < STACK_ALIGNMENT {
         return Err(ContextError::invalid());
     }
 
-    let bootstrap_rsp = top
-        .checked_sub(mem::size_of::<usize>() * 2)
-        .ok_or_else(ContextError::invalid)?;
-    let bootstrap_slot = bootstrap_rsp as *mut usize;
-    unsafe {
-        bootstrap_slot.write(fusion_linux_x86_64_context_start as *const () as usize);
-        bootstrap_slot.add(1).write(0);
-    }
-
-    Ok(bootstrap_rsp)
-}
-
-fn capture_control_state() -> (u32, u16) {
-    let mut mxcsr = 0_u32;
-    let mut x87_cw = 0_u16;
-
-    unsafe {
-        asm!(
-            "stmxcsr [{}]",
-            in(reg) &raw mut mxcsr,
-            options(nostack, preserves_flags),
-        );
-        asm!(
-            "fnstcw [{}]",
-            in(reg) &raw mut x87_cw,
-            options(nostack, preserves_flags),
-        );
-    }
-
-    (mxcsr, x87_cw)
+    Ok(top)
 }
 
 fn current_tid() -> libc::pid_t {
@@ -217,7 +212,7 @@ fn current_tid() -> libc::pid_t {
 }
 
 unsafe extern "C" {
-    fn fusion_linux_x86_64_context_start() -> !;
+    fn fusion_linux_aarch64_context_start() -> !;
 }
 
 /// Selected Linux context provider type.
@@ -255,8 +250,8 @@ mod tests {
     unsafe fn yield_once(context: *mut ()) -> ! {
         let yield_state = unsafe { &mut *context.cast::<YieldState>() };
         unsafe {
-            asm!(
-                "mov r12, {sentinel}",
+            core::arch::asm!(
+                "mov x19, {sentinel}",
                 sentinel = in(reg) FIBER_SENTINEL,
                 options(nostack, preserves_flags),
             );
@@ -327,8 +322,8 @@ mod tests {
         unsafe {
             (*state_ptr).caller = &raw mut resume_slot;
             (*state_ptr).callee = &raw mut fiber_context;
-            asm!(
-                "mov r12, {sentinel}",
+            core::arch::asm!(
+                "mov x19, {sentinel}",
                 sentinel = in(reg) MAIN_SENTINEL,
                 options(nostack, preserves_flags),
             );
@@ -340,16 +335,16 @@ mod tests {
                 .expect("swap to callee should succeed");
         }
 
-        let preserved_r12: usize;
+        let preserved_x19: usize;
         unsafe {
-            asm!(
-                "mov {preserved}, r12",
-                preserved = lateout(reg) preserved_r12,
+            core::arch::asm!(
+                "mov {preserved}, x19",
+                preserved = lateout(reg) preserved_x19,
                 options(nostack, preserves_flags),
             );
         }
 
         assert_eq!(progress.load(Ordering::Acquire), 1);
-        assert_eq!(preserved_r12, MAIN_SENTINEL);
+        assert_eq!(preserved_x19, MAIN_SENTINEL);
     }
 }

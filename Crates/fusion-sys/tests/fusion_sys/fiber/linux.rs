@@ -15,7 +15,7 @@ fn linux_fiber_support_reports_expected_same_carrier_contexts() {
     #[cfg(target_arch = "aarch64")]
     assert_eq!(
         support.context.implementation,
-        ContextImplementationKind::Emulated
+        ContextImplementationKind::Native
     );
     assert!(support.context.caps.contains(ContextCaps::MAKE));
     assert!(support.context.caps.contains(ContextCaps::SWAP));

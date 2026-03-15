@@ -870,7 +870,7 @@ fn thread_id_to_pid(id: ThreadId) -> Result<Pid, ThreadError> {
 fn set_current_thread_name(name: &str) -> Result<(), ThreadError> {
     let mut buffer = [0 as c_char; 16];
     for (index, byte) in name.bytes().enumerate() {
-        buffer[index] = byte.cast_signed() as c_char;
+        buffer[index] = c_char::from_ne_bytes([byte]);
     }
     let rc = unsafe { libc::pthread_setname_np(libc::pthread_self(), buffer.as_ptr()) };
     if rc != 0 {
