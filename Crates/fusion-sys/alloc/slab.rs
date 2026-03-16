@@ -1,16 +1,14 @@
 use core::array;
 use core::fmt;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sync::Mutex;
 
 use super::{
     AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
-    AllocResult, AllocationBacking, AllocationStrategy, AllocatorDomainId, SharedDomainPool,
+    AllocResult, AllocationBacking, AllocationStrategy, AllocatorDomainId, MemoryPoolLeaseId,
+    SharedDomainPool, shared_pool_marker,
 };
-
-static NEXT_SLAB_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 struct SlabState<const COUNT: usize> {
@@ -44,11 +42,12 @@ impl<const COUNT: usize> SlabState<COUNT> {
 
 /// Fixed-size, bounded allocator on top of one allocator-owned pool extent.
 pub struct Slab<const SIZE: usize, const COUNT: usize> {
-    id: u64,
     domain: AllocatorDomainId,
     policy: AllocPolicy,
     pool: SharedDomainPool,
     lease: Option<super::MemoryPoolLease>,
+    lease_id: MemoryPoolLeaseId,
+    pool_marker: usize,
     member: super::MemoryPoolMemberInfo,
     slot_align: usize,
     state: Mutex<SlabState<COUNT>>,
@@ -57,9 +56,9 @@ pub struct Slab<const SIZE: usize, const COUNT: usize> {
 impl<const SIZE: usize, const COUNT: usize> fmt::Debug for Slab<SIZE, COUNT> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Slab")
-            .field("id", &self.id)
             .field("domain", &self.domain)
             .field("policy", &self.policy)
+            .field("lease_id", &self.lease_id)
             .field("slot_align", &self.slot_align)
             .finish_non_exhaustive()
     }
@@ -86,14 +85,16 @@ impl<const SIZE: usize, const COUNT: usize> Slab<SIZE, COUNT> {
             len: total_len,
             align: slot_align,
         })?;
+        let lease_id = lease.id();
         let member = pool.member_info(lease.member())?;
 
         Ok(Self {
-            id: NEXT_SLAB_ID.fetch_add(1, Ordering::Relaxed),
             domain,
             policy,
+            pool_marker: shared_pool_marker(&pool),
             pool,
             lease: Some(lease),
+            lease_id,
             member,
             slot_align,
             state: Mutex::new(SlabState::new()),
@@ -196,7 +197,8 @@ impl<const SIZE: usize, const COUNT: usize> AllocationStrategy for Slab<SIZE, CO
             self.member.compatibility.hazards,
             self.member.compatibility.geometry,
             AllocationBacking::SlabSlot {
-                slab_id: self.id,
+                pool_marker: self.pool_marker,
+                lease_id: self.lease_id,
                 slot,
             },
         ))
@@ -204,7 +206,11 @@ impl<const SIZE: usize, const COUNT: usize> AllocationStrategy for Slab<SIZE, CO
 
     fn deallocate(&self, allocation: AllocResult) -> Result<(), AllocError> {
         match allocation.backing {
-            AllocationBacking::SlabSlot { slab_id, slot } if slab_id == self.id => {
+            AllocationBacking::SlabSlot {
+                pool_marker,
+                lease_id,
+                slot,
+            } if pool_marker == self.pool_marker && lease_id == self.lease_id => {
                 let mut state = self
                     .state
                     .lock()

@@ -1,16 +1,13 @@
 use core::fmt;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sync::Mutex;
 
 use super::{
     AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
-    AllocResult, AllocationBacking, AllocationStrategy, AllocatorDomainId, SharedDomainPool,
-    align_up,
+    AllocResult, AllocationBacking, AllocationStrategy, AllocatorDomainId, MemoryPoolLeaseId,
+    SharedDomainPool, align_up, shared_pool_marker,
 };
-
-static NEXT_ARENA_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 struct ArenaState {
@@ -20,11 +17,12 @@ struct ArenaState {
 /// Bounded lifetime allocator intended for bulk-free or reset-driven use.
 pub struct BoundedArena {
     capacity: usize,
-    id: u64,
     domain: AllocatorDomainId,
     policy: AllocPolicy,
     pool: SharedDomainPool,
     lease: Option<super::MemoryPoolLease>,
+    lease_id: MemoryPoolLeaseId,
+    pool_marker: usize,
     member: super::MemoryPoolMemberInfo,
     state: Mutex<ArenaState>,
 }
@@ -33,9 +31,9 @@ impl fmt::Debug for BoundedArena {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BoundedArena")
             .field("capacity", &self.capacity)
-            .field("id", &self.id)
             .field("domain", &self.domain)
             .field("policy", &self.policy)
+            .field("lease_id", &self.lease_id)
             .finish_non_exhaustive()
     }
 }
@@ -58,15 +56,17 @@ impl BoundedArena {
             len: capacity,
             align: 1,
         })?;
+        let lease_id = lease.id();
         let member = pool.member_info(lease.member())?;
 
         Ok(Self {
             capacity,
-            id: NEXT_ARENA_ID.fetch_add(1, Ordering::Relaxed),
             domain,
             policy,
+            pool_marker: shared_pool_marker(&pool),
             pool,
             lease: Some(lease),
+            lease_id,
             member,
             state: Mutex::new(ArenaState { cursor: 0 }),
         })
@@ -181,7 +181,8 @@ impl AllocationStrategy for BoundedArena {
             self.member.compatibility.hazards,
             self.member.compatibility.geometry,
             AllocationBacking::ArenaBlock {
-                arena_id: self.id,
+                pool_marker: self.pool_marker,
+                lease_id: self.lease_id,
                 offset,
                 len: request.len,
             },
@@ -190,14 +191,15 @@ impl AllocationStrategy for BoundedArena {
 
     fn deallocate(&self, allocation: AllocResult) -> Result<(), AllocError> {
         let AllocationBacking::ArenaBlock {
-            arena_id,
+            pool_marker,
+            lease_id,
             offset,
             len,
         } = allocation.backing
         else {
             return Err(AllocError::invalid_request());
         };
-        if arena_id != self.id {
+        if pool_marker != self.pool_marker || lease_id != self.lease_id {
             return Err(AllocError::invalid_request());
         }
 

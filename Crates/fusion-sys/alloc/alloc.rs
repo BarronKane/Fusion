@@ -81,11 +81,13 @@ impl AllocRequest {
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) enum AllocationBacking {
     SlabSlot {
-        slab_id: u64,
+        pool_marker: usize,
+        lease_id: MemoryPoolLeaseId,
         slot: usize,
     },
     ArenaBlock {
-        arena_id: u64,
+        pool_marker: usize,
+        lease_id: MemoryPoolLeaseId,
         offset: usize,
         len: usize,
     },
@@ -153,6 +155,10 @@ pub(crate) trait DomainPool {
 }
 
 pub(crate) type SharedDomainPool = Arc<dyn DomainPool + Send + Sync>;
+
+pub(crate) fn shared_pool_marker(pool: &SharedDomainPool) -> usize {
+    Arc::as_ptr(pool).cast::<()>() as usize
+}
 
 pub(crate) fn align_up(value: usize, align: usize) -> Result<usize, AllocError> {
     if align == 0 || !align.is_power_of_two() {
