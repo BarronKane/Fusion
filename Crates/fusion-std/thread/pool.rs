@@ -1,10 +1,11 @@
 //! Domain 1: public carrier thread-pool surface.
 
-use std::boxed::Box;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::fmt;
+use core::mem::{MaybeUninit, align_of, size_of};
 
 use crate::sync::{Mutex as SyncMutex, SyncError, SyncErrorKind};
+use fusion_sys::alloc::{AllocRequest, AllocationStrategy, Allocator, Slab};
 use fusion_sys::thread::{
     SystemPoolPlacement, SystemResizePolicy, SystemShutdownPolicy, SystemStealBoundary,
     SystemThreadPool, SystemThreadPoolConfig, SystemThreadPoolError, SystemThreadPoolStats,
@@ -175,9 +176,177 @@ pub type PoolStats = SystemThreadPoolStats;
 /// Public carrier-pool error.
 pub type ThreadPoolError = SystemThreadPoolError;
 
+const THREAD_POOL_JOB_INLINE_BYTES: usize = 768;
+const THREAD_POOL_JOB_SLOT_BYTES: usize = 1024;
+const THREAD_POOL_JOB_SLOT_COUNT: usize = 256;
+
 #[derive(Debug)]
 struct ThreadPoolShared {
     inner: SyncMutex<Option<SystemThreadPool>>,
+    jobs: SyncMutex<Slab<THREAD_POOL_JOB_SLOT_BYTES, THREAD_POOL_JOB_SLOT_COUNT>>,
+}
+
+#[repr(C, align(64))]
+struct InlineThreadJobBytes {
+    bytes: [u8; THREAD_POOL_JOB_INLINE_BYTES],
+}
+
+struct InlineThreadJobStorage {
+    storage: MaybeUninit<InlineThreadJobBytes>,
+    run: Option<unsafe fn(*mut u8)>,
+    drop: Option<unsafe fn(*mut u8)>,
+    occupied: bool,
+}
+
+impl fmt::Debug for InlineThreadJobStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InlineThreadJobStorage")
+            .field("occupied", &self.occupied)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InlineThreadJobStorage {
+    const fn empty() -> Self {
+        Self {
+            storage: MaybeUninit::uninit(),
+            run: None,
+            drop: None,
+            occupied: false,
+        }
+    }
+
+    fn store<F>(&mut self, job: F) -> Result<(), ThreadPoolError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        if self.occupied {
+            return Err(ThreadPoolError::state_conflict());
+        }
+        if size_of::<F>() > size_of::<InlineThreadJobBytes>()
+            || align_of::<F>() > align_of::<InlineThreadJobBytes>()
+        {
+            return Err(ThreadPoolError::resource_exhausted());
+        }
+
+        let ptr = self.storage.as_mut_ptr().cast::<F>();
+        // SAFETY: size and alignment were checked above and the storage is currently vacant.
+        unsafe { ptr.write(job) };
+        self.run = Some(run_inline_thread_job::<F>);
+        self.drop = Some(drop_inline_thread_job::<F>);
+        self.occupied = true;
+        Ok(())
+    }
+
+    fn take_runner(&mut self) -> Result<InlineThreadJobRunner, ThreadPoolError> {
+        if !self.occupied {
+            return Err(ThreadPoolError::state_conflict());
+        }
+
+        let run = self
+            .run
+            .take()
+            .ok_or_else(ThreadPoolError::state_conflict)?;
+        let drop = self.drop.take();
+        self.occupied = false;
+        Ok(InlineThreadJobRunner {
+            ptr: self.storage.as_mut_ptr().cast::<u8>(),
+            run,
+            drop,
+        })
+    }
+}
+
+impl Drop for InlineThreadJobStorage {
+    fn drop(&mut self) {
+        if !self.occupied {
+            return;
+        }
+        if let Some(drop) = self.drop.take() {
+            // SAFETY: `occupied` means a valid job is present in storage.
+            unsafe { drop(self.storage.as_mut_ptr().cast::<u8>()) };
+        }
+        self.run = None;
+        self.occupied = false;
+    }
+}
+
+struct InlineThreadJobRunner {
+    ptr: *mut u8,
+    run: unsafe fn(*mut u8),
+    drop: Option<unsafe fn(*mut u8)>,
+}
+
+impl InlineThreadJobRunner {
+    fn run(mut self) {
+        // SAFETY: `take_runner` only produces a runner for initialized storage.
+        unsafe { (self.run)(self.ptr) };
+        self.drop = None;
+    }
+}
+
+impl Drop for InlineThreadJobRunner {
+    fn drop(&mut self) {
+        if let Some(drop) = self.drop.take() {
+            // SAFETY: the runner still owns the stored job when `drop` remains present.
+            unsafe { drop(self.ptr) };
+        }
+    }
+}
+
+unsafe fn run_inline_thread_job<F>(ptr: *mut u8)
+where
+    F: FnOnce() + Send + 'static,
+{
+    // SAFETY: the storage guarantees `ptr` names a valid `F`, and we consume it exactly once.
+    let job = unsafe { ptr.cast::<F>().read() };
+    job();
+}
+
+unsafe fn drop_inline_thread_job<F>(ptr: *mut u8)
+where
+    F: FnOnce() + Send + 'static,
+{
+    // SAFETY: the storage guarantees `ptr` names a valid `F` when this drop hook is present.
+    unsafe { ptr.cast::<F>().drop_in_place() };
+}
+
+#[derive(Debug)]
+struct ThreadJobRecord {
+    shared: Arc<ThreadPoolShared>,
+    allocation: Option<fusion_sys::alloc::AllocResult>,
+    job: InlineThreadJobStorage,
+}
+
+impl ThreadJobRecord {
+    const fn new(
+        shared: Arc<ThreadPoolShared>,
+        allocation: fusion_sys::alloc::AllocResult,
+        job: InlineThreadJobStorage,
+    ) -> Self {
+        Self {
+            shared,
+            allocation: Some(allocation),
+            job,
+        }
+    }
+
+    fn run_contained(mut self) {
+        if let Ok(runner) = self.job.take_runner() {
+            run_inline_job_contained(runner);
+        }
+        if let Some(allocation) = self.allocation.take() {
+            let _ = self
+                .shared
+                .jobs
+                .lock()
+                .map_err(thread_pool_error_from_sync)
+                .and_then(|slab| {
+                    slab.deallocate(allocation)
+                        .map_err(thread_pool_error_from_alloc)
+                });
+        }
+    }
 }
 
 /// Public carrier thread-pool wrapper.
@@ -200,9 +369,18 @@ impl ThreadPool {
     /// Returns any honest lower-level configuration or support failure.
     pub fn new(config: &ThreadPoolConfig<'_>) -> Result<Self, ThreadPoolError> {
         let inner = SystemThreadPool::new(ThreadSystem::new(), &config.to_system())?;
+        let allocator =
+            Allocator::<1, 1>::system_default().map_err(thread_pool_error_from_alloc)?;
+        let default_domain = allocator
+            .default_domain()
+            .ok_or_else(ThreadPoolError::state_conflict)?;
+        let jobs = allocator
+            .slab::<THREAD_POOL_JOB_SLOT_BYTES, THREAD_POOL_JOB_SLOT_COUNT>(default_domain)
+            .map_err(thread_pool_error_from_alloc)?;
         Ok(Self {
             shared: Arc::new(ThreadPoolShared {
                 inner: SyncMutex::new(Some(inner)),
+                jobs: SyncMutex::new(jobs),
             }),
         })
     }
@@ -264,23 +442,41 @@ impl ThreadPool {
     where
         F: FnOnce() + Send + 'static,
     {
-        struct BoxedJob(Box<dyn FnOnce() + Send + 'static>);
-
-        unsafe fn run_boxed_job(context: *mut ()) {
-            let job = unsafe { Box::from_raw(context.cast::<BoxedJob>()) };
-            let _ = catch_unwind(AssertUnwindSafe(|| (job.0)()));
+        unsafe fn run_inline_job(context: *mut ()) {
+            // SAFETY: the context points at a slab-backed record written by `submit`.
+            let record = unsafe { context.cast::<ThreadJobRecord>().read() };
+            record.run_contained();
         }
 
-        let job = Box::new(BoxedJob(Box::new(work)));
-        let context = Box::into_raw(job).cast::<()>();
-        let item = SystemWorkItem::new(run_boxed_job, context);
+        let mut storage = InlineThreadJobStorage::empty();
+        storage.store(work)?;
+
+        let allocation = {
+            let slab = self
+                .shared
+                .jobs
+                .lock()
+                .map_err(thread_pool_error_from_sync)?;
+            slab.allocate(&AllocRequest {
+                len: size_of::<ThreadJobRecord>(),
+                align: align_of::<ThreadJobRecord>(),
+                zeroed: false,
+            })
+            .map_err(thread_pool_error_from_alloc)?
+        };
+        let context = allocation.ptr.cast::<ThreadJobRecord>();
+        let record = ThreadJobRecord::new(Arc::clone(&self.shared), allocation, storage);
+        // SAFETY: the slab allocation reserves enough space for one `ThreadJobRecord` and is
+        // uniquely owned until the worker consumes and recycles it.
+        unsafe { context.as_ptr().write(record) };
+        let item = SystemWorkItem::new(run_inline_job, context.cast::<()>().as_ptr());
 
         match self.submit_raw(item) {
             Ok(()) => Ok(()),
             Err(error) => {
-                unsafe {
-                    drop(Box::from_raw(context.cast::<BoxedJob>()));
-                }
+                // SAFETY: submission failed, so no worker can observe the record. Read it back,
+                // run its normal drop/recycle path, and return the original error.
+                unsafe { context.as_ptr().read().run_contained() };
                 Err(error)
             }
         }
@@ -306,11 +502,42 @@ impl ThreadPool {
     }
 }
 
+fn run_inline_job_contained(job: InlineThreadJobRunner) {
+    #[cfg(feature = "std")]
+    {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let _ = catch_unwind(AssertUnwindSafe(|| job.run()));
+    }
+
+    #[cfg(not(feature = "std"))]
+    {
+        job.run();
+    }
+}
+
 const fn thread_pool_error_from_sync(error: SyncError) -> ThreadPoolError {
     match error.kind {
         SyncErrorKind::Unsupported => ThreadPoolError::unsupported(),
         SyncErrorKind::Invalid | SyncErrorKind::Overflow => ThreadPoolError::invalid(),
         SyncErrorKind::Busy | SyncErrorKind::PermissionDenied | SyncErrorKind::Platform(_) => {
+            ThreadPoolError::state_conflict()
+        }
+    }
+}
+
+const fn thread_pool_error_from_alloc(error: fusion_sys::alloc::AllocError) -> ThreadPoolError {
+    match error.kind {
+        fusion_sys::alloc::AllocErrorKind::Unsupported => ThreadPoolError::unsupported(),
+        fusion_sys::alloc::AllocErrorKind::InvalidRequest
+        | fusion_sys::alloc::AllocErrorKind::InvalidDomain => ThreadPoolError::invalid(),
+        fusion_sys::alloc::AllocErrorKind::PolicyDenied => ThreadPoolError::state_conflict(),
+        fusion_sys::alloc::AllocErrorKind::MetadataExhausted
+        | fusion_sys::alloc::AllocErrorKind::CapacityExhausted
+        | fusion_sys::alloc::AllocErrorKind::OutOfMemory => ThreadPoolError::resource_exhausted(),
+        fusion_sys::alloc::AllocErrorKind::ResourceFailure(_)
+        | fusion_sys::alloc::AllocErrorKind::PoolFailure(_)
+        | fusion_sys::alloc::AllocErrorKind::SynchronizationFailure(_) => {
             ThreadPoolError::state_conflict()
         }
     }

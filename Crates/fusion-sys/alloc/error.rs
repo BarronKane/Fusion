@@ -2,6 +2,7 @@ use core::fmt;
 
 use crate::mem::pool::{MemoryPoolError, MemoryPoolErrorKind};
 use crate::mem::resource::{ResourceError, ResourceErrorKind};
+use crate::sync::SyncErrorKind;
 
 /// Allocation-layer failure classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,6 +25,8 @@ pub enum AllocErrorKind {
     ResourceFailure(ResourceErrorKind),
     /// Lower-level pool-substrate failure.
     PoolFailure(MemoryPoolErrorKind),
+    /// Internal synchronization failure while coordinating allocator state.
+    SynchronizationFailure(SyncErrorKind),
 }
 
 /// Error returned by `fusion-sys::alloc`.
@@ -89,6 +92,14 @@ impl AllocError {
             kind: AllocErrorKind::OutOfMemory,
         }
     }
+
+    /// Returns an internal synchronization failure.
+    #[must_use]
+    pub const fn synchronization(kind: SyncErrorKind) -> Self {
+        Self {
+            kind: AllocErrorKind::SynchronizationFailure(kind),
+        }
+    }
 }
 
 impl From<ResourceError> for AllocError {
@@ -127,6 +138,9 @@ impl fmt::Display for AllocErrorKind {
             Self::OutOfMemory => f.write_str("allocator exhausted backing memory"),
             Self::ResourceFailure(kind) => write!(f, "resource failure ({kind})"),
             Self::PoolFailure(kind) => write!(f, "pool-substrate failure ({kind})"),
+            Self::SynchronizationFailure(kind) => {
+                write!(f, "allocator synchronization failure ({kind})")
+            }
         }
     }
 }

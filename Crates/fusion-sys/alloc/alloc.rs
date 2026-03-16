@@ -10,7 +10,9 @@
 //! while allocator surfaces are still being built so callers migrate toward the right public
 //! namespace instead of wiring themselves directly into lower plumbing.
 
+use crate::rust_alloc::sync::Arc;
 use core::ptr::NonNull;
+use fusion_pal::sys::mem::Region;
 
 mod arena;
 mod domain;
@@ -22,12 +24,15 @@ mod slab;
 
 pub use arena::BoundedArena;
 pub use domain::{AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind};
+#[allow(unused_imports)]
 pub use error::{AllocError, AllocErrorKind};
 pub use heap::HeapAllocator;
 pub use policy::{AllocCapabilities, AllocHazards, AllocModeSet, AllocPolicy};
+#[allow(unused_imports)]
 pub use root::{Allocator, AllocatorBuilder};
 pub use slab::Slab;
 
+#[allow(unused_imports)]
 pub use crate::mem::pool::{
     MemoryPool, MemoryPoolBuilder, MemoryPoolContributor, MemoryPoolContributorOrigin,
     MemoryPoolError, MemoryPoolErrorKind, MemoryPoolExtentRequest, MemoryPoolLease,
@@ -35,6 +40,7 @@ pub use crate::mem::pool::{
     MemoryPoolMetadataLayout, MemoryPoolPolicy, MemoryPoolProvisioningPolicy, MemoryPoolStats,
 };
 pub use crate::mem::provider::CriticalSafetyRequirements;
+#[allow(unused_imports)]
 pub use crate::mem::resource::{
     MemoryDomain, MemoryDomainSet, MemoryGeometry, ResourceAttrs, ResourceHazardSet,
 };
@@ -72,8 +78,24 @@ impl AllocRequest {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) enum AllocationBacking {
+    SlabSlot {
+        slab_id: u64,
+        slot: usize,
+    },
+    ArenaBlock {
+        arena_id: u64,
+        offset: usize,
+        len: usize,
+    },
+}
+
 /// Successful allocator result together with the resource truth attached to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// This is intentionally a linear token, not a copyable descriptor. Releasing an allocation
+/// consumes the token so higher layers do not casually duplicate ownership.
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AllocResult {
     /// Base address of the allocation.
     pub ptr: NonNull<u8>,
@@ -89,6 +111,59 @@ pub struct AllocResult {
     pub hazards: ResourceHazardSet,
     /// Operation granularity exposed by the backing resource.
     pub geometry: MemoryGeometry,
+    pub(crate) backing: AllocationBacking,
+}
+
+impl AllocResult {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn from_parts(
+        ptr: NonNull<u8>,
+        len: usize,
+        align: usize,
+        domain: MemoryDomain,
+        attrs: ResourceAttrs,
+        hazards: ResourceHazardSet,
+        geometry: MemoryGeometry,
+        backing: AllocationBacking,
+    ) -> Self {
+        Self {
+            ptr,
+            len,
+            align,
+            domain,
+            attrs,
+            hazards,
+            geometry,
+            backing,
+        }
+    }
+}
+
+pub(crate) trait DomainPool {
+    fn acquire_extent(
+        &self,
+        request: &MemoryPoolExtentRequest,
+    ) -> Result<MemoryPoolLease, AllocError>;
+
+    fn release_extent(&self, lease: MemoryPoolLease) -> Result<(), AllocError>;
+
+    fn lease_region(&self, lease: &MemoryPoolLease) -> Result<Region, AllocError>;
+
+    fn member_info(&self, member: MemoryPoolMemberId) -> Result<MemoryPoolMemberInfo, AllocError>;
+}
+
+pub(crate) type SharedDomainPool = Arc<dyn DomainPool + Send + Sync>;
+
+pub(crate) fn align_up(value: usize, align: usize) -> Result<usize, AllocError> {
+    if align == 0 || !align.is_power_of_two() {
+        return Err(AllocError::invalid_request());
+    }
+
+    let mask = align - 1;
+    value
+        .checked_add(mask)
+        .map(|rounded| rounded & !mask)
+        .ok_or_else(AllocError::invalid_request)
 }
 
 /// Unified low-level allocator strategy contract.

@@ -1,12 +1,20 @@
 use core::array;
+use core::fmt;
 
-use crate::mem::resource::{MemoryResource, MemoryResourceHandle, ResourceInfo};
+use crate::rust_alloc::sync::Arc;
+
+use crate::mem::resource::{
+    MemoryResource, MemoryResourceHandle, ResourceInfo, ResourceRequest, VirtualMemoryResource,
+};
 
 use super::{
-    AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
-    AllocResult, AllocationStrategy, AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind,
-    BoundedArena, CriticalSafetyRequirements, HeapAllocator, Slab,
+    AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocResult,
+    AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind, BoundedArena, DomainPool,
+    HeapAllocator, MemoryPool, MemoryPoolContributor, MemoryPoolMemberId, MemoryPoolMemberInfo,
+    MemoryPoolPolicy, SharedDomainPool, Slab,
 };
+
+const DEFAULT_SYSTEM_RESOURCE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug)]
 struct AllocatorResourceBinding {
@@ -20,24 +28,66 @@ impl AllocatorResourceBinding {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AllocatorResourceRecord {
+    domain: AllocatorDomainId,
+    info: ResourceInfo,
+}
+
+impl AllocatorResourceRecord {
+    const fn new(domain: AllocatorDomainId, info: ResourceInfo) -> Self {
+        Self { domain, info }
+    }
+}
+
+struct AllocatorDomainRecord<const RESOURCES: usize, const EXTENTS: usize> {
+    info: AllocatorDomainInfo,
+    pool: Option<SharedDomainPool>,
+}
+
+impl<const RESOURCES: usize, const EXTENTS: usize> AllocatorDomainRecord<RESOURCES, EXTENTS> {
+    fn new(info: AllocatorDomainInfo, pool: Option<SharedDomainPool>) -> Self {
+        Self { info, pool }
+    }
+}
+
+impl<const RESOURCES: usize, const EXTENTS: usize> fmt::Debug
+    for AllocatorDomainRecord<RESOURCES, EXTENTS>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AllocatorDomainRecord")
+            .field("info", &self.info)
+            .field("pool", &self.pool.as_ref().map(|_| "shared"))
+            .finish()
+    }
+}
+
 /// Root allocation orchestration surface.
 ///
-/// One allocator owns one or more domains. Each domain corresponds to one internal pool-owned
-/// allocation stack, and each owned resource may be assigned to exactly one domain.
+/// One allocator owns one or more domains. Each domain owns at most one realized pool, and each
+/// owned resource may be assigned to exactly one domain.
 #[derive(Debug)]
-pub struct Allocator<const DOMAINS: usize = 4, const RESOURCES: usize = 16> {
+pub struct Allocator<
+    const DOMAINS: usize = 4,
+    const RESOURCES: usize = 16,
+    const EXTENTS: usize = 64,
+> {
     policy: AllocPolicy,
     capabilities: AllocCapabilities,
     hazards: AllocHazards,
-    domains: [Option<AllocatorDomainInfo>; DOMAINS],
+    domains: [Option<AllocatorDomainRecord<RESOURCES, EXTENTS>>; DOMAINS],
     domain_count: usize,
-    resources: [Option<AllocatorResourceBinding>; RESOURCES],
+    resources: [Option<AllocatorResourceRecord>; RESOURCES],
     resource_count: usize,
 }
 
 /// Builder for one allocator root.
 #[derive(Debug)]
-pub struct AllocatorBuilder<const DOMAINS: usize = 4, const RESOURCES: usize = 16> {
+pub struct AllocatorBuilder<
+    const DOMAINS: usize = 4,
+    const RESOURCES: usize = 16,
+    const EXTENTS: usize = 64,
+> {
     policy: AllocPolicy,
     domains: [Option<AllocatorDomainInfo>; DOMAINS],
     domain_count: usize,
@@ -46,38 +96,34 @@ pub struct AllocatorBuilder<const DOMAINS: usize = 4, const RESOURCES: usize = 1
     default_domain: Option<AllocatorDomainId>,
 }
 
-impl<const DOMAINS: usize, const RESOURCES: usize> Allocator<DOMAINS, RESOURCES> {
+impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
+    Allocator<DOMAINS, RESOURCES, EXTENTS>
+{
     /// Creates a default allocator root builder.
     #[must_use]
-    pub fn builder() -> AllocatorBuilder<DOMAINS, RESOURCES> {
+    pub fn builder() -> AllocatorBuilder<DOMAINS, RESOURCES, EXTENTS> {
         AllocatorBuilder::new()
     }
 
-    /// Creates a permissive zero-config allocator root.
+    /// Creates a permissive zero-config allocator root backed by anonymous private virtual memory.
     ///
-    /// This currently shapes the allocator honestly but does not yet realize provider discovery
-    /// or backing pools. Runtime allocation entry points therefore remain capability-gated.
-    #[must_use]
-    pub fn system_default() -> Self {
-        let mut domains = array::from_fn(|_| None);
-        if DOMAINS != 0 {
-            domains[0] = Some(AllocatorDomainInfo::new(
-                AllocatorDomainId(0),
-                AllocatorDomainKind::Default,
-                AllocPolicy::general_purpose(),
-            ));
+    /// # Errors
+    ///
+    /// Returns an error when allocator metadata is too small to host the default domain or the
+    /// backing virtual resource cannot be acquired.
+    pub fn system_default() -> Result<Self, AllocError> {
+        if DOMAINS == 0 || RESOURCES == 0 {
+            return Err(AllocError::metadata_exhausted());
         }
 
-        let policy = AllocPolicy::general_purpose();
-        Self {
-            policy,
-            capabilities: allocator_capabilities_for_domains(&domains),
-            hazards: allocator_hazards_for_domains(&domains),
-            domains,
-            domain_count: usize::from(DOMAINS != 0),
-            resources: array::from_fn(|_| None),
-            resource_count: 0,
-        }
+        let mut request = ResourceRequest::anonymous_private(DEFAULT_SYSTEM_RESOURCE_BYTES);
+        request.name = Some("fusion-alloc-system-default");
+        let resource = VirtualMemoryResource::create(&request)?;
+
+        let mut builder = Self::builder();
+        builder.policy(AllocPolicy::general_purpose());
+        builder.add_resource(MemoryResourceHandle::from(resource))?;
+        builder.build()
     }
 
     /// Returns the allocator-wide policy.
@@ -125,17 +171,13 @@ impl<const DOMAINS: usize, const RESOURCES: usize> Allocator<DOMAINS, RESOURCES>
         self.resources
             .get(index)
             .and_then(Option::as_ref)
-            .map(|binding| *binding.handle.info())
+            .map(|binding| binding.info)
     }
 
     /// Returns observable information for one allocator domain.
     #[must_use]
     pub fn domain(&self, id: AllocatorDomainId) -> Option<AllocatorDomainInfo> {
-        self.domains
-            .iter()
-            .flatten()
-            .copied()
-            .find(|domain| domain.id == id)
+        self.domain_record(id).map(|record| record.info)
     }
 
     /// Returns the implicit default domain when one exists.
@@ -144,8 +186,8 @@ impl<const DOMAINS: usize, const RESOURCES: usize> Allocator<DOMAINS, RESOURCES>
         self.domains
             .iter()
             .flatten()
-            .find(|domain| domain.kind == AllocatorDomainKind::Default)
-            .map(|domain| domain.id)
+            .find(|domain| domain.info.kind == AllocatorDomainKind::Default)
+            .map(|domain| domain.info.id)
     }
 
     /// Returns a slab strategy view for `domain`.
@@ -153,16 +195,18 @@ impl<const DOMAINS: usize, const RESOURCES: usize> Allocator<DOMAINS, RESOURCES>
     /// # Errors
     ///
     /// Returns an error when the domain does not exist, slab allocation is denied by policy, or
-    /// the slab strategy remains unsupported on the current implementation path.
+    /// the domain owns no realized backing pool.
     pub fn slab<const SIZE: usize, const COUNT: usize>(
         &self,
         domain: AllocatorDomainId,
     ) -> Result<Slab<SIZE, COUNT>, AllocError> {
-        let domain = self.domain(domain).ok_or_else(AllocError::invalid_domain)?;
-        if !domain.policy.allows(AllocModeSet::SLAB) {
+        let domain = self
+            .domain_record(domain)
+            .ok_or_else(AllocError::invalid_domain)?;
+        if !domain.info.policy.allows(AllocModeSet::SLAB) {
             return Err(AllocError::policy_denied());
         }
-        Slab::for_domain(domain.id, domain.policy)
+        Slab::for_domain(domain.info.id, domain.info.policy, domain.pool.clone())
     }
 
     /// Returns a bounded-arena strategy view for `domain`.
@@ -170,17 +214,24 @@ impl<const DOMAINS: usize, const RESOURCES: usize> Allocator<DOMAINS, RESOURCES>
     /// # Errors
     ///
     /// Returns an error when the domain does not exist, arena allocation is denied by policy, or
-    /// the arena strategy remains unsupported on the current implementation path.
+    /// the domain owns no realized backing pool.
     pub fn arena(
         &self,
         domain: AllocatorDomainId,
         capacity: usize,
     ) -> Result<BoundedArena, AllocError> {
-        let domain = self.domain(domain).ok_or_else(AllocError::invalid_domain)?;
-        if !domain.policy.allows(AllocModeSet::ARENA) {
+        let domain = self
+            .domain_record(domain)
+            .ok_or_else(AllocError::invalid_domain)?;
+        if !domain.info.policy.allows(AllocModeSet::ARENA) {
             return Err(AllocError::policy_denied());
         }
-        BoundedArena::for_domain(domain.id, capacity, domain.policy)
+        BoundedArena::for_domain(
+            domain.info.id,
+            capacity,
+            domain.info.policy,
+            domain.pool.clone(),
+        )
     }
 
     /// Returns a general-purpose heap strategy view for `domain`.
@@ -188,13 +239,15 @@ impl<const DOMAINS: usize, const RESOURCES: usize> Allocator<DOMAINS, RESOURCES>
     /// # Errors
     ///
     /// Returns an error when the domain does not exist, heap allocation is denied by policy, or
-    /// the heap strategy remains unsupported on the current implementation path.
+    /// the domain owns no realized backing pool.
     pub fn heap(&self, domain: AllocatorDomainId) -> Result<HeapAllocator, AllocError> {
-        let domain = self.domain(domain).ok_or_else(AllocError::invalid_domain)?;
-        if !domain.policy.allows(AllocModeSet::HEAP) {
+        let domain = self
+            .domain_record(domain)
+            .ok_or_else(AllocError::invalid_domain)?;
+        if !domain.info.policy.allows(AllocModeSet::HEAP) {
             return Err(AllocError::policy_denied());
         }
-        HeapAllocator::for_domain(domain.id, domain.policy)
+        HeapAllocator::for_domain(domain.info.id, domain.info.policy, domain.pool.clone())
     }
 
     /// Attempts to allocate one heap-routed block from the allocator root.
@@ -204,11 +257,14 @@ impl<const DOMAINS: usize, const RESOURCES: usize> Allocator<DOMAINS, RESOURCES>
     /// Returns an error when no default domain exists, heap allocation is denied by policy, or
     /// heap allocation remains unsupported on the current implementation path.
     pub fn malloc(&self, len: usize) -> Result<AllocResult, AllocError> {
-        self.heap(
+        if len == 0 {
+            return Err(AllocError::invalid_request());
+        }
+        let _ = self.heap(
             self.default_domain()
                 .ok_or_else(AllocError::invalid_domain)?,
-        )?
-        .allocate(&AllocRequest::new(len))
+        )?;
+        Err(AllocError::unsupported())
     }
 
     /// Attempts to allocate one zero-initialized heap-routed block from the allocator root.
@@ -218,11 +274,14 @@ impl<const DOMAINS: usize, const RESOURCES: usize> Allocator<DOMAINS, RESOURCES>
     /// Returns an error when no default domain exists, heap allocation is denied by policy, or
     /// heap allocation remains unsupported on the current implementation path.
     pub fn calloc(&self, len: usize) -> Result<AllocResult, AllocError> {
-        self.heap(
+        if len == 0 {
+            return Err(AllocError::invalid_request());
+        }
+        let _ = self.heap(
             self.default_domain()
                 .ok_or_else(AllocError::invalid_domain)?,
-        )?
-        .allocate(&AllocRequest::zeroed(len))
+        )?;
+        Err(AllocError::unsupported())
     }
 
     /// Attempts to grow or shrink an existing heap-routed allocation.
@@ -231,6 +290,7 @@ impl<const DOMAINS: usize, const RESOURCES: usize> Allocator<DOMAINS, RESOURCES>
     ///
     /// Returns an error when no default domain exists, heap allocation is denied by policy, the
     /// requested new length is invalid, or realloc remains unsupported on the current path.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn realloc(
         &self,
         allocation: AllocResult,
@@ -253,22 +313,30 @@ impl<const DOMAINS: usize, const RESOURCES: usize> Allocator<DOMAINS, RESOURCES>
     ///
     /// Returns an error when no default domain exists, heap allocation is denied by policy, or
     /// deallocation remains unsupported on the current implementation path.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn free(&self, allocation: AllocResult) -> Result<(), AllocError> {
-        self.heap(
+        let _ = allocation;
+        let _ = self.heap(
             self.default_domain()
                 .ok_or_else(AllocError::invalid_domain)?,
-        )?
-        .deallocate(allocation)
+        )?;
+        Err(AllocError::unsupported())
+    }
+
+    fn domain_record(
+        &self,
+        id: AllocatorDomainId,
+    ) -> Option<&AllocatorDomainRecord<RESOURCES, EXTENTS>> {
+        self.domains
+            .iter()
+            .flatten()
+            .find(|domain| domain.info.id == id)
     }
 }
 
-impl<const DOMAINS: usize, const RESOURCES: usize> Default for Allocator<DOMAINS, RESOURCES> {
-    fn default() -> Self {
-        Self::system_default()
-    }
-}
-
-impl<const DOMAINS: usize, const RESOURCES: usize> AllocatorBuilder<DOMAINS, RESOURCES> {
+impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
+    AllocatorBuilder<DOMAINS, RESOURCES, EXTENTS>
+{
     /// Creates a new allocator builder with a critical-safe baseline policy.
     #[must_use]
     pub fn new() -> Self {
@@ -290,7 +358,7 @@ impl<const DOMAINS: usize, const RESOURCES: usize> AllocatorBuilder<DOMAINS, RES
     }
 
     /// Overlays additional critical-safety requirements onto the root policy.
-    pub fn critical_safety(&mut self, required: CriticalSafetyRequirements) -> &mut Self {
+    pub fn critical_safety(&mut self, required: super::CriticalSafetyRequirements) -> &mut Self {
         self.policy.safety |= required;
         self.sync_default_domain_policy();
         self
@@ -366,19 +434,60 @@ impl<const DOMAINS: usize, const RESOURCES: usize> AllocatorBuilder<DOMAINS, RES
     /// # Errors
     ///
     /// Returns an error when the builder contains resources but no domains or otherwise fails
-    /// basic ownership validation.
-    pub fn build(mut self) -> Result<Allocator<DOMAINS, RESOURCES>, AllocError> {
+    /// ownership or pool-realization validation.
+    pub fn build(mut self) -> Result<Allocator<DOMAINS, RESOURCES, EXTENTS>, AllocError> {
         if self.domain_count == 0 {
             self.ensure_default_domain()?;
         }
 
+        let mut resource_records = array::from_fn(|_| None);
+        let mut domain_records = array::from_fn(|_| None);
+        let mut staged_resources = self.resources;
+
+        for (slot, domain) in self.domains.into_iter().enumerate() {
+            let Some(info) = domain else {
+                continue;
+            };
+
+            let mut pool_builder =
+                MemoryPool::<RESOURCES, EXTENTS>::builder(MemoryPoolPolicy::ready_only());
+            let mut contributor_count = 0;
+
+            for (resource_slot, binding) in staged_resources.iter_mut().enumerate() {
+                let Some(binding_ref) = binding.as_ref() else {
+                    continue;
+                };
+                if binding_ref.domain != info.id {
+                    continue;
+                }
+
+                let Some(binding) = binding.take() else {
+                    return Err(AllocError::metadata_exhausted());
+                };
+                resource_records[resource_slot] = Some(AllocatorResourceRecord::new(
+                    binding.domain,
+                    *binding.handle.info(),
+                ));
+                pool_builder
+                    .add_contributor(MemoryPoolContributor::explicit_ready(binding.handle))?;
+                contributor_count += 1;
+            }
+
+            let pool = if contributor_count == 0 {
+                None
+            } else {
+                Some(Arc::new(pool_builder.build()?) as SharedDomainPool)
+            };
+            domain_records[slot] = Some(AllocatorDomainRecord::new(info, pool));
+        }
+
         Ok(Allocator {
             policy: self.policy,
-            capabilities: allocator_capabilities_for_domains(&self.domains),
-            hazards: allocator_hazards_for_domains(&self.domains),
-            domains: self.domains,
+            capabilities: allocator_capabilities_for_domains(&domain_records),
+            hazards: allocator_hazards_for_domains(&domain_records),
+            domains: domain_records,
             domain_count: self.domain_count,
-            resources: self.resources,
+            resources: resource_records,
             resource_count: self.resource_count,
         })
     }
@@ -424,36 +533,64 @@ impl<const DOMAINS: usize, const RESOURCES: usize> AllocatorBuilder<DOMAINS, RES
     }
 }
 
-impl<const DOMAINS: usize, const RESOURCES: usize> Default
-    for AllocatorBuilder<DOMAINS, RESOURCES>
+impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize> Default
+    for AllocatorBuilder<DOMAINS, RESOURCES, EXTENTS>
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-fn allocator_capabilities_for_domains<const DOMAINS: usize>(
-    domains: &[Option<AllocatorDomainInfo>; DOMAINS],
+impl<const MEMBERS: usize, const EXTENTS: usize> DomainPool for MemoryPool<MEMBERS, EXTENTS> {
+    fn acquire_extent(
+        &self,
+        request: &super::MemoryPoolExtentRequest,
+    ) -> Result<super::MemoryPoolLease, AllocError> {
+        Self::acquire_extent(self, request).map_err(Into::into)
+    }
+
+    fn release_extent(&self, lease: super::MemoryPoolLease) -> Result<(), AllocError> {
+        Self::release_extent(self, lease).map_err(Into::into)
+    }
+
+    fn lease_region(
+        &self,
+        lease: &super::MemoryPoolLease,
+    ) -> Result<fusion_pal::sys::mem::Region, AllocError> {
+        let view = self.lease_view(lease)?;
+        // SAFETY: the returned region remains valid for as long as the lease stays active and the
+        // pool owns the underlying resource. Allocator strategies use it transiently while they
+        // still hold both the pool borrow and the live lease.
+        Ok(unsafe { view.as_range_view().raw_region() })
+    }
+
+    fn member_info(&self, member: MemoryPoolMemberId) -> Result<MemoryPoolMemberInfo, AllocError> {
+        Self::member_info(self, member).map_err(Into::into)
+    }
+}
+
+fn allocator_capabilities_for_domains<
+    const DOMAINS: usize,
+    const RESOURCES: usize,
+    const EXTENTS: usize,
+>(
+    domains: &[Option<AllocatorDomainRecord<RESOURCES, EXTENTS>>; DOMAINS],
 ) -> AllocCapabilities {
     let mut capabilities = AllocCapabilities::empty();
     for domain in domains.iter().flatten() {
-        if domain.policy.allows(AllocModeSet::SLAB) {
-            capabilities = capabilities.union(AllocCapabilities::SLAB);
+        if domain.pool.is_none() {
+            continue;
         }
-        if domain.policy.allows(AllocModeSet::ARENA) {
+        if domain.info.policy.allows(AllocModeSet::SLAB) {
+            capabilities = capabilities
+                .union(AllocCapabilities::SLAB)
+                .union(AllocCapabilities::ZEROED_ALLOC);
+        }
+        if domain.info.policy.allows(AllocModeSet::ARENA) {
             capabilities = capabilities.union(AllocCapabilities::ARENA);
         }
-        if domain.policy.allows(AllocModeSet::HEAP) {
-            capabilities = capabilities
-                .union(AllocCapabilities::HEAP)
-                .union(AllocCapabilities::ZEROED_ALLOC)
-                .union(AllocCapabilities::REALLOC);
-        }
-        if domain.policy.allows(AllocModeSet::GLOBAL_ALLOC) {
-            capabilities = capabilities.union(AllocCapabilities::GLOBAL_ALLOC);
-        }
     }
-    if !capabilities.contains(AllocCapabilities::HEAP) {
+    if !capabilities.is_empty() && !capabilities.contains(AllocCapabilities::HEAP) {
         capabilities = capabilities
             .union(AllocCapabilities::DETERMINISTIC)
             .union(AllocCapabilities::BOUNDED);
@@ -461,13 +598,12 @@ fn allocator_capabilities_for_domains<const DOMAINS: usize>(
     capabilities
 }
 
-fn allocator_hazards_for_domains<const DOMAINS: usize>(
-    domains: &[Option<AllocatorDomainInfo>; DOMAINS],
+fn allocator_hazards_for_domains<
+    const DOMAINS: usize,
+    const RESOURCES: usize,
+    const EXTENTS: usize,
+>(
+    _domains: &[Option<AllocatorDomainRecord<RESOURCES, EXTENTS>>; DOMAINS],
 ) -> AllocHazards {
-    for domain in domains.iter().flatten() {
-        if domain.policy.allows(AllocModeSet::HEAP) {
-            return HeapAllocator::expected_hazards();
-        }
-    }
     AllocHazards::empty()
 }

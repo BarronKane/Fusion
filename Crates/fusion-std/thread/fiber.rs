@@ -1,22 +1,19 @@
 //! Domain 2: public green-thread and fiber orchestration surface.
 
 use core::any::TypeId;
+use core::fmt;
 use core::marker::PhantomData;
 use core::mem::{MaybeUninit, align_of, size_of};
 use core::num::NonZeroUsize;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 
-use std::boxed::Box;
-use std::cell::Cell;
-use std::env;
-use std::fmt;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock as StdOnceLock};
-use std::vec::Vec;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 
-use crate::sync::{Mutex as SyncMutex, Semaphore, SyncError, SyncErrorKind};
-use fusion_pal::hal::{HardwareTopologyQuery as _, system_hardware};
+use crate::sync::{Mutex as SyncMutex, OnceLock, Semaphore, SyncError, SyncErrorKind};
 use fusion_pal::sys::fiber::{
     FiberHostError, FiberHostErrorKind, PlatformFiberSignalStack, PlatformFiberWakeSignal,
     PlatformWakeToken, system_fiber_host,
@@ -31,10 +28,15 @@ use fusion_sys::event::{
 };
 use fusion_sys::fiber::{
     ContextCaps, ContextMigrationSupport, ContextStackDirection, Fiber, FiberError, FiberReturn,
-    FiberStack, FiberSupport, FiberSystem, FiberYield, yield_now as system_yield_now,
+    FiberStack, FiberSupport, FiberSystem, FiberYield, current_context as system_fiber_context,
+    yield_now as system_yield_now,
 };
 
-use super::{PoolPlacement, ThreadPool, ThreadPoolConfig};
+use super::ThreadPool;
+#[cfg(feature = "std")]
+use super::{PoolPlacement, ThreadPoolConfig};
+#[cfg(feature = "std")]
+use fusion_pal::hal::{HardwareTopologyQuery as _, system_hardware};
 
 const INLINE_GREEN_JOB_BYTES: usize = 256;
 const INLINE_GREEN_RESULT_BYTES: usize = 256;
@@ -1451,15 +1453,6 @@ impl FiberStackSlab {
         Ok(())
     }
 
-    fn cache_slot_for_current_thread(&self, slot_index: usize) -> Result<(), FiberError> {
-        let FiberStackBackingState::Elastic { metadata, .. } = &self.backing else {
-            return Ok(());
-        };
-        let meta = metadata.get(slot_index).ok_or_else(FiberError::invalid)?;
-        cache_elastic_entry(ElasticRegistryEntry::from_meta(meta));
-        Ok(())
-    }
-
     fn take_capacity_event(
         &self,
         slot_index: usize,
@@ -1489,7 +1482,7 @@ impl FiberStackSlab {
             return Ok(());
         };
         if let Some(event) = self.take_capacity_event(slot_index)? {
-            let _ = catch_unwind(AssertUnwindSafe(|| callback(event)));
+            run_capacity_callback_contained(callback, event);
         }
         Ok(())
     }
@@ -1515,24 +1508,12 @@ struct ElasticRegistryEntry {
 }
 
 impl ElasticRegistryEntry {
-    const fn empty() -> Self {
-        Self {
-            reservation_base: 0,
-            reservation_end: 0,
-            meta: 0,
-        }
-    }
-
-    fn from_meta(meta: &ElasticStackMeta) -> Self {
+    fn new(meta: &ElasticStackMeta) -> Self {
         Self {
             reservation_base: meta.reservation_base,
             reservation_end: meta.reservation_end,
             meta: core::ptr::from_ref(meta) as usize,
         }
-    }
-
-    const fn contains(self, fault_addr: usize) -> bool {
-        self.meta != 0 && fault_addr >= self.reservation_base && fault_addr < self.reservation_end
     }
 }
 
@@ -1547,23 +1528,23 @@ struct ElasticRegistryState {
     snapshot: Option<Box<ElasticRegistrySnapshot>>,
 }
 
-static ELASTIC_STACK_REGISTRY: StdOnceLock<SyncMutex<ElasticRegistryState>> = StdOnceLock::new();
+static ELASTIC_STACK_REGISTRY: OnceLock<SyncMutex<ElasticRegistryState>> = OnceLock::new();
 static ELASTIC_STACK_SNAPSHOT: AtomicUsize = AtomicUsize::new(0);
 static ELASTIC_STACK_READERS: AtomicUsize = AtomicUsize::new(0);
-static ELASTIC_STACK_CACHE_EPOCH: AtomicUsize = AtomicUsize::new(1);
-const ELASTIC_STACK_CACHE_CAPACITY: usize = 64;
 
-fn elastic_registry() -> &'static SyncMutex<ElasticRegistryState> {
-    ELASTIC_STACK_REGISTRY.get_or_init(|| {
-        SyncMutex::new(ElasticRegistryState {
-            pointers: Vec::new(),
-            snapshot: None,
+fn elastic_registry() -> Result<&'static SyncMutex<ElasticRegistryState>, FiberError> {
+    ELASTIC_STACK_REGISTRY
+        .get_or_init(|| {
+            SyncMutex::new(ElasticRegistryState {
+                pointers: Vec::new(),
+                snapshot: None,
+            })
         })
-    })
+        .map_err(fiber_error_from_sync)
 }
 
 fn register_elastic_stack_metadata(metadata: &[ElasticStackMeta]) -> Result<(), FiberError> {
-    let registry = elastic_registry();
+    let registry = elastic_registry()?;
     let mut state = registry.lock().map_err(fiber_error_from_sync)?;
     for meta in metadata {
         state.pointers.push(core::ptr::from_ref(meta) as usize);
@@ -1573,7 +1554,7 @@ fn register_elastic_stack_metadata(metadata: &[ElasticStackMeta]) -> Result<(), 
 }
 
 fn unregister_elastic_stack_metadata(metadata: &[ElasticStackMeta]) -> Result<(), FiberError> {
-    let registry = elastic_registry();
+    let registry = elastic_registry()?;
     let mut state = registry.lock().map_err(fiber_error_from_sync)?;
     state.pointers.retain(|meta_ptr| {
         !metadata
@@ -1588,11 +1569,7 @@ fn publish_elastic_snapshot(state: &mut ElasticRegistryState) {
     let mut entries = Vec::with_capacity(state.pointers.len());
     for meta_ptr in &state.pointers {
         let meta = unsafe { &*(*meta_ptr as *const ElasticStackMeta) };
-        entries.push(ElasticRegistryEntry {
-            reservation_base: meta.reservation_base,
-            reservation_end: meta.reservation_end,
-            meta: *meta_ptr,
-        });
+        entries.push(ElasticRegistryEntry::new(meta));
     }
     entries.sort_by_key(|entry| entry.reservation_base);
 
@@ -1607,7 +1584,6 @@ fn publish_elastic_snapshot(state: &mut ElasticRegistryState) {
         .as_deref()
         .map_or(0, |snapshot| core::ptr::from_ref(snapshot) as usize);
     ELASTIC_STACK_SNAPSHOT.store(next_ptr, Ordering::Release);
-    ELASTIC_STACK_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
     let previous = core::mem::replace(&mut state.snapshot, next_snapshot);
     wait_for_elastic_readers_to_drain();
     drop(previous);
@@ -1617,51 +1593,6 @@ fn wait_for_elastic_readers_to_drain() {
     while ELASTIC_STACK_READERS.load(Ordering::Acquire) != 0 {
         core::hint::spin_loop();
     }
-}
-
-fn sync_elastic_stack_cache_epoch() {
-    let epoch = ELASTIC_STACK_CACHE_EPOCH.load(Ordering::Acquire);
-    ELASTIC_STACK_CACHE_EPOCH_LOCAL.with(|local| {
-        if local.get() == epoch {
-            return;
-        }
-        ELASTIC_STACK_CACHE.with(|cache| {
-            cache.set([ElasticRegistryEntry::empty(); ELASTIC_STACK_CACHE_CAPACITY]);
-        });
-        ELASTIC_STACK_CACHE_NEXT.with(|next| {
-            next.set(0);
-        });
-        local.set(epoch);
-    });
-}
-
-fn find_cached_elastic_entry(fault_addr: usize) -> Option<ElasticRegistryEntry> {
-    sync_elastic_stack_cache_epoch();
-    ELASTIC_STACK_CACHE.with(|cache| {
-        cache
-            .get()
-            .into_iter()
-            .find(|entry| entry.contains(fault_addr))
-    })
-}
-
-fn cache_elastic_entry(entry: ElasticRegistryEntry) {
-    if entry.meta == 0 {
-        return;
-    }
-    sync_elastic_stack_cache_epoch();
-    ELASTIC_STACK_CACHE.with(|cache| {
-        let mut entries = cache.get();
-        if entries.iter().any(|existing| existing.meta == entry.meta) {
-            return;
-        }
-        ELASTIC_STACK_CACHE_NEXT.with(|next| {
-            let index = next.get() % ELASTIC_STACK_CACHE_CAPACITY;
-            entries[index] = entry;
-            next.set((index + 1) % ELASTIC_STACK_CACHE_CAPACITY);
-        });
-        cache.set(entries);
-    });
 }
 
 fn find_snapshot_elastic_entry(
@@ -1743,27 +1674,21 @@ fn elastic_stack_fault_handler(fault_addr: usize) -> bool {
 }
 
 fn try_promote_elastic_stack_fault(fault_addr: usize) -> bool {
-    ELASTIC_STACK_READERS.fetch_add(1, Ordering::AcqRel);
-    let promoted = if let Some(entry) = find_cached_elastic_entry(fault_addr) {
+    ELASTIC_STACK_READERS.fetch_add(1, Ordering::Acquire);
+    let snapshot_ptr =
+        ELASTIC_STACK_SNAPSHOT.load(Ordering::Acquire) as *const ElasticRegistrySnapshot;
+    let promoted = if snapshot_ptr.is_null() {
+        false
+    } else {
+        let snapshot = unsafe { &*snapshot_ptr };
+        let Some(entry) = find_snapshot_elastic_entry(snapshot, fault_addr) else {
+            ELASTIC_STACK_READERS.fetch_sub(1, Ordering::Release);
+            return false;
+        };
         let meta = unsafe { &*(entry.meta as *const ElasticStackMeta) };
         try_promote_elastic_stack_meta(meta, fault_addr)
-    } else {
-        let snapshot_ptr =
-            ELASTIC_STACK_SNAPSHOT.load(Ordering::Acquire) as *const ElasticRegistrySnapshot;
-        if snapshot_ptr.is_null() {
-            false
-        } else {
-            let snapshot = unsafe { &*snapshot_ptr };
-            let Some(entry) = find_snapshot_elastic_entry(snapshot, fault_addr) else {
-                ELASTIC_STACK_READERS.fetch_sub(1, Ordering::AcqRel);
-                return false;
-            };
-            cache_elastic_entry(entry);
-            let meta = unsafe { &*(entry.meta as *const ElasticStackMeta) };
-            try_promote_elastic_stack_meta(meta, fault_addr)
-        }
     };
-    ELASTIC_STACK_READERS.fetch_sub(1, Ordering::AcqRel);
+    ELASTIC_STACK_READERS.fetch_sub(1, Ordering::Release);
     promoted
 }
 
@@ -2049,14 +1974,20 @@ impl GreenTaskRecord {
 
 #[derive(Debug)]
 struct GreenTaskSlot {
+    owner: AtomicUsize,
+    slot_index: usize,
+    yield_action: SyncMutex<CurrentGreenYieldAction>,
     record: SyncMutex<GreenTaskRecord>,
     completed: Semaphore,
     handle_refs: AtomicUsize,
 }
 
 impl GreenTaskSlot {
-    fn new() -> Result<Self, FiberError> {
+    fn new(slot_index: usize) -> Result<Self, FiberError> {
         Ok(Self {
+            owner: AtomicUsize::new(0),
+            slot_index,
+            yield_action: SyncMutex::new(CurrentGreenYieldAction::Requeue),
             record: SyncMutex::new(GreenTaskRecord::empty()),
             completed: Semaphore::new(0, 1).map_err(fiber_error_from_sync)?,
             handle_refs: AtomicUsize::new(0),
@@ -2065,6 +1996,36 @@ impl GreenTaskSlot {
 
     const fn context_ptr(&self) -> *mut () {
         core::ptr::from_ref(self).cast_mut().cast()
+    }
+
+    fn set_owner(&self, inner: *const GreenPoolInner) {
+        self.owner.store(inner as usize, Ordering::Release);
+    }
+
+    fn current_context(&self) -> Result<CurrentGreenContext, FiberError> {
+        let inner = self.owner.load(Ordering::Acquire) as *const GreenPoolInner;
+        if inner.is_null() {
+            return Err(FiberError::state_conflict());
+        }
+
+        Ok(CurrentGreenContext {
+            inner,
+            slot_index: self.slot_index,
+            id: self.current_id()?,
+        })
+    }
+
+    fn set_yield_action(&self, action: CurrentGreenYieldAction) -> Result<(), FiberError> {
+        *self.yield_action.lock().map_err(fiber_error_from_sync)? = action;
+        Ok(())
+    }
+
+    fn take_yield_action(&self) -> Result<CurrentGreenYieldAction, FiberError> {
+        let mut guard = self.yield_action.lock().map_err(fiber_error_from_sync)?;
+        Ok(core::mem::replace(
+            &mut *guard,
+            CurrentGreenYieldAction::Requeue,
+        ))
     }
 
     fn assign<F>(&self, id: u64, carrier: usize, slab_slot: usize, job: F) -> Result<(), FiberError>
@@ -2303,8 +2264,8 @@ impl GreenTaskRegistry {
         }
 
         let mut slots = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            slots.push(GreenTaskSlot::new()?);
+        for slot_index in 0..capacity {
+            slots.push(GreenTaskSlot::new(slot_index)?);
         }
 
         Ok(Self {
@@ -2319,6 +2280,12 @@ impl GreenTaskRegistry {
             .map_err(fiber_error_from_sync)?
             .pop()
             .ok_or_else(FiberError::resource_exhausted)
+    }
+
+    fn initialize_owner(&self, inner: *const GreenPoolInner) {
+        for slot in &*self.slots {
+            slot.set_owner(inner);
+        }
     }
 
     fn assign_job<F>(
@@ -2455,70 +2422,19 @@ struct CurrentGreenContext {
     inner: *const GreenPoolInner,
     slot_index: usize,
     id: u64,
-    active: bool,
 }
 
-impl CurrentGreenContext {
-    const fn none() -> Self {
-        Self {
-            inner: core::ptr::null(),
-            slot_index: 0,
-            id: 0,
-            active: false,
-        }
+fn current_green_slot() -> Option<&'static GreenTaskSlot> {
+    let context = system_fiber_context().ok()?;
+    let slot = context.cast::<GreenTaskSlot>();
+    if slot.is_null() {
+        return None;
     }
-}
-
-thread_local! {
-    static CURRENT_GREEN_CONTEXT: Cell<CurrentGreenContext> = const { Cell::new(CurrentGreenContext::none()) };
-    static CURRENT_GREEN_YIELD_ACTION: Cell<CurrentGreenYieldAction> =
-        const { Cell::new(CurrentGreenYieldAction::Requeue) };
-    static ELASTIC_STACK_CACHE: Cell<[ElasticRegistryEntry; ELASTIC_STACK_CACHE_CAPACITY]> =
-        const { Cell::new([ElasticRegistryEntry::empty(); ELASTIC_STACK_CACHE_CAPACITY]) };
-    static ELASTIC_STACK_CACHE_NEXT: Cell<usize> = const { Cell::new(0) };
-    static ELASTIC_STACK_CACHE_EPOCH_LOCAL: Cell<usize> = const { Cell::new(0) };
-}
-
-struct CurrentGreenScope {
-    previous: CurrentGreenContext,
-    previous_action: CurrentGreenYieldAction,
-}
-
-impl CurrentGreenScope {
-    fn enter(inner: &Arc<GreenPoolInner>, slot_index: usize, id: u64) -> Self {
-        CURRENT_GREEN_CONTEXT.with(|cell| {
-            let previous = cell.replace(CurrentGreenContext {
-                inner: Arc::as_ptr(inner),
-                slot_index,
-                id,
-                active: true,
-            });
-            let previous_action = CURRENT_GREEN_YIELD_ACTION
-                .with(|action| action.replace(CurrentGreenYieldAction::Requeue));
-            Self {
-                previous,
-                previous_action,
-            }
-        })
-    }
-}
-
-impl Drop for CurrentGreenScope {
-    fn drop(&mut self) {
-        CURRENT_GREEN_CONTEXT.with(|cell| {
-            cell.set(self.previous);
-        });
-        CURRENT_GREEN_YIELD_ACTION.with(|action| {
-            action.set(self.previous_action);
-        });
-    }
+    Some(unsafe { &*slot })
 }
 
 fn current_green_context() -> Option<CurrentGreenContext> {
-    CURRENT_GREEN_CONTEXT.with(|cell| {
-        let current = cell.get();
-        if current.active { Some(current) } else { None }
-    })
+    current_green_slot()?.current_context().ok()
 }
 
 #[doc(hidden)]
@@ -2528,13 +2444,16 @@ pub fn is_in_green_context() -> bool {
 }
 
 fn set_current_green_yield_action(action: CurrentGreenYieldAction) {
-    CURRENT_GREEN_YIELD_ACTION.with(|cell| {
-        cell.set(action);
-    });
+    if let Some(slot) = current_green_slot() {
+        let _ = slot.set_yield_action(action);
+    }
 }
 
-fn take_current_green_yield_action() -> CurrentGreenYieldAction {
-    CURRENT_GREEN_YIELD_ACTION.with(|cell| cell.replace(CurrentGreenYieldAction::Requeue))
+fn take_current_green_yield_action(
+    inner: &GreenPoolInner,
+    slot_index: usize,
+) -> Result<CurrentGreenYieldAction, FiberError> {
+    inner.tasks.slot(slot_index)?.take_yield_action()
 }
 
 #[derive(Debug)]
@@ -2852,13 +2771,15 @@ struct SpawnReservation {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(feature = "std")]
 struct AutomaticFiberRuntime {
     _carriers: ThreadPool,
     fibers: GreenPool,
 }
 
-static AUTOMATIC_FIBER_RUNTIME: StdOnceLock<SyncMutex<Option<AutomaticFiberRuntime>>> =
-    StdOnceLock::new();
+#[cfg(feature = "std")]
+static AUTOMATIC_FIBER_RUNTIME: OnceLock<SyncMutex<Option<AutomaticFiberRuntime>>> =
+    OnceLock::new();
 
 impl GreenPool {
     /// Returns the low-level fiber support available on the current backend.
@@ -2870,15 +2791,17 @@ impl GreenPool {
     /// Returns the shared automatic hosted fiber pool, creating it on first use.
     ///
     /// The current automatic carrier default prefers HAL-reported visible physical cores, then
-    /// falls back to visible logical CPUs, and otherwise falls back to
-    /// [`std::thread::available_parallelism`].
+    /// falls back to visible logical CPUs, and otherwise uses one carrier.
     ///
     /// # Errors
     ///
     /// Returns an honest bootstrap failure if the automatic carrier or fiber pool cannot be
     /// realized on the current platform.
+    #[cfg(feature = "std")]
     pub fn automatic() -> Result<Self, FiberError> {
-        let slot = AUTOMATIC_FIBER_RUNTIME.get_or_init(|| SyncMutex::new(None));
+        let slot = AUTOMATIC_FIBER_RUNTIME
+            .get_or_init(|| SyncMutex::new(None))
+            .map_err(fiber_error_from_sync)?;
         let mut guard = slot.lock().map_err(fiber_error_from_sync)?;
         if let Some(runtime) = guard.as_ref() {
             return Ok(runtime.fibers.clone());
@@ -2961,6 +2884,7 @@ impl GreenPool {
             tasks: GreenTaskRegistry::new(config.max_fibers_per_carrier)?,
             stack_slab,
         });
+        inner.tasks.initialize_owner(Arc::as_ptr(&inner));
 
         for carrier_index in 0..inner.carriers.len() {
             let inner = Arc::clone(&inner);
@@ -3171,6 +3095,7 @@ impl Drop for GreenPool {
     }
 }
 
+#[cfg(feature = "std")]
 fn build_automatic_fiber_runtime() -> Result<AutomaticFiberRuntime, FiberError> {
     let carrier_count = automatic_carrier_count();
     let carrier_config = ThreadPoolConfig {
@@ -3185,25 +3110,21 @@ fn build_automatic_fiber_runtime() -> Result<AutomaticFiberRuntime, FiberError> 
         ..ThreadPoolConfig::new()
     };
     let carriers = ThreadPool::new(&carrier_config).map_err(fiber_error_from_thread_pool)?;
-    let fibers = GreenPool::new(&automatic_fiber_config()?, &carriers)?;
+    let fibers = GreenPool::new(&automatic_fiber_config(), &carriers)?;
     Ok(AutomaticFiberRuntime {
         _carriers: carriers,
         fibers,
     })
 }
 
+#[cfg(feature = "std")]
 fn automatic_carrier_count() -> usize {
-    read_env_positive_usize("FUSION_FIBER_CARRIERS")
-        .or_else(hal_visible_carrier_count)
-        .or_else(|| {
-            std::thread::available_parallelism()
-                .ok()
-                .map(NonZeroUsize::get)
-        })
+    hal_visible_carrier_count()
         .filter(|count| *count != 0)
         .unwrap_or(1)
 }
 
+#[cfg(feature = "std")]
 fn hal_visible_carrier_count() -> Option<usize> {
     system_hardware()
         .topology_summary()
@@ -3212,45 +3133,25 @@ fn hal_visible_carrier_count() -> Option<usize> {
         .filter(|count| *count != 0)
 }
 
+#[cfg(feature = "std")]
 fn select_automatic_carrier_count(
     summary: fusion_pal::hal::HardwareTopologySummary,
 ) -> Option<usize> {
     summary.core_count.or(summary.logical_cpu_count)
 }
 
-fn automatic_fiber_config() -> Result<FiberPoolConfig, FiberError> {
+#[cfg(feature = "std")]
+fn automatic_fiber_config() -> FiberPoolConfig {
     let mut config = FiberPoolConfig {
         max_fibers_per_carrier: 1024,
         growth_chunk: 32,
         ..FiberPoolConfig::new()
     };
-
-    if let Some(chunk) = read_env_positive_usize("FUSION_FIBER_CHUNK") {
-        config.growth_chunk = chunk.min(config.max_fibers_per_carrier);
-    }
-
-    let default_initial = match config.stack_backing {
-        FiberStackBacking::Elastic { initial_size, .. } => initial_size,
-        FiberStackBacking::Fixed { stack_size } => stack_size,
-    };
-    let default_max = match config.stack_backing {
-        FiberStackBacking::Elastic { max_size, .. } => max_size,
-        FiberStackBacking::Fixed { stack_size } => stack_size,
-    };
-
-    let initial_size = read_env_kib_non_zero("FUSION_FIBER_INITIAL_KB")?.unwrap_or(default_initial);
-    let max_size = read_env_kib_non_zero("FUSION_FIBER_STACK_KB")?.unwrap_or(default_max);
-    if initial_size.get() > max_size.get() {
-        return Err(FiberError::invalid());
-    }
-    config.stack_backing = FiberStackBacking::Elastic {
-        initial_size,
-        max_size,
-    };
     config.huge_pages = automatic_huge_page_policy(config.stack_backing);
-    Ok(config)
+    config
 }
 
+#[cfg(feature = "std")]
 fn automatic_huge_page_policy(backing: FiberStackBacking) -> HugePagePolicy {
     let FiberStackBacking::Elastic { max_size, .. } = backing else {
         return HugePagePolicy::Disabled;
@@ -3268,25 +3169,6 @@ fn automatic_huge_page_policy(backing: FiberStackBacking) -> HugePagePolicy {
     HugePagePolicy::Enabled {
         size: HugePageSize::TwoMiB,
     }
-}
-
-fn read_env_positive_usize(name: &str) -> Option<usize> {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value != 0)
-}
-
-fn read_env_kib_non_zero(name: &str) -> Result<Option<NonZeroUsize>, FiberError> {
-    let Some(kib) = read_env_positive_usize(name) else {
-        return Ok(None);
-    };
-    let bytes = kib
-        .checked_mul(1024)
-        .ok_or_else(FiberError::resource_exhausted)?;
-    NonZeroUsize::new(bytes)
-        .map(Some)
-        .ok_or_else(FiberError::invalid)
 }
 
 const fn initial_steal_seed(carrier_index: usize) -> u64 {
@@ -3317,7 +3199,7 @@ unsafe fn green_task_entry(context: *mut ()) -> FiberReturn {
         }
     };
 
-    if catch_unwind(AssertUnwindSafe(|| runner.run())).is_err() {
+    if run_green_job_contained(runner).is_err() {
         let _ = slot.set_state(id, GreenTaskState::Failed(FiberError::state_conflict()));
         return FiberReturn::new(usize::MAX);
     }
@@ -3434,16 +3316,17 @@ fn run_ready_task(
     slot_index: usize,
 ) -> Result<(), FiberError> {
     let task_id = inner.tasks.current_id(slot_index)?;
-    let slab_slot = inner.tasks.slab_slot(slot_index, task_id)?;
-    inner.stack_slab.cache_slot_for_current_thread(slab_slot)?;
     inner
         .tasks
         .set_state(slot_index, task_id, GreenTaskState::Running)?;
-    let _current_green = CurrentGreenScope::enter(inner, slot_index, task_id);
+    inner
+        .tasks
+        .slot(slot_index)?
+        .set_yield_action(CurrentGreenYieldAction::Requeue)?;
     let resume = inner.tasks.resume(slot_index, task_id);
 
     match resume {
-        Ok(FiberYield::Yielded) => match take_current_green_yield_action() {
+        Ok(FiberYield::Yielded) => match take_current_green_yield_action(inner, slot_index)? {
             CurrentGreenYieldAction::Requeue => {
                 inner
                     .tasks
@@ -3536,6 +3419,35 @@ pub fn wait_blocking_for_readiness(
     Ok(())
 }
 
+fn run_capacity_callback_contained(callback: fn(FiberCapacityEvent), event: FiberCapacityEvent) {
+    #[cfg(feature = "std")]
+    {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let _ = catch_unwind(AssertUnwindSafe(|| callback(event)));
+    }
+
+    #[cfg(not(feature = "std"))]
+    {
+        callback(event);
+    }
+}
+
+fn run_green_job_contained(runner: InlineGreenJobRunner) -> Result<(), ()> {
+    #[cfg(feature = "std")]
+    {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        catch_unwind(AssertUnwindSafe(|| runner.run())).map_err(|_| ())
+    }
+
+    #[cfg(not(feature = "std"))]
+    {
+        runner.run();
+        Ok(())
+    }
+}
+
 /// Public alias for the carrier-backed stackful scheduler surface.
 pub type FiberPool = GreenPool;
 /// Public alias for one spawned fiber handle.
@@ -3544,7 +3456,7 @@ pub type FiberHandle<T = ()> = GreenHandle<T>;
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
+    use std::sync::{Mutex as StdMutex, OnceLock as StdOnceLock};
 
     static CAPACITY_EVENT_CALLS: AtomicU32 = AtomicU32::new(0);
     static LAST_CAPACITY_FIBER_ID: AtomicU64 = AtomicU64::new(0);
@@ -3800,7 +3712,7 @@ mod tests {
     }
 
     #[test]
-    fn elastic_stack_cache_tracks_live_slots_and_clears_on_drop() {
+    fn elastic_stack_registry_tracks_live_slots_and_clears_on_drop() {
         let _guard = lock_elastic_tests();
         let support = GreenPool::support();
         let config = FiberPoolConfig {
@@ -3835,12 +3747,16 @@ mod tests {
             .detector_page
             .load(Ordering::Acquire);
 
-        slab.cache_slot_for_current_thread(lease.slot_index)
-            .expect("slot cache should accept a live elastic slot");
-        assert!(find_cached_elastic_entry(detector).is_some());
+        let snapshot_ptr =
+            ELASTIC_STACK_SNAPSHOT.load(Ordering::Acquire) as *const ElasticRegistrySnapshot;
+        assert!(!snapshot_ptr.is_null());
+        let snapshot = unsafe { &*snapshot_ptr };
+        assert!(find_snapshot_elastic_entry(snapshot, detector).is_some());
 
         drop(slab);
-        assert!(find_cached_elastic_entry(detector).is_none());
+        let snapshot_ptr =
+            ELASTIC_STACK_SNAPSHOT.load(Ordering::Acquire) as *const ElasticRegistrySnapshot;
+        assert!(snapshot_ptr.is_null());
     }
 
     #[test]

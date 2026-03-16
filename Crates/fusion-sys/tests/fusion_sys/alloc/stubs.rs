@@ -3,8 +3,8 @@ use core::ptr::NonNull;
 
 use fusion_pal::sys::mem::{CachePolicy, Protect, Region};
 use fusion_sys::alloc::{
-    AllocErrorKind, AllocModeSet, AllocPolicy, AllocResult, Allocator, BoundedArena,
-    CriticalSafetyRequirements, HeapAllocator, Slab,
+    AllocErrorKind, AllocModeSet, AllocPolicy, AllocationStrategy, Allocator,
+    CriticalSafetyRequirements,
 };
 use fusion_sys::mem::resource::{
     BoundMemoryResource, BoundResourceSpec, MemoryDomain, MemoryGeometry, MemoryResourceHandle,
@@ -77,39 +77,6 @@ fn bound_resource(
         ))
         .expect("bound resource should build"),
     )
-}
-
-#[test]
-fn heap_allocator_respects_policy_gate_before_implementation_exists() {
-    assert_eq!(
-        HeapAllocator::new(AllocPolicy::critical_safe())
-            .expect_err("critical-safe policy should deny heap allocation")
-            .kind,
-        AllocErrorKind::PolicyDenied
-    );
-
-    assert_eq!(
-        HeapAllocator::new(AllocPolicy::general_purpose())
-            .expect_err("heap implementation is still intentionally absent")
-            .kind,
-        AllocErrorKind::Unsupported
-    );
-}
-
-#[test]
-fn slab_and_arena_validate_shape_before_reporting_unsupported() {
-    assert_eq!(
-        Slab::<0, 4>::new(AllocPolicy::critical_safe())
-            .expect_err("zero-sized slabs should be rejected")
-            .kind,
-        AllocErrorKind::InvalidRequest
-    );
-    assert_eq!(
-        BoundedArena::new(0, AllocPolicy::critical_safe())
-            .expect_err("zero-capacity arenas should be rejected")
-            .kind,
-        AllocErrorKind::InvalidRequest
-    );
 }
 
 #[test]
@@ -197,15 +164,29 @@ fn allocator_builder_can_split_resources_across_explicit_domains() {
 }
 
 #[test]
-fn allocator_root_routes_heap_and_strategy_policy_honestly() {
-    let allocator = Allocator::<2, 2>::system_default();
-    let default_domain = allocator
-        .default_domain()
-        .expect("system default should expose a default domain");
+fn system_default_constructs_a_real_backed_allocator() {
+    let allocator = Allocator::<2, 2>::system_default().expect("allocator should build");
+    assert_eq!(allocator.domain_count(), 1);
+    assert_eq!(allocator.resource_count(), 1);
+    assert!(
+        allocator
+            .capabilities()
+            .contains(fusion_sys::alloc::AllocCapabilities::SLAB)
+    );
+    assert!(
+        allocator
+            .capabilities()
+            .contains(fusion_sys::alloc::AllocCapabilities::ARENA)
+    );
+}
+
+#[test]
+fn heap_routing_is_policy_gated_and_still_unimplemented() {
+    let allocator = Allocator::<2, 2>::system_default().expect("allocator should build");
     assert_eq!(
         allocator
-            .heap(default_domain)
-            .expect_err("heap remains unsupported until implementation lands")
+            .malloc(4096)
+            .expect_err("heap remains intentionally unimplemented")
             .kind,
         AllocErrorKind::Unsupported
     );
@@ -223,29 +204,91 @@ fn allocator_root_routes_heap_and_strategy_policy_honestly() {
 }
 
 #[test]
-fn allocator_root_routes_slab_and_arena_honestly() {
-    let critical = Allocator::<2, 2>::builder()
-        .build()
-        .expect("allocator should build");
-    let default_domain = critical
+fn slab_validates_shape_and_reuses_capacity() {
+    let allocator = Allocator::<2, 2>::system_default().expect("allocator should build");
+    let default_domain = allocator
         .default_domain()
-        .expect("allocator should expose a default domain");
+        .expect("default domain should exist");
 
     assert_eq!(
-        critical
-            .slab::<64, 8>(default_domain)
-            .expect_err("slab backing is still intentionally absent")
+        allocator
+            .slab::<0, 4>(default_domain)
+            .expect_err("zero-sized slabs should be rejected")
             .kind,
-        AllocErrorKind::Unsupported
-    );
-    assert_eq!(
-        critical
-            .arena(default_domain, 4096)
-            .expect_err("arena backing is still intentionally absent")
-            .kind,
-        AllocErrorKind::Unsupported
+        AllocErrorKind::InvalidRequest
     );
 
+    let slab = allocator
+        .slab::<64, 4>(default_domain)
+        .expect("slab should reserve backing");
+    let first = slab
+        .allocate(&fusion_sys::alloc::AllocRequest::new(32))
+        .expect("first slab allocation should succeed");
+    let second = slab
+        .allocate(&fusion_sys::alloc::AllocRequest::zeroed(64))
+        .expect("second slab allocation should succeed");
+    assert_eq!(first.len, 64);
+    assert_eq!(second.align, 64);
+
+    slab.deallocate(first)
+        .expect("first slab allocation should release");
+    slab.deallocate(second)
+        .expect("second slab allocation should release");
+
+    for _ in 0..4 {
+        let allocation = slab
+            .allocate(&fusion_sys::alloc::AllocRequest::new(64))
+            .expect("slab should recycle freed slots");
+        slab.deallocate(allocation)
+            .expect("recycled slab allocation should release");
+    }
+}
+
+#[test]
+fn arena_provides_bounded_bump_allocation_and_reset() {
+    let allocator = Allocator::<2, 2>::system_default().expect("allocator should build");
+    let default_domain = allocator
+        .default_domain()
+        .expect("default domain should exist");
+
+    assert_eq!(
+        allocator
+            .arena(default_domain, 0)
+            .expect_err("zero-capacity arenas should be rejected")
+            .kind,
+        AllocErrorKind::InvalidRequest
+    );
+
+    let arena = allocator
+        .arena(default_domain, 256)
+        .expect("arena should reserve backing");
+    let first = arena
+        .allocate(&fusion_sys::alloc::AllocRequest {
+            len: 32,
+            align: 16,
+            zeroed: false,
+        })
+        .expect("first arena allocation should succeed");
+    let second = arena
+        .allocate(&fusion_sys::alloc::AllocRequest {
+            len: 64,
+            align: 32,
+            zeroed: true,
+        })
+        .expect("second arena allocation should succeed");
+    assert_eq!(second.ptr.as_ptr() as usize % 32, 0);
+
+    arena
+        .deallocate(second)
+        .expect("most recent arena allocation should release");
+    arena
+        .deallocate(first)
+        .expect("earlier allocation becomes releasable after stack unwind");
+    arena.reset().expect("arena reset should succeed");
+}
+
+#[test]
+fn heap_only_domains_deny_slab_and_arena_routing() {
     let mut builder = Allocator::<4, 2>::builder();
     let heap_only = builder
         .add_domain(AllocPolicy {
@@ -268,42 +311,6 @@ fn allocator_root_routes_slab_and_arena_honestly() {
             .expect_err("heap-only domain should deny arena routing")
             .kind,
         AllocErrorKind::PolicyDenied
-    );
-}
-
-#[test]
-fn allocator_root_realloc_and_free_fail_honestly() {
-    let allocator = Allocator::<2, 2>::system_default();
-    let allocation = AllocResult {
-        ptr: NonNull::dangling(),
-        len: 64,
-        align: 16,
-        domain: MemoryDomain::StaticRegion,
-        attrs: ResourceAttrs::ALLOCATABLE | ResourceAttrs::CACHEABLE | ResourceAttrs::COHERENT,
-        hazards: fusion_sys::alloc::ResourceHazardSet::empty(),
-        geometry: general_geometry(),
-    };
-
-    assert_eq!(
-        allocator
-            .realloc(allocation, 0)
-            .expect_err("realloc still fails at the unsupported heap boundary")
-            .kind,
-        AllocErrorKind::Unsupported
-    );
-    assert_eq!(
-        allocator
-            .realloc(allocation, 128)
-            .expect_err("realloc remains intentionally unsupported")
-            .kind,
-        AllocErrorKind::Unsupported
-    );
-    assert_eq!(
-        allocator
-            .free(allocation)
-            .expect_err("free remains intentionally unsupported")
-            .kind,
-        AllocErrorKind::Unsupported
     );
 }
 

@@ -1,35 +1,41 @@
+use core::fmt;
+
 use super::{
     AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
-    AllocResult, AllocationStrategy, AllocatorDomainId,
+    AllocResult, AllocationStrategy, AllocatorDomainId, SharedDomainPool,
 };
 
 /// General-purpose allocator surface for non-critical-safe heap behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HeapAllocator {
     domain: AllocatorDomainId,
     policy: AllocPolicy,
+    pool: SharedDomainPool,
+}
+
+impl fmt::Debug for HeapAllocator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HeapAllocator")
+            .field("domain", &self.domain)
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
 }
 
 impl HeapAllocator {
-    /// Creates a heap allocator description.
-    ///
-    /// # Errors
-    ///
-    /// Returns `policy_denied` when heap behavior is disabled and `unsupported` until the
-    /// concrete heap implementation lands.
-    pub const fn new(policy: AllocPolicy) -> Result<Self, AllocError> {
-        Self::for_domain(AllocatorDomainId(0), policy)
-    }
-
-    pub(super) const fn for_domain(
+    pub(super) fn for_domain(
         domain: AllocatorDomainId,
         policy: AllocPolicy,
+        pool: Option<SharedDomainPool>,
     ) -> Result<Self, AllocError> {
         if !policy.allows(AllocModeSet::HEAP) {
             return Err(AllocError::policy_denied());
         }
-        let _ = (domain, policy);
-        Err(AllocError::unsupported())
+        let pool = pool.ok_or_else(AllocError::capacity_exhausted)?;
+        Ok(Self {
+            domain,
+            policy,
+            pool,
+        })
     }
 
     /// Returns the capability surface a general-purpose heap intends to provide.
@@ -88,12 +94,12 @@ impl AllocationStrategy for HeapAllocator {
         if request.len == 0 || request.align == 0 || !request.align.is_power_of_two() {
             return Err(AllocError::invalid_request());
         }
-        let _ = self;
+        let _ = self.pool;
         Err(AllocError::unsupported())
     }
 
     fn deallocate(&self, allocation: AllocResult) -> Result<(), AllocError> {
-        let _ = (self, allocation);
+        let _ = (&self.pool, allocation);
         Err(AllocError::unsupported())
     }
 }

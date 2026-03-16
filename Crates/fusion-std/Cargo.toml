@@ -17,12 +17,15 @@ name = "fusion_std_fiber_fault_probe"
 path = "bin/fiber_fault_probe.rs"
 
 [features]
-default = []
+default = ["std"]
+std = []
 sys-fusion-kn = ["fusion-sys/sys-fusion-kn"]
 
 [dependencies]
 fusion-pal = { workspace = true }
 fusion-sys = { workspace = true }
+
+[dev-dependencies]
 libc = "0.2"
 
 [lints]

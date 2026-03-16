@@ -276,6 +276,7 @@ unsafe impl Sync for FiberBootstrapRegistry {}
 struct ActiveFiberSlot {
     active: bool,
     thread_id: ThreadId,
+    arg: *mut (),
     caller_context: *mut PlatformSavedContext,
     fiber_context: *mut PlatformSavedContext,
     outcome: *mut FiberResumeOutcome,
@@ -286,6 +287,7 @@ impl ActiveFiberSlot {
         Self {
             active: false,
             thread_id: ThreadId(0),
+            arg: core::ptr::null_mut(),
             caller_context: core::ptr::null_mut(),
             fiber_context: core::ptr::null_mut(),
             outcome: core::ptr::null_mut(),
@@ -419,10 +421,12 @@ impl Fiber {
             bootstrap.outcome = outcome;
             Ok(())
         })?;
+        let active_arg = with_bootstrap(bootstrap_slot, |bootstrap| Ok(bootstrap.arg))?;
 
         install_active_fiber(ActiveFiberSlot {
             active: true,
             thread_id: current_thread_id()?,
+            arg: active_arg,
             caller_context,
             fiber_context,
             outcome,
@@ -503,6 +507,19 @@ pub fn yield_now() -> Result<(), FiberError> {
     let context = system_context();
     unsafe { context.swap(&mut *active.fiber_context, &*active.caller_context)? };
     Ok(())
+}
+
+/// Returns the current fiber's opaque caller-provided context pointer.
+///
+/// # Errors
+///
+/// Returns an error if no active fiber is registered on the current carrier.
+pub fn current_context() -> Result<*mut (), FiberError> {
+    let active = current_active_fiber()?;
+    if active.arg.is_null() {
+        return Err(FiberError::state_conflict());
+    }
+    Ok(active.arg)
 }
 
 unsafe fn fiber_entry_trampoline(context: *mut ()) -> ! {

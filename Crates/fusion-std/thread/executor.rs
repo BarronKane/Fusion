@@ -28,17 +28,17 @@
 //! ```
 
 use core::future::Future;
+use core::hint::spin_loop;
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
 use core::pin::Pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use core::time::Duration;
 
-use std::collections::VecDeque;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::thread;
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::sync::{Mutex as SyncMutex, Semaphore, SyncError, SyncErrorKind};
 use fusion_sys::event::EventSystem;
@@ -47,6 +47,7 @@ pub use fusion_sys::event::{
     EventInterest, EventKey, EventModel, EventNotification, EventPoller as ReactorPoller,
     EventReadiness, EventRecord, EventSourceHandle, EventSupport,
 };
+use fusion_sys::thread::system_thread;
 
 use super::{GreenPool, ThreadPool};
 
@@ -421,7 +422,7 @@ where
         };
         drop(future);
 
-        let poll = catch_unwind(AssertUnwindSafe(|| future_slot.as_mut().poll(&mut context)));
+        let poll = poll_future_contained(future_slot.as_mut(), &mut context);
         match poll {
             Ok(Poll::Ready(output)) => {
                 let _ = self.shared.complete(output);
@@ -433,7 +434,7 @@ where
                     let _ = self.shared.fail(ExecutorError::Stopped);
                 }
             }
-            Err(_) => {
+            Err(()) => {
                 let _ = self.shared.fail(ExecutorError::TaskPanicked);
             }
         }
@@ -630,8 +631,8 @@ impl Executor {
 
         let handle = self.spawn(future)?;
         while !handle.is_finished()? {
-            if !queue.run_next()? {
-                thread::yield_now();
+            if !queue.run_next()? && system_thread().yield_now().is_err() {
+                spin_loop();
             }
         }
         handle.join()
@@ -667,6 +668,27 @@ impl Executor {
             self.inner.config,
             SchedulerBinding::GreenPool(green.clone()),
         ))
+    }
+}
+
+fn poll_future_contained<F>(
+    future: Pin<&mut F>,
+    context: &mut Context<'_>,
+) -> Result<Poll<F::Output>, ()>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    #[cfg(feature = "std")]
+    {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        catch_unwind(AssertUnwindSafe(|| future.poll(context))).map_err(|_| ())
+    }
+
+    #[cfg(not(feature = "std"))]
+    {
+        Ok(future.poll(context))
     }
 }
 

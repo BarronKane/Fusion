@@ -6,6 +6,8 @@
 
 #![no_std]
 
+extern crate alloc as rust_alloc;
+
 /// Target platform discriminator re-exported from `fusion-pal`.
 pub use fusion_pal::{Platform, TARGET_PLATFORM};
 

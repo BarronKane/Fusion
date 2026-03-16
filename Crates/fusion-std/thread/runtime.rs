@@ -1,8 +1,8 @@
 //! Domain 5: public runtime orchestration surface.
 
 use super::{
-    Executor, ExecutorConfig, FiberStackBacking, GreenPool, GreenPoolConfig, ThreadPool,
-    ThreadPoolConfig,
+    Executor, ExecutorConfig, FiberStackBacking, GreenGrowth, GreenPool, GreenPoolConfig,
+    GreenScheduling, ThreadPool, ThreadPoolConfig,
 };
 
 /// Runtime profile selecting broad safety and elasticity policy.
@@ -240,10 +240,16 @@ fn validate_runtime_config(config: &RuntimeConfig<'_>) -> Result<(), RuntimeErro
         {
             return Err(RuntimeError::Unsupported);
         }
-        if let Some(green) = config.green
-            && !matches!(green.stack_backing, FiberStackBacking::Fixed { .. })
-        {
-            return Err(RuntimeError::Unsupported);
+        if let Some(green) = config.green {
+            if !matches!(green.stack_backing, FiberStackBacking::Fixed { .. }) {
+                return Err(RuntimeError::Unsupported);
+            }
+            if !matches!(green.growth, GreenGrowth::Fixed) {
+                return Err(RuntimeError::Unsupported);
+            }
+            if !matches!(green.scheduling, GreenScheduling::Fifo) {
+                return Err(RuntimeError::Unsupported);
+            }
         }
     }
 
