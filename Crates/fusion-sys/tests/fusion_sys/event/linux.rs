@@ -6,9 +6,48 @@ use fusion_sys::event::{
     EventCaps, EventInterest, EventModel, EventNotification, EventReadiness, EventRecord,
     EventSourceHandle, EventSystem,
 };
-use std::io::Write;
-use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
+
+#[derive(Debug)]
+struct TestPipe {
+    read_fd: i32,
+    write_fd: i32,
+}
+
+impl TestPipe {
+    fn new() -> Self {
+        let mut fds = [0_i32; 2];
+        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        assert_eq!(rc, 0, "nonblocking test pipe should create");
+        Self {
+            read_fd: fds[0],
+            write_fd: fds[1],
+        }
+    }
+
+    fn source(&self) -> EventSourceHandle {
+        EventSourceHandle(usize::try_from(self.read_fd).expect("pipe fd should be non-negative"))
+    }
+
+    fn write_byte(&self, value: u8) {
+        let rc = unsafe {
+            libc::write(
+                self.write_fd,
+                (&raw const value).cast::<libc::c_void>(),
+                core::mem::size_of::<u8>(),
+            )
+        };
+        assert_eq!(rc, 1, "pipe writer should make the reader readable");
+    }
+}
+
+impl Drop for TestPipe {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.read_fd);
+            libc::close(self.write_fd);
+        }
+    }
+}
 
 #[test]
 fn linux_event_support_reports_native_readiness_backend() {
@@ -27,24 +66,20 @@ fn linux_event_support_reports_native_readiness_backend() {
 }
 
 #[test]
-fn linux_event_poller_reports_readable_unix_streams() {
+fn linux_event_poller_reports_readable_pipes() {
     let event = EventSystem::new();
     let mut poller = event.create().expect("poller should create");
-    let (reader, mut writer) = UnixStream::pair().expect("unix stream pair should create");
+    let pipe = TestPipe::new();
 
     let key = event
         .register(
             &mut poller,
-            EventSourceHandle(
-                usize::try_from(reader.as_raw_fd()).expect("unix stream fd should be non-negative"),
-            ),
+            pipe.source(),
             EventInterest::READABLE | EventInterest::ERROR | EventInterest::HANGUP,
         )
-        .expect("reader should register");
+        .expect("pipe reader should register");
 
-    writer
-        .write_all(b"x")
-        .expect("writer should make reader readable");
+    pipe.write_byte(b'x');
 
     let mut events = [EventRecord {
         key,

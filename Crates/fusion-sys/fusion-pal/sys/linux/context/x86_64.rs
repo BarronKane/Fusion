@@ -7,8 +7,6 @@
 use core::arch::{asm, global_asm};
 use core::mem;
 
-use rustix::thread as rustix_thread;
-
 use crate::pal::context::{
     ContextAuthoritySet, ContextBase, ContextCaps, ContextError, ContextGuarantee,
     ContextImplementationKind, ContextMigrationSupport, ContextStackDirection, ContextStackLayout,
@@ -36,7 +34,7 @@ const X86_64_CONTEXT_SUPPORT: ContextSupport = ContextSupport {
     tls_isolation: ContextTlsIsolation::SharedCarrierThread,
     signal_mask_preserved: false,
     unwind_across_boundary: false,
-    migration: ContextMigrationSupport::SameCarrierOnly,
+    migration: ContextMigrationSupport::CrossCarrier,
     authorities: ContextAuthoritySet::ISA.union(ContextAuthoritySet::OPERATING_SYSTEM),
     implementation: ContextImplementationKind::Native,
 };
@@ -65,7 +63,6 @@ struct X86_64Registers {
 pub struct LinuxSavedContext {
     registers: X86_64Registers,
     ready: bool,
-    owner_tid: libc::pid_t,
 }
 
 unsafe extern "C" {
@@ -98,7 +95,6 @@ impl LinuxSavedContext {
                 _padding: 0,
             },
             ready: false,
-            owner_tid: 0,
         }
     }
 }
@@ -111,8 +107,9 @@ impl ContextBase for LinuxContext {
     }
 }
 
-// SAFETY: this backend saves and restores the reported x86_64 context record directly and
-// enforces same-carrier resume before dispatching into the assembly switch path.
+// SAFETY: this backend saves and restores the reported x86_64 context record directly and the
+// saved state is carrier-agnostic process memory, so suspended contexts may honestly resume on a
+// different carrier while still sharing that carrier thread's TLS domain.
 unsafe impl ContextSwitch for LinuxContext {
     unsafe fn make(
         &self,
@@ -130,7 +127,6 @@ unsafe impl ContextSwitch for LinuxContext {
         saved.registers.mxcsr = mxcsr;
         saved.registers.x87_cw = x87_cw;
         saved.ready = true;
-        saved.owner_tid = 0;
 
         Ok(saved)
     }
@@ -144,13 +140,7 @@ unsafe impl ContextSwitch for LinuxContext {
             return Err(ContextError::invalid());
         }
 
-        let current_tid = current_tid();
-        if to.owner_tid != 0 && to.owner_tid != current_tid {
-            return Err(ContextError::state_conflict());
-        }
-
         from.ready = true;
-        from.owner_tid = current_tid;
         unsafe {
             fusion_linux_x86_64_context_swap(&raw mut from.registers, &raw const to.registers);
         }
@@ -210,10 +200,6 @@ fn capture_control_state() -> (u32, u16) {
     }
 
     (mxcsr, x87_cw)
-}
-
-fn current_tid() -> libc::pid_t {
-    rustix_thread::gettid().as_raw_pid()
 }
 
 unsafe extern "C" {
@@ -290,7 +276,7 @@ mod tests {
             support.tls_isolation,
             ContextTlsIsolation::SharedCarrierThread
         );
-        assert_eq!(support.migration, ContextMigrationSupport::SameCarrierOnly);
+        assert_eq!(support.migration, ContextMigrationSupport::CrossCarrier);
         assert!(!support.signal_mask_preserved);
         assert!(!support.unwind_across_boundary);
     }

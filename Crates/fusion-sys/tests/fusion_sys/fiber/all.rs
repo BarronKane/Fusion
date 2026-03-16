@@ -6,9 +6,11 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use fusion_sys::fiber::{
-    ContextCaps, ContextErrorKind, ContextStackLayout, ContextSwitch, Fiber, FiberReturn,
-    FiberStack, FiberSystem, FiberYield, PlatformSavedContext, system_context, yield_now,
+    ContextCaps, ContextErrorKind, ContextMigrationSupport, ContextStackLayout, ContextSwitch,
+    Fiber, FiberReturn, FiberStack, FiberSystem, FiberYield, PlatformSavedContext, system_context,
+    yield_now,
 };
+use std::thread;
 use std::vec;
 
 #[repr(C)]
@@ -25,7 +27,7 @@ unsafe fn yield_once(context: *mut ()) -> ! {
 
     let context = system_context();
     // SAFETY: the test sets both context pointers to valid saved-context slots before first
-    // resume and only resumes on the same carrier thread.
+    // resume and only yields back to the active caller slot.
     unsafe {
         context
             .swap(&mut *yield_state.callee, &*yield_state.caller)
@@ -106,7 +108,8 @@ fn raw_context_make_and_swap_follow_backend_truth() {
         (*state_ptr).callee = &raw mut fiber_context;
     }
 
-    // SAFETY: both contexts are valid and the backend reports same-carrier migration only.
+    // SAFETY: both contexts are valid and the selected backend reports the migration contract it
+    // can honor for this raw context switch.
     unsafe {
         context
             .swap(&mut resume_slot, &fiber_context)
@@ -154,6 +157,51 @@ fn fiber_primitive_yields_and_completes_follow_backend_truth() {
     assert_eq!(progress.load(Ordering::Acquire), 1);
     assert_eq!(
         fiber.resume().expect("second resume should complete"),
+        FiberYield::Completed(FiberReturn::new(99))
+    );
+    assert_eq!(progress.load(Ordering::Acquire), 2);
+}
+
+#[test]
+fn suspended_fiber_can_resume_on_another_thread_when_reported() {
+    let support = FiberSystem::new().support();
+    if !support.context.caps.contains(ContextCaps::MAKE) {
+        return;
+    }
+    if support.context.migration != ContextMigrationSupport::CrossCarrier {
+        return;
+    }
+
+    let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
+    let stack = FiberStack::new(
+        unsafe { NonNull::new_unchecked(stack_words.as_mut_ptr().cast::<u8>()) },
+        stack_words.len() * mem::size_of::<u128>(),
+    )
+    .expect("stack should be valid");
+    let progress = AtomicUsize::new(0);
+
+    let mut fiber = Fiber::new(
+        stack,
+        cooperative_fiber,
+        (&raw const progress).cast_mut().cast(),
+    )
+    .expect("fiber should build on supported backends");
+    assert_eq!(
+        fiber.resume().expect("first resume should yield"),
+        FiberYield::Yielded
+    );
+    assert_eq!(progress.load(Ordering::Acquire), 1);
+
+    let join = thread::spawn(move || {
+        let stack_words = stack_words;
+        let outcome = fiber.resume();
+        std::hint::black_box(&stack_words);
+        outcome
+    });
+    assert_eq!(
+        join.join()
+            .expect("resuming suspended fiber on another thread should not panic")
+            .expect("cross-carrier resume should complete"),
         FiberYield::Completed(FiberReturn::new(99))
     );
     assert_eq!(progress.load(Ordering::Acquire), 2);

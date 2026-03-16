@@ -4,6 +4,9 @@ pub mod context;
 #[path = "event/event.rs"]
 /// Windows fusion-pal event backend implementation.
 pub mod event;
+#[path = "../unsupported/fiber.rs"]
+/// Windows hosted-fiber helper surface remains unsupported for now.
+pub mod fiber;
 #[path = "hal/hal.rs"]
 /// Windows fusion-pal hardware backend implementation.
 pub mod hal;

@@ -412,6 +412,14 @@ mod tests {
             "linux HAL should enumerate scheduler-visible logical CPUs"
         );
         assert_eq!(summary.logical_cpu_count, Some(cpuset.count() as usize));
+        if let Some(core_count) = summary.core_count {
+            assert!(
+                support.topology.caps.contains(HardwareTopologyCaps::CORES),
+                "linux HAL should surface visible physical cores when topology sysfs is available"
+            );
+            assert!(core_count > 0);
+            assert!(core_count <= cpuset.count() as usize);
+        }
     }
 
     #[test]
@@ -429,6 +437,24 @@ mod tests {
 
         assert_eq!(summary.total, cpuset.count() as usize);
         assert_eq!(summary.written, summary.total);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn system_hardware_writes_visible_core_ids_when_available() {
+        let hardware = system_hardware();
+        let summary = hardware.topology_summary().expect("linux topology summary");
+        let Some(core_count) = summary.core_count else {
+            return;
+        };
+
+        let mut output = [crate::pal::thread::ThreadCoreId(0); CpuSet::MAX_CPU];
+        let written = hardware
+            .write_cores(&mut output)
+            .expect("linux core enumeration");
+
+        assert_eq!(written.total, core_count);
+        assert_eq!(written.written, written.total);
     }
 
     #[test]

@@ -218,15 +218,15 @@ impl ThreadPool {
             .inner
             .lock()
             .map_err(thread_pool_error_from_sync)?;
-        Ok(guard.as_ref().map_or(
-            PoolStats {
+        guard.as_ref().map_or(
+            Ok(PoolStats {
                 min_threads: 0,
                 max_threads: 0,
                 active_workers: 0,
                 queued_items: 0,
-            },
+            }),
             SystemThreadPool::stats,
-        ))
+        )
     }
 
     /// Returns the current active worker count.

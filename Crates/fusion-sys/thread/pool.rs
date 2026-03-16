@@ -321,15 +321,18 @@ impl SystemThreadPool {
     }
 
     /// Returns the configured statistics snapshot.
-    #[must_use]
-    pub fn stats(&self) -> SystemThreadPoolStats {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pool can no longer observe its slot state honestly.
+    pub fn stats(&self) -> Result<SystemThreadPoolStats, ThreadError> {
         let Some(slot_index) = self.slot_index else {
-            return SystemThreadPoolStats {
+            return Ok(SystemThreadPoolStats {
                 min_threads: self.min_threads,
                 max_threads: self.max_threads,
                 active_workers: 0,
                 queued_items: 0,
-            };
+            });
         };
 
         with_slot(slot_index, |slot| {
@@ -340,18 +343,15 @@ impl SystemThreadPool {
                 queued_items: slot.queued_items,
             })
         })
-        .unwrap_or(SystemThreadPoolStats {
-            min_threads: self.min_threads,
-            max_threads: self.max_threads,
-            active_workers: 0,
-            queued_items: 0,
-        })
     }
 
     /// Returns the current active worker count.
-    #[must_use]
-    pub fn worker_count(&self) -> usize {
-        self.stats().active_workers
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pool can no longer observe its slot state honestly.
+    pub fn worker_count(&self) -> Result<usize, ThreadError> {
+        Ok(self.stats()?.active_workers)
     }
 
     /// Submits one raw work item to the bounded carrier queue.

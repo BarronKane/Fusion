@@ -13,7 +13,7 @@ use crate::pal::hal::{
     HardwareTopologyCaps, HardwareTopologyNodeId, HardwareTopologyQuery, HardwareTopologySummary,
     HardwareTopologySupport, HardwareWriteSummary,
 };
-use crate::pal::thread::{ThreadLogicalCpuId, ThreadProcessorGroupId};
+use crate::pal::thread::{ThreadCoreId, ThreadLogicalCpuId, ThreadProcessorGroupId};
 
 /// Selected Linux hardware provider type.
 #[derive(Debug, Clone, Copy, Default)]
@@ -40,6 +40,15 @@ const NODE_ONLINE_PATH: &str = "/sys/devices/system/node/online";
 const CACHE_PATH_PREFIX: &[u8] = b"/sys/devices/system/cpu/cpu";
 const CACHE_PATH_MIDDLE: &[u8] = b"/cache/index";
 const CACHE_PATH_SUFFIX: &[u8] = b"/coherency_line_size";
+const TOPOLOGY_PATH_PREFIX: &[u8] = b"/sys/devices/system/cpu/cpu";
+const CORE_ID_PATH_SUFFIX: &[u8] = b"/topology/core_id";
+const PACKAGE_ID_PATH_SUFFIX: &[u8] = b"/topology/physical_package_id";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VisibleCoreKey {
+    package_id: u32,
+    core_id: u32,
+}
 
 impl HardwareBase for LinuxHardware {
     fn support(&self) -> HardwareSupport {
@@ -71,9 +80,9 @@ impl HardwareTopologyQuery for LinuxHardware {
 
     fn write_cores(
         &self,
-        _output: &mut [crate::pal::thread::ThreadCoreId],
+        output: &mut [crate::pal::thread::ThreadCoreId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
-        Err(HardwareError::unsupported())
+        write_cores(output)
     }
 
     fn write_clusters(
@@ -158,15 +167,16 @@ fn cpu_description() -> HardwareCpuDescription {
 
 fn topology_summary() -> Result<HardwareTopologySummary, HardwareError> {
     let logical_cpu_count = visible_cpuset().map(|cpuset| cpuset.count() as usize).ok();
+    let core_count = visible_core_count().ok();
     let numa_node_count = online_node_count().ok();
 
-    if logical_cpu_count.is_none() && numa_node_count.is_none() {
+    if logical_cpu_count.is_none() && core_count.is_none() && numa_node_count.is_none() {
         return Err(HardwareError::unsupported());
     }
 
     Ok(HardwareTopologySummary {
         logical_cpu_count,
-        core_count: None,
+        core_count,
         cluster_count: None,
         package_count: None,
         numa_node_count,
@@ -198,6 +208,10 @@ fn write_logical_cpus(
     }
 
     Ok(HardwareWriteSummary::new(total, written))
+}
+
+fn write_cores(output: &mut [ThreadCoreId]) -> Result<HardwareWriteSummary, HardwareError> {
+    enumerate_visible_cores(Some(output))
 }
 
 fn write_numa_nodes(
@@ -234,17 +248,25 @@ fn cpu_authorities(
 
 fn topology_support() -> HardwareTopologySupport {
     let logical_cpus = visible_cpuset().map(|_| ()).is_ok();
+    let cores = visible_core_count().is_ok();
     let numa_nodes = online_node_count().is_ok();
 
     let mut caps = HardwareTopologyCaps::empty();
     let mut summary = HardwareGuarantee::Unsupported;
     let mut logical_cpus_guarantee = HardwareGuarantee::Unsupported;
+    let mut cores_guarantee = HardwareGuarantee::Unsupported;
     let mut numa_nodes_guarantee = HardwareGuarantee::Unsupported;
 
     if logical_cpus {
         caps |= HardwareTopologyCaps::SUMMARY | HardwareTopologyCaps::LOGICAL_CPUS;
         summary = HardwareGuarantee::Verified;
         logical_cpus_guarantee = HardwareGuarantee::Verified;
+    }
+
+    if cores {
+        caps |= HardwareTopologyCaps::SUMMARY | HardwareTopologyCaps::CORES;
+        summary = HardwareGuarantee::Verified;
+        cores_guarantee = HardwareGuarantee::Verified;
     }
 
     if numa_nodes {
@@ -261,7 +283,7 @@ fn topology_support() -> HardwareTopologySupport {
         caps,
         summary,
         logical_cpus: logical_cpus_guarantee,
-        cores: HardwareGuarantee::Unsupported,
+        cores: cores_guarantee,
         clusters: HardwareGuarantee::Unsupported,
         packages: HardwareGuarantee::Unsupported,
         numa_nodes: numa_nodes_guarantee,
@@ -319,6 +341,61 @@ const fn runtime_simd_guarantee() -> HardwareGuarantee {
 
 fn visible_cpuset() -> Result<CpuSet, HardwareError> {
     rustix_thread::sched_getaffinity(None).map_err(map_errno)
+}
+
+fn visible_core_count() -> Result<usize, HardwareError> {
+    enumerate_visible_cores(None).map(|summary| summary.total)
+}
+
+fn enumerate_visible_cores(
+    mut output: Option<&mut [ThreadCoreId]>,
+) -> Result<HardwareWriteSummary, HardwareError> {
+    let cpuset = visible_cpuset()?;
+    let mut unique = [VisibleCoreKey {
+        package_id: u32::MAX,
+        core_id: u32::MAX,
+    }; CpuSet::MAX_CPU];
+    let mut total = 0usize;
+    let mut written = 0usize;
+
+    for cpu in 0..CpuSet::MAX_CPU {
+        if !cpuset.is_set(cpu) {
+            continue;
+        }
+
+        let cpu = u32::try_from(cpu).map_err(|_| HardwareError::platform(libc::EOVERFLOW))?;
+        let key = visible_core_key(cpu)?;
+        if unique[..total].contains(&key) {
+            continue;
+        }
+
+        unique[total] = key;
+        if let Some(slice) = output.as_deref_mut()
+            && written < slice.len()
+        {
+            slice[written] = ThreadCoreId(
+                u32::try_from(total).map_err(|_| HardwareError::platform(libc::EOVERFLOW))?,
+            );
+            written += 1;
+        }
+        total += 1;
+    }
+
+    Ok(HardwareWriteSummary::new(total, written))
+}
+
+fn visible_core_key(cpu: u32) -> Result<VisibleCoreKey, HardwareError> {
+    let core_id = read_cpu_topology_u32(cpu, CORE_ID_PATH_SUFFIX)?;
+    let package_id = match read_cpu_topology_u32(cpu, PACKAGE_ID_PATH_SUFFIX) {
+        Ok(value) => value,
+        Err(error) if error.kind() == HardwareErrorKind::Unsupported => 0,
+        Err(error) => return Err(error),
+    };
+
+    Ok(VisibleCoreKey {
+        package_id,
+        core_id,
+    })
 }
 
 fn online_node_count() -> Result<usize, HardwareError> {
@@ -539,6 +616,26 @@ fn build_cache_line_path(cpu: u32, index: u32, output: &mut [u8]) -> Result<&str
     written = write_decimal_u32(output, written, index)?;
     written = write_bytes(output, written, CACHE_PATH_SUFFIX)?;
     str::from_utf8(&output[..written]).map_err(|_| HardwareError::invalid())
+}
+
+fn build_cpu_topology_path<'a>(
+    cpu: u32,
+    suffix: &[u8],
+    output: &'a mut [u8],
+) -> Result<&'a str, HardwareError> {
+    let mut written = 0;
+    written = write_bytes(output, written, TOPOLOGY_PATH_PREFIX)?;
+    written = write_decimal_u32(output, written, cpu)?;
+    written = write_bytes(output, written, suffix)?;
+    str::from_utf8(&output[..written]).map_err(|_| HardwareError::invalid())
+}
+
+fn read_cpu_topology_u32(cpu: u32, suffix: &[u8]) -> Result<u32, HardwareError> {
+    let mut path_buf = [0u8; 128];
+    let mut value_buf = [0u8; 64];
+    let path = build_cpu_topology_path(cpu, suffix, &mut path_buf)?;
+    let bytes = read_text_file(path, &mut value_buf)?;
+    parse_decimal_u32(bytes)
 }
 
 fn write_bytes(output: &mut [u8], offset: usize, bytes: &[u8]) -> Result<usize, HardwareError> {

@@ -7,8 +7,6 @@
 use core::arch::global_asm;
 use core::mem;
 
-use rustix::thread as rustix_thread;
-
 use crate::pal::context::{
     ContextAuthoritySet, ContextBase, ContextCaps, ContextError, ContextGuarantee,
     ContextImplementationKind, ContextMigrationSupport, ContextStackDirection, ContextStackLayout,
@@ -36,7 +34,7 @@ const AARCH64_CONTEXT_SUPPORT: ContextSupport = ContextSupport {
     tls_isolation: ContextTlsIsolation::SharedCarrierThread,
     signal_mask_preserved: false,
     unwind_across_boundary: false,
-    migration: ContextMigrationSupport::SameCarrierOnly,
+    migration: ContextMigrationSupport::CrossCarrier,
     authorities: ContextAuthoritySet::ISA.union(ContextAuthoritySet::OPERATING_SYSTEM),
     implementation: ContextImplementationKind::Native,
 };
@@ -78,7 +76,6 @@ struct Aarch64Registers {
 pub struct LinuxSavedContext {
     registers: Aarch64Registers,
     ready: bool,
-    owner_tid: libc::pid_t,
 }
 
 unsafe extern "C" {
@@ -124,7 +121,6 @@ impl LinuxSavedContext {
                 d15: 0,
             },
             ready: false,
-            owner_tid: 0,
         }
     }
 }
@@ -137,8 +133,9 @@ impl ContextBase for LinuxContext {
     }
 }
 
-// SAFETY: this backend saves and restores the reported `aarch64` context record directly and
-// enforces same-carrier resume before dispatching into the assembly switch path.
+// SAFETY: this backend saves and restores the reported `aarch64` context record directly and the
+// saved state is carrier-agnostic process memory, so suspended contexts may honestly resume on a
+// different carrier while still sharing that carrier thread's TLS domain.
 unsafe impl ContextSwitch for LinuxContext {
     unsafe fn make(
         &self,
@@ -154,7 +151,6 @@ unsafe impl ContextSwitch for LinuxContext {
         saved.registers.x20 = arg as usize;
         saved.registers.x30 = fusion_linux_aarch64_context_start as *const () as usize;
         saved.ready = true;
-        saved.owner_tid = 0;
 
         Ok(saved)
     }
@@ -168,13 +164,7 @@ unsafe impl ContextSwitch for LinuxContext {
             return Err(ContextError::invalid());
         }
 
-        let current_tid = current_tid();
-        if to.owner_tid != 0 && to.owner_tid != current_tid {
-            return Err(ContextError::state_conflict());
-        }
-
         from.ready = true;
-        from.owner_tid = current_tid;
         unsafe {
             fusion_linux_aarch64_context_swap(&raw mut from.registers, &raw const to.registers);
         }
@@ -205,10 +195,6 @@ fn validate_stack_layout(stack: ContextStackLayout) -> Result<usize, ContextErro
     }
 
     Ok(top)
-}
-
-fn current_tid() -> libc::pid_t {
-    rustix_thread::gettid().as_raw_pid()
 }
 
 unsafe extern "C" {
@@ -285,7 +271,7 @@ mod tests {
             support.tls_isolation,
             ContextTlsIsolation::SharedCarrierThread
         );
-        assert_eq!(support.migration, ContextMigrationSupport::SameCarrierOnly);
+        assert_eq!(support.migration, ContextMigrationSupport::CrossCarrier);
         assert!(!support.signal_mask_preserved);
         assert!(!support.unwind_across_boundary);
     }

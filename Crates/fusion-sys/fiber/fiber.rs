@@ -1,7 +1,7 @@
 //! fusion-sys-level stackful execution surfaces built on top of fusion-pal context switching.
 //!
 //! This layer stays deliberately narrow. It owns the low-level stackful primitive, the
-//! same-carrier yield protocol, and the minimal bookkeeping required to let higher schedulers
+//! carrier-local yield protocol, and the minimal bookkeeping required to let higher schedulers
 //! resume and suspend fibers honestly. Scheduling policy stays above this layer.
 
 use core::cell::UnsafeCell;
@@ -193,6 +193,20 @@ pub struct FiberStackSpec {
     pub size_bytes: NonZeroUsize,
     /// Requested guard size in bytes.
     pub guard_bytes: usize,
+    /// Requested stack-backing behavior.
+    pub backing: FiberStackBackingKind,
+}
+
+/// Low-level stack-backing mode requested for one fiber stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FiberStackBackingKind {
+    /// Fully committed fixed-capacity stack.
+    Fixed,
+    /// Reservation-backed elastic stack with an initial committed prefix.
+    Elastic {
+        /// Initial committed usable bytes at stack creation.
+        initial_usable_bytes: NonZeroUsize,
+    },
 }
 
 /// fusion-sys context provider wrapper used by higher fiber layers.
@@ -311,8 +325,8 @@ pub struct Fiber {
 }
 
 // SAFETY: `Fiber` contains raw context pointers that are only dereferenced while the caller
-// holds exclusive `&mut self` access during `resume()`. The primitive still enforces
-// same-carrier resumption at runtime.
+// holds exclusive `&mut self` access during `resume()`. The primitive relies on the selected
+// fusion-pal backend to enforce whatever migration contract it reports at runtime.
 unsafe impl Send for Fiber {}
 
 impl FiberSystem {

@@ -12,6 +12,10 @@ repository.workspace = true
 crate-type = ["rlib"]
 path = "fusion-std.rs"
 
+[[bin]]
+name = "fusion_std_fiber_fault_probe"
+path = "bin/fiber_fault_probe.rs"
+
 [features]
 default = []
 sys-fusion-kn = ["fusion-sys/sys-fusion-kn"]
@@ -19,6 +23,7 @@ sys-fusion-kn = ["fusion-sys/sys-fusion-kn"]
 [dependencies]
 fusion-pal = { workspace = true }
 fusion-sys = { workspace = true }
+libc = "0.2"
 
 [lints]
 workspace = true

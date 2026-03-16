@@ -4,6 +4,9 @@ pub mod context;
 #[path = "event/event.rs"]
 /// iOS fusion-pal event backend implementation.
 pub mod event;
+#[path = "../unsupported/fiber.rs"]
+/// iOS hosted-fiber helper surface remains unsupported for now.
+pub mod fiber;
 #[path = "hal/hal.rs"]
 /// iOS fusion-pal hardware backend implementation.
 pub mod hal;

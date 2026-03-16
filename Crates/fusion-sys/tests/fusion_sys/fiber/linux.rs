@@ -4,7 +4,7 @@ use fusion_sys::fiber::{
 };
 
 #[test]
-fn linux_fiber_support_reports_expected_same_carrier_contexts() {
+fn linux_fiber_support_reports_expected_cross_carrier_contexts() {
     let support = FiberSystem::new().support();
 
     #[cfg(target_arch = "x86_64")]
@@ -26,7 +26,7 @@ fn linux_fiber_support_reports_expected_same_carrier_contexts() {
     );
     assert_eq!(
         support.context.migration,
-        ContextMigrationSupport::SameCarrierOnly
+        ContextMigrationSupport::CrossCarrier
     );
     #[cfg(target_arch = "x86_64")]
     assert_eq!(support.context.red_zone_bytes, 128);

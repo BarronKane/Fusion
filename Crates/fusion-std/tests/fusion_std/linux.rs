@@ -1,0 +1,530 @@
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use fusion_pal::sys::mem::{MemAdviceCaps, MemBase, system_mem};
+use fusion_std::thread::{
+    DeterministicConstraints, EventInterest, EventNotification, EventReadiness, EventRecord,
+    EventSourceHandle, Executor, ExecutorConfig, ExecutorMode, FiberStackBacking, FiberTelemetry,
+    GreenPool, GreenPoolConfig, HugePagePolicy, HugePageSize, Runtime, RuntimeConfig, RuntimeError,
+    RuntimeProfile, ThreadPool, ThreadPoolConfig, wait_for_readiness, yield_now as green_yield_now,
+};
+use fusion_sys::fiber::FiberSystem;
+use std::num::NonZeroUsize;
+use std::process::Command;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+use super::lock_fusion_std_tests;
+
+#[derive(Debug)]
+struct TestPipe {
+    read_fd: i32,
+    write_fd: i32,
+}
+
+impl TestPipe {
+    fn new() -> Self {
+        let mut fds = [0_i32; 2];
+        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        assert_eq!(rc, 0, "nonblocking test pipe should create");
+        Self {
+            read_fd: fds[0],
+            write_fd: fds[1],
+        }
+    }
+
+    fn source(&self) -> EventSourceHandle {
+        EventSourceHandle(usize::try_from(self.read_fd).expect("pipe fd should be non-negative"))
+    }
+
+    fn write_byte(&self, value: u8) {
+        let rc = unsafe {
+            libc::write(
+                self.write_fd,
+                (&raw const value).cast::<libc::c_void>(),
+                core::mem::size_of::<u8>(),
+            )
+        };
+        assert_eq!(rc, 1, "pipe writer should make the reader readable");
+    }
+
+    fn read_byte(&self) -> u8 {
+        let mut byte = 0_u8;
+        loop {
+            let rc = unsafe {
+                libc::read(
+                    self.read_fd,
+                    (&raw mut byte).cast::<libc::c_void>(),
+                    core::mem::size_of::<u8>(),
+                )
+            };
+            if rc == 1 {
+                return byte;
+            }
+            assert_eq!(rc, -1, "pipe read should either succeed or report errno");
+            let errno = unsafe { *libc::__errno_location() };
+            if errno == libc::EINTR {
+                continue;
+            }
+            panic!("pipe read should complete after readiness, errno={errno}");
+        }
+    }
+}
+
+impl Drop for TestPipe {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.read_fd);
+            libc::close(self.write_fd);
+        }
+    }
+}
+
+#[test]
+fn automatic_green_pool_bootstraps_and_runs_work() {
+    let _guard = lock_fusion_std_tests();
+
+    let automatic_a = GreenPool::automatic().expect("automatic green pool should bootstrap");
+    let automatic_b =
+        GreenPool::automatic().expect("automatic green pool should reuse the shared runtime");
+
+    let task = automatic_a
+        .spawn(|| 17_u32)
+        .expect("automatic green pool should accept work");
+    assert_eq!(
+        task.join()
+            .expect("automatic green task should complete with a result"),
+        17
+    );
+
+    let second = automatic_b
+        .spawn(|| 23_u32)
+        .expect("shared automatic green pool should also accept work");
+    assert_eq!(
+        second
+            .join()
+            .expect("second automatic green task should complete"),
+        23
+    );
+}
+
+#[test]
+fn executor_green_pool_and_runtime_paths_are_real() {
+    let _guard = lock_fusion_std_tests();
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+
+    assert_eq!(GreenPool::support(), FiberSystem::new().support());
+    let green = GreenPool::new(&GreenPoolConfig::new(), &carrier)
+        .expect("green pool should build on the carrier pool");
+    let runs = Arc::new(AtomicU32::new(0));
+    let runs_for_green = Arc::clone(&runs);
+    let green_job = green
+        .spawn(move || {
+            runs_for_green.fetch_add(1, Ordering::AcqRel);
+            green_yield_now().expect("green task should yield cooperatively");
+            runs_for_green.fetch_add(1, Ordering::AcqRel);
+        })
+        .expect("green pool should spawn a job");
+    green_job
+        .join()
+        .expect("green job should finish after yielding once");
+    assert_eq!(runs.load(Ordering::Acquire), 2);
+
+    let green_executor = Executor::new(ExecutorConfig {
+        mode: ExecutorMode::GreenPool,
+        ..ExecutorConfig::new()
+    })
+    .on_green(&green)
+    .expect("executor should bind to the green pool");
+    let green_task = green_executor
+        .spawn(async { 13_u8 })
+        .expect("green-backed executor should spawn work");
+    assert_eq!(
+        green_task
+            .join()
+            .expect("green-backed executor task should complete"),
+        13
+    );
+
+    let runtime = Runtime::new(&RuntimeConfig {
+        profile: RuntimeProfile::Deterministic,
+        thread_pool: ThreadPoolConfig::new(),
+        green: Some(GreenPoolConfig::fixed(
+            NonZeroUsize::new(64 * 1024).expect("non-zero fixed fiber stack"),
+            64,
+        )),
+        executor: ExecutorConfig {
+            mode: ExecutorMode::GreenPool,
+            ..ExecutorConfig::new()
+        },
+        deterministic: Some(DeterministicConstraints::strict()),
+        elastic: None,
+    })
+    .expect("runtime should build a carrier pool, green pool, and executor");
+    assert!(runtime.thread_pool().is_some());
+    assert!(runtime.green_pool().is_some());
+    assert_eq!(
+        runtime
+            .stats()
+            .expect("runtime stats should remain observable")
+            .carrier_workers,
+        1
+    );
+
+    let runtime_task = runtime
+        .executor()
+        .spawn(async { 17_u8 })
+        .expect("runtime executor should spawn onto the green pool");
+    assert_eq!(
+        runtime_task
+            .join()
+            .expect("runtime executor task should complete"),
+        17
+    );
+
+    let unsupported_hybrid = Runtime::new(&RuntimeConfig {
+        profile: RuntimeProfile::Balanced,
+        thread_pool: ThreadPoolConfig::new(),
+        green: Some(GreenPoolConfig::new()),
+        executor: ExecutorConfig {
+            mode: ExecutorMode::Hybrid,
+            ..ExecutorConfig::new()
+        },
+        deterministic: None,
+        elastic: None,
+    });
+    assert!(matches!(unsupported_hybrid, Err(RuntimeError::Unsupported)));
+
+    green
+        .shutdown()
+        .expect("green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn green_pool_supports_guarded_stacks_and_rejects_oversized_jobs() {
+    let _guard = lock_fusion_std_tests();
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+    let guarded = GreenPool::new(
+        &GreenPoolConfig {
+            guard_pages: 1,
+            ..GreenPoolConfig::new()
+        },
+        &carrier,
+    )
+    .expect("green pool should build with guard-backed stacks");
+
+    let runs = Arc::new(AtomicU32::new(0));
+    let runs_for_job = Arc::clone(&runs);
+    let handle = guarded
+        .spawn(move || {
+            runs_for_job.fetch_add(1, Ordering::AcqRel);
+        })
+        .expect("guarded green pool should spawn a bounded job");
+    let clone = handle.clone();
+    handle
+        .join()
+        .expect("first handle should observe green completion");
+    clone
+        .join()
+        .expect("cloned handle should also observe green completion");
+    assert_eq!(runs.load(Ordering::Acquire), 1);
+
+    let oversized = [0_u8; 1024];
+    assert_eq!(
+        guarded
+            .spawn(move || {
+                std::hint::black_box(oversized);
+            })
+            .expect_err("oversized green jobs should be rejected honestly")
+            .kind(),
+        fusion_sys::fiber::FiberError::unsupported().kind()
+    );
+
+    guarded
+        .shutdown()
+        .expect("guarded green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn elastic_fiber_pool_builds_and_runs_jobs() {
+    let _guard = lock_fusion_std_tests();
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+    let fibers = GreenPool::new(
+        &GreenPoolConfig {
+            stack_backing: FiberStackBacking::Elastic {
+                initial_size: NonZeroUsize::new(4 * 1024).expect("non-zero initial stack"),
+                max_size: NonZeroUsize::new(64 * 1024).expect("non-zero max stack"),
+            },
+            ..GreenPoolConfig::new()
+        },
+        &carrier,
+    )
+    .expect("elastic green pool should build");
+
+    let handle = fibers
+        .spawn(|| 7_u32)
+        .expect("elastic green pool should spawn");
+    assert_eq!(handle.join().expect("elastic fiber should finish"), 7);
+
+    fibers
+        .shutdown()
+        .expect("elastic green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn elastic_fiber_pool_accepts_manual_huge_page_advice() {
+    let _guard = lock_fusion_std_tests();
+
+    if !system_mem()
+        .support()
+        .advice
+        .contains(MemAdviceCaps::HUGE_PAGE)
+    {
+        return;
+    }
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+    let fibers = GreenPool::new(
+        &GreenPoolConfig {
+            stack_backing: FiberStackBacking::Elastic {
+                initial_size: NonZeroUsize::new(4 * 1024).expect("non-zero initial stack"),
+                max_size: NonZeroUsize::new(4 * 1024 * 1024).expect("non-zero max stack"),
+            },
+            huge_pages: HugePagePolicy::Enabled {
+                size: HugePageSize::TwoMiB,
+            },
+            ..GreenPoolConfig::new()
+        },
+        &carrier,
+    )
+    .expect("huge-page-advised elastic green pool should build");
+
+    let handle = fibers
+        .spawn(|| 9_u32)
+        .expect("huge-page-advised elastic pool should spawn");
+    assert_eq!(
+        handle
+            .join()
+            .expect("huge-page-advised elastic fiber should finish"),
+        9
+    );
+
+    fibers
+        .shutdown()
+        .expect("huge-page-advised green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn elastic_fiber_fault_probe_survives_real_growth() {
+    let _guard = lock_fusion_std_tests();
+
+    let probe = env!("CARGO_BIN_EXE_fusion_std_fiber_fault_probe");
+    let output = Command::new(probe)
+        .output()
+        .expect("fiber fault probe binary should execute");
+    assert!(
+        output.status.success(),
+        "fiber fault probe failed: status={:?}, stdout={}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn fiber_pool_stack_stats_follow_telemetry_policy() {
+    let _guard = lock_fusion_std_tests();
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+    let disabled =
+        GreenPool::new(&GreenPoolConfig::new(), &carrier).expect("default green pool should build");
+    assert!(disabled.stack_stats().is_none());
+    disabled
+        .shutdown()
+        .expect("default green pool should shut down cleanly");
+
+    let enabled = GreenPool::new(
+        &GreenPoolConfig {
+            telemetry: FiberTelemetry::Full,
+            ..GreenPoolConfig::new()
+        },
+        &carrier,
+    )
+    .expect("telemetry-enabled green pool should build");
+    let started = Arc::new(AtomicU32::new(0));
+    let gate = Arc::new(AtomicU32::new(0));
+    let started_for_job = Arc::clone(&started);
+    let gate_for_job = Arc::clone(&gate);
+    let handle = enabled
+        .spawn(move || {
+            started_for_job.store(1, Ordering::Release);
+            while gate_for_job.load(Ordering::Acquire) == 0 {
+                green_yield_now().expect("fiber should yield cooperatively");
+            }
+            7_u32
+        })
+        .expect("telemetry-enabled green pool should spawn");
+    while started.load(Ordering::Acquire) == 0 {
+        thread::yield_now();
+    }
+
+    let stats = enabled
+        .stack_stats()
+        .expect("telemetry-enabled pool should report stack stats");
+    assert_eq!(stats.total_growth_events, 0);
+    assert_eq!(stats.peak_committed_pages, 1);
+    assert_eq!(stats.committed_distribution, vec![(1, 1)]);
+    assert_eq!(stats.at_capacity_count, 0);
+
+    gate.store(1, Ordering::Release);
+    assert_eq!(handle.join().expect("fiber should complete"), 7);
+    let drained = enabled
+        .stack_stats()
+        .expect("telemetry-enabled pool should report stack stats");
+    assert_eq!(drained.total_growth_events, 0);
+    assert_eq!(drained.peak_committed_pages, 0);
+    assert!(drained.committed_distribution.is_empty());
+    assert_eq!(drained.at_capacity_count, 0);
+
+    enabled
+        .shutdown()
+        .expect("telemetry-enabled green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn green_pool_supports_typed_child_results_and_cooperative_join() {
+    let _guard = lock_fusion_std_tests();
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+    let fibers = GreenPool::new(&GreenPoolConfig::new(), &carrier)
+        .expect("green pool should build on the carrier pool");
+    let child_pool = fibers.clone();
+
+    let parent = fibers
+        .spawn(move || {
+            let child = child_pool
+                .spawn(|| 21_u32)
+                .expect("child fiber should spawn");
+            child
+                .join()
+                .expect("parent fiber should join child cooperatively")
+                * 2
+        })
+        .expect("parent fiber should spawn");
+
+    assert_eq!(
+        parent
+            .join()
+            .expect("parent fiber should produce a typed result"),
+        42
+    );
+
+    fibers
+        .shutdown()
+        .expect("green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn reactor_facade_exposes_lower_level_readiness_polling() {
+    let _guard = lock_fusion_std_tests();
+
+    let executor = Executor::new(ExecutorConfig::new());
+    let reactor = executor.reactor();
+    let mut poller = reactor.create().expect("reactor should create a poller");
+    let pipe = TestPipe::new();
+
+    let key = reactor
+        .register(
+            &mut poller,
+            pipe.source(),
+            EventInterest::READABLE | EventInterest::ERROR | EventInterest::HANGUP,
+        )
+        .expect("reactor should register the pipe reader");
+
+    pipe.write_byte(b'x');
+
+    let mut events = [EventRecord {
+        key,
+        notification: EventNotification::Readiness(EventReadiness::empty()),
+    }; 4];
+    let ready = reactor
+        .poll(&mut poller, &mut events, Some(Duration::from_secs(1)))
+        .expect("reactor poll should succeed");
+    assert!(ready >= 1);
+
+    let readiness = match events[0].notification {
+        EventNotification::Readiness(readiness) => readiness,
+        EventNotification::Completion(_) => {
+            panic!("linux reactor façade should surface readiness notifications")
+        }
+    };
+    assert!(readiness.contains(EventReadiness::READABLE));
+
+    reactor
+        .deregister(&mut poller, key)
+        .expect("reactor should deregister the pipe reader");
+}
+
+#[test]
+fn fibers_wait_on_pipe_readiness_and_resume_cleanly() {
+    let _guard = lock_fusion_std_tests();
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+    let fibers = GreenPool::new(&GreenPoolConfig::new(), &carrier)
+        .expect("green pool should build on the carrier pool");
+    let pipe = Arc::new(TestPipe::new());
+
+    let server = fibers
+        .spawn({
+            let pipe = Arc::clone(&pipe);
+            move || {
+                wait_for_readiness(
+                    pipe.source(),
+                    EventInterest::READABLE | EventInterest::ERROR | EventInterest::HANGUP,
+                )
+                .expect("fiber should park on pipe readiness and resume");
+                pipe.read_byte()
+            }
+        })
+        .expect("pipe-waiting fiber should spawn");
+
+    let client = thread::spawn(move || {
+        pipe.write_byte(b'p');
+    });
+
+    assert_eq!(
+        server
+            .join()
+            .expect("fiber should complete after readiness wakeup"),
+        b'p'
+    );
+    client.join().expect("pipe writer thread should finish");
+
+    fibers
+        .shutdown()
+        .expect("green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}

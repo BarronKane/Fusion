@@ -67,10 +67,14 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows as platform;
 
+mod fiber_common;
+
 /// Public user-space context module re-exported from the selected private platform backend.
 pub mod context;
 /// Public event module re-exported from the selected private platform backend.
 pub mod event;
+/// Public hosted-fiber helper module re-exported from the selected private platform backend.
+pub mod fiber;
 #[cfg(feature = "sys-fusion-kn")]
 /// Public mediated Fusion kernel backend module.
 pub mod fusion_kn;

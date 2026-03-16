@@ -1,6 +1,9 @@
 //! Domain 5: public runtime orchestration surface.
 
-use super::{Executor, ExecutorConfig, GreenPool, GreenPoolConfig, ThreadPool, ThreadPoolConfig};
+use super::{
+    Executor, ExecutorConfig, FiberStackBacking, GreenPool, GreenPoolConfig, ThreadPool,
+    ThreadPoolConfig,
+};
 
 /// Runtime profile selecting broad safety and elasticity policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -234,6 +237,11 @@ fn validate_runtime_config(config: &RuntimeConfig<'_>) -> Result<(), RuntimeErro
                 config.thread_pool.steal_boundary,
                 super::StealBoundary::Global
             )
+        {
+            return Err(RuntimeError::Unsupported);
+        }
+        if let Some(green) = config.green
+            && !matches!(green.stack_backing, FiberStackBacking::Fixed { .. })
         {
             return Err(RuntimeError::Unsupported);
         }

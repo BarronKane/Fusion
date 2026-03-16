@@ -4,6 +4,9 @@ pub mod context;
 #[path = "event/event.rs"]
 /// Linux fusion-pal event backend implementation.
 pub mod event;
+#[path = "fiber/fiber.rs"]
+/// Linux fusion-pal hosted-fiber helper implementation.
+pub mod fiber;
 #[path = "hal/hal.rs"]
 /// Linux fusion-pal hardware backend implementation.
 pub mod hal;
