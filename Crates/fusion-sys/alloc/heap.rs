@@ -2,14 +2,14 @@ use core::fmt;
 
 use super::{
     AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
-    AllocResult, AllocationStrategy, AllocatorDomainId, SharedDomainPool,
+    AllocResult, AllocationStrategy, AllocatorDomainId, PoolHandle,
 };
 
 /// General-purpose allocator surface for non-critical-safe heap behavior.
 pub struct HeapAllocator {
     domain: AllocatorDomainId,
     policy: AllocPolicy,
-    pool: SharedDomainPool,
+    pool: PoolHandle,
 }
 
 impl fmt::Debug for HeapAllocator {
@@ -25,12 +25,14 @@ impl HeapAllocator {
     pub(super) fn for_domain(
         domain: AllocatorDomainId,
         policy: AllocPolicy,
-        pool: Option<SharedDomainPool>,
+        pool: Option<&PoolHandle>,
     ) -> Result<Self, AllocError> {
         if !policy.allows(AllocModeSet::HEAP) {
             return Err(AllocError::policy_denied());
         }
-        let pool = pool.ok_or_else(AllocError::capacity_exhausted)?;
+        let pool = pool
+            .ok_or_else(AllocError::capacity_exhausted)?
+            .try_clone()?;
         Ok(Self {
             domain,
             policy,

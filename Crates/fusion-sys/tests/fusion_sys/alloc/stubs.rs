@@ -320,6 +320,70 @@ fn arena_provides_bounded_bump_allocation_and_reset() {
 }
 
 #[test]
+fn arena_supports_typed_slice_metadata_allocation() {
+    let allocator = Allocator::<2, 2>::system_default().expect("allocator should build");
+    let default_domain = allocator
+        .default_domain()
+        .expect("default domain should exist");
+    let arena = allocator
+        .arena(default_domain, 256)
+        .expect("arena should reserve backing");
+
+    let mut entries = arena
+        .alloc_array_with(4, |index| u32::try_from(index * 3).expect("index should fit"))
+        .expect("typed arena slice should allocate");
+    assert_eq!(entries.as_slice(), &[0, 3, 6, 9]);
+
+    entries[2] = 12;
+    assert_eq!(entries.as_slice(), &[0, 3, 12, 9]);
+}
+
+#[test]
+fn arena_reset_rejects_live_typed_leases_and_recovers_after_drop() {
+    let allocator = Allocator::<2, 2>::system_default().expect("allocator should build");
+    let default_domain = allocator
+        .default_domain()
+        .expect("default domain should exist");
+    let arena = allocator
+        .arena(default_domain, 256)
+        .expect("arena should reserve backing");
+
+    let slice = arena
+        .alloc_array_with(2, |index| u32::try_from(index + 1).expect("index should fit"))
+        .expect("typed arena slice should allocate");
+    assert_eq!(
+        arena
+            .reset()
+            .expect_err("reset must reject live typed leases")
+            .kind,
+        AllocErrorKind::Busy
+    );
+    drop(slice);
+    arena
+        .reset()
+        .expect("arena reset should succeed once all slices are gone");
+}
+
+#[test]
+fn typed_arena_slice_keeps_backing_alive_after_wrapper_drop() {
+    let allocator = Allocator::<2, 2>::system_default().expect("allocator should build");
+    let default_domain = allocator
+        .default_domain()
+        .expect("default domain should exist");
+    let arena = allocator
+        .arena(default_domain, 256)
+        .expect("arena should reserve backing");
+
+    let mut slice = arena
+        .alloc_array_with(3, |index| u32::try_from(index).expect("index should fit"))
+        .expect("typed arena slice should allocate");
+    drop(arena);
+
+    slice[1] = 9;
+    assert_eq!(slice.as_slice(), &[0, 9, 2]);
+}
+
+#[test]
 fn heap_only_domains_deny_slab_and_arena_routing() {
     let mut builder = Allocator::<4, 2>::builder();
     let heap_only = builder

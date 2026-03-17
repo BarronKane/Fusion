@@ -15,6 +15,8 @@ pub enum AllocErrorKind {
     Unsupported,
     /// Current policy forbids the requested allocator mode.
     PolicyDenied,
+    /// The allocator object cannot proceed while live users still hold leased state.
+    Busy,
     /// Fixed allocator metadata or builder storage was exhausted.
     MetadataExhausted,
     /// No bounded allocator capacity was available.
@@ -66,6 +68,14 @@ impl AllocError {
     pub const fn policy_denied() -> Self {
         Self {
             kind: AllocErrorKind::PolicyDenied,
+        }
+    }
+
+    /// Returns a busy/in-use error.
+    #[must_use]
+    pub const fn busy() -> Self {
+        Self {
+            kind: AllocErrorKind::Busy,
         }
     }
 
@@ -133,6 +143,7 @@ impl fmt::Display for AllocErrorKind {
             Self::InvalidDomain => f.write_str("invalid allocator domain"),
             Self::Unsupported => f.write_str("allocator operation unsupported"),
             Self::PolicyDenied => f.write_str("allocator policy denied the request"),
+            Self::Busy => f.write_str("allocator target is busy or still in use"),
             Self::MetadataExhausted => f.write_str("allocator metadata exhausted"),
             Self::CapacityExhausted => f.write_str("allocator capacity exhausted"),
             Self::OutOfMemory => f.write_str("allocator exhausted backing memory"),

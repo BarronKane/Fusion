@@ -1,8 +1,6 @@
 use core::array;
 use core::fmt;
 
-use crate::rust_alloc::sync::Arc;
-
 use fusion_pal::pal::mem::MemBase;
 use fusion_pal::sys::mem::system_mem;
 
@@ -12,10 +10,9 @@ use crate::mem::resource::{
 
 use super::{
     AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocResult,
-    AssignedPoolExtent,
-    AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind, BoundedArena, DomainPool,
-    HeapAllocator, MemoryPool, MemoryPoolContributor, MemoryPoolMemberId, MemoryPoolMemberInfo,
-    MemoryPoolPolicy, SharedDomainPool, Slab,
+    AssignedPoolExtent, AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind,
+    BoundedArena, HeapAllocator, MemoryPool, MemoryPoolContributor, MemoryPoolPolicy, PoolHandle,
+    Slab,
 };
 
 #[derive(Debug)]
@@ -44,11 +41,11 @@ impl AllocatorResourceRecord {
 
 struct AllocatorDomainRecord<const RESOURCES: usize, const EXTENTS: usize> {
     info: AllocatorDomainInfo,
-    pool: Option<SharedDomainPool>,
+    pool: Option<PoolHandle>,
 }
 
 impl<const RESOURCES: usize, const EXTENTS: usize> AllocatorDomainRecord<RESOURCES, EXTENTS> {
-    fn new(info: AllocatorDomainInfo, pool: Option<SharedDomainPool>) -> Self {
+    const fn new(info: AllocatorDomainInfo, pool: Option<PoolHandle>) -> Self {
         Self { info, pool }
     }
 
@@ -56,7 +53,11 @@ impl<const RESOURCES: usize, const EXTENTS: usize> AllocatorDomainRecord<RESOURC
         &self,
         request: &super::MemoryPoolExtentRequest,
     ) -> Result<AssignedPoolExtent, AllocError> {
-        let pool = self.pool.clone().ok_or_else(AllocError::capacity_exhausted)?;
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(AllocError::capacity_exhausted)?
+            .try_clone()?;
         AssignedPoolExtent::assign(pool, request)
     }
 }
@@ -67,7 +68,7 @@ impl<const RESOURCES: usize, const EXTENTS: usize> fmt::Debug
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AllocatorDomainRecord")
             .field("info", &self.info)
-            .field("pool", &self.pool.as_ref().map(|_| "shared"))
+            .field("pool", &self.pool.as_ref().map(|_| "owned"))
             .finish()
     }
 }
@@ -258,8 +259,35 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             return Err(AllocError::policy_denied());
         }
         let request = BoundedArena::extent_request(capacity)?;
+        let control_request = BoundedArena::control_extent_request()?;
         let extent = domain.assign_extent(&request)?;
-        BoundedArena::from_assigned_extent(domain.info.id, capacity, domain.info.policy, extent)
+        let control_extent = domain.assign_extent(&control_request)?;
+        BoundedArena::from_assigned_extents(
+            domain.info.id,
+            capacity,
+            domain.info.policy,
+            extent,
+            control_extent,
+        )
+    }
+
+    /// Returns one allocator-backed shared control block for `value`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain does not exist, owns no realized pool, or cannot
+    /// reserve control backing honestly.
+    pub fn control<T>(
+        &self,
+        domain: AllocatorDomainId,
+        value: T,
+    ) -> Result<super::ControlLease<T>, AllocError> {
+        let domain = self
+            .domain_record(domain)
+            .ok_or_else(AllocError::invalid_domain)?;
+        let request = super::ControlLease::<T>::extent_request()?;
+        let extent = domain.assign_extent(&request)?;
+        super::ControlLease::new(extent, value)
     }
 
     /// Returns a general-purpose heap strategy view for `domain`.
@@ -275,7 +303,7 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         if !domain.info.policy.allows(AllocModeSet::HEAP) {
             return Err(AllocError::policy_denied());
         }
-        HeapAllocator::for_domain(domain.info.id, domain.info.policy, domain.pool.clone())
+        HeapAllocator::for_domain(domain.info.id, domain.info.policy, domain.pool.as_ref())
     }
 
     /// Attempts to allocate one heap-routed block from the allocator root.
@@ -504,7 +532,7 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             let pool = if contributor_count == 0 {
                 None
             } else {
-                Some(Arc::new(pool_builder.build()?) as SharedDomainPool)
+                Some(PoolHandle::new(pool_builder.build()?))
             };
             domain_records[slot] = Some(AllocatorDomainRecord::new(info, pool));
         }
@@ -566,34 +594,6 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize> Default
 {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<const MEMBERS: usize, const EXTENTS: usize> DomainPool for MemoryPool<MEMBERS, EXTENTS> {
-    fn acquire_extent(
-        &self,
-        request: &super::MemoryPoolExtentRequest,
-    ) -> Result<super::MemoryPoolLease, AllocError> {
-        Self::acquire_extent(self, request).map_err(Into::into)
-    }
-
-    fn release_extent(&self, lease: super::MemoryPoolLease) -> Result<(), AllocError> {
-        Self::release_extent(self, lease).map_err(Into::into)
-    }
-
-    fn lease_region(
-        &self,
-        lease: &super::MemoryPoolLease,
-    ) -> Result<fusion_pal::sys::mem::Region, AllocError> {
-        let view = self.lease_view(lease)?;
-        // SAFETY: the returned region remains valid for as long as the lease stays active and the
-        // pool owns the underlying resource. Allocator strategies use it transiently while they
-        // still hold both the pool borrow and the live lease.
-        Ok(unsafe { view.as_range_view().raw_region() })
-    }
-
-    fn member_info(&self, member: MemoryPoolMemberId) -> Result<MemoryPoolMemberInfo, AllocError> {
-        Self::member_info(self, member).map_err(Into::into)
     }
 }
 

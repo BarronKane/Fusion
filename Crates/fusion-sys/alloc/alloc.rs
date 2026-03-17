@@ -10,11 +10,13 @@
 //! while allocator surfaces are still being built so callers migrate toward the right public
 //! namespace instead of wiring themselves directly into lower plumbing.
 
-use crate::rust_alloc::sync::Arc;
+use crate::rust_alloc::boxed::Box;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use fusion_pal::sys::mem::Region;
 
 mod arena;
+mod control;
 mod domain;
 mod error;
 mod heap;
@@ -22,7 +24,8 @@ mod policy;
 mod root;
 mod slab;
 
-pub use arena::BoundedArena;
+pub use arena::{ArenaInitError, ArenaSlice, BoundedArena};
+pub use control::ControlLease;
 pub use domain::{AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind};
 #[allow(unused_imports)]
 pub use error::{AllocError, AllocErrorKind};
@@ -141,27 +144,180 @@ impl AllocResult {
     }
 }
 
-pub(crate) trait DomainPool {
-    fn acquire_extent(
-        &self,
-        request: &MemoryPoolExtentRequest,
-    ) -> Result<MemoryPoolLease, AllocError>;
-
-    fn release_extent(&self, lease: MemoryPoolLease) -> Result<(), AllocError>;
-
-    fn lease_region(&self, lease: &MemoryPoolLease) -> Result<Region, AllocError>;
-
-    fn member_info(&self, member: MemoryPoolMemberId) -> Result<MemoryPoolMemberInfo, AllocError>;
+#[derive(Clone, Copy)]
+struct PoolHandleVTable {
+    acquire_extent:
+        unsafe fn(NonNull<()>, &MemoryPoolExtentRequest) -> Result<MemoryPoolLease, AllocError>,
+    release_extent: unsafe fn(NonNull<()>, MemoryPoolLease) -> Result<(), AllocError>,
+    lease_region: unsafe fn(NonNull<()>, &MemoryPoolLease) -> Result<Region, AllocError>,
+    member_info:
+        unsafe fn(NonNull<()>, MemoryPoolMemberId) -> Result<MemoryPoolMemberInfo, AllocError>,
+    retain: unsafe fn(NonNull<()>) -> Result<(), AllocError>,
+    release: unsafe fn(NonNull<()>),
 }
 
-pub(crate) type SharedDomainPool = Arc<dyn DomainPool + Send + Sync>;
+struct PoolControlBlock<const MEMBERS: usize, const EXTENTS: usize> {
+    refs: AtomicUsize,
+    pool: MemoryPool<MEMBERS, EXTENTS>,
+}
 
-pub(crate) fn shared_pool_marker(pool: &SharedDomainPool) -> usize {
-    Arc::as_ptr(pool).cast::<()>() as usize
+pub(crate) struct PoolHandle {
+    ptr: NonNull<()>,
+    vtable: PoolHandleVTable,
+}
+
+impl core::fmt::Debug for PoolHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PoolHandle")
+            .field("marker", &self.marker())
+            .finish_non_exhaustive()
+    }
+}
+
+unsafe impl Send for PoolHandle {}
+unsafe impl Sync for PoolHandle {}
+
+impl PoolHandle {
+    pub(crate) fn new<const MEMBERS: usize, const EXTENTS: usize>(
+        pool: MemoryPool<MEMBERS, EXTENTS>,
+    ) -> Self {
+        let block = Box::new(PoolControlBlock {
+            refs: AtomicUsize::new(1),
+            pool,
+        });
+        let ptr = NonNull::from(Box::leak(block)).cast::<()>();
+        Self {
+            ptr,
+            vtable: PoolHandleVTable {
+                acquire_extent: acquire_extent_impl::<MEMBERS, EXTENTS>,
+                release_extent: release_extent_impl::<MEMBERS, EXTENTS>,
+                lease_region: lease_region_impl::<MEMBERS, EXTENTS>,
+                member_info: member_info_impl::<MEMBERS, EXTENTS>,
+                retain: retain_impl::<MEMBERS, EXTENTS>,
+                release: release_impl::<MEMBERS, EXTENTS>,
+            },
+        }
+    }
+
+    pub(crate) fn marker(&self) -> usize {
+        self.ptr.as_ptr() as usize
+    }
+
+    pub(crate) fn try_clone(&self) -> Result<Self, AllocError> {
+        unsafe { (self.vtable.retain)(self.ptr)? };
+        Ok(Self {
+            ptr: self.ptr,
+            vtable: self.vtable,
+        })
+    }
+
+    pub(crate) fn acquire_extent(
+        &self,
+        request: &MemoryPoolExtentRequest,
+    ) -> Result<MemoryPoolLease, AllocError> {
+        unsafe { (self.vtable.acquire_extent)(self.ptr, request) }
+    }
+
+    pub(crate) fn release_extent(&self, lease: MemoryPoolLease) -> Result<(), AllocError> {
+        unsafe { (self.vtable.release_extent)(self.ptr, lease) }
+    }
+
+    pub(crate) fn lease_region(&self, lease: &MemoryPoolLease) -> Result<Region, AllocError> {
+        unsafe { (self.vtable.lease_region)(self.ptr, lease) }
+    }
+
+    pub(crate) fn member_info(
+        &self,
+        member: MemoryPoolMemberId,
+    ) -> Result<MemoryPoolMemberInfo, AllocError> {
+        unsafe { (self.vtable.member_info)(self.ptr, member) }
+    }
+}
+
+impl Drop for PoolHandle {
+    fn drop(&mut self) {
+        unsafe { (self.vtable.release)(self.ptr) };
+    }
+}
+
+fn pool_block<const MEMBERS: usize, const EXTENTS: usize>(
+    ptr: NonNull<()>,
+) -> &'static PoolControlBlock<MEMBERS, EXTENTS> {
+    // SAFETY: the pointer is created from a leaked `PoolControlBlock<MEMBERS, EXTENTS>` and the
+    // vtable ensures each method uses the matching concrete instantiation.
+    unsafe { &*ptr.cast::<PoolControlBlock<MEMBERS, EXTENTS>>().as_ptr() }
+}
+
+unsafe fn acquire_extent_impl<const MEMBERS: usize, const EXTENTS: usize>(
+    ptr: NonNull<()>,
+    request: &MemoryPoolExtentRequest,
+) -> Result<MemoryPoolLease, AllocError> {
+    pool_block::<MEMBERS, EXTENTS>(ptr)
+        .pool
+        .acquire_extent(request)
+        .map_err(Into::into)
+}
+
+unsafe fn release_extent_impl<const MEMBERS: usize, const EXTENTS: usize>(
+    ptr: NonNull<()>,
+    lease: MemoryPoolLease,
+) -> Result<(), AllocError> {
+    pool_block::<MEMBERS, EXTENTS>(ptr)
+        .pool
+        .release_extent(lease)
+        .map_err(Into::into)
+}
+
+unsafe fn lease_region_impl<const MEMBERS: usize, const EXTENTS: usize>(
+    ptr: NonNull<()>,
+    lease: &MemoryPoolLease,
+) -> Result<Region, AllocError> {
+    let view = pool_block::<MEMBERS, EXTENTS>(ptr).pool.lease_view(lease)?;
+    // SAFETY: the lease remains live while the assigned extent exists.
+    Ok(unsafe { view.as_range_view().raw_region() })
+}
+
+unsafe fn member_info_impl<const MEMBERS: usize, const EXTENTS: usize>(
+    ptr: NonNull<()>,
+    member: MemoryPoolMemberId,
+) -> Result<MemoryPoolMemberInfo, AllocError> {
+    pool_block::<MEMBERS, EXTENTS>(ptr)
+        .pool
+        .member_info(member)
+        .map_err(Into::into)
+}
+
+unsafe fn retain_impl<const MEMBERS: usize, const EXTENTS: usize>(
+    ptr: NonNull<()>,
+) -> Result<(), AllocError> {
+    let refs = &pool_block::<MEMBERS, EXTENTS>(ptr).refs;
+    refs.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        current.checked_add(1)
+    })
+    .map(|_| ())
+    .map_err(|_| AllocError::capacity_exhausted())
+}
+
+unsafe fn release_impl<const MEMBERS: usize, const EXTENTS: usize>(ptr: NonNull<()>) {
+    let refs = &pool_block::<MEMBERS, EXTENTS>(ptr).refs;
+    let Ok(previous) = refs.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        current.checked_sub(1)
+    }) else {
+        return;
+    };
+    if previous != 1 {
+        return;
+    }
+    // SAFETY: the final reference owns the leaked control block and no further users remain.
+    unsafe {
+        drop(Box::from_raw(
+            ptr.cast::<PoolControlBlock<MEMBERS, EXTENTS>>().as_ptr(),
+        ));
+    }
 }
 
 pub(crate) struct AssignedPoolExtent {
-    pool: SharedDomainPool,
+    pool: PoolHandle,
     pool_marker: usize,
     lease: Option<MemoryPoolLease>,
     lease_id: MemoryPoolLeaseId,
@@ -182,7 +338,7 @@ impl core::fmt::Debug for AssignedPoolExtent {
 
 impl AssignedPoolExtent {
     pub(crate) fn assign(
-        pool: SharedDomainPool,
+        pool: PoolHandle,
         request: &MemoryPoolExtentRequest,
     ) -> Result<Self, AllocError> {
         let lease = pool.acquire_extent(request)?;
@@ -190,7 +346,7 @@ impl AssignedPoolExtent {
         let member = pool.member_info(lease.member())?;
         let region = pool.lease_region(&lease)?;
         Ok(Self {
-            pool_marker: shared_pool_marker(&pool),
+            pool_marker: pool.marker(),
             pool,
             lease: Some(lease),
             lease_id,

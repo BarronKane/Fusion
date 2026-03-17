@@ -535,7 +535,8 @@ const fn thread_pool_error_from_alloc(error: fusion_sys::alloc::AllocError) -> T
         fusion_sys::alloc::AllocErrorKind::Unsupported => ThreadPoolError::unsupported(),
         fusion_sys::alloc::AllocErrorKind::InvalidRequest
         | fusion_sys::alloc::AllocErrorKind::InvalidDomain => ThreadPoolError::invalid(),
-        fusion_sys::alloc::AllocErrorKind::PolicyDenied => ThreadPoolError::state_conflict(),
+        fusion_sys::alloc::AllocErrorKind::PolicyDenied
+        | fusion_sys::alloc::AllocErrorKind::Busy => ThreadPoolError::state_conflict(),
         fusion_sys::alloc::AllocErrorKind::MetadataExhausted
         | fusion_sys::alloc::AllocErrorKind::CapacityExhausted
         | fusion_sys::alloc::AllocErrorKind::OutOfMemory => ThreadPoolError::resource_exhausted(),
