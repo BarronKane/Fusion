@@ -3,6 +3,9 @@ use core::fmt;
 
 use crate::rust_alloc::sync::Arc;
 
+use fusion_pal::pal::mem::MemBase;
+use fusion_pal::sys::mem::system_mem;
+
 use crate::mem::resource::{
     MemoryResource, MemoryResourceHandle, ResourceInfo, ResourceRequest, VirtualMemoryResource,
 };
@@ -13,8 +16,6 @@ use super::{
     HeapAllocator, MemoryPool, MemoryPoolContributor, MemoryPoolMemberId, MemoryPoolMemberInfo,
     MemoryPoolPolicy, SharedDomainPool, Slab,
 };
-
-const DEFAULT_SYSTEM_RESOURCE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug)]
 struct AllocatorResourceBinding {
@@ -112,11 +113,29 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
     /// Returns an error when allocator metadata is too small to host the default domain or the
     /// backing virtual resource cannot be acquired.
     pub fn system_default() -> Result<Self, AllocError> {
+        let page = system_mem().page_info().alloc_granule.get();
+        Self::system_default_with_capacity(page)
+    }
+
+    /// Creates a permissive zero-config allocator root backed by anonymous private virtual
+    /// memory sized for at least `min_capacity` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when allocator metadata is too small to host the default domain, the
+    /// requested capacity is invalid, or the backing virtual resource cannot be acquired.
+    pub fn system_default_with_capacity(min_capacity: usize) -> Result<Self, AllocError> {
         if DOMAINS == 0 || RESOURCES == 0 {
             return Err(AllocError::metadata_exhausted());
         }
+        if min_capacity == 0 {
+            return Err(AllocError::invalid_request());
+        }
 
-        let mut request = ResourceRequest::anonymous_private(DEFAULT_SYSTEM_RESOURCE_BYTES);
+        let page = system_mem().page_info().alloc_granule.get();
+        let requested_len = super::align_up(min_capacity.max(page), page)?;
+
+        let mut request = ResourceRequest::anonymous_private(requested_len);
         request.name = Some("fusion-alloc-system-default");
         let resource = VirtualMemoryResource::create(&request)?;
 

@@ -369,8 +369,12 @@ impl ThreadPool {
     /// Returns any honest lower-level configuration or support failure.
     pub fn new(config: &ThreadPoolConfig<'_>) -> Result<Self, ThreadPoolError> {
         let inner = SystemThreadPool::new(ThreadSystem::new(), &config.to_system())?;
-        let allocator =
-            Allocator::<1, 1>::system_default().map_err(thread_pool_error_from_alloc)?;
+        let allocator = Allocator::<1, 1>::system_default_with_capacity(
+            THREAD_POOL_JOB_SLOT_BYTES
+                .checked_mul(THREAD_POOL_JOB_SLOT_COUNT)
+                .ok_or_else(ThreadPoolError::resource_exhausted)?,
+        )
+        .map_err(thread_pool_error_from_alloc)?;
         let default_domain = allocator
             .default_domain()
             .ok_or_else(ThreadPoolError::state_conflict)?;

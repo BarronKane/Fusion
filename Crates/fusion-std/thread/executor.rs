@@ -27,18 +27,21 @@
 //! # demo();
 //! ```
 
+use core::any::TypeId;
+use core::array;
+use core::fmt;
 use core::future::Future;
 use core::hint::spin_loop;
 use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
+use core::mem::{MaybeUninit, align_of, size_of};
 use core::pin::Pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use core::time::Duration;
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use crate::sync::{Mutex as SyncMutex, Semaphore, SyncError, SyncErrorKind};
 use fusion_sys::event::EventSystem;
@@ -122,6 +125,34 @@ pub enum ExecutorError {
     Sync(SyncErrorKind),
     /// The spawned future panicked while running.
     TaskPanicked,
+}
+
+/// Stable executor-scoped task identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TaskId {
+    executor_scope: usize,
+    sequence: u64,
+}
+
+impl TaskId {
+    const fn new(executor_scope: usize, sequence: u64) -> Self {
+        Self {
+            executor_scope,
+            sequence,
+        }
+    }
+
+    /// Returns the executor scope that owns this task identifier.
+    #[must_use]
+    pub const fn executor_scope(self) -> usize {
+        self.executor_scope
+    }
+
+    /// Returns the per-executor sequence number for this task identifier.
+    #[must_use]
+    pub const fn sequence(self) -> u64 {
+        self.sequence
+    }
 }
 
 /// Public reactor wrapper.
@@ -225,22 +256,71 @@ impl Default for Reactor {
     }
 }
 
+const CURRENT_QUEUE_CAPACITY: usize = 256;
+const TASK_REGISTRY_CAPACITY: usize = 256;
+const JOIN_SET_CAPACITY: usize = 64;
+const INLINE_ASYNC_FUTURE_BYTES: usize = 256;
+const INLINE_ASYNC_RESULT_BYTES: usize = 256;
+
+const SLOT_EMPTY: u8 = 0;
+const SLOT_PENDING: u8 = 1;
+const SLOT_READY: u8 = 2;
+const SLOT_FAILED: u8 = 3;
+
+const fn executor_invalid() -> ExecutorError {
+    ExecutorError::Sync(SyncErrorKind::Invalid)
+}
+
+const fn executor_busy() -> ExecutorError {
+    ExecutorError::Sync(SyncErrorKind::Busy)
+}
+
+const fn executor_overflow() -> ExecutorError {
+    ExecutorError::Sync(SyncErrorKind::Overflow)
+}
+
 struct CurrentQueue {
-    ready: SyncMutex<VecDeque<Box<dyn FnOnce() + Send + 'static>>>,
+    ready: SyncMutex<CurrentQueueState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CurrentJob {
+    run: unsafe fn(usize, usize, u64),
+    core: usize,
+    slot_index: usize,
+    generation: u64,
+}
+
+#[derive(Debug)]
+struct CurrentQueueState {
+    entries: [Option<CurrentJob>; CURRENT_QUEUE_CAPACITY],
+    head: usize,
+    tail: usize,
+    len: usize,
 }
 
 impl CurrentQueue {
     const fn new() -> Self {
         Self {
-            ready: SyncMutex::new(VecDeque::new()),
+            ready: SyncMutex::new(CurrentQueueState::new()),
         }
     }
 
-    fn schedule(&self, job: Box<dyn FnOnce() + Send + 'static>) -> Result<(), ExecutorError> {
+    fn schedule_slot(
+        &self,
+        core: &ExecutorCore,
+        slot_index: usize,
+        generation: u64,
+    ) -> Result<(), ExecutorError> {
         self.ready
             .lock()
             .map_err(executor_error_from_sync)?
-            .push_back(job);
+            .enqueue(CurrentJob {
+                run: run_current_slot,
+                core: core::ptr::from_ref(core) as usize,
+                slot_index,
+                generation,
+            })?;
         Ok(())
     }
 
@@ -249,267 +329,970 @@ impl CurrentQueue {
             .ready
             .lock()
             .map_err(executor_error_from_sync)?
-            .pop_front();
-        Ok(job.is_some_and(|job| {
-            job();
-            true
-        }))
+            .dequeue();
+        if let Some(job) = job {
+            unsafe {
+                (job.run)(job.core, job.slot_index, job.generation);
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 }
 
-impl core::fmt::Debug for CurrentQueue {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Debug for CurrentQueue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CurrentQueue").finish_non_exhaustive()
     }
 }
 
-#[derive(Debug, Clone)]
+impl CurrentQueueState {
+    const fn new() -> Self {
+        Self {
+            entries: [None; CURRENT_QUEUE_CAPACITY],
+            head: 0,
+            tail: 0,
+            len: 0,
+        }
+    }
+
+    const fn enqueue(&mut self, job: CurrentJob) -> Result<(), ExecutorError> {
+        if self.len == self.entries.len() {
+            return Err(executor_overflow());
+        }
+        self.entries[self.tail] = Some(job);
+        self.tail = (self.tail + 1) % self.entries.len();
+        self.len += 1;
+        Ok(())
+    }
+
+    const fn dequeue(&mut self) -> Option<CurrentJob> {
+        if self.len == 0 {
+            return None;
+        }
+        let job = self.entries[self.head].take();
+        self.head = (self.head + 1) % self.entries.len();
+        self.len -= 1;
+        job
+    }
+}
+
+#[derive(Debug)]
+struct FixedIndexStack {
+    entries: Box<[usize]>,
+    len: usize,
+}
+
+impl FixedIndexStack {
+    fn new(capacity: usize) -> Self {
+        let entries = (0..capacity).collect::<Vec<_>>().into_boxed_slice();
+        Self {
+            len: entries.len(),
+            entries,
+        }
+    }
+
+    fn pop(&mut self) -> Option<usize> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        Some(self.entries[self.len])
+    }
+
+    fn push(&mut self, value: usize) -> Result<(), ExecutorError> {
+        if self.len == self.entries.len() {
+            return Err(executor_invalid());
+        }
+        self.entries[self.len] = value;
+        self.len += 1;
+        Ok(())
+    }
+}
+
+#[repr(C, align(64))]
+struct InlineAsyncFutureBytes {
+    bytes: [u8; INLINE_ASYNC_FUTURE_BYTES],
+}
+
+type InlineAsyncPollFn = unsafe fn(
+    *mut u8,
+    &SyncMutex<InlineAsyncResultStorage>,
+    &mut Context<'_>,
+) -> Result<Poll<()>, ExecutorError>;
+
+struct InlineAsyncFutureStorage {
+    storage: MaybeUninit<InlineAsyncFutureBytes>,
+    poll: Option<InlineAsyncPollFn>,
+    drop: Option<unsafe fn(*mut u8)>,
+    occupied: bool,
+}
+
+impl fmt::Debug for InlineAsyncFutureStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InlineAsyncFutureStorage")
+            .field("occupied", &self.occupied)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InlineAsyncFutureStorage {
+    const fn empty() -> Self {
+        Self {
+            storage: MaybeUninit::uninit(),
+            poll: None,
+            drop: None,
+            occupied: false,
+        }
+    }
+
+    const fn supports<F>() -> bool
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        size_of::<F>() <= size_of::<InlineAsyncFutureBytes>()
+            && align_of::<F>() <= align_of::<InlineAsyncFutureBytes>()
+            && InlineAsyncResultStorage::supports::<F::Output>()
+    }
+
+    fn store_future<F>(&mut self, future: F) -> Result<(), ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        if self.occupied {
+            return Err(executor_invalid());
+        }
+        if !Self::supports::<F>() {
+            return Err(ExecutorError::Unsupported);
+        }
+
+        unsafe {
+            self.storage.as_mut_ptr().cast::<F>().write(future);
+        }
+        self.poll = Some(poll_inline_async_future::<F>);
+        self.drop = Some(drop_inline_async_value::<F>);
+        self.occupied = true;
+        Ok(())
+    }
+
+    fn poll_in_place(
+        &mut self,
+        result: &SyncMutex<InlineAsyncResultStorage>,
+        context: &mut Context<'_>,
+    ) -> Result<Poll<()>, ExecutorError> {
+        if !self.occupied {
+            return Err(executor_invalid());
+        }
+        let poll = self.poll.ok_or_else(executor_invalid)?;
+        unsafe { poll(self.storage.as_mut_ptr().cast::<u8>(), result, context) }
+    }
+
+    fn clear(&mut self) {
+        if !self.occupied {
+            self.poll = None;
+            self.drop = None;
+            return;
+        }
+
+        if let Some(drop) = self.drop.take() {
+            unsafe {
+                drop(self.storage.as_mut_ptr().cast::<u8>());
+            }
+        }
+        self.poll = None;
+        self.occupied = false;
+    }
+}
+
+impl Drop for InlineAsyncFutureStorage {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+#[repr(C, align(64))]
+struct InlineAsyncResultBytes {
+    bytes: [u8; INLINE_ASYNC_RESULT_BYTES],
+}
+
+struct InlineAsyncResultStorage {
+    storage: MaybeUninit<InlineAsyncResultBytes>,
+    drop: Option<unsafe fn(*mut u8)>,
+    type_id: Option<TypeId>,
+    occupied: bool,
+}
+
+impl fmt::Debug for InlineAsyncResultStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InlineAsyncResultStorage")
+            .field("occupied", &self.occupied)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InlineAsyncResultStorage {
+    const fn empty() -> Self {
+        Self {
+            storage: MaybeUninit::uninit(),
+            drop: None,
+            type_id: None,
+            occupied: false,
+        }
+    }
+
+    const fn supports<T: 'static>() -> bool {
+        size_of::<T>() <= size_of::<InlineAsyncResultBytes>()
+            && align_of::<T>() <= align_of::<InlineAsyncResultBytes>()
+    }
+
+    fn store<T: 'static>(&mut self, value: T) -> Result<(), ExecutorError> {
+        if self.occupied {
+            return Err(executor_invalid());
+        }
+        if !Self::supports::<T>() {
+            return Err(ExecutorError::Unsupported);
+        }
+
+        unsafe {
+            self.storage.as_mut_ptr().cast::<T>().write(value);
+        }
+        self.drop = Some(drop_inline_async_value::<T>);
+        self.type_id = Some(TypeId::of::<T>());
+        self.occupied = true;
+        Ok(())
+    }
+
+    fn take<T: 'static>(&mut self) -> Result<T, ExecutorError> {
+        if !self.occupied || self.type_id != Some(TypeId::of::<T>()) {
+            return Err(executor_invalid());
+        }
+
+        self.drop = None;
+        self.type_id = None;
+        self.occupied = false;
+        Ok(unsafe { self.storage.as_ptr().cast::<T>().read() })
+    }
+
+    fn clear(&mut self) {
+        if !self.occupied {
+            self.drop = None;
+            self.type_id = None;
+            return;
+        }
+
+        if let Some(drop) = self.drop.take() {
+            unsafe {
+                drop(self.storage.as_mut_ptr().cast::<u8>());
+            }
+        }
+        self.type_id = None;
+        self.occupied = false;
+    }
+}
+
+impl Drop for InlineAsyncResultStorage {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+unsafe fn poll_inline_async_future<F>(
+    ptr: *mut u8,
+    result: &SyncMutex<InlineAsyncResultStorage>,
+    context: &mut Context<'_>,
+) -> Result<Poll<()>, ExecutorError>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let future = unsafe { Pin::new_unchecked(&mut *ptr.cast::<F>()) };
+    match poll_future_contained(future, context) {
+        Ok(Poll::Ready(output)) => {
+            result
+                .lock()
+                .map_err(executor_error_from_sync)?
+                .store(output)?;
+            Ok(Poll::Ready(()))
+        }
+        Ok(Poll::Pending) => Ok(Poll::Pending),
+        Err(()) => Err(ExecutorError::TaskPanicked),
+    }
+}
+
+unsafe fn drop_inline_async_value<T>(ptr: *mut u8) {
+    unsafe {
+        ptr.cast::<T>().drop_in_place();
+    }
+}
+
+#[derive(Debug)]
+struct AsyncTaskWakerData {
+    core_ptr: AtomicUsize,
+    slot_index: usize,
+    generation: AtomicU64,
+}
+
+impl AsyncTaskWakerData {
+    const fn new(slot_index: usize) -> Self {
+        Self {
+            core_ptr: AtomicUsize::new(0),
+            slot_index,
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    fn set_core(&self, core: *const ExecutorCore) {
+        self.core_ptr.store(core as usize, Ordering::Release);
+    }
+
+    fn core_ptr(&self) -> *const ExecutorCore {
+        let core_ptr = self.core_ptr.load(Ordering::Acquire);
+        if core_ptr == 0 {
+            return core::ptr::null();
+        }
+        core_ptr as *const ExecutorCore
+    }
+
+    fn set_generation(&self, generation: u64) {
+        self.generation.store(generation, Ordering::Release);
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+}
+
+struct AsyncTaskSlot {
+    generation: AtomicU64,
+    future: SyncMutex<InlineAsyncFutureStorage>,
+    result: SyncMutex<InlineAsyncResultStorage>,
+    state: AtomicU8,
+    error: SyncMutex<Option<ExecutorError>>,
+    completed: Semaphore,
+    scheduled: AtomicBool,
+    handle_live: AtomicBool,
+    waker_refs: AtomicUsize,
+    waker: AsyncTaskWakerData,
+}
+
+impl fmt::Debug for AsyncTaskSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AsyncTaskSlot")
+            .field("generation", &self.generation.load(Ordering::Acquire))
+            .field("state", &self.state.load(Ordering::Acquire))
+            .field("scheduled", &self.scheduled.load(Ordering::Acquire))
+            .field("handle_live", &self.handle_live.load(Ordering::Acquire))
+            .field("waker_refs", &self.waker_refs.load(Ordering::Acquire))
+            .finish_non_exhaustive()
+    }
+}
+
+impl AsyncTaskSlot {
+    fn new(slot_index: usize) -> Result<Self, ExecutorError> {
+        Ok(Self {
+            generation: AtomicU64::new(0),
+            future: SyncMutex::new(InlineAsyncFutureStorage::empty()),
+            result: SyncMutex::new(InlineAsyncResultStorage::empty()),
+            state: AtomicU8::new(SLOT_EMPTY),
+            error: SyncMutex::new(None),
+            completed: Semaphore::new(0, 1).map_err(executor_error_from_sync)?,
+            scheduled: AtomicBool::new(false),
+            handle_live: AtomicBool::new(false),
+            waker_refs: AtomicUsize::new(0),
+            waker: AsyncTaskWakerData::new(slot_index),
+        })
+    }
+
+    fn set_core(&self, core: *const ExecutorCore) {
+        self.waker.set_core(core);
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn state(&self) -> u8 {
+        self.state.load(Ordering::Acquire)
+    }
+
+    fn initialize_for_allocation(&self) -> Result<u64, ExecutorError> {
+        if self.state() != SLOT_EMPTY {
+            return Err(executor_invalid());
+        }
+
+        let previous = self
+            .generation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| executor_overflow())?;
+        let generation = previous.checked_add(1).ok_or_else(executor_overflow)?;
+
+        self.future
+            .lock()
+            .map_err(executor_error_from_sync)?
+            .clear();
+        self.result
+            .lock()
+            .map_err(executor_error_from_sync)?
+            .clear();
+        *self.error.lock().map_err(executor_error_from_sync)? = None;
+        self.drain_completed()?;
+        self.scheduled.store(false, Ordering::Release);
+        self.handle_live.store(true, Ordering::Release);
+        self.waker_refs.store(0, Ordering::Release);
+        self.waker.set_generation(generation);
+        self.state.store(SLOT_PENDING, Ordering::Release);
+        Ok(generation)
+    }
+
+    fn store_future<F>(&self, future: F) -> Result<(), ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.future
+            .lock()
+            .map_err(executor_error_from_sync)?
+            .store_future(future)
+    }
+
+    fn create_waker(&self, generation: u64) -> Result<Waker, ExecutorError> {
+        if self.generation() != generation
+            || self.waker.generation() != generation
+            || self.state() == SLOT_EMPTY
+        {
+            return Err(ExecutorError::Stopped);
+        }
+        let core_ptr = self.waker.core_ptr();
+        if core_ptr.is_null() {
+            return Err(ExecutorError::Stopped);
+        }
+        self.waker_refs
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| executor_overflow())?;
+        unsafe {
+            Arc::increment_strong_count(core_ptr);
+        }
+
+        let raw = RawWaker::new(
+            core::ptr::from_ref(&self.waker).cast::<()>(),
+            &ASYNC_TASK_WAKER_VTABLE,
+        );
+        Ok(unsafe { Waker::from_raw(raw) })
+    }
+
+    fn poll_in_place(
+        &self,
+        generation: u64,
+        context: &mut Context<'_>,
+    ) -> Result<Poll<()>, ExecutorError> {
+        if self.generation() != generation || self.state() != SLOT_PENDING {
+            return Ok(Poll::Ready(()));
+        }
+        self.future
+            .lock()
+            .map_err(executor_error_from_sync)?
+            .poll_in_place(&self.result, context)
+    }
+
+    fn complete(&self, generation: u64) -> Result<(), ExecutorError> {
+        if self.generation() != generation {
+            return Ok(());
+        }
+        if self
+            .state
+            .compare_exchange(
+                SLOT_PENDING,
+                SLOT_READY,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        self.future
+            .lock()
+            .map_err(executor_error_from_sync)?
+            .clear();
+        *self.error.lock().map_err(executor_error_from_sync)? = None;
+        self.scheduled.store(false, Ordering::Release);
+        self.completed.release(1).map_err(executor_error_from_sync)
+    }
+
+    fn fail(&self, generation: u64, error: ExecutorError) -> Result<(), ExecutorError> {
+        if self.generation() != generation {
+            return Ok(());
+        }
+        if self
+            .state
+            .compare_exchange(
+                SLOT_PENDING,
+                SLOT_FAILED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        self.future
+            .lock()
+            .map_err(executor_error_from_sync)?
+            .clear();
+        self.result
+            .lock()
+            .map_err(executor_error_from_sync)?
+            .clear();
+        *self.error.lock().map_err(executor_error_from_sync)? = Some(error);
+        self.scheduled.store(false, Ordering::Release);
+        self.completed.release(1).map_err(executor_error_from_sync)
+    }
+
+    fn is_finished(&self, generation: u64) -> Result<bool, ExecutorError> {
+        if self.generation() != generation {
+            return Err(ExecutorError::Stopped);
+        }
+        Ok(matches!(self.state(), SLOT_READY | SLOT_FAILED))
+    }
+
+    fn take_result<T: 'static>(&self, generation: u64) -> Result<T, ExecutorError> {
+        if self.generation() != generation {
+            return Err(ExecutorError::Stopped);
+        }
+        match self.state() {
+            SLOT_READY => self
+                .result
+                .lock()
+                .map_err(executor_error_from_sync)?
+                .take::<T>(),
+            SLOT_FAILED => Err(self
+                .error
+                .lock()
+                .map_err(executor_error_from_sync)?
+                .take()
+                .ok_or(ExecutorError::Stopped)?),
+            SLOT_PENDING | SLOT_EMPTY => Err(ExecutorError::Stopped),
+            _ => Err(executor_invalid()),
+        }
+    }
+
+    fn mark_handle_released(&self, generation: u64) -> Result<(), ExecutorError> {
+        if self.generation() != generation {
+            return Err(ExecutorError::Stopped);
+        }
+        self.handle_live.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    fn can_recycle(&self, generation: u64) -> Result<bool, ExecutorError> {
+        if self.generation() != generation {
+            return Err(ExecutorError::Stopped);
+        }
+        let state = self.state();
+        Ok(!self.handle_live.load(Ordering::Acquire)
+            && self.waker_refs.load(Ordering::Acquire) == 0
+            && matches!(state, SLOT_READY | SLOT_FAILED))
+    }
+
+    fn reset_empty(&self, generation: u64) -> Result<(), ExecutorError> {
+        if self.generation() != generation {
+            return Err(ExecutorError::Stopped);
+        }
+
+        self.future
+            .lock()
+            .map_err(executor_error_from_sync)?
+            .clear();
+        self.result
+            .lock()
+            .map_err(executor_error_from_sync)?
+            .clear();
+        *self.error.lock().map_err(executor_error_from_sync)? = None;
+        self.drain_completed()?;
+        self.scheduled.store(false, Ordering::Release);
+        self.handle_live.store(false, Ordering::Release);
+        self.state.store(SLOT_EMPTY, Ordering::Release);
+        Ok(())
+    }
+
+    fn drain_completed(&self) -> Result<(), ExecutorError> {
+        while self
+            .completed
+            .try_acquire()
+            .map_err(executor_error_from_sync)?
+        {}
+        Ok(())
+    }
+
+    fn release_waker_ref(&self, generation: u64) -> Result<bool, ExecutorError> {
+        if self.generation() != generation {
+            return Ok(false);
+        }
+        let previous = self
+            .waker_refs
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_sub(1)
+            })
+            .map_err(|_| executor_invalid())?;
+        Ok(previous == 1)
+    }
+}
+
+struct AsyncTaskRegistry {
+    slots: Box<[AsyncTaskSlot]>,
+    free: SyncMutex<FixedIndexStack>,
+}
+
+impl fmt::Debug for AsyncTaskRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AsyncTaskRegistry")
+            .field("capacity", &self.slots.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AsyncTaskRegistry {
+    fn new(capacity: usize) -> Result<Self, ExecutorError> {
+        let mut slots = Vec::with_capacity(capacity);
+        for slot_index in 0..capacity {
+            slots.push(AsyncTaskSlot::new(slot_index)?);
+        }
+        Ok(Self {
+            slots: slots.into_boxed_slice(),
+            free: SyncMutex::new(FixedIndexStack::new(capacity)),
+        })
+    }
+
+    fn set_core(&self, core: *const ExecutorCore) {
+        for slot in &self.slots {
+            slot.set_core(core);
+        }
+    }
+
+    fn slot(&self, slot_index: usize) -> Result<&AsyncTaskSlot, ExecutorError> {
+        self.slots.get(slot_index).ok_or_else(executor_invalid)
+    }
+
+    fn allocate_slot(&self) -> Result<(usize, u64), ExecutorError> {
+        let slot_index = self
+            .free
+            .lock()
+            .map_err(executor_error_from_sync)?
+            .pop()
+            .ok_or_else(executor_busy)?;
+        let generation = self.slot(slot_index)?.initialize_for_allocation()?;
+        Ok((slot_index, generation))
+    }
+
+    fn release_slot(&self, slot_index: usize, generation: u64) -> Result<(), ExecutorError> {
+        let slot = self.slot(slot_index)?;
+        if slot.generation() != generation || slot.state() != SLOT_EMPTY {
+            return Err(executor_invalid());
+        }
+        self.free
+            .lock()
+            .map_err(executor_error_from_sync)?
+            .push(slot_index)
+    }
+}
+
+#[derive(Debug)]
 enum SchedulerBinding {
-    Current(Arc<CurrentQueue>),
+    Current,
     ThreadPool(ThreadPool),
     GreenPool(GreenPool),
     Unsupported,
 }
 
 impl SchedulerBinding {
-    fn schedule<F>(&self, task: Arc<TaskCell<F>>) -> Result<(), ExecutorError>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
+    fn schedule_slot(
+        &self,
+        core: &Arc<ExecutorCore>,
+        slot_index: usize,
+        generation: u64,
+    ) -> Result<(), ExecutorError> {
         match self {
-            Self::Current(queue) => queue.schedule(Box::new(move || task.run())),
-            Self::ThreadPool(pool) => pool
-                .submit(move || task.run())
-                .map_err(|_| ExecutorError::Stopped),
-            Self::GreenPool(pool) => pool
-                .spawn(move || task.run())
-                .map(|_| ())
-                .map_err(|_| ExecutorError::Stopped),
+            Self::Current => core
+                .current_queue
+                .schedule_slot(core.as_ref(), slot_index, generation),
+            Self::ThreadPool(pool) => {
+                let core = Arc::clone(core);
+                pool.submit(move || run_scheduled_slot_arc(&core, slot_index, generation))
+                    .map_err(|_| ExecutorError::Stopped)
+            }
+            Self::GreenPool(pool) => {
+                let core = Arc::clone(core);
+                pool.spawn(move || run_scheduled_slot_arc(&core, slot_index, generation))
+                    .map(|_| ())
+                    .map_err(|_| ExecutorError::Stopped)
+            }
             Self::Unsupported => Err(ExecutorError::Unsupported),
         }
     }
 }
 
 #[derive(Debug)]
-struct ExecutorInner {
-    config: ExecutorConfig,
-    reactor: Reactor,
-    scheduler: SchedulerBinding,
-    next_id: AtomicU64,
-}
-
-#[derive(Debug)]
-enum TaskState<T> {
-    Pending,
-    Ready(T),
+enum ExecutorRegistry {
+    Ready(AsyncTaskRegistry),
     Failed(ExecutorError),
 }
 
-#[derive(Debug)]
-struct TaskShared<T> {
-    state: SyncMutex<TaskState<T>>,
-    finished: AtomicBool,
-    ready: Semaphore,
-}
-
-impl<T> TaskShared<T> {
-    fn new() -> Result<Self, ExecutorError> {
-        Ok(Self {
-            state: SyncMutex::new(TaskState::Pending),
-            finished: AtomicBool::new(false),
-            ready: Semaphore::new(0, 1).map_err(executor_error_from_sync)?,
-        })
-    }
-
-    fn complete(&self, value: T) -> Result<(), ExecutorError> {
-        *self.state.lock().map_err(executor_error_from_sync)? = TaskState::Ready(value);
-        self.finished.store(true, Ordering::Release);
-        self.ready.release(1).map_err(executor_error_from_sync)
-    }
-
-    fn fail(&self, error: ExecutorError) -> Result<(), ExecutorError> {
-        *self.state.lock().map_err(executor_error_from_sync)? = TaskState::Failed(error);
-        self.finished.store(true, Ordering::Release);
-        self.ready.release(1).map_err(executor_error_from_sync)
-    }
-
-    fn is_finished(&self) -> Result<bool, ExecutorError> {
-        Ok(!matches!(
-            *self.state.lock().map_err(executor_error_from_sync)?,
-            TaskState::Pending
-        ))
-    }
-
-    fn join(self: &Arc<Self>) -> Result<T, ExecutorError> {
-        if !self.is_finished()? {
-            self.ready.acquire().map_err(executor_error_from_sync)?;
+impl ExecutorRegistry {
+    fn new(capacity: usize) -> Self {
+        match AsyncTaskRegistry::new(capacity) {
+            Ok(registry) => Self::Ready(registry),
+            Err(error) => Self::Failed(error),
         }
-        match core::mem::replace(
-            &mut *self.state.lock().map_err(executor_error_from_sync)?,
-            TaskState::Failed(ExecutorError::Stopped),
-        ) {
-            TaskState::Ready(value) => Ok(value),
-            TaskState::Failed(error) => Err(error),
-            TaskState::Pending => Err(ExecutorError::Stopped),
+    }
+
+    const fn get(&self) -> Result<&AsyncTaskRegistry, ExecutorError> {
+        match self {
+            Self::Ready(registry) => Ok(registry),
+            Self::Failed(error) => Err(*error),
         }
     }
 }
 
-struct TaskCell<F>
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    future: SyncMutex<Option<Pin<Box<F>>>>,
-    shared: Arc<TaskShared<F::Output>>,
+struct ExecutorCore {
+    config: ExecutorConfig,
+    reactor: Reactor,
+    current_queue: CurrentQueue,
     scheduler: SchedulerBinding,
-    scheduled: AtomicBool,
+    next_id: AtomicU64,
+    registry: ExecutorRegistry,
 }
 
-impl<F> TaskCell<F>
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    fn new(future: F, shared: Arc<TaskShared<F::Output>>, scheduler: SchedulerBinding) -> Self {
-        Self {
-            future: SyncMutex::new(Some(Box::pin(future))),
-            shared,
-            scheduler,
-            scheduled: AtomicBool::new(false),
+impl fmt::Debug for ExecutorCore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExecutorCore")
+            .field("config", &self.config)
+            .field("scheduler", &self.scheduler)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ExecutorCore {
+    fn allocate_task_id(&self) -> Result<TaskId, ExecutorError> {
+        let sequence = self
+            .next_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| executor_overflow())?;
+        Ok(TaskId::new(core::ptr::from_ref(self) as usize, sequence))
+    }
+
+    const fn registry(&self) -> Result<&AsyncTaskRegistry, ExecutorError> {
+        self.registry.get()
+    }
+
+    fn initialize_registry_core_ptrs(&self) {
+        if let Ok(registry) = self.registry() {
+            registry.set_core(core::ptr::from_ref(self));
         }
     }
 
-    fn schedule(self: &Arc<Self>) -> Result<(), ExecutorError> {
-        if self.scheduled.swap(true, Ordering::AcqRel) {
+    fn schedule_slot(
+        self: &Arc<Self>,
+        slot_index: usize,
+        generation: u64,
+    ) -> Result<(), ExecutorError> {
+        let slot = self.registry()?.slot(slot_index)?;
+        if slot.generation() != generation || slot.state() != SLOT_PENDING {
+            return Ok(());
+        }
+        if slot.scheduled.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
 
-        if let Err(error) = self.scheduler.schedule(Arc::clone(self)) {
-            self.scheduled.store(false, Ordering::Release);
-            let _ = self.shared.fail(error);
-            if let Ok(mut future) = self.future.lock() {
-                *future = None;
-            }
+        if let Err(error) = self.scheduler.schedule_slot(self, slot_index, generation) {
+            slot.scheduled.store(false, Ordering::Release);
+            let _ = slot.fail(generation, error);
+            let _ = self.recycle_slot_if_possible(slot_index, generation);
             return Err(error);
         }
         Ok(())
     }
 
-    fn run(self: Arc<Self>) {
-        self.scheduled.store(false, Ordering::Release);
-        match self.shared.is_finished() {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(error) => {
-                let _ = self.shared.fail(error);
-                return;
-            }
-        }
-
-        let waker = task_waker(Arc::clone(&self));
-        let mut context = Context::from_waker(&waker);
-        let mut future = match self.future.lock().map_err(executor_error_from_sync) {
-            Ok(future) => future,
-            Err(error) => {
-                let _ = self.shared.fail(error);
-                return;
-            }
-        };
-        let Some(mut future_slot) = future.take() else {
+    fn run_slot_by_ref(&self, slot_index: usize, generation: u64) {
+        let Ok(registry) = self.registry() else {
             return;
         };
-        drop(future);
+        let Ok(slot) = registry.slot(slot_index) else {
+            return;
+        };
+        if slot.generation() != generation || slot.state() != SLOT_PENDING {
+            return;
+        }
 
-        let poll = poll_future_contained(future_slot.as_mut(), &mut context);
+        slot.scheduled.store(false, Ordering::Release);
+
+        let poll = {
+            let Ok(waker) = slot.create_waker(generation) else {
+                return;
+            };
+            let mut context = Context::from_waker(&waker);
+            slot.poll_in_place(generation, &mut context)
+        };
+
         match poll {
-            Ok(Poll::Ready(output)) => {
-                let _ = self.shared.complete(output);
+            Ok(Poll::Ready(())) => {
+                let _ = slot.complete(generation);
+                let _ = self.recycle_slot_if_possible(slot_index, generation);
             }
-            Ok(Poll::Pending) => {
-                if let Ok(mut future) = self.future.lock() {
-                    *future = Some(future_slot);
-                } else {
-                    let _ = self.shared.fail(ExecutorError::Stopped);
-                }
+            Ok(Poll::Pending) => {}
+            Err(error) => {
+                let _ = slot.fail(generation, error);
+                let _ = self.recycle_slot_if_possible(slot_index, generation);
             }
-            Err(()) => {
-                let _ = self.shared.fail(ExecutorError::TaskPanicked);
+        }
+    }
+
+    fn drive_current_once(&self) -> Result<bool, ExecutorError> {
+        match &self.scheduler {
+            SchedulerBinding::Current => self.current_queue.run_next(),
+            _ => Ok(false),
+        }
+    }
+
+    fn recycle_slot_if_possible(
+        &self,
+        slot_index: usize,
+        generation: u64,
+    ) -> Result<(), ExecutorError> {
+        let registry = self.registry()?;
+        let slot = registry.slot(slot_index)?;
+        if !slot.can_recycle(generation)? {
+            return Ok(());
+        }
+        slot.reset_empty(generation)?;
+        registry.release_slot(slot_index, generation)
+    }
+
+    fn detach_handle(&self, slot_index: usize, generation: u64) -> Result<(), ExecutorError> {
+        let slot = self.registry()?.slot(slot_index)?;
+        slot.mark_handle_released(generation)?;
+        self.recycle_slot_if_possible(slot_index, generation)
+    }
+}
+
+unsafe fn clone_async_task_waker(data: *const ()) -> RawWaker {
+    let waker = unsafe { &*data.cast::<AsyncTaskWakerData>() };
+    let core_ptr = waker.core_ptr();
+    if !core_ptr.is_null() {
+        unsafe {
+            Arc::increment_strong_count(core_ptr);
+        }
+        let core = unsafe { &*core_ptr };
+        let generation = waker.generation();
+        if let Ok(slot) = core
+            .registry()
+            .and_then(|registry| registry.slot(waker.slot_index))
+            && slot.generation() == generation
+            && slot
+                .waker_refs
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current.checked_add(1)
+                })
+                .is_ok()
+        {}
+    }
+    RawWaker::new(data, &ASYNC_TASK_WAKER_VTABLE)
+}
+
+unsafe fn wake_async_task_waker(data: *const ()) {
+    let waker = unsafe { &*data.cast::<AsyncTaskWakerData>() };
+    let core_ptr = waker.core_ptr();
+    if !core_ptr.is_null() {
+        let core = unsafe { Arc::from_raw(core_ptr) };
+        let generation = waker.generation();
+        if let Ok(slot) = core
+            .registry()
+            .and_then(|registry| registry.slot(waker.slot_index))
+        {
+            let _ = core.schedule_slot(waker.slot_index, generation);
+            if slot.release_waker_ref(generation).unwrap_or(false) {
+                let _ = core.recycle_slot_if_possible(waker.slot_index, generation);
             }
         }
     }
 }
 
-unsafe fn clone_task_waker<F>(data: *const ()) -> RawWaker
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    let task = ManuallyDrop::new(unsafe { Arc::<TaskCell<F>>::from_raw(data.cast()) });
-    let cloned = Arc::clone(&task);
-    RawWaker::new(Arc::into_raw(cloned).cast(), task_waker_vtable::<F>())
+unsafe fn wake_async_task_waker_by_ref(data: *const ()) {
+    let waker = unsafe { &*data.cast::<AsyncTaskWakerData>() };
+    let core_ptr = waker.core_ptr();
+    if !core_ptr.is_null() {
+        unsafe {
+            Arc::increment_strong_count(core_ptr);
+        }
+        let core = unsafe { Arc::from_raw(core_ptr) };
+        let generation = waker.generation();
+        if let Ok(slot) = core
+            .registry()
+            .and_then(|registry| registry.slot(waker.slot_index))
+            && slot.generation() == generation
+        {
+            let _ = core.schedule_slot(waker.slot_index, generation);
+        }
+    }
 }
 
-unsafe fn wake_task<F>(data: *const ())
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    let task = unsafe { Arc::<TaskCell<F>>::from_raw(data.cast()) };
-    let _ = task.schedule();
+unsafe fn drop_async_task_waker(data: *const ()) {
+    let waker = unsafe { &*data.cast::<AsyncTaskWakerData>() };
+    let core_ptr = waker.core_ptr();
+    if !core_ptr.is_null() {
+        let core = unsafe { Arc::from_raw(core_ptr) };
+        let generation = waker.generation();
+        if let Ok(slot) = core
+            .registry()
+            .and_then(|registry| registry.slot(waker.slot_index))
+            && slot.release_waker_ref(generation).unwrap_or(false)
+        {
+            let _ = core.recycle_slot_if_possible(waker.slot_index, generation);
+        }
+    }
 }
 
-unsafe fn wake_task_by_ref<F>(data: *const ())
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    let task = ManuallyDrop::new(unsafe { Arc::<TaskCell<F>>::from_raw(data.cast()) });
-    let _ = Arc::clone(&task).schedule();
-}
-
-unsafe fn drop_task_waker<F>(data: *const ())
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    drop(unsafe { Arc::<TaskCell<F>>::from_raw(data.cast()) });
-}
-
-fn task_waker_vtable<F>() -> &'static RawWakerVTable
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    &RawWakerVTable::new(
-        clone_task_waker::<F>,
-        wake_task::<F>,
-        wake_task_by_ref::<F>,
-        drop_task_waker::<F>,
-    )
-}
-
-fn task_waker<F>(task: Arc<TaskCell<F>>) -> Waker
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    let raw = RawWaker::new(Arc::into_raw(task).cast(), task_waker_vtable::<F>());
-    unsafe { Waker::from_raw(raw) }
-}
+static ASYNC_TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    clone_async_task_waker,
+    wake_async_task_waker,
+    wake_async_task_waker_by_ref,
+    drop_async_task_waker,
+);
 
 /// Public spawned-task handle.
-#[derive(Debug)]
 pub struct TaskHandle<T> {
-    id: u64,
-    shared: Arc<TaskShared<T>>,
+    id: TaskId,
+    core: Arc<ExecutorCore>,
+    slot_index: usize,
+    generation: u64,
+    active: bool,
+    _marker: PhantomData<T>,
+}
+
+impl<T> fmt::Debug for TaskHandle<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskHandle")
+            .field("id", &self.id)
+            .field("slot_index", &self.slot_index)
+            .field("generation", &self.generation)
+            .field("active", &self.active)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T> TaskHandle<T> {
     /// Returns the stable task identifier.
     #[must_use]
-    pub const fn id(&self) -> u64 {
+    pub const fn id(&self) -> TaskId {
         self.id
     }
 
@@ -519,7 +1302,10 @@ impl<T> TaskHandle<T> {
     ///
     /// Returns an error if the task state cannot be observed honestly.
     pub fn is_finished(&self) -> Result<bool, ExecutorError> {
-        self.shared.is_finished()
+        self.core
+            .registry()?
+            .slot(self.slot_index)?
+            .is_finished(self.generation)
     }
 
     /// Blocks until the task completes and returns its result.
@@ -527,40 +1313,207 @@ impl<T> TaskHandle<T> {
     /// # Errors
     ///
     /// Returns the scheduler failure that stopped the task, if any.
-    pub fn join(self) -> Result<T, ExecutorError> {
-        self.shared.join()
+    pub fn join(mut self) -> Result<T, ExecutorError>
+    where
+        T: 'static,
+    {
+        let slot = self.core.registry()?.slot(self.slot_index)?;
+        match &self.core.scheduler {
+            SchedulerBinding::Current => {
+                while !slot.is_finished(self.generation)? {
+                    if !self.core.drive_current_once()? && system_thread().yield_now().is_err() {
+                        spin_loop();
+                    }
+                }
+            }
+            _ => {
+                if !slot.is_finished(self.generation)? {
+                    slot.completed.acquire().map_err(executor_error_from_sync)?;
+                }
+            }
+        }
+
+        let result = slot.take_result::<T>(self.generation);
+        self.active = false;
+        let _ = self.core.detach_handle(self.slot_index, self.generation);
+        result
+    }
+}
+
+impl<T> Drop for TaskHandle<T> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.core.detach_handle(self.slot_index, self.generation);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct JoinSetState<T> {
+    entries: [Option<TaskHandle<T>>; JOIN_SET_CAPACITY],
+    len: usize,
+}
+
+impl<T> JoinSetState<T> {
+    fn new() -> Self {
+        Self {
+            entries: array::from_fn(|_| None),
+            len: 0,
+        }
+    }
+
+    fn first_free_index(&self) -> Option<usize> {
+        self.entries.iter().position(Option::is_none)
     }
 }
 
 /// Public set of task handles joined as a group.
-#[derive(Debug, Default)]
 pub struct JoinSet<T> {
-    _marker: PhantomData<T>,
+    entries: SyncMutex<JoinSetState<T>>,
+}
+
+impl<T> fmt::Debug for JoinSet<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JoinSet").finish_non_exhaustive()
+    }
+}
+
+impl<T> Default for JoinSet<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> JoinSet<T> {
+    /// Creates an empty fixed-capacity join set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: SyncMutex::new(JoinSetState::new()),
+        }
+    }
+
+    /// Returns the number of tracked tasks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the set state cannot be observed honestly.
+    pub fn len(&self) -> Result<usize, ExecutorError> {
+        Ok(self.entries.lock().map_err(executor_error_from_sync)?.len)
+    }
+
+    /// Returns whether the set is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the set state cannot be observed honestly.
+    pub fn is_empty(&self) -> Result<bool, ExecutorError> {
+        Ok(self.len()? == 0)
+    }
+
+    /// Spawns a task through the supplied executor and tracks it in this join set.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest spawn failure, or `Overflow` if the join set is full.
+    pub fn spawn<F>(&self, executor: &Executor, future: F) -> Result<TaskId, ExecutorError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let mut state = self.entries.lock().map_err(executor_error_from_sync)?;
+        let entry_index = state.first_free_index().ok_or_else(executor_overflow)?;
+        let handle = executor.spawn(future)?;
+        let id = handle.id();
+        state.entries[entry_index] = Some(handle);
+        state.len += 1;
+        Ok(id)
+    }
+
+    /// Waits for the next tracked task to finish and returns its output.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Stopped` when the set is empty, or any honest task/join failure.
+    pub fn join_next(&self) -> Result<T, ExecutorError>
+    where
+        T: 'static,
+    {
+        loop {
+            let mut current_executor = None;
+            let ready = {
+                let mut state = self.entries.lock().map_err(executor_error_from_sync)?;
+                if state.len == 0 {
+                    return Err(ExecutorError::Stopped);
+                }
+
+                let mut ready_index = None;
+                for (index, entry) in state.entries.iter().enumerate() {
+                    let Some(handle) = entry.as_ref() else {
+                        continue;
+                    };
+                    if handle.is_finished()? {
+                        ready_index = Some(index);
+                        break;
+                    }
+                    if current_executor.is_none()
+                        && matches!(handle.core.scheduler, SchedulerBinding::Current)
+                    {
+                        current_executor = Some(Arc::clone(&handle.core));
+                    }
+                }
+
+                if let Some(index) = ready_index {
+                    state.len -= 1;
+                    state.entries[index].take()
+                } else {
+                    None
+                }
+            };
+
+            if let Some(handle) = ready {
+                return handle.join();
+            }
+
+            if let Some(core) = current_executor {
+                if !core.drive_current_once()? && system_thread().yield_now().is_err() {
+                    spin_loop();
+                }
+                continue;
+            }
+
+            if system_thread().yield_now().is_err() {
+                spin_loop();
+            }
+        }
+    }
 }
 
 /// Public async executor wrapper.
 #[derive(Debug, Clone)]
 pub struct Executor {
-    inner: Arc<ExecutorInner>,
+    inner: Arc<ExecutorCore>,
 }
 
 impl Executor {
     fn with_scheduler(config: ExecutorConfig, scheduler: SchedulerBinding) -> Self {
-        Self {
-            inner: Arc::new(ExecutorInner {
-                config,
-                reactor: Reactor::new(),
-                scheduler,
-                next_id: AtomicU64::new(1),
-            }),
-        }
+        let inner = Arc::new(ExecutorCore {
+            config,
+            reactor: Reactor::new(),
+            current_queue: CurrentQueue::new(),
+            scheduler,
+            next_id: AtomicU64::new(1),
+            registry: ExecutorRegistry::new(TASK_REGISTRY_CAPACITY),
+        });
+        inner.initialize_registry_core_ptrs();
+        Self { inner }
     }
 
     /// Creates a new executor surface.
     #[must_use]
     pub fn new(config: ExecutorConfig) -> Self {
         let scheduler = match config.mode {
-            ExecutorMode::CurrentThread => SchedulerBinding::Current(Arc::new(CurrentQueue::new())),
+            ExecutorMode::CurrentThread => SchedulerBinding::Current,
             ExecutorMode::ThreadPool | ExecutorMode::GreenPool | ExecutorMode::Hybrid => {
                 SchedulerBinding::Unsupported
             }
@@ -591,15 +1544,32 @@ impl Executor {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let shared = Arc::new(TaskShared::new()?);
-        let id = self.inner.next_id.fetch_add(1, Ordering::AcqRel);
-        let task = Arc::new(TaskCell::new(
-            future,
-            Arc::clone(&shared),
-            self.inner.scheduler.clone(),
-        ));
-        task.schedule()?;
-        Ok(TaskHandle { id, shared })
+        let id = self.inner.allocate_task_id()?;
+        let registry = self.inner.registry()?;
+        let (slot_index, generation) = registry.allocate_slot()?;
+        let slot = registry.slot(slot_index)?;
+
+        if let Err(error) = slot.store_future(future) {
+            slot.mark_handle_released(generation)?;
+            slot.reset_empty(generation)?;
+            registry.release_slot(slot_index, generation)?;
+            return Err(error);
+        }
+
+        if let Err(error) = self.inner.schedule_slot(slot_index, generation) {
+            slot.mark_handle_released(generation)?;
+            let _ = self.inner.recycle_slot_if_possible(slot_index, generation);
+            return Err(error);
+        }
+
+        Ok(TaskHandle {
+            id,
+            core: Arc::clone(&self.inner),
+            slot_index,
+            generation,
+            active: true,
+            _marker: PhantomData,
+        })
     }
 
     /// Spawns a non-`Send` future local to the current execution domain.
@@ -625,13 +1595,13 @@ impl Executor {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let SchedulerBinding::Current(queue) = &self.inner.scheduler else {
+        let SchedulerBinding::Current = &self.inner.scheduler else {
             return Err(ExecutorError::Unsupported);
         };
 
         let handle = self.spawn(future)?;
         while !handle.is_finished()? {
-            if !queue.run_next()? && system_thread().yield_now().is_err() {
+            if !self.inner.current_queue.run_next()? && system_thread().yield_now().is_err() {
                 spin_loop();
             }
         }
@@ -671,6 +1641,15 @@ impl Executor {
     }
 }
 
+unsafe fn run_current_slot(core: usize, slot_index: usize, generation: u64) {
+    let core = unsafe { &*(core as *const ExecutorCore) };
+    core.run_slot_by_ref(slot_index, generation);
+}
+
+fn run_scheduled_slot_arc(core: &Arc<ExecutorCore>, slot_index: usize, generation: u64) {
+    core.run_slot_by_ref(slot_index, generation);
+}
+
 fn poll_future_contained<F>(
     future: Pin<&mut F>,
     context: &mut Context<'_>,
@@ -694,4 +1673,57 @@ where
 
 const fn executor_error_from_sync(error: SyncError) -> ExecutorError {
     ExecutorError::Sync(error.kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_reuses_slots_with_new_generations() {
+        let executor = Executor::new(ExecutorConfig::new());
+
+        let first = executor
+            .spawn(async { 7_u8 })
+            .expect("first task should spawn");
+        let first_slot = first.slot_index;
+        let first_generation = first.generation;
+        assert_eq!(first.join().expect("first task should finish"), 7);
+
+        let second = executor
+            .spawn(async { 9_u8 })
+            .expect("second task should spawn");
+        assert_eq!(second.slot_index, first_slot);
+        assert!(second.generation > first_generation);
+        assert_eq!(second.join().expect("second task should finish"), 9);
+    }
+
+    #[test]
+    fn join_set_drives_current_thread_tasks_to_completion() {
+        let executor = Executor::new(ExecutorConfig::new());
+        let join_set = JoinSet::<u8>::new();
+
+        join_set
+            .spawn(&executor, async { 3_u8 })
+            .expect("first join-set task should spawn");
+        join_set
+            .spawn(&executor, async { 5_u8 })
+            .expect("second join-set task should spawn");
+
+        let first = join_set.join_next().expect("first task should complete");
+        let second = join_set.join_next().expect("second task should complete");
+        assert!(matches!((first, second), (3, 5) | (5, 3)));
+        assert!(matches!(join_set.join_next(), Err(ExecutorError::Stopped)));
+    }
+
+    #[test]
+    fn oversized_futures_are_rejected_honestly() {
+        let executor = Executor::new(ExecutorConfig::new());
+        let oversized = [0_u8; 1024];
+
+        assert!(matches!(
+            executor.spawn(async move { oversized.len() }),
+            Err(ExecutorError::Unsupported)
+        ));
+    }
 }

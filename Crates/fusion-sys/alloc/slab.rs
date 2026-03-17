@@ -12,30 +12,44 @@ use super::{
 
 #[derive(Debug)]
 struct SlabState<const COUNT: usize> {
-    slots: [bool; COUNT],
+    free: [usize; COUNT],
+    occupied: [bool; COUNT],
+    len: usize,
 }
 
 impl<const COUNT: usize> SlabState<COUNT> {
     fn new() -> Self {
         Self {
-            slots: array::from_fn(|_| true),
+            free: array::from_fn(|index| COUNT.saturating_sub(index + 1)),
+            occupied: array::from_fn(|_| false),
+            len: COUNT,
         }
     }
 
     fn allocate_slot(&mut self) -> Option<usize> {
-        let slot = self.slots.iter().position(|free| *free)?;
-        self.slots[slot] = false;
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        let slot = self.free[self.len];
+        let occupied = self.occupied.get_mut(slot)?;
+        if *occupied {
+            return None;
+        }
+        *occupied = true;
         Some(slot)
     }
 
     fn release_slot(&mut self, slot: usize) -> Result<(), AllocError> {
-        let Some(free) = self.slots.get_mut(slot) else {
+        let Some(occupied) = self.occupied.get_mut(slot) else {
             return Err(AllocError::invalid_request());
         };
-        if *free {
+        if !*occupied || self.len == COUNT {
             return Err(AllocError::invalid_request());
         }
-        *free = true;
+        *occupied = false;
+        self.free[self.len] = slot;
+        self.len += 1;
         Ok(())
     }
 }

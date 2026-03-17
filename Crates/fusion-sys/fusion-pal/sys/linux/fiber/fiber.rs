@@ -4,9 +4,9 @@
 //! SIGSEGV handler installation for elastic stack promotion, alternate signal stacks for
 //! carrier threads, and nonblocking wake pipes suitable for readiness pollers.
 
-extern crate alloc;
-
-use alloc::boxed::Box;
+use core::cell::UnsafeCell;
+use core::hint::spin_loop;
+use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use libc::{self, c_void};
@@ -34,6 +34,19 @@ struct ElasticSignalState {
 
 static ELASTIC_SIGNAL_STATE: AtomicUsize = AtomicUsize::new(0);
 static ELASTIC_SIGNAL_HANDLER: AtomicUsize = AtomicUsize::new(0);
+const ELASTIC_SIGNAL_UNINITIALIZED: usize = 0;
+const ELASTIC_SIGNAL_INSTALLING: usize = 1;
+const ELASTIC_SIGNAL_READY: usize = 2;
+
+struct ElasticSignalStateStorage {
+    state: UnsafeCell<MaybeUninit<ElasticSignalState>>,
+}
+
+unsafe impl Sync for ElasticSignalStateStorage {}
+
+static ELASTIC_SIGNAL_STATE_STORAGE: ElasticSignalStateStorage = ElasticSignalStateStorage {
+    state: UnsafeCell::new(MaybeUninit::uninit()),
+};
 
 /// Opaque alternate-signal-stack guard for one carrier thread.
 #[derive(Debug)]
@@ -82,6 +95,7 @@ impl LinuxFiberHost {
         &self,
         handler: PlatformElasticFaultHandler,
     ) -> Result<(), FiberHostError> {
+        let installed = elastic_stack_sigsegv_handler as *const () as usize;
         let mut current = unsafe { core::mem::zeroed::<libc::sigaction>() };
         unsafe {
             if libc::sigaction(libc::SIGSEGV, core::ptr::null(), &raw mut current) != 0 {
@@ -89,10 +103,37 @@ impl LinuxFiberHost {
             }
         }
 
-        let installed = elastic_stack_sigsegv_handler as *const () as usize;
-        if current.sa_sigaction == installed && ELASTIC_SIGNAL_STATE.load(Ordering::Acquire) != 0 {
+        if current.sa_sigaction == installed
+            && ELASTIC_SIGNAL_STATE.load(Ordering::Acquire) == ELASTIC_SIGNAL_READY
+        {
             ELASTIC_SIGNAL_HANDLER.store(handler as usize, Ordering::Release);
             return Ok(());
+        }
+
+        loop {
+            match ELASTIC_SIGNAL_STATE.compare_exchange(
+                ELASTIC_SIGNAL_UNINITIALIZED,
+                ELASTIC_SIGNAL_INSTALLING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(ELASTIC_SIGNAL_READY) => {
+                    let mut live = unsafe { core::mem::zeroed::<libc::sigaction>() };
+                    unsafe {
+                        if libc::sigaction(libc::SIGSEGV, core::ptr::null(), &raw mut live) != 0 {
+                            return Err(FiberHostError::state_conflict());
+                        }
+                    }
+                    if live.sa_sigaction != installed {
+                        return Err(FiberHostError::state_conflict());
+                    }
+                    ELASTIC_SIGNAL_HANDLER.store(handler as usize, Ordering::Release);
+                    return Ok(());
+                }
+                Err(ELASTIC_SIGNAL_INSTALLING) => spin_loop(),
+                Err(_) => return Err(FiberHostError::state_conflict()),
+            }
         }
 
         let mut action = unsafe { core::mem::zeroed::<libc::sigaction>() };
@@ -102,13 +143,16 @@ impl LinuxFiberHost {
         unsafe {
             libc::sigemptyset(&raw mut action.sa_mask);
             if libc::sigaction(libc::SIGSEGV, &raw const action, &raw mut previous) != 0 {
+                ELASTIC_SIGNAL_STATE.store(ELASTIC_SIGNAL_UNINITIALIZED, Ordering::Release);
                 return Err(FiberHostError::state_conflict());
             }
         }
 
+        unsafe {
+            write_elastic_signal_state(previous);
+        }
         ELASTIC_SIGNAL_HANDLER.store(handler as usize, Ordering::Release);
-        let state_ptr = Box::into_raw(Box::new(ElasticSignalState { previous })) as usize;
-        ELASTIC_SIGNAL_STATE.store(state_ptr, Ordering::Release);
+        ELASTIC_SIGNAL_STATE.store(ELASTIC_SIGNAL_READY, Ordering::Release);
         Ok(())
     }
 
@@ -319,11 +363,9 @@ unsafe fn chain_previous_sigsegv(
     info: *mut libc::siginfo_t,
     context: *mut libc::c_void,
 ) -> ! {
-    let state_ptr = ELASTIC_SIGNAL_STATE.load(Ordering::Acquire) as *const ElasticSignalState;
-    if state_ptr.is_null() {
+    let Some(state) = elastic_signal_state() else {
         unsafe { libc::_exit(128 + signal) };
-    }
-    let state = unsafe { &*state_ptr };
+    };
     let previous = &state.previous;
     let handler = previous.sa_sigaction;
     if handler == libc::SIG_IGN {
@@ -346,6 +388,19 @@ unsafe fn chain_previous_sigsegv(
         action(signal);
     }
     unsafe { libc::_exit(128 + signal) };
+}
+
+fn elastic_signal_state() -> Option<&'static ElasticSignalState> {
+    if ELASTIC_SIGNAL_STATE.load(Ordering::Acquire) != ELASTIC_SIGNAL_READY {
+        return None;
+    }
+    Some(unsafe { &*(*ELASTIC_SIGNAL_STATE_STORAGE.state.get()).as_ptr() })
+}
+
+unsafe fn write_elastic_signal_state(previous: libc::sigaction) {
+    unsafe {
+        (*ELASTIC_SIGNAL_STATE_STORAGE.state.get()).write(ElasticSignalState { previous });
+    }
 }
 
 fn signal_fd(fd: i32) -> Result<(), FiberHostError> {

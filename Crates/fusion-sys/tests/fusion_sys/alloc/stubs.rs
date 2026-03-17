@@ -181,6 +181,38 @@ fn system_default_constructs_a_real_backed_allocator() {
 }
 
 #[test]
+fn system_default_with_capacity_sizes_backing_for_requested_slabs() {
+    let allocator =
+        Allocator::<2, 2>::system_default_with_capacity(256).expect("allocator should build");
+    let default_domain = allocator
+        .default_domain()
+        .expect("default domain should exist");
+    let slab = allocator
+        .slab::<64, 4>(default_domain)
+        .expect("requested backing should satisfy the exact slab footprint");
+
+    let mut allocations = std::vec::Vec::new();
+    for _ in 0..4 {
+        allocations.push(
+            slab.allocate(&fusion_sys::alloc::AllocRequest::new(64))
+                .expect("slab should consume the requested backing capacity"),
+        );
+    }
+
+    assert_eq!(
+        slab.allocate(&fusion_sys::alloc::AllocRequest::new(64))
+            .expect_err("exact-capacity slab should exhaust after four slots")
+            .kind,
+        AllocErrorKind::CapacityExhausted
+    );
+
+    for allocation in allocations {
+        slab.deallocate(allocation)
+            .expect("exact-capacity slab allocation should release");
+    }
+}
+
+#[test]
 fn heap_routing_is_policy_gated_and_still_unimplemented() {
     let allocator = Allocator::<2, 2>::system_default().expect("allocator should build");
     assert_eq!(
