@@ -160,6 +160,70 @@ pub(crate) fn shared_pool_marker(pool: &SharedDomainPool) -> usize {
     Arc::as_ptr(pool).cast::<()>() as usize
 }
 
+pub(crate) struct AssignedPoolExtent {
+    pool: SharedDomainPool,
+    pool_marker: usize,
+    lease: Option<MemoryPoolLease>,
+    lease_id: MemoryPoolLeaseId,
+    region: Region,
+    member: MemoryPoolMemberInfo,
+}
+
+impl core::fmt::Debug for AssignedPoolExtent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AssignedPoolExtent")
+            .field("pool_marker", &self.pool_marker)
+            .field("lease_id", &self.lease_id)
+            .field("region", &self.region)
+            .field("member", &self.member)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AssignedPoolExtent {
+    pub(crate) fn assign(
+        pool: SharedDomainPool,
+        request: &MemoryPoolExtentRequest,
+    ) -> Result<Self, AllocError> {
+        let lease = pool.acquire_extent(request)?;
+        let lease_id = lease.id();
+        let member = pool.member_info(lease.member())?;
+        let region = pool.lease_region(&lease)?;
+        Ok(Self {
+            pool_marker: shared_pool_marker(&pool),
+            pool,
+            lease: Some(lease),
+            lease_id,
+            region,
+            member,
+        })
+    }
+
+    pub(crate) const fn pool_marker(&self) -> usize {
+        self.pool_marker
+    }
+
+    pub(crate) const fn lease_id(&self) -> MemoryPoolLeaseId {
+        self.lease_id
+    }
+
+    pub(crate) const fn region(&self) -> Region {
+        self.region
+    }
+
+    pub(crate) const fn member(&self) -> MemoryPoolMemberInfo {
+        self.member
+    }
+}
+
+impl Drop for AssignedPoolExtent {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            let _ = self.pool.release_extent(lease);
+        }
+    }
+}
+
 pub(crate) fn align_up(value: usize, align: usize) -> Result<usize, AllocError> {
     if align == 0 || !align.is_power_of_two() {
         return Err(AllocError::invalid_request());

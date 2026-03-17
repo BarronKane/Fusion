@@ -12,6 +12,7 @@ use crate::mem::resource::{
 
 use super::{
     AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocResult,
+    AssignedPoolExtent,
     AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind, BoundedArena, DomainPool,
     HeapAllocator, MemoryPool, MemoryPoolContributor, MemoryPoolMemberId, MemoryPoolMemberInfo,
     MemoryPoolPolicy, SharedDomainPool, Slab,
@@ -49,6 +50,14 @@ struct AllocatorDomainRecord<const RESOURCES: usize, const EXTENTS: usize> {
 impl<const RESOURCES: usize, const EXTENTS: usize> AllocatorDomainRecord<RESOURCES, EXTENTS> {
     fn new(info: AllocatorDomainInfo, pool: Option<SharedDomainPool>) -> Self {
         Self { info, pool }
+    }
+
+    fn assign_extent(
+        &self,
+        request: &super::MemoryPoolExtentRequest,
+    ) -> Result<AssignedPoolExtent, AllocError> {
+        let pool = self.pool.clone().ok_or_else(AllocError::capacity_exhausted)?;
+        AssignedPoolExtent::assign(pool, request)
     }
 }
 
@@ -225,7 +234,10 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         if !domain.info.policy.allows(AllocModeSet::SLAB) {
             return Err(AllocError::policy_denied());
         }
-        Slab::for_domain(domain.info.id, domain.info.policy, domain.pool.clone())
+        let slot_align = Slab::<SIZE, COUNT>::slot_align_for_domain()?;
+        let request = Slab::<SIZE, COUNT>::extent_request(slot_align)?;
+        let extent = domain.assign_extent(&request)?;
+        Slab::from_assigned_extent(domain.info.id, domain.info.policy, extent)
     }
 
     /// Returns a bounded-arena strategy view for `domain`.
@@ -245,12 +257,9 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         if !domain.info.policy.allows(AllocModeSet::ARENA) {
             return Err(AllocError::policy_denied());
         }
-        BoundedArena::for_domain(
-            domain.info.id,
-            capacity,
-            domain.info.policy,
-            domain.pool.clone(),
-        )
+        let request = BoundedArena::extent_request(capacity)?;
+        let extent = domain.assign_extent(&request)?;
+        BoundedArena::from_assigned_extent(domain.info.id, capacity, domain.info.policy, extent)
     }
 
     /// Returns a general-purpose heap strategy view for `domain`.

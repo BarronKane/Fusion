@@ -6,8 +6,7 @@ use crate::sync::Mutex;
 
 use super::{
     AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
-    AllocResult, AllocationBacking, AllocationStrategy, AllocatorDomainId, MemoryPoolLeaseId,
-    SharedDomainPool, shared_pool_marker,
+    AllocResult, AllocationBacking, AllocationStrategy, AllocatorDomainId, AssignedPoolExtent,
 };
 
 #[derive(Debug)]
@@ -58,11 +57,7 @@ impl<const COUNT: usize> SlabState<COUNT> {
 pub struct Slab<const SIZE: usize, const COUNT: usize> {
     domain: AllocatorDomainId,
     policy: AllocPolicy,
-    pool: SharedDomainPool,
-    lease: Option<super::MemoryPoolLease>,
-    lease_id: MemoryPoolLeaseId,
-    pool_marker: usize,
-    member: super::MemoryPoolMemberInfo,
+    extent: AssignedPoolExtent,
     slot_align: usize,
     state: Mutex<SlabState<COUNT>>,
 }
@@ -72,17 +67,36 @@ impl<const SIZE: usize, const COUNT: usize> fmt::Debug for Slab<SIZE, COUNT> {
         f.debug_struct("Slab")
             .field("domain", &self.domain)
             .field("policy", &self.policy)
-            .field("lease_id", &self.lease_id)
+            .field("lease_id", &self.extent.lease_id())
             .field("slot_align", &self.slot_align)
             .finish_non_exhaustive()
     }
 }
 
 impl<const SIZE: usize, const COUNT: usize> Slab<SIZE, COUNT> {
-    pub(super) fn for_domain(
+    pub(super) const fn extent_request(
+        slot_align: usize,
+    ) -> Result<super::MemoryPoolExtentRequest, AllocError> {
+        if SIZE == 0 || COUNT == 0 {
+            return Err(AllocError::invalid_request());
+        }
+        let Some(total_len) = SIZE.checked_mul(COUNT) else {
+            return Err(AllocError::invalid_request());
+        };
+        Ok(super::MemoryPoolExtentRequest {
+            len: total_len,
+            align: slot_align,
+        })
+    }
+
+    pub(super) fn slot_align_for_domain() -> Result<usize, AllocError> {
+        slab_slot_align::<SIZE>()
+    }
+
+    pub(super) fn from_assigned_extent(
         domain: AllocatorDomainId,
         policy: AllocPolicy,
-        pool: Option<SharedDomainPool>,
+        extent: AssignedPoolExtent,
     ) -> Result<Self, AllocError> {
         if SIZE == 0 || COUNT == 0 {
             return Err(AllocError::invalid_request());
@@ -90,26 +104,12 @@ impl<const SIZE: usize, const COUNT: usize> Slab<SIZE, COUNT> {
         if !policy.allows(AllocModeSet::SLAB) {
             return Err(AllocError::policy_denied());
         }
-        let pool = pool.ok_or_else(AllocError::capacity_exhausted)?;
         let slot_align = slab_slot_align::<SIZE>()?;
-        let total_len = SIZE
-            .checked_mul(COUNT)
-            .ok_or_else(AllocError::invalid_request)?;
-        let lease = pool.acquire_extent(&super::MemoryPoolExtentRequest {
-            len: total_len,
-            align: slot_align,
-        })?;
-        let lease_id = lease.id();
-        let member = pool.member_info(lease.member())?;
 
         Ok(Self {
             domain,
             policy,
-            pool_marker: shared_pool_marker(&pool),
-            pool,
-            lease: Some(lease),
-            lease_id,
-            member,
+            extent,
             slot_align,
             state: Mutex::new(SlabState::new()),
         })
@@ -170,10 +170,6 @@ impl<const SIZE: usize, const COUNT: usize> AllocationStrategy for Slab<SIZE, CO
             return Err(AllocError::invalid_request());
         }
 
-        let lease = self
-            .lease
-            .as_ref()
-            .ok_or_else(AllocError::invalid_request)?;
         let slot = {
             let mut state = self
                 .state
@@ -184,7 +180,7 @@ impl<const SIZE: usize, const COUNT: usize> AllocationStrategy for Slab<SIZE, CO
                 .ok_or_else(AllocError::capacity_exhausted)?
         };
 
-        let region = self.pool.lease_region(lease)?;
+        let region = self.extent.region();
         let base = region.base.as_ptr() as usize;
         let addr = base
             .checked_add(
@@ -206,13 +202,13 @@ impl<const SIZE: usize, const COUNT: usize> AllocationStrategy for Slab<SIZE, CO
             ptr,
             SIZE,
             self.slot_align,
-            self.member.compatibility.domain,
-            self.member.compatibility.attrs,
-            self.member.compatibility.hazards,
-            self.member.compatibility.geometry,
+            self.extent.member().compatibility.domain,
+            self.extent.member().compatibility.attrs,
+            self.extent.member().compatibility.hazards,
+            self.extent.member().compatibility.geometry,
             AllocationBacking::SlabSlot {
-                pool_marker: self.pool_marker,
-                lease_id: self.lease_id,
+                pool_marker: self.extent.pool_marker(),
+                lease_id: self.extent.lease_id(),
                 slot,
             },
         ))
@@ -224,7 +220,7 @@ impl<const SIZE: usize, const COUNT: usize> AllocationStrategy for Slab<SIZE, CO
                 pool_marker,
                 lease_id,
                 slot,
-            } if pool_marker == self.pool_marker && lease_id == self.lease_id => {
+            } if pool_marker == self.extent.pool_marker() && lease_id == self.extent.lease_id() => {
                 let mut state = self
                     .state
                     .lock()
@@ -232,14 +228,6 @@ impl<const SIZE: usize, const COUNT: usize> AllocationStrategy for Slab<SIZE, CO
                 state.release_slot(slot)
             }
             _ => Err(AllocError::invalid_request()),
-        }
-    }
-}
-
-impl<const SIZE: usize, const COUNT: usize> Drop for Slab<SIZE, COUNT> {
-    fn drop(&mut self) {
-        if let Some(lease) = self.lease.take() {
-            let _ = self.pool.release_extent(lease);
         }
     }
 }

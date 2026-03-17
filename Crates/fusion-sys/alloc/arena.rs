@@ -5,8 +5,8 @@ use crate::sync::Mutex;
 
 use super::{
     AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
-    AllocResult, AllocationBacking, AllocationStrategy, AllocatorDomainId, MemoryPoolLeaseId,
-    SharedDomainPool, align_up, shared_pool_marker,
+    AllocResult, AllocationBacking, AllocationStrategy, AllocatorDomainId, AssignedPoolExtent,
+    align_up,
 };
 
 #[derive(Debug)]
@@ -19,11 +19,7 @@ pub struct BoundedArena {
     capacity: usize,
     domain: AllocatorDomainId,
     policy: AllocPolicy,
-    pool: SharedDomainPool,
-    lease: Option<super::MemoryPoolLease>,
-    lease_id: MemoryPoolLeaseId,
-    pool_marker: usize,
-    member: super::MemoryPoolMemberInfo,
+    extent: AssignedPoolExtent,
     state: Mutex<ArenaState>,
 }
 
@@ -33,17 +29,27 @@ impl fmt::Debug for BoundedArena {
             .field("capacity", &self.capacity)
             .field("domain", &self.domain)
             .field("policy", &self.policy)
-            .field("lease_id", &self.lease_id)
+            .field("lease_id", &self.extent.lease_id())
             .finish_non_exhaustive()
     }
 }
 
 impl BoundedArena {
-    pub(super) fn for_domain(
+    pub(super) const fn extent_request(capacity: usize) -> Result<super::MemoryPoolExtentRequest, AllocError> {
+        if capacity == 0 {
+            return Err(AllocError::invalid_request());
+        }
+        Ok(super::MemoryPoolExtentRequest {
+            len: capacity,
+            align: 1,
+        })
+    }
+
+    pub(super) fn from_assigned_extent(
         domain: AllocatorDomainId,
         capacity: usize,
         policy: AllocPolicy,
-        pool: Option<SharedDomainPool>,
+        extent: AssignedPoolExtent,
     ) -> Result<Self, AllocError> {
         if capacity == 0 {
             return Err(AllocError::invalid_request());
@@ -51,23 +57,12 @@ impl BoundedArena {
         if !policy.allows(AllocModeSet::ARENA) {
             return Err(AllocError::policy_denied());
         }
-        let pool = pool.ok_or_else(AllocError::capacity_exhausted)?;
-        let lease = pool.acquire_extent(&super::MemoryPoolExtentRequest {
-            len: capacity,
-            align: 1,
-        })?;
-        let lease_id = lease.id();
-        let member = pool.member_info(lease.member())?;
 
         Ok(Self {
             capacity,
             domain,
             policy,
-            pool_marker: shared_pool_marker(&pool),
-            pool,
-            lease: Some(lease),
-            lease_id,
-            member,
+            extent,
             state: Mutex::new(ArenaState { cursor: 0 }),
         })
     }
@@ -137,11 +132,7 @@ impl AllocationStrategy for BoundedArena {
             return Err(AllocError::invalid_request());
         }
 
-        let lease = self
-            .lease
-            .as_ref()
-            .ok_or_else(AllocError::invalid_request)?;
-        let region = self.pool.lease_region(lease)?;
+        let region = self.extent.region();
         let base = region.base.as_ptr() as usize;
         let mut state = self
             .state
@@ -176,13 +167,13 @@ impl AllocationStrategy for BoundedArena {
             ptr,
             request.len,
             request.align,
-            self.member.compatibility.domain,
-            self.member.compatibility.attrs,
-            self.member.compatibility.hazards,
-            self.member.compatibility.geometry,
+            self.extent.member().compatibility.domain,
+            self.extent.member().compatibility.attrs,
+            self.extent.member().compatibility.hazards,
+            self.extent.member().compatibility.geometry,
             AllocationBacking::ArenaBlock {
-                pool_marker: self.pool_marker,
-                lease_id: self.lease_id,
+                pool_marker: self.extent.pool_marker(),
+                lease_id: self.extent.lease_id(),
                 offset,
                 len: request.len,
             },
@@ -199,7 +190,7 @@ impl AllocationStrategy for BoundedArena {
         else {
             return Err(AllocError::invalid_request());
         };
-        if pool_marker != self.pool_marker || lease_id != self.lease_id {
+        if pool_marker != self.extent.pool_marker() || lease_id != self.extent.lease_id() {
             return Err(AllocError::invalid_request());
         }
 
@@ -216,13 +207,5 @@ impl AllocationStrategy for BoundedArena {
 
         state.cursor = offset;
         Ok(())
-    }
-}
-
-impl Drop for BoundedArena {
-    fn drop(&mut self) {
-        if let Some(lease) = self.lease.take() {
-            let _ = self.pool.release_extent(lease);
-        }
     }
 }
