@@ -10,9 +10,8 @@ use crate::mem::resource::{
 
 use super::{
     AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocResult,
-    AssignedPoolExtent, AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind,
-    BoundedArena, HeapAllocator, MemoryPool, MemoryPoolContributor, MemoryPoolPolicy, PoolHandle,
-    Slab,
+    AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind, AssignedPoolExtent, BoundedArena,
+    HeapAllocator, MemoryPool, MemoryPoolContributor, MemoryPoolPolicy, PoolHandle, Slab,
 };
 
 #[derive(Debug)]
@@ -252,19 +251,36 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         domain: AllocatorDomainId,
         capacity: usize,
     ) -> Result<BoundedArena, AllocError> {
+        let max_align = 64;
+        self.arena_with_alignment(domain, capacity, max_align)
+    }
+
+    /// Returns a bounded-arena strategy view for `domain` with explicit maximum alignment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain does not exist, arena allocation is denied by policy, or
+    /// the domain owns no realized backing pool.
+    pub fn arena_with_alignment(
+        &self,
+        domain: AllocatorDomainId,
+        capacity: usize,
+        max_align: usize,
+    ) -> Result<BoundedArena, AllocError> {
         let domain = self
             .domain_record(domain)
             .ok_or_else(AllocError::invalid_domain)?;
         if !domain.info.policy.allows(AllocModeSet::ARENA) {
             return Err(AllocError::policy_denied());
         }
-        let request = BoundedArena::extent_request(capacity)?;
+        let request = BoundedArena::extent_request(capacity, max_align)?;
         let control_request = BoundedArena::control_extent_request()?;
         let extent = domain.assign_extent(&request)?;
         let control_extent = domain.assign_extent(&control_request)?;
         BoundedArena::from_assigned_extents(
             domain.info.id,
             capacity,
+            max_align,
             domain.info.policy,
             extent,
             control_extent,
@@ -532,7 +548,7 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             let pool = if contributor_count == 0 {
                 None
             } else {
-                Some(PoolHandle::new(pool_builder.build()?))
+                Some(PoolHandle::new(pool_builder.build()?)?)
             };
             domain_records[slot] = Some(AllocatorDomainRecord::new(info, pool));
         }

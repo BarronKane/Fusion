@@ -21,8 +21,10 @@ struct ArenaState {
 #[derive(Debug)]
 struct ArenaControl {
     capacity: usize,
+    max_align: usize,
     domain: AllocatorDomainId,
     policy: AllocPolicy,
+    usable_base: usize,
     extent: AssignedPoolExtent,
     state: Mutex<ArenaState>,
 }
@@ -141,6 +143,7 @@ impl fmt::Debug for BoundedArena {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BoundedArena")
             .field("capacity", &self.control.capacity)
+            .field("max_align", &self.control.max_align)
             .field("domain", &self.control.domain)
             .field("policy", &self.control.policy)
             .field("lease_id", &self.control.extent.lease_id())
@@ -151,41 +154,59 @@ impl fmt::Debug for BoundedArena {
 impl BoundedArena {
     pub(super) const fn extent_request(
         capacity: usize,
+        max_align: usize,
     ) -> Result<super::MemoryPoolExtentRequest, AllocError> {
-        if capacity == 0 {
+        if capacity == 0 || max_align == 0 || !max_align.is_power_of_two() {
             return Err(AllocError::invalid_request());
         }
+        let Some(len) = capacity.checked_add(max_align - 1) else {
+            return Err(AllocError::invalid_request());
+        };
         Ok(super::MemoryPoolExtentRequest {
-            len: capacity,
-            align: 1,
+            len,
+            align: max_align,
         })
     }
 
-    pub(super) const fn control_extent_request(
-    ) -> Result<super::MemoryPoolExtentRequest, AllocError> {
+    pub(super) const fn control_extent_request()
+    -> Result<super::MemoryPoolExtentRequest, AllocError> {
         ControlLease::<ArenaControl>::extent_request()
     }
 
     pub(super) fn from_assigned_extents(
         domain: AllocatorDomainId,
         capacity: usize,
+        max_align: usize,
         policy: AllocPolicy,
         extent: AssignedPoolExtent,
         control_extent: AssignedPoolExtent,
     ) -> Result<Self, AllocError> {
-        if capacity == 0 {
+        if capacity == 0 || max_align == 0 || !max_align.is_power_of_two() {
             return Err(AllocError::invalid_request());
         }
         if !policy.allows(AllocModeSet::ARENA) {
             return Err(AllocError::policy_denied());
+        }
+        let region = extent.region();
+        let usable_base = align_up(region.base.as_ptr() as usize, max_align)?;
+        let usable_offset = usable_base
+            .checked_sub(region.base.as_ptr() as usize)
+            .ok_or_else(AllocError::invalid_request)?;
+        let usable_end = usable_offset
+            .checked_add(capacity)
+            .ok_or_else(AllocError::invalid_request)?;
+        if usable_end > region.len {
+            return Err(AllocError::invalid_request());
         }
 
         let control = ControlLease::new(
             control_extent,
             ArenaControl {
                 capacity,
+                max_align,
                 domain,
                 policy,
+                usable_base,
                 extent,
                 state: Mutex::new(ArenaState {
                     cursor: 0,
@@ -259,8 +280,10 @@ impl BoundedArena {
     /// Returns an error when the typed request cannot be represented or the arena is full.
     pub fn alloc_value<T>(&self, value: T) -> Result<ArenaSlice<T>, AllocError> {
         let request = typed_request::<T>(1)?;
-        let region = self.control.extent.region();
-        let base = region.base.as_ptr() as usize;
+        if request.align > self.control.max_align {
+            return Err(AllocError::invalid_request());
+        }
+        let base = self.control.usable_base;
         let mut state = self
             .control
             .state
@@ -302,7 +325,11 @@ impl BoundedArena {
     /// # Errors
     ///
     /// Returns an error when the typed request cannot be represented or the arena is full.
-    pub fn alloc_array_with<T, F>(&self, len: usize, mut init: F) -> Result<ArenaSlice<T>, AllocError>
+    pub fn alloc_array_with<T, F>(
+        &self,
+        len: usize,
+        mut init: F,
+    ) -> Result<ArenaSlice<T>, AllocError>
     where
         F: FnMut(usize) -> T,
     {
@@ -328,8 +355,10 @@ impl BoundedArena {
         F: FnMut(usize) -> Result<T, E>,
     {
         let request = typed_request::<T>(len).map_err(ArenaInitError::Alloc)?;
-        let region = self.control.extent.region();
-        let base = region.base.as_ptr() as usize;
+        if request.align > self.control.max_align {
+            return Err(ArenaInitError::Alloc(AllocError::invalid_request()));
+        }
+        let base = self.control.usable_base;
         let mut state = self
             .control
             .state
@@ -407,9 +436,11 @@ impl AllocationStrategy for BoundedArena {
         if request.len == 0 || request.align == 0 || !request.align.is_power_of_two() {
             return Err(AllocError::invalid_request());
         }
+        if request.align > self.control.max_align {
+            return Err(AllocError::invalid_request());
+        }
 
-        let region = self.control.extent.region();
-        let base = region.base.as_ptr() as usize;
+        let base = self.control.usable_base;
         let mut state = self
             .control
             .state

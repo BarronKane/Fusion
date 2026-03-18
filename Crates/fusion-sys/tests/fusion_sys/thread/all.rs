@@ -7,6 +7,8 @@ use fusion_sys::thread::{
     SystemThreadPool, SystemThreadPoolConfig, SystemWorkItem, ThreadConfig, ThreadEntryReturn,
     ThreadErrorKind, ThreadLifecycleCaps, ThreadStackCaps, ThreadSystem, system_thread,
 };
+use std::sync::Arc;
+use std::thread;
 
 #[repr(C)]
 struct ExitContext<'a> {
@@ -29,6 +31,34 @@ unsafe fn detached_entry(_context: *mut ()) -> ThreadEntryReturn {
 unsafe fn pool_entry(context: *mut ()) {
     let touched = unsafe { &*(context.cast::<AtomicU32>()) };
     touched.fetch_add(1, Ordering::AcqRel);
+}
+
+struct BlockingPoolContext {
+    started: Arc<AtomicU32>,
+    release: Arc<AtomicU32>,
+}
+
+struct CancelPoolContext {
+    executed: Arc<AtomicU32>,
+    canceled: Arc<AtomicU32>,
+}
+
+unsafe fn blocking_pool_entry(context: *mut ()) {
+    let context = unsafe { &*(context.cast::<BlockingPoolContext>()) };
+    context.started.fetch_add(1, Ordering::AcqRel);
+    while context.release.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+}
+
+unsafe fn cancelable_pool_entry(context: *mut ()) {
+    let context = unsafe { &*(context.cast::<CancelPoolContext>()) };
+    context.executed.fetch_add(1, Ordering::AcqRel);
+}
+
+unsafe fn cancelable_pool_drop(context: *mut ()) {
+    let context = unsafe { &*(context.cast::<CancelPoolContext>()) };
+    context.canceled.fetch_add(1, Ordering::AcqRel);
 }
 
 #[test]
@@ -194,4 +224,57 @@ fn system_thread_pool_executes_submitted_work_and_drains_on_shutdown() {
 
     pool.shutdown().expect("pool should drain queued work");
     assert_eq!(completed.load(Ordering::Acquire), 8);
+}
+
+#[test]
+fn system_thread_pool_cancels_queued_work_with_cleanup_hook() {
+    let config = SystemThreadPoolConfig {
+        shutdown_policy: fusion_sys::thread::SystemShutdownPolicy::CancelPending,
+        ..SystemThreadPoolConfig::new()
+    };
+    let pool = SystemThreadPool::new(ThreadSystem::new(), &config)
+        .expect("thread pool should build on supported backend");
+
+    let started = Arc::new(AtomicU32::new(0));
+    let release = Arc::new(AtomicU32::new(0));
+    let blocking = BlockingPoolContext {
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    };
+    let executed = Arc::new(AtomicU32::new(0));
+    let canceled = Arc::new(AtomicU32::new(0));
+    let canceled_context = CancelPoolContext {
+        executed: Arc::clone(&executed),
+        canceled: Arc::clone(&canceled),
+    };
+
+    pool.submit(SystemWorkItem::new(
+        blocking_pool_entry,
+        (&raw const blocking).cast_mut().cast(),
+    ))
+    .expect("blocking work should enter the queue");
+    while started.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+
+    pool.submit(SystemWorkItem::with_cancel(
+        cancelable_pool_entry,
+        (&raw const canceled_context).cast_mut().cast(),
+        cancelable_pool_drop,
+    ))
+    .expect("cancelable work should queue behind the blocker");
+
+    let shutdown = thread::spawn(move || {
+        pool.shutdown()
+            .expect("pool should shut down and cancel queued work");
+    });
+
+    while canceled.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    release.store(1, Ordering::Release);
+    shutdown.join().expect("shutdown thread should join");
+
+    assert_eq!(executed.load(Ordering::Acquire), 0);
+    assert_eq!(canceled.load(Ordering::Acquire), 1);
 }

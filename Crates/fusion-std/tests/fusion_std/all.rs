@@ -181,14 +181,25 @@ fn thread_pool_facade_reports_lower_level_support_honestly() {
             return;
         }
     };
+    let clone = pool
+        .try_clone()
+        .expect("pool handle should retain shared state");
 
     let completed = Arc::new(AtomicU32::new(0));
-    for _ in 0..6 {
+    for _ in 0..3 {
         let completed = Arc::clone(&completed);
         pool.submit(move || {
             completed.fetch_add(1, Ordering::AcqRel);
         })
         .expect("pool should accept submitted work");
+    }
+    for _ in 0..3 {
+        let completed = Arc::clone(&completed);
+        clone
+            .submit(move || {
+                completed.fetch_add(1, Ordering::AcqRel);
+            })
+            .expect("cloned pool handle should submit work");
     }
 
     pool.shutdown().expect("pool should drain and shut down");

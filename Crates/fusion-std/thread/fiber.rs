@@ -2770,7 +2770,7 @@ struct SpawnReservation {
     context: *mut (),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[cfg(feature = "std")]
 struct AutomaticFiberRuntime {
     _carriers: ThreadPool,

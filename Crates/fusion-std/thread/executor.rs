@@ -41,10 +41,10 @@ use core::time::Duration;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use crate::sync::{Mutex as SyncMutex, Semaphore, SyncError, SyncErrorKind};
-use fusion_sys::event::EventSystem;
 use fusion_sys::alloc::{
-    AllocError, AllocErrorKind, ArenaInitError, ArenaSlice, Allocator, BoundedArena, ControlLease,
+    AllocError, AllocErrorKind, Allocator, ArenaInitError, ArenaSlice, BoundedArena, ControlLease,
 };
+use fusion_sys::event::EventSystem;
 pub use fusion_sys::event::{
     EventCompletion, EventCompletionOp, EventCompletionOpKind, EventError, EventErrorKind,
     EventInterest, EventKey, EventModel, EventNotification, EventPoller as ReactorPoller,
@@ -1004,11 +1004,12 @@ impl fmt::Debug for AsyncTaskRegistry {
 impl AsyncTaskRegistry {
     fn new(capacity: usize) -> Result<Self, ExecutorError> {
         let arena_capacity = executor_registry_capacity(capacity)?;
+        let registry_align = align_of::<usize>().max(align_of::<AsyncTaskSlot>());
         let allocator = Allocator::<1, 1>::system_default_with_capacity(arena_capacity)
             .map_err(executor_error_from_alloc)?;
         let default_domain = allocator.default_domain().ok_or_else(executor_invalid)?;
         let arena = allocator
-            .arena(default_domain, arena_capacity)
+            .arena_with_alignment(default_domain, arena_capacity, registry_align)
             .map_err(executor_error_from_alloc)?;
         let slots = match arena.try_alloc_array_with(capacity, AsyncTaskSlot::new) {
             Ok(slots) => slots,
@@ -1241,7 +1242,9 @@ unsafe fn clone_async_task_waker(data: *const ()) -> RawWaker {
     if !core_ptr.is_null() {
         let core = unsafe { &*core_ptr };
         let generation = waker.generation();
-        if let Ok(slot) = core.registry().and_then(|registry| registry.slot(waker.slot_index))
+        if let Ok(slot) = core
+            .registry()
+            .and_then(|registry| registry.slot(waker.slot_index))
             && slot.generation() == generation
             && slot
                 .waker_refs
@@ -1717,7 +1720,9 @@ impl Executor {
 
         Ok(Self::with_scheduler(
             self.config,
-            SchedulerBinding::ThreadPool(pool.clone()),
+            SchedulerBinding::ThreadPool(
+                pool.try_clone().map_err(executor_error_from_thread_pool)?,
+            ),
         ))
     }
 
@@ -1793,6 +1798,28 @@ const fn executor_error_from_alloc(error: AllocError) -> ExecutorError {
         | AllocErrorKind::InvalidDomain
         | AllocErrorKind::ResourceFailure(_)
         | AllocErrorKind::PoolFailure(_) => ExecutorError::Sync(SyncErrorKind::Invalid),
+    }
+}
+
+const fn executor_error_from_thread_pool(error: super::ThreadPoolError) -> ExecutorError {
+    match error.kind() {
+        fusion_sys::thread::ThreadErrorKind::Unsupported => ExecutorError::Unsupported,
+        fusion_sys::thread::ThreadErrorKind::ResourceExhausted => {
+            ExecutorError::Sync(SyncErrorKind::Overflow)
+        }
+        fusion_sys::thread::ThreadErrorKind::Busy
+        | fusion_sys::thread::ThreadErrorKind::Timeout
+        | fusion_sys::thread::ThreadErrorKind::StateConflict => {
+            ExecutorError::Sync(SyncErrorKind::Busy)
+        }
+        fusion_sys::thread::ThreadErrorKind::Invalid
+        | fusion_sys::thread::ThreadErrorKind::PermissionDenied
+        | fusion_sys::thread::ThreadErrorKind::PlacementDenied
+        | fusion_sys::thread::ThreadErrorKind::SchedulerDenied
+        | fusion_sys::thread::ThreadErrorKind::StackDenied
+        | fusion_sys::thread::ThreadErrorKind::Platform(_) => {
+            ExecutorError::Sync(SyncErrorKind::Invalid)
+        }
     }
 }
 
@@ -1887,11 +1914,12 @@ mod tests {
             .slot(slot_index)
             .expect("slot should still be addressable");
         assert_eq!(slot.state(), SLOT_FAILED);
-        assert!(slot
-            .core
-            .lock()
-            .expect("slot core lock should succeed")
-            .is_none());
+        assert!(
+            slot.core
+                .lock()
+                .expect("slot core lock should succeed")
+                .is_none()
+        );
         assert!(slot.waker.core_ptr().is_null());
         assert!(matches!(handle.join(), Err(ExecutorError::Stopped)));
         assert_eq!(slot.generation(), generation);

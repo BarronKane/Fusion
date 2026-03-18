@@ -1,11 +1,10 @@
 //! Domain 1: public carrier thread-pool surface.
 
-use alloc::sync::Arc;
 use core::fmt;
 use core::mem::{MaybeUninit, align_of, size_of};
 
 use crate::sync::{Mutex as SyncMutex, SyncError, SyncErrorKind};
-use fusion_sys::alloc::{AllocRequest, AllocationStrategy, Allocator, Slab};
+use fusion_sys::alloc::{AllocRequest, AllocationStrategy, Allocator, ControlLease, Slab};
 use fusion_sys::thread::{
     SystemPoolPlacement, SystemResizePolicy, SystemShutdownPolicy, SystemStealBoundary,
     SystemThreadPool, SystemThreadPoolConfig, SystemThreadPoolError, SystemThreadPoolStats,
@@ -181,9 +180,14 @@ const THREAD_POOL_JOB_SLOT_BYTES: usize = 1024;
 const THREAD_POOL_JOB_SLOT_COUNT: usize = 256;
 
 #[derive(Debug)]
+struct ThreadPoolJobStore {
+    jobs: SyncMutex<Slab<THREAD_POOL_JOB_SLOT_BYTES, THREAD_POOL_JOB_SLOT_COUNT>>,
+}
+
+#[derive(Debug)]
 struct ThreadPoolShared {
     inner: SyncMutex<Option<SystemThreadPool>>,
-    jobs: SyncMutex<Slab<THREAD_POOL_JOB_SLOT_BYTES, THREAD_POOL_JOB_SLOT_COUNT>>,
+    jobs: ControlLease<ThreadPoolJobStore>,
 }
 
 #[repr(C, align(64))]
@@ -313,19 +317,19 @@ where
 
 #[derive(Debug)]
 struct ThreadJobRecord {
-    shared: Arc<ThreadPoolShared>,
+    jobs: ControlLease<ThreadPoolJobStore>,
     allocation: Option<fusion_sys::alloc::AllocResult>,
     job: InlineThreadJobStorage,
 }
 
 impl ThreadJobRecord {
     const fn new(
-        shared: Arc<ThreadPoolShared>,
+        jobs: ControlLease<ThreadPoolJobStore>,
         allocation: fusion_sys::alloc::AllocResult,
         job: InlineThreadJobStorage,
     ) -> Self {
         Self {
-            shared,
+            jobs,
             allocation: Some(allocation),
             job,
         }
@@ -337,7 +341,22 @@ impl ThreadJobRecord {
         }
         if let Some(allocation) = self.allocation.take() {
             let _ = self
-                .shared
+                .jobs
+                .jobs
+                .lock()
+                .map_err(thread_pool_error_from_sync)
+                .and_then(|slab| {
+                    slab.deallocate(allocation)
+                        .map_err(thread_pool_error_from_alloc)
+                });
+        }
+    }
+
+    fn cancel_contained(mut self) {
+        self.job = InlineThreadJobStorage::empty();
+        if let Some(allocation) = self.allocation.take() {
+            let _ = self
+                .jobs
                 .jobs
                 .lock()
                 .map_err(thread_pool_error_from_sync)
@@ -350,9 +369,9 @@ impl ThreadJobRecord {
 }
 
 /// Public carrier thread-pool wrapper.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ThreadPool {
-    shared: Arc<ThreadPoolShared>,
+    shared: ControlLease<ThreadPoolShared>,
 }
 
 impl ThreadPool {
@@ -369,9 +388,19 @@ impl ThreadPool {
     /// Returns any honest lower-level configuration or support failure.
     pub fn new(config: &ThreadPoolConfig<'_>) -> Result<Self, ThreadPoolError> {
         let inner = SystemThreadPool::new(ThreadSystem::new(), &config.to_system())?;
+        let slab_bytes = THREAD_POOL_JOB_SLOT_BYTES
+            .checked_mul(THREAD_POOL_JOB_SLOT_COUNT)
+            .ok_or_else(ThreadPoolError::resource_exhausted)?;
+        let jobs_control_bytes = ControlLease::<ThreadPoolJobStore>::extent_request()
+            .map_err(thread_pool_error_from_alloc)?
+            .len;
+        let shared_control_bytes = ControlLease::<ThreadPoolShared>::extent_request()
+            .map_err(thread_pool_error_from_alloc)?
+            .len;
         let allocator = Allocator::<1, 1>::system_default_with_capacity(
-            THREAD_POOL_JOB_SLOT_BYTES
-                .checked_mul(THREAD_POOL_JOB_SLOT_COUNT)
+            slab_bytes
+                .checked_add(jobs_control_bytes)
+                .and_then(|total| total.checked_add(shared_control_bytes))
                 .ok_or_else(ThreadPoolError::resource_exhausted)?,
         )
         .map_err(thread_pool_error_from_alloc)?;
@@ -381,11 +410,37 @@ impl ThreadPool {
         let jobs = allocator
             .slab::<THREAD_POOL_JOB_SLOT_BYTES, THREAD_POOL_JOB_SLOT_COUNT>(default_domain)
             .map_err(thread_pool_error_from_alloc)?;
+        let jobs = allocator
+            .control(
+                default_domain,
+                ThreadPoolJobStore {
+                    jobs: SyncMutex::new(jobs),
+                },
+            )
+            .map_err(thread_pool_error_from_alloc)?;
+        let shared = allocator
+            .control(
+                default_domain,
+                ThreadPoolShared {
+                    inner: SyncMutex::new(Some(inner)),
+                    jobs,
+                },
+            )
+            .map_err(thread_pool_error_from_alloc)?;
+        Ok(Self { shared })
+    }
+
+    /// Attempts to clone one additional carrier-pool handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the shared pool state cannot be retained honestly.
+    pub fn try_clone(&self) -> Result<Self, ThreadPoolError> {
         Ok(Self {
-            shared: Arc::new(ThreadPoolShared {
-                inner: SyncMutex::new(Some(inner)),
-                jobs: SyncMutex::new(jobs),
-            }),
+            shared: self
+                .shared
+                .try_clone()
+                .map_err(thread_pool_error_from_alloc)?,
         })
     }
 
@@ -452,12 +507,20 @@ impl ThreadPool {
             record.run_contained();
         }
 
+        unsafe fn cancel_inline_job(context: *mut ()) {
+            // SAFETY: cancellation only runs for queued items that never executed, so the record
+            // remains exclusively owned by the queue slot.
+            let record = unsafe { context.cast::<ThreadJobRecord>().read() };
+            record.cancel_contained();
+        }
+
         let mut storage = InlineThreadJobStorage::empty();
         storage.store(work)?;
 
         let allocation = {
             let slab = self
                 .shared
+                .jobs
                 .jobs
                 .lock()
                 .map_err(thread_pool_error_from_sync)?;
@@ -469,11 +532,28 @@ impl ThreadPool {
             .map_err(thread_pool_error_from_alloc)?
         };
         let context = allocation.ptr.cast::<ThreadJobRecord>();
-        let record = ThreadJobRecord::new(Arc::clone(&self.shared), allocation, storage);
+        let jobs = match self.shared.jobs.try_clone() {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                self.shared
+                    .jobs
+                    .jobs
+                    .lock()
+                    .map_err(thread_pool_error_from_sync)?
+                    .deallocate(allocation)
+                    .map_err(thread_pool_error_from_alloc)?;
+                return Err(thread_pool_error_from_alloc(error));
+            }
+        };
+        let record = ThreadJobRecord::new(jobs, allocation, storage);
         // SAFETY: the slab allocation reserves enough space for one `ThreadJobRecord` and is
         // uniquely owned until the worker consumes and recycles it.
         unsafe { context.as_ptr().write(record) };
-        let item = SystemWorkItem::new(run_inline_job, context.cast::<()>().as_ptr());
+        let item = SystemWorkItem::with_cancel(
+            run_inline_job,
+            context.cast::<()>().as_ptr(),
+            cancel_inline_job,
+        );
 
         match self.submit_raw(item) {
             Ok(()) => Ok(()),

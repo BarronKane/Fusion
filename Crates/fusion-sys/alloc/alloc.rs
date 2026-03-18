@@ -10,10 +10,14 @@
 //! while allocator surfaces are still being built so callers migrate toward the right public
 //! namespace instead of wiring themselves directly into lower plumbing.
 
-use crate::rust_alloc::boxed::Box;
+use core::mem::{ManuallyDrop, size_of};
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use fusion_pal::sys::mem::Region;
+use fusion_pal::sys::mem::{
+    Backing, CachePolicy, MapFlags, MapRequest, MemBase, MemError, MemErrorKind, MemMap, Placement,
+    Protect, Region, RegionAttrs, system_mem,
+};
+
+use crate::sync::{SharedHeader, SharedRelease};
 
 mod arena;
 mod control;
@@ -157,8 +161,9 @@ struct PoolHandleVTable {
 }
 
 struct PoolControlBlock<const MEMBERS: usize, const EXTENTS: usize> {
-    refs: AtomicUsize,
-    pool: MemoryPool<MEMBERS, EXTENTS>,
+    header: SharedHeader,
+    region: Region,
+    pool: ManuallyDrop<MemoryPool<MEMBERS, EXTENTS>>,
 }
 
 pub(crate) struct PoolHandle {
@@ -180,14 +185,29 @@ unsafe impl Sync for PoolHandle {}
 impl PoolHandle {
     pub(crate) fn new<const MEMBERS: usize, const EXTENTS: usize>(
         pool: MemoryPool<MEMBERS, EXTENTS>,
-    ) -> Self {
-        let block = Box::new(PoolControlBlock {
-            refs: AtomicUsize::new(1),
-            pool,
-        });
-        let ptr = NonNull::from(Box::leak(block)).cast::<()>();
-        Self {
-            ptr,
+    ) -> Result<Self, AllocError> {
+        let region = pool_control_region::<MEMBERS, EXTENTS>()?;
+        if region.len < size_of::<PoolControlBlock<MEMBERS, EXTENTS>>()
+            || !(region.base.as_ptr() as usize)
+                .is_multiple_of(core::mem::align_of::<PoolControlBlock<MEMBERS, EXTENTS>>())
+        {
+            let _ = unsafe { system_mem().unmap(region) };
+            return Err(AllocError::invalid_request());
+        }
+
+        let ptr = region.base.cast::<PoolControlBlock<MEMBERS, EXTENTS>>();
+        // SAFETY: the mapped control region is uniquely owned here, properly aligned, and large
+        // enough to host exactly one pool control block.
+        unsafe {
+            ptr.as_ptr().write(PoolControlBlock {
+                header: SharedHeader::new(),
+                region,
+                pool: ManuallyDrop::new(pool),
+            });
+        }
+
+        Ok(Self {
+            ptr: ptr.cast::<()>(),
             vtable: PoolHandleVTable {
                 acquire_extent: acquire_extent_impl::<MEMBERS, EXTENTS>,
                 release_extent: release_extent_impl::<MEMBERS, EXTENTS>,
@@ -196,7 +216,7 @@ impl PoolHandle {
                 retain: retain_impl::<MEMBERS, EXTENTS>,
                 release: release_impl::<MEMBERS, EXTENTS>,
             },
-        }
+        })
     }
 
     pub(crate) fn marker(&self) -> usize {
@@ -243,17 +263,24 @@ impl Drop for PoolHandle {
 fn pool_block<const MEMBERS: usize, const EXTENTS: usize>(
     ptr: NonNull<()>,
 ) -> &'static PoolControlBlock<MEMBERS, EXTENTS> {
-    // SAFETY: the pointer is created from a leaked `PoolControlBlock<MEMBERS, EXTENTS>` and the
-    // vtable ensures each method uses the matching concrete instantiation.
+    // SAFETY: the pointer is created from a live pool control mapping and the vtable ensures each
+    // method uses the matching concrete instantiation.
     unsafe { &*ptr.cast::<PoolControlBlock<MEMBERS, EXTENTS>>().as_ptr() }
+}
+
+fn pool_ref<const MEMBERS: usize, const EXTENTS: usize>(
+    ptr: NonNull<()>,
+) -> &'static MemoryPool<MEMBERS, EXTENTS> {
+    let block = pool_block::<MEMBERS, EXTENTS>(ptr);
+    // SAFETY: the pool lives inside the control block until the final handle release.
+    unsafe { &*((&raw const block.pool).cast::<MemoryPool<MEMBERS, EXTENTS>>()) }
 }
 
 unsafe fn acquire_extent_impl<const MEMBERS: usize, const EXTENTS: usize>(
     ptr: NonNull<()>,
     request: &MemoryPoolExtentRequest,
 ) -> Result<MemoryPoolLease, AllocError> {
-    pool_block::<MEMBERS, EXTENTS>(ptr)
-        .pool
+    pool_ref::<MEMBERS, EXTENTS>(ptr)
         .acquire_extent(request)
         .map_err(Into::into)
 }
@@ -262,8 +289,7 @@ unsafe fn release_extent_impl<const MEMBERS: usize, const EXTENTS: usize>(
     ptr: NonNull<()>,
     lease: MemoryPoolLease,
 ) -> Result<(), AllocError> {
-    pool_block::<MEMBERS, EXTENTS>(ptr)
-        .pool
+    pool_ref::<MEMBERS, EXTENTS>(ptr)
         .release_extent(lease)
         .map_err(Into::into)
 }
@@ -272,7 +298,7 @@ unsafe fn lease_region_impl<const MEMBERS: usize, const EXTENTS: usize>(
     ptr: NonNull<()>,
     lease: &MemoryPoolLease,
 ) -> Result<Region, AllocError> {
-    let view = pool_block::<MEMBERS, EXTENTS>(ptr).pool.lease_view(lease)?;
+    let view = pool_ref::<MEMBERS, EXTENTS>(ptr).lease_view(lease)?;
     // SAFETY: the lease remains live while the assigned extent exists.
     Ok(unsafe { view.as_range_view().raw_region() })
 }
@@ -281,8 +307,7 @@ unsafe fn member_info_impl<const MEMBERS: usize, const EXTENTS: usize>(
     ptr: NonNull<()>,
     member: MemoryPoolMemberId,
 ) -> Result<MemoryPoolMemberInfo, AllocError> {
-    pool_block::<MEMBERS, EXTENTS>(ptr)
-        .pool
+    pool_ref::<MEMBERS, EXTENTS>(ptr)
         .member_info(member)
         .map_err(Into::into)
 }
@@ -290,29 +315,25 @@ unsafe fn member_info_impl<const MEMBERS: usize, const EXTENTS: usize>(
 unsafe fn retain_impl<const MEMBERS: usize, const EXTENTS: usize>(
     ptr: NonNull<()>,
 ) -> Result<(), AllocError> {
-    let refs = &pool_block::<MEMBERS, EXTENTS>(ptr).refs;
-    refs.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-        current.checked_add(1)
-    })
-    .map(|_| ())
-    .map_err(|_| AllocError::capacity_exhausted())
+    pool_block::<MEMBERS, EXTENTS>(ptr)
+        .header
+        .try_retain()
+        .map_err(|error| AllocError::synchronization(error.kind))
 }
 
 unsafe fn release_impl<const MEMBERS: usize, const EXTENTS: usize>(ptr: NonNull<()>) {
-    let refs = &pool_block::<MEMBERS, EXTENTS>(ptr).refs;
-    let Ok(previous) = refs.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-        current.checked_sub(1)
-    }) else {
+    let Ok(release) = pool_block::<MEMBERS, EXTENTS>(ptr).header.release() else {
         return;
     };
-    if previous != 1 {
+    if release != SharedRelease::Last {
         return;
     }
-    // SAFETY: the final reference owns the leaked control block and no further users remain.
+    let block = ptr.cast::<PoolControlBlock<MEMBERS, EXTENTS>>().as_ptr();
+    // SAFETY: the final reference exclusively owns the control mapping. The pool must be dropped
+    // before unmapping because its storage resides inside that mapping.
     unsafe {
-        drop(Box::from_raw(
-            ptr.cast::<PoolControlBlock<MEMBERS, EXTENTS>>().as_ptr(),
-        ));
+        ManuallyDrop::drop(&mut (*block).pool);
+        let _ = system_mem().unmap((*block).region);
     }
 }
 
@@ -376,6 +397,39 @@ impl Drop for AssignedPoolExtent {
     fn drop(&mut self) {
         if let Some(lease) = self.lease.take() {
             let _ = self.pool.release_extent(lease);
+        }
+    }
+}
+
+fn pool_control_region<const MEMBERS: usize, const EXTENTS: usize>() -> Result<Region, AllocError> {
+    let page = system_mem().page_info().alloc_granule.get();
+    let len = align_up(size_of::<PoolControlBlock<MEMBERS, EXTENTS>>(), page)?;
+    unsafe {
+        system_mem().map(&MapRequest {
+            len,
+            align: page,
+            protect: Protect::READ | Protect::WRITE,
+            flags: MapFlags::PRIVATE,
+            attrs: RegionAttrs::VIRTUAL_ONLY,
+            cache: CachePolicy::Default,
+            placement: Placement::Anywhere,
+            backing: Backing::Anonymous,
+        })
+    }
+    .map_err(alloc_error_from_mem)
+}
+
+const fn alloc_error_from_mem(error: MemError) -> AllocError {
+    match error.kind {
+        MemErrorKind::Unsupported => AllocError::unsupported(),
+        MemErrorKind::InvalidInput
+        | MemErrorKind::InvalidAddress
+        | MemErrorKind::Misaligned
+        | MemErrorKind::OutOfBounds
+        | MemErrorKind::Overflow => AllocError::invalid_request(),
+        MemErrorKind::OutOfMemory => AllocError::out_of_memory(),
+        MemErrorKind::Busy | MemErrorKind::PermissionDenied | MemErrorKind::Platform(_) => {
+            AllocError::capacity_exhausted()
         }
     }
 }

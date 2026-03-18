@@ -23,10 +23,33 @@ fn aligned_region(len: usize, align: usize) -> Region {
     Region { base, len }
 }
 
+fn shifted_region(len: usize, align: usize, offset: usize) -> Region {
+    let layout = Layout::from_size_align(
+        len.checked_add(offset).expect("shifted region should fit"),
+        align,
+    )
+    .expect("shifted layout should be valid");
+    // SAFETY: the layout is valid and intentionally leaked for the test.
+    let ptr = unsafe { alloc_zeroed(layout) };
+    let base = NonNull::new(unsafe { ptr.add(offset) }).expect("shifted allocation should exist");
+    Region { base, len }
+}
+
 const fn general_geometry() -> MemoryGeometry {
     MemoryGeometry {
         base_granule: NonZeroUsize::new(4096).expect("nonzero"),
         alloc_granule: NonZeroUsize::new(4096).expect("nonzero"),
+        protect_granule: None,
+        commit_granule: None,
+        lock_granule: None,
+        large_granule: None,
+    }
+}
+
+const fn byte_geometry() -> MemoryGeometry {
+    MemoryGeometry {
+        base_granule: NonZeroUsize::new(1).expect("nonzero"),
+        alloc_granule: NonZeroUsize::new(1).expect("nonzero"),
         protect_granule: None,
         commit_granule: None,
         lock_granule: None,
@@ -60,13 +83,29 @@ fn bound_resource(
     backing: ResourceBackingKind,
     attrs: ResourceAttrs,
 ) -> MemoryResourceHandle {
+    bound_resource_with_region(
+        aligned_region(len, 4096),
+        general_geometry(),
+        domain,
+        backing,
+        attrs,
+    )
+}
+
+fn bound_resource_with_region(
+    region: Region,
+    geometry: MemoryGeometry,
+    domain: MemoryDomain,
+    backing: ResourceBackingKind,
+    attrs: ResourceAttrs,
+) -> MemoryResourceHandle {
     MemoryResourceHandle::from(
         BoundMemoryResource::new(BoundResourceSpec::new(
-            aligned_region(len, 4096),
+            region,
             domain,
             backing,
             attrs,
-            general_geometry(),
+            geometry,
             general_contract(),
             general_support(),
             ResourceState::static_state(
@@ -213,6 +252,56 @@ fn system_default_with_capacity_sizes_backing_for_requested_slabs() {
 }
 
 #[test]
+fn arena_with_alignment_preserves_full_capacity_on_misaligned_backing() {
+    let mut builder = Allocator::<2, 2>::builder();
+    builder
+        .add_resource(bound_resource_with_region(
+            shifted_region(4096, 256, 8),
+            byte_geometry(),
+            MemoryDomain::StaticRegion,
+            ResourceBackingKind::StaticRegion,
+            ResourceAttrs::ALLOCATABLE | ResourceAttrs::CACHEABLE | ResourceAttrs::COHERENT,
+        ))
+        .expect("resource should fit");
+    let allocator = builder.build().expect("allocator should build");
+    let default_domain = allocator
+        .default_domain()
+        .expect("default domain should exist");
+    let arena = allocator
+        .arena_with_alignment(default_domain, 128, 64)
+        .expect("arena should reserve aligned usable backing");
+
+    let first = arena
+        .allocate(&fusion_sys::alloc::AllocRequest {
+            len: 64,
+            align: 64,
+            zeroed: false,
+        })
+        .expect("first aligned allocation should fit");
+    let second = arena
+        .allocate(&fusion_sys::alloc::AllocRequest {
+            len: 64,
+            align: 64,
+            zeroed: false,
+        })
+        .expect("second aligned allocation should consume the remaining advertised capacity");
+
+    assert_eq!(first.align, 64);
+    assert_eq!(second.align, 64);
+    assert_eq!(
+        arena
+            .allocate(&fusion_sys::alloc::AllocRequest {
+                len: 1,
+                align: 1,
+                zeroed: false,
+            })
+            .expect_err("arena should exhaust after its advertised usable capacity")
+            .kind,
+        AllocErrorKind::CapacityExhausted
+    );
+}
+
+#[test]
 fn heap_routing_is_policy_gated_and_still_unimplemented() {
     let allocator = Allocator::<2, 2>::system_default().expect("allocator should build");
     assert_eq!(
@@ -330,7 +419,9 @@ fn arena_supports_typed_slice_metadata_allocation() {
         .expect("arena should reserve backing");
 
     let mut entries = arena
-        .alloc_array_with(4, |index| u32::try_from(index * 3).expect("index should fit"))
+        .alloc_array_with(4, |index| {
+            u32::try_from(index * 3).expect("index should fit")
+        })
         .expect("typed arena slice should allocate");
     assert_eq!(entries.as_slice(), &[0, 3, 6, 9]);
 
@@ -349,7 +440,9 @@ fn arena_reset_rejects_live_typed_leases_and_recovers_after_drop() {
         .expect("arena should reserve backing");
 
     let slice = arena
-        .alloc_array_with(2, |index| u32::try_from(index + 1).expect("index should fit"))
+        .alloc_array_with(2, |index| {
+            u32::try_from(index + 1).expect("index should fit")
+        })
         .expect("typed arena slice should allocate");
     assert_eq!(
         arena

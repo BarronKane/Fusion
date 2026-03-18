@@ -40,6 +40,8 @@ pub struct WorkerId(pub u16);
 
 /// Raw submitted work entry executed by a carrier worker.
 pub type SystemWorkEntry = unsafe fn(*mut ());
+/// Cleanup hook for a work item that is canceled before execution.
+pub type SystemWorkCancel = unsafe fn(*mut ());
 
 /// One raw work item executed by a carrier worker.
 #[derive(Debug, Clone, Copy)]
@@ -48,13 +50,33 @@ pub struct SystemWorkItem {
     pub entry: SystemWorkEntry,
     /// Opaque caller-owned context passed to the entry function.
     pub context: *mut (),
+    /// Optional cleanup hook invoked if the item is canceled before execution.
+    pub cancel: Option<SystemWorkCancel>,
 }
 
 impl SystemWorkItem {
     /// Creates one raw work item.
     #[must_use]
     pub const fn new(entry: SystemWorkEntry, context: *mut ()) -> Self {
-        Self { entry, context }
+        Self {
+            entry,
+            context,
+            cancel: None,
+        }
+    }
+
+    /// Creates one raw work item with an explicit cancellation cleanup hook.
+    #[must_use]
+    pub const fn with_cancel(
+        entry: SystemWorkEntry,
+        context: *mut (),
+        cancel: SystemWorkCancel,
+    ) -> Self {
+        Self {
+            entry,
+            context,
+            cancel: Some(cancel),
+        }
     }
 }
 
@@ -274,7 +296,13 @@ impl PoolSlot {
     }
 
     fn clear_queue(&mut self) {
-        while self.dequeue().is_some() {}
+        while let Some(item) = self.dequeue() {
+            if let Some(cancel) = item.cancel {
+                // SAFETY: cancellation only receives the caller-owned opaque context that would
+                // otherwise have been passed to the work entry.
+                unsafe { cancel(item.context) };
+            }
+        }
     }
 }
 
