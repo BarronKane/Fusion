@@ -1,0 +1,21 @@
+[package]
+name = "fusion-example-template"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "template"
+path = "main.rs"
+
+[features]
+default = ["std"]
+std = ["fusion-std/std"]
+
+[dependencies]
+fusion-std = { path = "../../Crates/fusion-std" }
+
+[lints]
+workspace = true

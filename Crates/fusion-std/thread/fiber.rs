@@ -496,12 +496,22 @@ impl<T: Copy> MappedVec<T> {
         self.len = write;
     }
 
-    fn sort_by_key<K, F>(&mut self, f: F)
+    fn sort_by_key<K, F>(&mut self, mut f: F)
     where
         K: Ord,
         F: FnMut(&T) -> K,
     {
-        self.as_mut_slice().sort_by_key(f);
+        let slice = self.as_mut_slice();
+        for i in 1..slice.len() {
+            let key = f(&slice[i]);
+            let value = slice[i];
+            let mut j = i;
+            while j > 0 && f(&slice[j - 1]) > key {
+                slice[j] = slice[j - 1];
+                j -= 1;
+            }
+            slice[j] = value;
+        }
     }
 }
 

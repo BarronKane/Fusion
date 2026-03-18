@@ -16,6 +16,9 @@ members = [
     "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_vulkan",
     "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_dx12",
     "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_metal",
+
+    # Examples.
+    "Examples/Template",
 ]
 
 [workspace.package]
