@@ -3,17 +3,16 @@
 use core::any::TypeId;
 use core::fmt;
 use core::marker::PhantomData;
-use core::mem::{MaybeUninit, align_of, size_of};
+use core::mem::{ManuallyDrop, MaybeUninit, align_of, size_of};
 use core::num::NonZeroUsize;
+use core::ops::{Deref, DerefMut};
+use core::ptr::{self, NonNull, addr_of_mut};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
-
-use crate::sync::{Mutex as SyncMutex, OnceLock, Semaphore, SyncError, SyncErrorKind};
+use crate::sync::{
+    Mutex as SyncMutex, OnceLock, Semaphore, SharedHeader, SharedRelease, SyncError, SyncErrorKind,
+};
 use fusion_pal::sys::fiber::{
     FiberHostError, FiberHostErrorKind, PlatformFiberSignalStack, PlatformFiberWakeSignal,
     PlatformWakeToken, system_fiber_host,
@@ -118,14 +117,14 @@ pub struct FiberCapacityEvent {
 }
 
 /// Approximate pool-level stack telemetry snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct FiberStackStats {
     /// Total growth events across live fibers in the pool.
     pub total_growth_events: u64,
     /// Maximum committed-page count observed across live fibers.
     pub peak_committed_pages: u32,
     /// Distribution of live fibers by committed-page count.
-    pub committed_distribution: Vec<(u32, usize)>,
+    pub committed_distribution: FiberStackDistribution,
     /// Number of live fibers currently at reservation capacity.
     pub at_capacity_count: usize,
 }
@@ -265,29 +264,426 @@ const EMPTY_EVENT_RECORD: EventRecord = EventRecord {
     notification: EventNotification::Readiness(EventReadiness::empty()),
 };
 
-#[derive(Debug)]
-struct FixedIndexStack {
-    entries: Box<[usize]>,
+struct MetadataSlice<T> {
+    ptr: core::ptr::NonNull<T>,
     len: usize,
 }
 
-impl FixedIndexStack {
-    fn new(capacity: usize) -> Self {
-        let entries = (0..capacity).collect::<Vec<_>>().into_boxed_slice();
+impl<T> Copy for MetadataSlice<T> {}
+
+impl<T> Clone for MetadataSlice<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> MetadataSlice<T> {
+    const fn empty() -> Self {
         Self {
-            len: entries.len(),
-            entries,
+            ptr: core::ptr::NonNull::dangling(),
+            len: 0,
         }
     }
 
-    fn with_prefix(capacity: usize, len: usize) -> Result<Self, FiberError> {
-        if len > capacity {
+    const fn len(&self) -> usize {
+        self.len
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    unsafe fn write(&self, index: usize, value: T) -> Result<(), FiberError> {
+        if index >= self.len {
+            return Err(FiberError::invalid());
+        }
+        // SAFETY: the metadata slice owner reserved a contiguous region for `len` elements and is
+        // responsible for initialization discipline before exposing shared references.
+        unsafe {
+            self.ptr.as_ptr().add(index).write(value);
+        }
+        Ok(())
+    }
+
+    const fn as_slice(&self) -> &[T] {
+        // SAFETY: callers construct `MetadataSlice<T>` only after reserving enough contiguous
+        // space, and all public readers are used only after initialization is complete.
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    const fn as_mut_slice(&mut self) -> &mut [T] {
+        // SAFETY: the owner provides unique mutable access before any aliasing references are
+        // handed out.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+
+    fn get(&self, index: usize) -> Option<&T> {
+        self.as_slice().get(index)
+    }
+}
+
+impl<T> fmt::Debug for MetadataSlice<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MetadataSlice")
+            .field("ptr", &self.ptr)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> Deref for MetadataSlice<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<T> DerefMut for MetadataSlice<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
+    }
+}
+
+// SAFETY: `MetadataSlice<T>` is just a pointer/length view over allocator-owned memory. Sending
+// or sharing it is sound when the underlying element type already satisfies the corresponding
+// thread-safety contract.
+unsafe impl<T: Send> Send for MetadataSlice<T> {}
+// SAFETY: see above.
+unsafe impl<T: Sync> Sync for MetadataSlice<T> {}
+
+struct MappedVec<T> {
+    region: Option<Region>,
+    ptr: core::ptr::NonNull<T>,
+    len: usize,
+    capacity: usize,
+}
+
+impl<T: Copy> MappedVec<T> {
+    const fn new() -> Self {
+        Self {
+            region: None,
+            ptr: core::ptr::NonNull::dangling(),
+            len: 0,
+            capacity: 0,
+        }
+    }
+
+    const fn len(&self) -> usize {
+        self.len
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    const fn as_slice(&self) -> &[T] {
+        // SAFETY: `ptr` references `len` initialized elements while the owned mapping stays live.
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    const fn as_mut_slice(&mut self) -> &mut [T] {
+        // SAFETY: the owned mapping stays live and mutable access is unique through `&mut self`.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.len = self.len.min(len);
+    }
+
+    fn grow_for(&mut self, min_capacity: usize) -> Result<(), FiberError> {
+        let mut target = self.capacity.max(4);
+        while target < min_capacity {
+            target = target
+                .checked_mul(2)
+                .ok_or_else(FiberError::resource_exhausted)?;
+        }
+
+        let mut next = Self::with_capacity(target)?;
+        for item in self.as_slice() {
+            next.push_copy(item)?;
+        }
+        *self = next;
+        Ok(())
+    }
+
+    fn with_capacity(capacity: usize) -> Result<Self, FiberError> {
+        if capacity == 0 {
+            return Ok(Self::new());
+        }
+        if size_of::<T>() == 0 {
+            return Err(FiberError::unsupported());
+        }
+
+        let memory = system_mem();
+        let page = memory.page_info().alloc_granule.get();
+        let align = page.max(align_of::<T>());
+        let bytes = size_of::<T>()
+            .checked_mul(capacity)
+            .ok_or_else(FiberError::resource_exhausted)?;
+        let len = fiber_align_up(bytes, page)?;
+        let region = unsafe {
+            memory.map(&MapRequest {
+                len,
+                align,
+                protect: Protect::NONE,
+                flags: MapFlags::PRIVATE,
+                attrs: RegionAttrs::VIRTUAL_ONLY,
+                cache: CachePolicy::Default,
+                placement: Placement::Anywhere,
+                backing: Backing::Anonymous,
+            })
+        }
+        .map_err(fiber_error_from_mem)?;
+        unsafe { memory.protect(region, Protect::READ | Protect::WRITE) }
+            .map_err(fiber_error_from_mem)?;
+
+        Ok(Self {
+            region: Some(region),
+            ptr: region.base.cast::<T>(),
+            len: 0,
+            capacity,
+        })
+    }
+
+    fn push_copy(&mut self, value: &T) -> Result<(), FiberError> {
+        if self.len == self.capacity {
+            self.grow_for(
+                self.len
+                    .checked_add(1)
+                    .ok_or_else(FiberError::resource_exhausted)?,
+            )?;
+        }
+        // SAFETY: growth above guarantees spare initialized storage for exactly one `T`.
+        unsafe {
+            self.ptr.as_ptr().add(self.len).write(*value);
+        }
+        self.len += 1;
+        Ok(())
+    }
+
+    fn push(&mut self, value: T) -> Result<(), FiberError> {
+        if self.len == self.capacity {
+            self.grow_for(
+                self.len
+                    .checked_add(1)
+                    .ok_or_else(FiberError::resource_exhausted)?,
+            )?;
+        }
+        // SAFETY: growth above guarantees spare initialized storage for exactly one `T`.
+        unsafe {
+            self.ptr.as_ptr().add(self.len).write(value);
+        }
+        self.len += 1;
+        Ok(())
+    }
+
+    fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let mut write = 0;
+        for read in 0..self.len {
+            let value = self.as_slice()[read];
+            if keep(&value) {
+                // SAFETY: `write <= read < len` always addresses initialized storage.
+                unsafe {
+                    self.ptr.as_ptr().add(write).write(value);
+                }
+                write += 1;
+            }
+        }
+        self.len = write;
+    }
+
+    fn sort_by_key<K, F>(&mut self, f: F)
+    where
+        K: Ord,
+        F: FnMut(&T) -> K,
+    {
+        self.as_mut_slice().sort_by_key(f);
+    }
+}
+
+impl<T> Drop for MappedVec<T> {
+    fn drop(&mut self) {
+        if let Some(region) = self.region.take() {
+            let _ = unsafe { system_mem().unmap(region) };
+        }
+    }
+}
+
+impl<T: Copy> Deref for MappedVec<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<T: Copy> DerefMut for MappedVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
+    }
+}
+
+impl<T: Copy + fmt::Debug> fmt::Debug for MappedVec<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_slice().fmt(f)
+    }
+}
+
+impl<T: Copy + PartialEq> PartialEq for MappedVec<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl<T: Copy + Eq> Eq for MappedVec<T> {}
+
+// SAFETY: `MappedVec<T>` owns its mapping and only exposes shared/mutable access according to `T`.
+unsafe impl<T: Copy + Send> Send for MappedVec<T> {}
+// SAFETY: see above.
+unsafe impl<T: Copy + Sync> Sync for MappedVec<T> {}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct FiberStackDistribution {
+    entries: MappedVec<(u32, usize)>,
+}
+
+impl FiberStackDistribution {
+    const fn new() -> Self {
+        Self {
+            entries: MappedVec::new(),
+        }
+    }
+
+    fn increment(&mut self, committed_pages: u32) -> Result<(), FiberError> {
+        if let Some((_, count)) = self
+            .entries
+            .as_mut_slice()
+            .iter_mut()
+            .find(|(pages, _)| *pages == committed_pages)
+        {
+            *count += 1;
+            return Ok(());
+        }
+        self.entries.push((committed_pages, 1))
+    }
+
+    fn sort(&mut self) {
+        self.entries
+            .sort_by_key(|(committed_pages, _)| *committed_pages);
+    }
+
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[must_use]
+    pub const fn as_slice(&self) -> &[(u32, usize)] {
+        self.entries.as_slice()
+    }
+}
+
+impl Default for FiberStackDistribution {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Deref for FiberStackDistribution {
+    type Target = [(u32, usize)];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+struct MetadataCursor {
+    region: Region,
+    offset: usize,
+}
+
+impl MetadataCursor {
+    const fn new(region: Region) -> Self {
+        Self { region, offset: 0 }
+    }
+
+    fn reserve_slice<T>(&mut self, len: usize) -> Result<MetadataSlice<T>, FiberError> {
+        if len == 0 || size_of::<T>() == 0 {
             return Err(FiberError::invalid());
         }
 
-        let mut entries = vec![0_usize; capacity].into_boxed_slice();
-        for (index, slot) in entries.iter_mut().take(len).enumerate() {
-            *slot = index;
+        let base = self.region.base.as_ptr() as usize;
+        let start = fiber_align_up(
+            base.checked_add(self.offset)
+                .ok_or_else(FiberError::resource_exhausted)?,
+            align_of::<T>(),
+        )?;
+        let offset = start
+            .checked_sub(base)
+            .ok_or_else(FiberError::resource_exhausted)?;
+        let bytes = size_of::<T>()
+            .checked_mul(len)
+            .ok_or_else(FiberError::resource_exhausted)?;
+        let end = offset
+            .checked_add(bytes)
+            .ok_or_else(FiberError::resource_exhausted)?;
+        if end > self.region.len {
+            return Err(FiberError::resource_exhausted());
+        }
+
+        self.offset = end;
+        Ok(MetadataSlice {
+            ptr: core::ptr::NonNull::new(start as *mut T).ok_or_else(FiberError::invalid)?,
+            len,
+        })
+    }
+}
+
+fn fiber_align_up(value: usize, align: usize) -> Result<usize, FiberError> {
+    if align == 0 || !align.is_power_of_two() {
+        return Err(FiberError::invalid());
+    }
+    let mask = align - 1;
+    value
+        .checked_add(mask)
+        .map(|rounded| rounded & !mask)
+        .ok_or_else(FiberError::resource_exhausted)
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+struct FiberStackSlabHeader {
+    metadata_len: usize,
+    payload_offset: usize,
+    capacity: usize,
+    slot_stride: usize,
+    elastic: bool,
+}
+
+#[derive(Debug)]
+struct MetadataIndexStack {
+    entries: MetadataSlice<usize>,
+    len: usize,
+}
+
+impl MetadataIndexStack {
+    fn with_prefix(entries: MetadataSlice<usize>, len: usize) -> Result<Self, FiberError> {
+        if len > entries.len() {
+            return Err(FiberError::invalid());
+        }
+        for index in 0..entries.len() {
+            unsafe {
+                entries.write(index, 0)?;
+            }
+        }
+        for index in 0..len {
+            unsafe {
+                entries.write(index, index)?;
+            }
         }
         Ok(Self { entries, len })
     }
@@ -323,20 +719,25 @@ impl FixedIndexStack {
 }
 
 #[derive(Debug)]
-struct FixedIndexQueue {
-    entries: Box<[usize]>,
+struct MetadataIndexQueue {
+    entries: MetadataSlice<usize>,
     head: usize,
     tail: usize,
     len: usize,
 }
 
-impl FixedIndexQueue {
-    fn new(capacity: usize) -> Result<Self, FiberError> {
-        if capacity == 0 {
+impl MetadataIndexQueue {
+    fn new(entries: MetadataSlice<usize>) -> Result<Self, FiberError> {
+        if entries.is_empty() {
             return Err(FiberError::invalid());
         }
+        for index in 0..entries.len() {
+            unsafe {
+                entries.write(index, 0)?;
+            }
+        }
         Ok(Self {
-            entries: vec![0_usize; capacity].into_boxed_slice(),
+            entries,
             head: 0,
             tail: 0,
             len: 0,
@@ -662,12 +1063,13 @@ enum FiberStackBackingState {
     Fixed(FixedStackLayout),
     Elastic {
         layout: ElasticStackLayout,
-        metadata: Box<[ElasticStackMeta]>,
+        metadata: MetadataSlice<ElasticStackMeta>,
     },
 }
 
 #[derive(Debug)]
 struct FiberStackSlab {
+    mapping: Region,
     region: Region,
     slot_stride: usize,
     capacity: usize,
@@ -683,8 +1085,8 @@ struct FiberStackSlab {
 
 #[derive(Debug)]
 struct FiberStackSlabState {
-    free: FixedIndexStack,
-    allocated: Box<[bool]>,
+    free: MetadataIndexStack,
+    allocated: MetadataSlice<bool>,
     committed_slots: usize,
 }
 
@@ -697,10 +1099,19 @@ struct FiberStackRegionLayout {
 }
 
 impl FiberStackSlabState {
-    fn new(capacity: usize, initial_slots: usize) -> Result<Self, FiberError> {
+    fn new(
+        free_entries: MetadataSlice<usize>,
+        allocated: MetadataSlice<bool>,
+        initial_slots: usize,
+    ) -> Result<Self, FiberError> {
+        for index in 0..allocated.len() {
+            unsafe {
+                allocated.write(index, false)?;
+            }
+        }
         Ok(Self {
-            free: FixedIndexStack::with_prefix(capacity, initial_slots)?,
-            allocated: vec![false; capacity].into_boxed_slice(),
+            free: MetadataIndexStack::with_prefix(free_entries, initial_slots)?,
+            allocated,
             committed_slots: initial_slots,
         })
     }
@@ -749,10 +1160,15 @@ impl FiberStackSlab {
         let total = slot_stride
             .checked_mul(count)
             .ok_or_else(FiberError::resource_exhausted)?;
+        let elastic = matches!(backing, FiberStackBackingState::Elastic { .. });
+        let metadata_len = Self::metadata_bytes(count, elastic, page)?;
+        let mapping_len = metadata_len
+            .checked_add(total)
+            .ok_or_else(FiberError::resource_exhausted)?;
 
-        let region = unsafe {
+        let mapping = unsafe {
             memory.map(&MapRequest {
-                len: total,
+                len: mapping_len,
                 align: page,
                 protect: Protect::NONE,
                 flags: MapFlags::PRIVATE,
@@ -763,13 +1179,24 @@ impl FiberStackSlab {
             })
         }
         .map_err(fiber_error_from_mem)?;
+        let metadata_region = mapping
+            .subrange(0, metadata_len)
+            .map_err(fiber_error_from_mem)?;
+        unsafe { memory.protect(metadata_region, Protect::READ | Protect::WRITE) }
+            .map_err(fiber_error_from_mem)?;
+        let region = mapping
+            .subrange(metadata_len, total)
+            .map_err(fiber_error_from_mem)?;
 
         let initial_slots = match growth {
             GreenGrowth::Fixed => count,
             GreenGrowth::OnDemand => count.min(growth_chunk),
         };
+        let (header, state, elastic_metadata) =
+            Self::initialize_metadata(metadata_region, count, slot_stride, initial_slots, elastic)?;
 
         let mut slab = Self {
+            mapping,
             region,
             slot_stride,
             capacity: count,
@@ -779,14 +1206,92 @@ impl FiberStackSlab {
             telemetry,
             huge_pages,
             stack_direction,
-            backing,
-            state: SyncMutex::new(FiberStackSlabState::new(count, initial_slots)?),
+            backing: match backing {
+                FiberStackBackingState::Fixed(layout) => FiberStackBackingState::Fixed(layout),
+                FiberStackBackingState::Elastic { layout, .. } => FiberStackBackingState::Elastic {
+                    layout,
+                    metadata: elastic_metadata.ok_or_else(FiberError::invalid)?,
+                },
+            },
+            state: SyncMutex::new(state),
         };
+        debug_assert_eq!(header.capacity, count);
+        debug_assert_eq!(header.slot_stride, slot_stride);
 
         slab.initialize_slots(initial_slots)?;
         slab.apply_huge_page_policy()?;
 
         Ok(slab)
+    }
+
+    fn metadata_bytes(capacity: usize, elastic: bool, page: usize) -> Result<usize, FiberError> {
+        let mut bytes = size_of::<FiberStackSlabHeader>();
+        bytes = fiber_align_up(bytes, align_of::<usize>())?;
+        bytes = bytes
+            .checked_add(
+                size_of::<usize>()
+                    .checked_mul(capacity)
+                    .ok_or_else(FiberError::resource_exhausted)?,
+            )
+            .ok_or_else(FiberError::resource_exhausted)?;
+        bytes = fiber_align_up(bytes, align_of::<bool>())?;
+        bytes = bytes
+            .checked_add(
+                size_of::<bool>()
+                    .checked_mul(capacity)
+                    .ok_or_else(FiberError::resource_exhausted)?,
+            )
+            .ok_or_else(FiberError::resource_exhausted)?;
+        if elastic {
+            bytes = fiber_align_up(bytes, align_of::<ElasticStackMeta>())?;
+            bytes = bytes
+                .checked_add(
+                    size_of::<ElasticStackMeta>()
+                        .checked_mul(capacity)
+                        .ok_or_else(FiberError::resource_exhausted)?,
+                )
+                .ok_or_else(FiberError::resource_exhausted)?;
+        }
+        fiber_align_up(bytes, page)
+    }
+
+    fn initialize_metadata(
+        metadata_region: Region,
+        capacity: usize,
+        slot_stride: usize,
+        initial_slots: usize,
+        elastic: bool,
+    ) -> Result<
+        (
+            FiberStackSlabHeader,
+            FiberStackSlabState,
+            Option<MetadataSlice<ElasticStackMeta>>,
+        ),
+        FiberError,
+    > {
+        let mut cursor = MetadataCursor::new(metadata_region);
+        let header_slice = cursor.reserve_slice::<FiberStackSlabHeader>(1)?;
+        let free_entries = cursor.reserve_slice::<usize>(capacity)?;
+        let allocated = cursor.reserve_slice::<bool>(capacity)?;
+        let elastic_metadata = if elastic {
+            Some(cursor.reserve_slice::<ElasticStackMeta>(capacity)?)
+        } else {
+            None
+        };
+
+        let header = FiberStackSlabHeader {
+            metadata_len: metadata_region.len,
+            payload_offset: metadata_region.len,
+            capacity,
+            slot_stride,
+            elastic,
+        };
+        unsafe {
+            header_slice.write(0, header)?;
+        }
+
+        let state = FiberStackSlabState::new(free_entries, allocated, initial_slots)?;
+        Ok((header, state, elastic_metadata))
     }
 
     const fn validate_huge_page_policy(
@@ -866,7 +1371,7 @@ impl FiberStackSlab {
                             guard: rounded_guard,
                             detector: page,
                         },
-                        metadata: Box::new([]),
+                        metadata: MetadataSlice::empty(),
                     },
                 ))
             }
@@ -957,10 +1462,9 @@ impl FiberStackSlab {
         telemetry: FiberTelemetry,
         layout: ElasticStackLayout,
         committed_slots: usize,
-        metadata: &mut Box<[ElasticStackMeta]>,
+        metadata: &MetadataSlice<ElasticStackMeta>,
     ) -> Result<(), FiberError> {
         let memory = system_mem();
-        let mut entries = Vec::with_capacity(region_layout.capacity);
         for slot_index in 0..region_layout.capacity {
             let slot = Self::slot_region_from(
                 region_layout.region,
@@ -992,32 +1496,36 @@ impl FiberStackSlab {
             let guard = slot
                 .subrange(guard_offset, layout.guard)
                 .map_err(fiber_error_from_mem)?;
-            entries.push(ElasticStackMeta {
-                reservation_base: slot.base.addr().get(),
-                reservation_end: slot.end_addr().ok_or_else(FiberError::invalid)?,
-                page_size: layout.detector,
-                telemetry,
-                initial_committed_pages: u32::try_from(layout.initial / layout.detector)
-                    .map_err(|_| FiberError::resource_exhausted())?,
-                max_committed_pages: u32::try_from(layout.max / layout.detector)
-                    .map_err(|_| FiberError::resource_exhausted())?,
-                fiber_id: AtomicU64::new(0),
-                carrier_id: AtomicUsize::new(0),
-                capacity_token: AtomicU64::new(PlatformWakeToken::invalid().into_raw()),
-                initial_detector_page: detector.base.addr().get(),
-                initial_guard_page: guard.base.addr().get(),
-                detector_page: AtomicUsize::new(detector.base.addr().get()),
-                guard_page: AtomicUsize::new(guard.base.addr().get()),
-                at_capacity: AtomicBool::new(false),
-                capacity_pending: AtomicBool::new(false),
-                occupied: AtomicBool::new(false),
-                growth_events: AtomicU32::new(0),
-                committed_pages: AtomicU32::new(0),
-                active: AtomicBool::new(true),
-            });
+            unsafe {
+                metadata.write(
+                    slot_index,
+                    ElasticStackMeta {
+                        reservation_base: slot.base.addr().get(),
+                        reservation_end: slot.end_addr().ok_or_else(FiberError::invalid)?,
+                        page_size: layout.detector,
+                        telemetry,
+                        initial_committed_pages: u32::try_from(layout.initial / layout.detector)
+                            .map_err(|_| FiberError::resource_exhausted())?,
+                        max_committed_pages: u32::try_from(layout.max / layout.detector)
+                            .map_err(|_| FiberError::resource_exhausted())?,
+                        fiber_id: AtomicU64::new(0),
+                        carrier_id: AtomicUsize::new(0),
+                        capacity_token: AtomicU64::new(PlatformWakeToken::invalid().into_raw()),
+                        initial_detector_page: detector.base.addr().get(),
+                        initial_guard_page: guard.base.addr().get(),
+                        detector_page: AtomicUsize::new(detector.base.addr().get()),
+                        guard_page: AtomicUsize::new(guard.base.addr().get()),
+                        at_capacity: AtomicBool::new(false),
+                        capacity_pending: AtomicBool::new(false),
+                        occupied: AtomicBool::new(false),
+                        growth_events: AtomicU32::new(0),
+                        committed_pages: AtomicU32::new(0),
+                        active: AtomicBool::new(true),
+                    },
+                )?;
+            }
         }
-        *metadata = entries.into_boxed_slice();
-        register_elastic_stack_metadata(metadata)?;
+        register_elastic_stack_metadata(metadata.as_slice())?;
         Ok(())
     }
 
@@ -1207,7 +1715,7 @@ impl FiberStackSlab {
             return Some(FiberStackStats {
                 total_growth_events: 0,
                 peak_committed_pages: 0,
-                committed_distribution: Vec::new(),
+                committed_distribution: FiberStackDistribution::new(),
                 at_capacity_count: 0,
             });
         };
@@ -1215,7 +1723,7 @@ impl FiberStackSlab {
         let mut stats = FiberStackStats {
             total_growth_events: 0,
             peak_committed_pages: 0,
-            committed_distribution: Vec::new(),
+            committed_distribution: FiberStackDistribution::new(),
             at_capacity_count: 0,
         };
         for meta in &**metadata {
@@ -1231,19 +1739,15 @@ impl FiberStackSlab {
                 stats.at_capacity_count += 1;
             }
 
-            if let Some((_, count)) = stats
+            if stats
                 .committed_distribution
-                .iter_mut()
-                .find(|(pages, _)| *pages == committed_pages)
+                .increment(committed_pages)
+                .is_err()
             {
-                *count += 1;
-            } else {
-                stats.committed_distribution.push((committed_pages, 1));
+                return None;
             }
         }
-        stats
-            .committed_distribution
-            .sort_by_key(|(committed_pages, _)| *committed_pages);
+        stats.committed_distribution.sort();
         Some(stats)
     }
 
@@ -1402,7 +1906,7 @@ impl FiberStackSlab {
 
     fn reset_elastic_metadata(
         slot_index: usize,
-        metadata: &[ElasticStackMeta],
+        metadata: &MetadataSlice<ElasticStackMeta>,
     ) -> Result<(), FiberError> {
         let meta = metadata.get(slot_index).ok_or_else(FiberError::invalid)?;
         meta.detector_page
@@ -1491,12 +1995,12 @@ impl FiberStackSlab {
 impl Drop for FiberStackSlab {
     fn drop(&mut self) {
         if let FiberStackBackingState::Elastic { metadata, .. } = &self.backing {
-            for meta in &**metadata {
+            for meta in metadata.as_slice() {
                 meta.active.store(false, Ordering::Release);
             }
-            let _ = unregister_elastic_stack_metadata(metadata);
+            let _ = unregister_elastic_stack_metadata(metadata.as_slice());
         }
-        let _ = unsafe { system_mem().unmap(self.region) };
+        let _ = unsafe { system_mem().unmap(self.mapping) };
     }
 }
 
@@ -1517,15 +2021,98 @@ impl ElasticRegistryEntry {
     }
 }
 
-#[derive(Debug)]
-struct ElasticRegistrySnapshot {
-    entries: Box<[ElasticRegistryEntry]>,
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct ElasticRegistrySnapshotHeader {
+    len: usize,
+    entries_offset: usize,
 }
 
 #[derive(Debug)]
+struct ElasticRegistrySnapshot {
+    region: Region,
+    header: core::ptr::NonNull<ElasticRegistrySnapshotHeader>,
+}
+
+impl ElasticRegistrySnapshot {
+    fn new(entries: &[ElasticRegistryEntry]) -> Result<Option<Self>, FiberError> {
+        if entries.is_empty() {
+            return Ok(None);
+        }
+
+        let memory = system_mem();
+        let page = memory.page_info().alloc_granule.get();
+        let entries_offset = fiber_align_up(
+            size_of::<ElasticRegistrySnapshotHeader>(),
+            align_of::<ElasticRegistryEntry>(),
+        )?;
+        let entries_bytes = size_of::<ElasticRegistryEntry>()
+            .checked_mul(entries.len())
+            .ok_or_else(FiberError::resource_exhausted)?;
+        let mapping_len = fiber_align_up(
+            entries_offset
+                .checked_add(entries_bytes)
+                .ok_or_else(FiberError::resource_exhausted)?,
+            page,
+        )?;
+
+        let region = unsafe {
+            memory.map(&MapRequest {
+                len: mapping_len,
+                align: page.max(align_of::<ElasticRegistrySnapshotHeader>()),
+                protect: Protect::NONE,
+                flags: MapFlags::PRIVATE,
+                attrs: RegionAttrs::VIRTUAL_ONLY,
+                cache: CachePolicy::Default,
+                placement: Placement::Anywhere,
+                backing: Backing::Anonymous,
+            })
+        }
+        .map_err(fiber_error_from_mem)?;
+        unsafe { memory.protect(region, Protect::READ | Protect::WRITE) }
+            .map_err(fiber_error_from_mem)?;
+
+        let header = region.base.cast::<ElasticRegistrySnapshotHeader>();
+        let entries_ptr = (region.base.as_ptr() as usize)
+            .checked_add(entries_offset)
+            .ok_or_else(FiberError::resource_exhausted)?
+            as *mut ElasticRegistryEntry;
+        debug_assert_eq!(
+            entries_ptr.align_offset(align_of::<ElasticRegistryEntry>()),
+            0
+        );
+        unsafe {
+            header.as_ptr().write(ElasticRegistrySnapshotHeader {
+                len: entries.len(),
+                entries_offset,
+            });
+            core::ptr::copy_nonoverlapping(entries.as_ptr(), entries_ptr, entries.len());
+        }
+
+        Ok(Some(Self { region, header }))
+    }
+
+    const fn header_ptr(&self) -> *const ElasticRegistrySnapshotHeader {
+        self.header.as_ptr()
+    }
+}
+
+impl Drop for ElasticRegistrySnapshot {
+    fn drop(&mut self) {
+        let _ = unsafe { system_mem().unmap(self.region) };
+    }
+}
+
+// SAFETY: snapshots are immutable after publication and keep their backing mapping alive until
+// dropped after the reader drain barrier.
+unsafe impl Send for ElasticRegistrySnapshot {}
+// SAFETY: see above.
+unsafe impl Sync for ElasticRegistrySnapshot {}
+
+#[derive(Debug)]
 struct ElasticRegistryState {
-    pointers: Vec<usize>,
-    snapshot: Option<Box<ElasticRegistrySnapshot>>,
+    pointers: MappedVec<usize>,
+    snapshot: Option<ElasticRegistrySnapshot>,
 }
 
 static ELASTIC_STACK_REGISTRY: OnceLock<SyncMutex<ElasticRegistryState>> = OnceLock::new();
@@ -1536,7 +2123,7 @@ fn elastic_registry() -> Result<&'static SyncMutex<ElasticRegistryState>, FiberE
     ELASTIC_STACK_REGISTRY
         .get_or_init(|| {
             SyncMutex::new(ElasticRegistryState {
-                pointers: Vec::new(),
+                pointers: MappedVec::new(),
                 snapshot: None,
             })
         })
@@ -1546,10 +2133,15 @@ fn elastic_registry() -> Result<&'static SyncMutex<ElasticRegistryState>, FiberE
 fn register_elastic_stack_metadata(metadata: &[ElasticStackMeta]) -> Result<(), FiberError> {
     let registry = elastic_registry()?;
     let mut state = registry.lock().map_err(fiber_error_from_sync)?;
+    let previous_len = state.pointers.len();
     for meta in metadata {
-        state.pointers.push(core::ptr::from_ref(meta) as usize);
+        if let Err(error) = state.pointers.push(core::ptr::from_ref(meta) as usize) {
+            state.pointers.truncate(previous_len);
+            return Err(error);
+        }
     }
-    publish_elastic_snapshot(&mut state);
+    let next_snapshot = build_elastic_snapshot(state.pointers.as_slice())?;
+    commit_elastic_snapshot(&mut state, next_snapshot);
     Ok(())
 }
 
@@ -1561,32 +2153,43 @@ fn unregister_elastic_stack_metadata(metadata: &[ElasticStackMeta]) -> Result<()
             .iter()
             .any(|meta| core::ptr::from_ref(meta) as usize == *meta_ptr)
     });
-    publish_elastic_snapshot(&mut state);
+    let next_snapshot = build_elastic_snapshot(state.pointers.as_slice())?;
+    commit_elastic_snapshot(&mut state, next_snapshot);
     Ok(())
 }
 
-fn publish_elastic_snapshot(state: &mut ElasticRegistryState) {
-    let mut entries = Vec::with_capacity(state.pointers.len());
-    for meta_ptr in &state.pointers {
+fn build_elastic_snapshot(
+    pointers: &[usize],
+) -> Result<Option<ElasticRegistrySnapshot>, FiberError> {
+    let mut entries = MappedVec::with_capacity(pointers.len())?;
+    for meta_ptr in pointers {
         let meta = unsafe { &*(*meta_ptr as *const ElasticStackMeta) };
-        entries.push(ElasticRegistryEntry::new(meta));
+        entries.push(ElasticRegistryEntry::new(meta))?;
     }
     entries.sort_by_key(|entry| entry.reservation_base);
+    ElasticRegistrySnapshot::new(entries.as_slice())
+}
 
-    let next_snapshot = if entries.is_empty() {
-        None
-    } else {
-        Some(Box::new(ElasticRegistrySnapshot {
-            entries: entries.into_boxed_slice(),
-        }))
-    };
+fn commit_elastic_snapshot(
+    state: &mut ElasticRegistryState,
+    next_snapshot: Option<ElasticRegistrySnapshot>,
+) {
     let next_ptr = next_snapshot
-        .as_deref()
-        .map_or(0, |snapshot| core::ptr::from_ref(snapshot) as usize);
+        .as_ref()
+        .map_or(0, |snapshot| snapshot.header_ptr() as usize);
     ELASTIC_STACK_SNAPSHOT.store(next_ptr, Ordering::Release);
     let previous = core::mem::replace(&mut state.snapshot, next_snapshot);
     wait_for_elastic_readers_to_drain();
     drop(previous);
+}
+
+#[allow(clippy::missing_const_for_fn)]
+fn snapshot_entries(snapshot: &ElasticRegistrySnapshotHeader) -> &[ElasticRegistryEntry] {
+    // SAFETY: published snapshots point at a live immutable header inside a mapped snapshot
+    // region, and the entry payload immediately follows at `entries_offset`.
+    let entries_ptr = (core::ptr::from_ref(snapshot).addr() + snapshot.entries_offset)
+        as *const ElasticRegistryEntry;
+    unsafe { core::slice::from_raw_parts(entries_ptr, snapshot.len) }
 }
 
 fn wait_for_elastic_readers_to_drain() {
@@ -1596,10 +2199,10 @@ fn wait_for_elastic_readers_to_drain() {
 }
 
 fn find_snapshot_elastic_entry(
-    snapshot: &ElasticRegistrySnapshot,
+    snapshot: &ElasticRegistrySnapshotHeader,
     fault_addr: usize,
 ) -> Option<ElasticRegistryEntry> {
-    let entries = &*snapshot.entries;
+    let entries = snapshot_entries(snapshot);
     let mut low = 0;
     let mut high = entries.len();
     while low < high {
@@ -1676,7 +2279,7 @@ fn elastic_stack_fault_handler(fault_addr: usize) -> bool {
 fn try_promote_elastic_stack_fault(fault_addr: usize) -> bool {
     ELASTIC_STACK_READERS.fetch_add(1, Ordering::Acquire);
     let snapshot_ptr =
-        ELASTIC_STACK_SNAPSHOT.load(Ordering::Acquire) as *const ElasticRegistrySnapshot;
+        ELASTIC_STACK_SNAPSHOT.load(Ordering::Acquire) as *const ElasticRegistrySnapshotHeader;
     let promoted = if snapshot_ptr.is_null() {
         false
     } else {
@@ -1713,7 +2316,7 @@ struct CarrierWaiterRecord {
 struct CarrierReactorState {
     reactor: EventSystem,
     poller: SyncMutex<EventPoller>,
-    waiters: SyncMutex<Box<[Option<CarrierWaiterRecord>]>>,
+    waiters: SyncMutex<MetadataSlice<Option<CarrierWaiterRecord>>>,
     wake: PlatformFiberWakeSignal,
     wake_key: EventKey,
     capacity: PlatformFiberWakeSignal,
@@ -1727,13 +2330,15 @@ struct CarrierPollResult {
 }
 
 impl CarrierReactorState {
-    fn new(capacity: usize) -> Result<Option<Self>, FiberError> {
-        let reactor = EventSystem::new();
-        let host = system_fiber_host();
-        if !reactor.support().caps.contains(EventCaps::READINESS) || !host.support().wake_signal {
-            return Ok(None);
+    fn new(waiters: MetadataSlice<Option<CarrierWaiterRecord>>) -> Result<Self, FiberError> {
+        for index in 0..waiters.len() {
+            unsafe {
+                waiters.write(index, None)?;
+            }
         }
 
+        let reactor = EventSystem::new();
+        let host = system_fiber_host();
         let mut poller = reactor.create().map_err(fiber_error_from_event)?;
         let wake = host.create_wake_signal().map_err(fiber_error_from_host)?;
         let wake_key = reactor
@@ -1755,15 +2360,15 @@ impl CarrierReactorState {
                 EventInterest::READABLE | EventInterest::ERROR | EventInterest::HANGUP,
             )
             .map_err(fiber_error_from_event)?;
-        Ok(Some(Self {
+        Ok(Self {
             reactor,
             poller: SyncMutex::new(poller),
-            waiters: SyncMutex::new(vec![None; capacity].into_boxed_slice()),
+            waiters: SyncMutex::new(waiters),
             wake,
             wake_key,
             capacity: capacity_signal,
             capacity_key,
-        }))
+        })
     }
 
     fn signal(&self) -> Result<(), FiberError> {
@@ -1882,25 +2487,29 @@ impl CarrierReactorState {
 
 #[derive(Debug)]
 struct CarrierQueue {
-    queue: SyncMutex<FixedIndexQueue>,
+    queue: SyncMutex<MetadataIndexQueue>,
     ready: Semaphore,
     reactor: Option<CarrierReactorState>,
     steal_state: AtomicU64,
 }
 
 impl CarrierQueue {
-    fn new(capacity: usize, enable_reactor: bool, seed: u64) -> Result<Self, FiberError> {
+    fn new(
+        queue_entries: MetadataSlice<usize>,
+        waiters: Option<MetadataSlice<Option<CarrierWaiterRecord>>>,
+        seed: u64,
+    ) -> Result<Self, FiberError> {
+        let capacity = queue_entries.len();
         Ok(Self {
-            queue: SyncMutex::new(FixedIndexQueue::new(capacity)?),
+            queue: SyncMutex::new(MetadataIndexQueue::new(queue_entries)?),
             ready: Semaphore::new(
                 0,
                 u32::try_from(capacity).map_err(|_| FiberError::resource_exhausted())?,
             )
             .map_err(fiber_error_from_sync)?,
-            reactor: if enable_reactor {
-                CarrierReactorState::new(capacity)?
-            } else {
-                None
+            reactor: match waiters {
+                Some(waiters) => Some(CarrierReactorState::new(waiters)?),
+                None => None,
             },
             steal_state: AtomicU64::new(seed.max(1)),
         })
@@ -2253,24 +2862,28 @@ impl GreenTaskSlot {
 
 #[derive(Debug)]
 struct GreenTaskRegistry {
-    slots: Box<[GreenTaskSlot]>,
-    free: SyncMutex<FixedIndexStack>,
+    slots: MetadataSlice<GreenTaskSlot>,
+    free: SyncMutex<MetadataIndexStack>,
 }
 
 impl GreenTaskRegistry {
-    fn new(capacity: usize) -> Result<Self, FiberError> {
-        if capacity == 0 {
+    fn new(
+        slots: MetadataSlice<GreenTaskSlot>,
+        free_entries: MetadataSlice<usize>,
+    ) -> Result<Self, FiberError> {
+        if slots.is_empty() || slots.len() != free_entries.len() {
             return Err(FiberError::invalid());
         }
 
-        let mut slots = Vec::with_capacity(capacity);
-        for slot_index in 0..capacity {
-            slots.push(GreenTaskSlot::new(slot_index)?);
+        for slot_index in 0..slots.len() {
+            unsafe {
+                slots.write(slot_index, GreenTaskSlot::new(slot_index)?)?;
+            }
         }
 
         Ok(Self {
-            free: SyncMutex::new(FixedIndexStack::new(capacity)),
-            slots: slots.into_boxed_slice(),
+            free: SyncMutex::new(MetadataIndexStack::with_prefix(free_entries, slots.len())?),
+            slots,
         })
     }
 
@@ -2456,6 +3069,305 @@ fn take_current_green_yield_action(
     inner.tasks.slot(slot_index)?.take_yield_action()
 }
 
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+struct GreenPoolMetadataHeader {
+    metadata_len: usize,
+    carrier_count: usize,
+    task_capacity: usize,
+    reactor_enabled: bool,
+}
+
+#[derive(Debug)]
+struct GreenPoolMetadata {
+    mapping: Region,
+    tasks: MetadataSlice<GreenTaskSlot>,
+    initialized_tasks: usize,
+    carriers: MetadataSlice<CarrierQueue>,
+    initialized_carriers: usize,
+}
+
+impl GreenPoolMetadata {
+    fn new(
+        carrier_count: usize,
+        task_capacity: usize,
+        reactor_enabled: bool,
+    ) -> Result<(Self, GreenTaskRegistry, MetadataSlice<CarrierQueue>), FiberError> {
+        if carrier_count == 0 || task_capacity == 0 {
+            return Err(FiberError::invalid());
+        }
+
+        let memory = system_mem();
+        let page = memory.page_info().alloc_granule.get();
+        let metadata_len =
+            Self::metadata_bytes(carrier_count, task_capacity, reactor_enabled, page)?;
+        let mapping = unsafe {
+            memory.map(&MapRequest {
+                len: metadata_len,
+                align: page,
+                protect: Protect::NONE,
+                flags: MapFlags::PRIVATE,
+                attrs: RegionAttrs::VIRTUAL_ONLY,
+                cache: CachePolicy::Default,
+                placement: Placement::Anywhere,
+                backing: Backing::Anonymous,
+            })
+        }
+        .map_err(fiber_error_from_mem)?;
+        unsafe { memory.protect(mapping, Protect::READ | Protect::WRITE) }
+            .map_err(fiber_error_from_mem)?;
+
+        let mut metadata = Self {
+            mapping,
+            tasks: MetadataSlice::empty(),
+            initialized_tasks: 0,
+            carriers: MetadataSlice::empty(),
+            initialized_carriers: 0,
+        };
+        let result =
+            Self::initialize_into(&mut metadata, carrier_count, task_capacity, reactor_enabled);
+        match result {
+            Ok((tasks, carriers)) => Ok((metadata, tasks, carriers)),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn metadata_bytes(
+        carrier_count: usize,
+        task_capacity: usize,
+        reactor_enabled: bool,
+        page: usize,
+    ) -> Result<usize, FiberError> {
+        let mut bytes = size_of::<GreenPoolMetadataHeader>();
+        bytes = fiber_align_up(bytes, align_of::<GreenTaskSlot>())?;
+        bytes = bytes
+            .checked_add(
+                size_of::<GreenTaskSlot>()
+                    .checked_mul(task_capacity)
+                    .ok_or_else(FiberError::resource_exhausted)?,
+            )
+            .ok_or_else(FiberError::resource_exhausted)?;
+        bytes = fiber_align_up(bytes, align_of::<usize>())?;
+        bytes = bytes
+            .checked_add(
+                size_of::<usize>()
+                    .checked_mul(task_capacity)
+                    .ok_or_else(FiberError::resource_exhausted)?,
+            )
+            .ok_or_else(FiberError::resource_exhausted)?;
+        bytes = fiber_align_up(bytes, align_of::<CarrierQueue>())?;
+        bytes = bytes
+            .checked_add(
+                size_of::<CarrierQueue>()
+                    .checked_mul(carrier_count)
+                    .ok_or_else(FiberError::resource_exhausted)?,
+            )
+            .ok_or_else(FiberError::resource_exhausted)?;
+
+        for _ in 0..carrier_count {
+            bytes = fiber_align_up(bytes, align_of::<usize>())?;
+            bytes = bytes
+                .checked_add(
+                    size_of::<usize>()
+                        .checked_mul(task_capacity)
+                        .ok_or_else(FiberError::resource_exhausted)?,
+                )
+                .ok_or_else(FiberError::resource_exhausted)?;
+            if reactor_enabled {
+                bytes = fiber_align_up(bytes, align_of::<Option<CarrierWaiterRecord>>())?;
+                bytes = bytes
+                    .checked_add(
+                        size_of::<Option<CarrierWaiterRecord>>()
+                            .checked_mul(task_capacity)
+                            .ok_or_else(FiberError::resource_exhausted)?,
+                    )
+                    .ok_or_else(FiberError::resource_exhausted)?;
+            }
+        }
+
+        fiber_align_up(bytes, page)
+    }
+
+    fn initialize_into(
+        metadata: &mut Self,
+        carrier_count: usize,
+        task_capacity: usize,
+        reactor_enabled: bool,
+    ) -> Result<(GreenTaskRegistry, MetadataSlice<CarrierQueue>), FiberError> {
+        let mut cursor = MetadataCursor::new(metadata.mapping);
+        let header_slice = cursor.reserve_slice::<GreenPoolMetadataHeader>(1)?;
+        let task_slots = cursor.reserve_slice::<GreenTaskSlot>(task_capacity)?;
+        let free_entries = cursor.reserve_slice::<usize>(task_capacity)?;
+        let carriers = cursor.reserve_slice::<CarrierQueue>(carrier_count)?;
+        metadata.tasks = task_slots;
+        metadata.carriers = carriers;
+
+        let header = GreenPoolMetadataHeader {
+            metadata_len: metadata.mapping.len,
+            carrier_count,
+            task_capacity,
+            reactor_enabled,
+        };
+        unsafe {
+            header_slice.write(0, header)?;
+        }
+
+        let tasks = GreenTaskRegistry::new(task_slots, free_entries)?;
+        metadata.initialized_tasks = task_slots.len();
+
+        for carrier_index in 0..carrier_count {
+            let queue_entries = cursor.reserve_slice::<usize>(task_capacity)?;
+            let waiters = if reactor_enabled {
+                Some(cursor.reserve_slice::<Option<CarrierWaiterRecord>>(task_capacity)?)
+            } else {
+                None
+            };
+            let queue =
+                CarrierQueue::new(queue_entries, waiters, initial_steal_seed(carrier_index))?;
+            unsafe {
+                carriers.write(carrier_index, queue)?;
+            }
+            metadata.initialized_carriers += 1;
+        }
+
+        Ok((tasks, carriers))
+    }
+}
+
+impl Drop for GreenPoolMetadata {
+    fn drop(&mut self) {
+        for index in 0..self.initialized_carriers {
+            unsafe {
+                self.carriers.ptr.as_ptr().add(index).drop_in_place();
+            }
+        }
+        for index in 0..self.initialized_tasks {
+            unsafe {
+                self.tasks.ptr.as_ptr().add(index).drop_in_place();
+            }
+        }
+        let _ = unsafe { system_mem().unmap(self.mapping) };
+    }
+}
+
+#[repr(C)]
+struct GreenPoolControlBlock {
+    header: SharedHeader,
+    region: Region,
+    metadata: ManuallyDrop<GreenPoolMetadata>,
+    inner: GreenPoolInner,
+}
+
+struct GreenPoolLease {
+    ptr: NonNull<GreenPoolControlBlock>,
+}
+
+unsafe impl Send for GreenPoolLease {}
+unsafe impl Sync for GreenPoolLease {}
+
+impl fmt::Debug for GreenPoolLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GreenPoolLease")
+            .field("ptr", &self.ptr)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GreenPoolLease {
+    fn new(inner: GreenPoolInner, metadata: GreenPoolMetadata) -> Result<Self, FiberError> {
+        let region = green_pool_control_region()?;
+        if region.len < size_of::<GreenPoolControlBlock>()
+            || !(region.base.as_ptr() as usize).is_multiple_of(align_of::<GreenPoolControlBlock>())
+        {
+            let _ = unsafe { system_mem().unmap(region) };
+            return Err(FiberError::invalid());
+        }
+
+        let ptr = region.base.cast::<GreenPoolControlBlock>();
+        // SAFETY: the control mapping is uniquely owned here, properly aligned, and large enough
+        // to host exactly one green-pool control block.
+        unsafe {
+            ptr.as_ptr().write(GreenPoolControlBlock {
+                header: SharedHeader::new(),
+                region,
+                metadata: ManuallyDrop::new(metadata),
+                inner,
+            });
+        }
+        Ok(Self { ptr })
+    }
+
+    fn try_clone(&self) -> Result<Self, FiberError> {
+        self.block()
+            .header
+            .try_retain()
+            .map_err(fiber_error_from_sync)?;
+        Ok(Self { ptr: self.ptr })
+    }
+
+    const fn as_ptr(&self) -> *const GreenPoolInner {
+        core::ptr::from_ref(&self.block().inner)
+    }
+
+    const fn block(&self) -> &GreenPoolControlBlock {
+        // SAFETY: a live lease always points at a live green-pool control block.
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
+impl Deref for GreenPoolLease {
+    type Target = GreenPoolInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.block().inner
+    }
+}
+
+impl Drop for GreenPoolLease {
+    fn drop(&mut self) {
+        let Ok(release) = self.block().header.release() else {
+            return;
+        };
+        if release != SharedRelease::Last {
+            return;
+        }
+
+        let block = self.ptr.as_ptr();
+        // SAFETY: the final lease exclusively owns the control block. The inner value must be
+        // dropped before the metadata mapping is released, and the control mapping itself is only
+        // unmapped after both have been torn down.
+        unsafe {
+            ptr::drop_in_place(addr_of_mut!((*block).inner));
+            let metadata = ManuallyDrop::take(&mut (*block).metadata);
+            let region = (*block).region;
+            drop(metadata);
+            let _ = system_mem().unmap(region);
+        }
+    }
+}
+
+fn green_pool_control_region() -> Result<Region, FiberError> {
+    let memory = system_mem();
+    let page = memory.page_info().alloc_granule.get();
+    let len = fiber_align_up(size_of::<GreenPoolControlBlock>(), page)?;
+    let region = unsafe {
+        memory.map(&MapRequest {
+            len,
+            align: page.max(align_of::<GreenPoolControlBlock>()),
+            protect: Protect::NONE,
+            flags: MapFlags::PRIVATE,
+            attrs: RegionAttrs::VIRTUAL_ONLY,
+            cache: CachePolicy::Default,
+            placement: Placement::Anywhere,
+            backing: Backing::Anonymous,
+        })
+    }
+    .map_err(fiber_error_from_mem)?;
+    unsafe { memory.protect(region, Protect::READ | Protect::WRITE) }
+        .map_err(fiber_error_from_mem)?;
+    Ok(region)
+}
+
 #[derive(Debug)]
 struct GreenPoolInner {
     support: FiberSupport,
@@ -2466,7 +3378,7 @@ struct GreenPoolInner {
     active: AtomicUsize,
     next_id: AtomicU64,
     next_carrier: AtomicUsize,
-    carriers: Box<[CarrierQueue]>,
+    carriers: MetadataSlice<CarrierQueue>,
     tasks: GreenTaskRegistry,
     stack_slab: FiberStackSlab,
 }
@@ -2662,7 +3574,7 @@ impl GreenPoolInner {
 pub struct GreenHandle<T = ()> {
     id: u64,
     slot_index: usize,
-    inner: Arc<GreenPoolInner>,
+    inner: GreenPoolLease,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -2692,7 +3604,7 @@ where
     /// Returns the fiber failure that stopped execution, if any.
     pub fn join(self) -> Result<T, FiberError> {
         let state = if let Some(current) = current_green_context() {
-            if core::ptr::eq(current.inner, Arc::as_ptr(&self.inner))
+            if core::ptr::eq(current.inner, self.inner.as_ptr())
                 && current.slot_index == self.slot_index
                 && current.id == self.id
             {
@@ -2733,19 +3645,21 @@ where
     }
 }
 
-impl Clone for GreenHandle<()> {
-    fn clone(&self) -> Self {
-        if self.inner.tasks.clone_handle(self.slot_index).is_err() {
-            // The underlying task registry should stay live while a handle exists. If it
-            // doesn't, the only honest fallback left to `Clone` is to preserve the stale handle
-            // shape and let later observation report the state conflict.
-        }
-        Self {
+impl GreenHandle<()> {
+    /// Attempts to clone one unit-result green-thread handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying green-pool root cannot be retained honestly.
+    pub fn try_clone(&self) -> Result<Self, FiberError> {
+        let inner = self.inner.try_clone()?;
+        self.inner.tasks.clone_handle(self.slot_index)?;
+        Ok(Self {
             id: self.id,
             slot_index: self.slot_index,
-            inner: Arc::clone(&self.inner),
+            inner,
             _marker: PhantomData,
-        }
+        })
     }
 }
 
@@ -2758,7 +3672,7 @@ impl<T> Drop for GreenHandle<T> {
 /// Public green-thread pool wrapper.
 #[derive(Debug)]
 pub struct GreenPool {
-    inner: Arc<GreenPoolInner>,
+    inner: GreenPoolLease,
 }
 
 #[derive(Debug)]
@@ -2804,11 +3718,11 @@ impl GreenPool {
             .map_err(fiber_error_from_sync)?;
         let mut guard = slot.lock().map_err(fiber_error_from_sync)?;
         if let Some(runtime) = guard.as_ref() {
-            return Ok(runtime.fibers.clone());
+            return runtime.fibers.try_clone();
         }
 
         let runtime = build_automatic_fiber_runtime()?;
-        let fibers = runtime.fibers.clone();
+        let fibers = runtime.fibers.try_clone()?;
         *guard = Some(runtime);
         Ok(fibers)
     }
@@ -2860,41 +3774,45 @@ impl GreenPool {
         let reactor_enabled = EventSystem::new()
             .support()
             .caps
-            .contains(EventCaps::READINESS);
-        let mut carriers = Vec::with_capacity(carrier_workers);
-        for carrier_index in 0..carrier_workers {
-            carriers.push(CarrierQueue::new(
-                config.max_fibers_per_carrier,
-                reactor_enabled,
-                initial_steal_seed(carrier_index),
-            )?);
-        }
-        let carriers = carriers.into_boxed_slice();
+            .contains(EventCaps::READINESS)
+            && system_fiber_host().support().wake_signal;
+        let (pool_metadata, tasks, carriers) = GreenPoolMetadata::new(
+            carrier_workers,
+            config.max_fibers_per_carrier,
+            reactor_enabled,
+        )?;
 
-        let inner = Arc::new(GreenPoolInner {
-            support,
-            scheduling: config.scheduling,
-            capacity_policy: config.capacity_policy,
-            shutdown: AtomicBool::new(false),
-            client_refs: AtomicUsize::new(1),
-            active: AtomicUsize::new(0),
-            next_id: AtomicU64::new(1),
-            next_carrier: AtomicUsize::new(0),
-            carriers,
-            tasks: GreenTaskRegistry::new(config.max_fibers_per_carrier)?,
-            stack_slab,
-        });
-        inner.tasks.initialize_owner(Arc::as_ptr(&inner));
+        let inner = GreenPoolLease::new(
+            GreenPoolInner {
+                support,
+                scheduling: config.scheduling,
+                capacity_policy: config.capacity_policy,
+                shutdown: AtomicBool::new(false),
+                client_refs: AtomicUsize::new(1),
+                active: AtomicUsize::new(0),
+                next_id: AtomicU64::new(1),
+                next_carrier: AtomicUsize::new(0),
+                carriers,
+                tasks,
+                stack_slab,
+            },
+            pool_metadata,
+        )?;
+        inner.tasks.initialize_owner(inner.as_ptr());
 
         for carrier_index in 0..inner.carriers.len() {
-            let inner = Arc::clone(&inner);
-            carrier
+            let carrier_inner = inner.try_clone()?;
+            if let Err(error) = carrier
                 .submit(move || {
-                    if run_carrier_loop(&inner, carrier_index).is_err() {
-                        let _ = inner.request_shutdown();
+                    if run_carrier_loop(&carrier_inner, carrier_index).is_err() {
+                        let _ = carrier_inner.request_shutdown();
                     }
                 })
-                .map_err(fiber_error_from_thread_pool)?;
+                .map_err(fiber_error_from_thread_pool)
+            {
+                let _ = inner.request_shutdown();
+                return Err(error);
+            }
         }
 
         Ok(Self { inner })
@@ -3063,7 +3981,7 @@ impl GreenPool {
         Ok(GreenHandle {
             id: reservation.id,
             slot_index: reservation.slot_index,
-            inner: Arc::clone(&self.inner),
+            inner: self.inner.try_clone()?,
             _marker: PhantomData,
         })
     }
@@ -3078,12 +3996,16 @@ impl GreenPool {
     }
 }
 
-impl Clone for GreenPool {
-    fn clone(&self) -> Self {
-        self.inner.client_refs.fetch_add(1, Ordering::AcqRel);
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
+impl GreenPool {
+    /// Attempts to clone one green-thread pool handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the shared pool root cannot be retained honestly.
+    pub fn try_clone(&self) -> Result<Self, FiberError> {
+        let inner = self.inner.try_clone()?;
+        inner.client_refs.fetch_add(1, Ordering::AcqRel);
+        Ok(Self { inner })
     }
 }
 
@@ -3207,7 +4129,7 @@ unsafe fn green_task_entry(context: *mut ()) -> FiberReturn {
     FiberReturn::new(0)
 }
 
-fn run_carrier_loop(inner: &Arc<GreenPoolInner>, carrier_index: usize) -> Result<(), FiberError> {
+fn run_carrier_loop(inner: &GreenPoolInner, carrier_index: usize) -> Result<(), FiberError> {
     if inner.carriers[carrier_index].reactor.is_some() {
         return run_reactor_carrier_loop(inner, carrier_index);
     }
@@ -3235,7 +4157,7 @@ fn run_carrier_loop(inner: &Arc<GreenPoolInner>, carrier_index: usize) -> Result
 }
 
 fn run_reactor_carrier_loop(
-    inner: &Arc<GreenPoolInner>,
+    inner: &GreenPoolInner,
     carrier_index: usize,
 ) -> Result<(), FiberError> {
     let _alt_stack = if inner.stack_slab.requires_signal_handler() {
@@ -3311,7 +4233,7 @@ fn dequeue_ready(
 }
 
 fn run_ready_task(
-    inner: &Arc<GreenPoolInner>,
+    inner: &GreenPoolInner,
     carrier_index: usize,
     slot_index: usize,
 ) -> Result<(), FiberError> {
@@ -3456,7 +4378,8 @@ pub type FiberHandle<T = ()> = GreenHandle<T>;
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use std::sync::{Mutex as StdMutex, OnceLock as StdOnceLock};
+    use std::sync::{Arc, Mutex as StdMutex, OnceLock as StdOnceLock};
+    use std::vec::Vec;
 
     static CAPACITY_EVENT_CALLS: AtomicU32 = AtomicU32::new(0);
     static LAST_CAPACITY_FIBER_ID: AtomicU64 = AtomicU64::new(0);
@@ -3641,7 +4564,7 @@ mod tests {
         let stats = slab.stack_stats().expect("telemetry should be enabled");
         assert_eq!(stats.total_growth_events, 1);
         assert_eq!(stats.peak_committed_pages, 2);
-        assert_eq!(stats.committed_distribution, vec![(2, 1)]);
+        assert_eq!(stats.committed_distribution.as_slice(), &[(2, 1)]);
         assert_eq!(stats.at_capacity_count, 1);
 
         slab.release(lease.slot_index)
@@ -3748,14 +4671,14 @@ mod tests {
             .load(Ordering::Acquire);
 
         let snapshot_ptr =
-            ELASTIC_STACK_SNAPSHOT.load(Ordering::Acquire) as *const ElasticRegistrySnapshot;
+            ELASTIC_STACK_SNAPSHOT.load(Ordering::Acquire) as *const ElasticRegistrySnapshotHeader;
         assert!(!snapshot_ptr.is_null());
         let snapshot = unsafe { &*snapshot_ptr };
         assert!(find_snapshot_elastic_entry(snapshot, detector).is_some());
 
         drop(slab);
         let snapshot_ptr =
-            ELASTIC_STACK_SNAPSHOT.load(Ordering::Acquire) as *const ElasticRegistrySnapshot;
+            ELASTIC_STACK_SNAPSHOT.load(Ordering::Acquire) as *const ElasticRegistrySnapshotHeader;
         assert!(snapshot_ptr.is_null());
     }
 

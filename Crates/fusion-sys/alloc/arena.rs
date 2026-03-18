@@ -1,15 +1,17 @@
 use core::fmt;
-use core::mem::{align_of, size_of};
+use core::marker::PhantomData;
+use core::mem::{ManuallyDrop, align_of, size_of};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::slice;
 
-use crate::sync::Mutex;
+use crate::sync::{Mutex, RetainedHandle};
 
 use super::{
     AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
-    AllocResult, AllocationBacking, AllocationStrategy, AllocatorDomainId, AssignedPoolExtent,
-    ControlLease, align_up,
+    AllocResult, AllocSubsystemKind, AllocationBacking, AllocationStrategy, AllocatorDomainId,
+    AssignedPoolExtent, ControlLease, Immortal, LifetimePolicy, MetadataPageHeader, Mortal,
+    align_up, front_metadata_layout,
 };
 
 #[derive(Debug)]
@@ -20,12 +22,10 @@ struct ArenaState {
 
 #[derive(Debug)]
 struct ArenaControl {
-    capacity: usize,
+    header: MetadataPageHeader,
     max_align: usize,
     domain: AllocatorDomainId,
     policy: AllocPolicy,
-    usable_base: usize,
-    extent: AssignedPoolExtent,
     state: Mutex<ArenaState>,
 }
 
@@ -135,51 +135,50 @@ impl<T> Drop for ArenaSlice<T> {
 }
 
 /// Bounded lifetime allocator intended for bulk-free or reset-driven use.
-pub struct BoundedArena {
-    control: ControlLease<ArenaControl>,
+pub struct BoundedArena<L: LifetimePolicy = Mortal> {
+    control: ManuallyDrop<ControlLease<ArenaControl>>,
+    _lifetime: PhantomData<L>,
 }
 
-impl fmt::Debug for BoundedArena {
+impl<L: LifetimePolicy> fmt::Debug for BoundedArena<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BoundedArena")
-            .field("capacity", &self.control.capacity)
-            .field("max_align", &self.control.max_align)
-            .field("domain", &self.control.domain)
-            .field("policy", &self.control.policy)
-            .field("lease_id", &self.control.extent.lease_id())
+            .field("capacity", &self.control().header.payload_len)
+            .field("max_align", &self.control().max_align)
+            .field("domain", &self.control().domain)
+            .field("policy", &self.control().policy)
+            .field("lease_id", &self.control().lease_id())
+            .field("immortal", &L::IMMORTAL)
             .finish_non_exhaustive()
     }
 }
 
-impl BoundedArena {
-    pub(super) const fn extent_request(
+impl<L: LifetimePolicy> BoundedArena<L> {
+    pub(super) fn extent_request(
         capacity: usize,
         max_align: usize,
     ) -> Result<super::MemoryPoolExtentRequest, AllocError> {
         if capacity == 0 || max_align == 0 || !max_align.is_power_of_two() {
             return Err(AllocError::invalid_request());
         }
-        let Some(len) = capacity.checked_add(max_align - 1) else {
-            return Err(AllocError::invalid_request());
-        };
+        let layout = front_metadata_layout(
+            ControlLease::<ArenaControl>::backing_size(),
+            ControlLease::<ArenaControl>::backing_align(),
+            capacity,
+            max_align,
+        )?;
         Ok(super::MemoryPoolExtentRequest {
-            len,
-            align: max_align,
+            len: layout.total_len,
+            align: layout.request_align,
         })
     }
 
-    pub(super) const fn control_extent_request()
-    -> Result<super::MemoryPoolExtentRequest, AllocError> {
-        ControlLease::<ArenaControl>::extent_request()
-    }
-
-    pub(super) fn from_assigned_extents(
+    pub(super) fn from_assigned_extent(
         domain: AllocatorDomainId,
         capacity: usize,
         max_align: usize,
         policy: AllocPolicy,
         extent: AssignedPoolExtent,
-        control_extent: AssignedPoolExtent,
     ) -> Result<Self, AllocError> {
         if capacity == 0 || max_align == 0 || !max_align.is_power_of_two() {
             return Err(AllocError::invalid_request());
@@ -187,27 +186,36 @@ impl BoundedArena {
         if !policy.allows(AllocModeSet::ARENA) {
             return Err(AllocError::policy_denied());
         }
+        let layout = front_metadata_layout(
+            ControlLease::<ArenaControl>::backing_size(),
+            ControlLease::<ArenaControl>::backing_align(),
+            capacity,
+            max_align,
+        )?;
         let region = extent.region();
-        let usable_base = align_up(region.base.as_ptr() as usize, max_align)?;
-        let usable_offset = usable_base
-            .checked_sub(region.base.as_ptr() as usize)
+        let usable_base = (region.base.as_ptr() as usize)
+            .checked_add(layout.payload_offset)
             .ok_or_else(AllocError::invalid_request)?;
-        let usable_end = usable_offset
-            .checked_add(capacity)
-            .ok_or_else(AllocError::invalid_request)?;
-        if usable_end > region.len {
+        if region.len < layout.total_len
+            || usable_base % max_align != 0
+            || !(region.base.as_ptr() as usize)
+                .is_multiple_of(ControlLease::<ArenaControl>::backing_align())
+        {
             return Err(AllocError::invalid_request());
         }
 
         let control = ControlLease::new(
-            control_extent,
+            extent,
             ArenaControl {
-                capacity,
+                header: MetadataPageHeader::new(
+                    AllocSubsystemKind::BoundedArena,
+                    layout.metadata_len,
+                    layout.payload_offset,
+                    layout.payload_len,
+                ),
                 max_align,
                 domain,
                 policy,
-                usable_base,
-                extent,
                 state: Mutex::new(ArenaState {
                     cursor: 0,
                     live_slices: 0,
@@ -215,7 +223,10 @@ impl BoundedArena {
             },
         )?;
 
-        Ok(Self { control })
+        Ok(Self {
+            control: ManuallyDrop::new(control),
+            _lifetime: PhantomData,
+        })
     }
 
     /// Returns the capability surface a bounded arena provides.
@@ -235,38 +246,31 @@ impl BoundedArena {
     /// Returns the configured bounded capacity in bytes.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.control.capacity
+        self.control().header.payload_len
     }
 
     /// Returns the arena policy.
     #[must_use]
     pub fn policy(&self) -> AllocPolicy {
-        self.control.policy
+        self.control().policy
     }
 
     /// Returns the owning allocator domain.
     #[must_use]
     pub fn domain(&self) -> AllocatorDomainId {
-        self.control.domain
+        self.control().domain
     }
 
-    /// Resets the arena cursor to the beginning of the reserved extent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the arena still has live typed leases or cannot synchronize its
-    /// cursor state honestly.
-    pub fn reset(&self) -> Result<(), AllocError> {
-        let mut state = self
-            .control
-            .state
-            .lock()
-            .map_err(|error| AllocError::synchronization(error.kind))?;
-        if state.live_slices != 0 {
-            return Err(AllocError::busy());
-        }
-        state.cursor = 0;
-        Ok(())
+    const fn control(&self) -> &ControlLease<ArenaControl> {
+        // SAFETY: the arena owns the control lease and only leaks it intentionally for immortal
+        // typestates.
+        unsafe { &*((&raw const self.control).cast::<ControlLease<ArenaControl>>()) }
+    }
+
+    fn payload_base(&self) -> Result<usize, AllocError> {
+        (self.control().region().base.as_ptr() as usize)
+            .checked_add(self.control().header.payload_offset)
+            .ok_or_else(AllocError::invalid_request)
     }
 
     /// Allocates one typed value from the arena.
@@ -280,12 +284,12 @@ impl BoundedArena {
     /// Returns an error when the typed request cannot be represented or the arena is full.
     pub fn alloc_value<T>(&self, value: T) -> Result<ArenaSlice<T>, AllocError> {
         let request = typed_request::<T>(1)?;
-        if request.align > self.control.max_align {
+        if request.align > self.control().max_align {
             return Err(AllocError::invalid_request());
         }
-        let base = self.control.usable_base;
+        let base = self.payload_base()?;
         let mut state = self
-            .control
+            .control()
             .state
             .lock()
             .map_err(|error| AllocError::synchronization(error.kind))?;
@@ -300,11 +304,11 @@ impl BoundedArena {
         let end = offset
             .checked_add(request.len)
             .ok_or_else(AllocError::invalid_request)?;
-        if end > self.control.capacity {
+        if end > self.control().header.payload_len {
             return Err(AllocError::capacity_exhausted());
         }
 
-        let control = self.control.try_clone()?;
+        let control = self.control().try_clone()?;
         state.cursor = end;
         state.live_slices = state
             .live_slices
@@ -355,12 +359,12 @@ impl BoundedArena {
         F: FnMut(usize) -> Result<T, E>,
     {
         let request = typed_request::<T>(len).map_err(ArenaInitError::Alloc)?;
-        if request.align > self.control.max_align {
+        if request.align > self.control().max_align {
             return Err(ArenaInitError::Alloc(AllocError::invalid_request()));
         }
-        let base = self.control.usable_base;
+        let base = self.payload_base().map_err(ArenaInitError::Alloc)?;
         let mut state = self
-            .control
+            .control()
             .state
             .lock()
             .map_err(|error| ArenaInitError::Alloc(AllocError::synchronization(error.kind)))?;
@@ -376,11 +380,11 @@ impl BoundedArena {
         let end = offset
             .checked_add(request.len)
             .ok_or_else(|| ArenaInitError::Alloc(AllocError::invalid_request()))?;
-        if end > self.control.capacity {
+        if end > self.control().header.payload_len {
             return Err(ArenaInitError::Alloc(AllocError::capacity_exhausted()));
         }
 
-        let control = self.control.try_clone().map_err(ArenaInitError::Alloc)?;
+        let control = self.control().try_clone().map_err(ArenaInitError::Alloc)?;
         state.cursor = end;
         state.live_slices = state
             .live_slices
@@ -419,30 +423,48 @@ impl BoundedArena {
     }
 }
 
-impl AllocationStrategy for BoundedArena {
-    fn policy(&self) -> AllocPolicy {
-        self.control.policy
-    }
-
-    fn capabilities(&self) -> AllocCapabilities {
-        Self::supported_capabilities()
-    }
-
-    fn hazards(&self) -> AllocHazards {
-        Self::expected_hazards()
-    }
-
-    fn allocate(&self, request: &AllocRequest) -> Result<AllocResult, AllocError> {
-        if request.len == 0 || request.align == 0 || !request.align.is_power_of_two() {
-            return Err(AllocError::invalid_request());
-        }
-        if request.align > self.control.max_align {
-            return Err(AllocError::invalid_request());
-        }
-
-        let base = self.control.usable_base;
+impl BoundedArena<Mortal> {
+    /// Resets the arena cursor to the beginning of the reserved extent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the arena still has live typed leases or cannot synchronize its
+    /// cursor state honestly.
+    pub fn reset(&self) -> Result<(), AllocError> {
         let mut state = self
-            .control
+            .control()
+            .state
+            .lock()
+            .map_err(|error| AllocError::synchronization(error.kind))?;
+        if state.live_slices != 0 {
+            return Err(AllocError::busy());
+        }
+        state.cursor = 0;
+        Ok(())
+    }
+}
+
+impl BoundedArena<Immortal> {
+    /// Allocates one process-lifetime typed value from this immortal arena.
+    ///
+    /// The returned handle never drops `value`; the bytes remain permanently occupied until
+    /// process teardown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the typed request cannot be represented honestly or the arena is full.
+    pub fn alloc_retained_value<T: 'static>(
+        &self,
+        value: T,
+    ) -> Result<RetainedHandle<T>, AllocError> {
+        let request = typed_request::<T>(1)?;
+        if request.align > self.control().max_align {
+            return Err(AllocError::invalid_request());
+        }
+
+        let base = self.payload_base()?;
+        let mut state = self
+            .control()
             .state
             .lock()
             .map_err(|error| AllocError::synchronization(error.kind))?;
@@ -457,7 +479,76 @@ impl AllocationStrategy for BoundedArena {
         let end = offset
             .checked_add(request.len)
             .ok_or_else(AllocError::invalid_request)?;
-        if end > self.control.capacity {
+        if end > self.control().header.payload_len {
+            return Err(AllocError::capacity_exhausted());
+        }
+
+        state.cursor = end;
+        let ptr = NonNull::new(start as *mut T).ok_or_else(AllocError::invalid_request)?;
+        // SAFETY: the typed request reserved one aligned `T` slot in immortal backing.
+        unsafe {
+            ptr.as_ptr().write(value);
+        }
+        drop(state);
+        Ok(RetainedHandle::from_nonnull(ptr))
+    }
+}
+
+impl<L: LifetimePolicy> BoundedArena<L> {
+    const fn control_for_drop(&mut self) -> &mut ManuallyDrop<ControlLease<ArenaControl>> {
+        &mut self.control
+    }
+}
+
+impl<L: LifetimePolicy> Drop for BoundedArena<L> {
+    fn drop(&mut self) {
+        if !L::IMMORTAL {
+            // SAFETY: mortal arenas own their control lease and must release it on drop.
+            unsafe {
+                ManuallyDrop::drop(self.control_for_drop());
+            }
+        }
+    }
+}
+impl<L: LifetimePolicy> AllocationStrategy for BoundedArena<L> {
+    fn policy(&self) -> AllocPolicy {
+        self.control().policy
+    }
+
+    fn capabilities(&self) -> AllocCapabilities {
+        Self::supported_capabilities()
+    }
+
+    fn hazards(&self) -> AllocHazards {
+        Self::expected_hazards()
+    }
+
+    fn allocate(&self, request: &AllocRequest) -> Result<AllocResult, AllocError> {
+        if request.len == 0 || request.align == 0 || !request.align.is_power_of_two() {
+            return Err(AllocError::invalid_request());
+        }
+        if request.align > self.control().max_align {
+            return Err(AllocError::invalid_request());
+        }
+
+        let base = self.payload_base()?;
+        let mut state = self
+            .control()
+            .state
+            .lock()
+            .map_err(|error| AllocError::synchronization(error.kind))?;
+        let start = align_up(
+            base.checked_add(state.cursor)
+                .ok_or_else(AllocError::invalid_request)?,
+            request.align,
+        )?;
+        let offset = start
+            .checked_sub(base)
+            .ok_or_else(AllocError::invalid_request)?;
+        let end = offset
+            .checked_add(request.len)
+            .ok_or_else(AllocError::invalid_request)?;
+        if end > self.control().header.payload_len {
             return Err(AllocError::capacity_exhausted());
         }
 
@@ -475,13 +566,13 @@ impl AllocationStrategy for BoundedArena {
             ptr,
             request.len,
             request.align,
-            self.control.extent.member().compatibility.domain,
-            self.control.extent.member().compatibility.attrs,
-            self.control.extent.member().compatibility.hazards,
-            self.control.extent.member().compatibility.geometry,
+            self.control().member().compatibility.domain,
+            self.control().member().compatibility.attrs,
+            self.control().member().compatibility.hazards,
+            self.control().member().compatibility.geometry,
             AllocationBacking::ArenaBlock {
-                pool_marker: self.control.extent.pool_marker(),
-                lease_id: self.control.extent.lease_id(),
+                pool_marker: self.control().pool_marker(),
+                lease_id: self.control().lease_id(),
                 offset,
                 len: request.len,
             },
@@ -498,14 +589,12 @@ impl AllocationStrategy for BoundedArena {
         else {
             return Err(AllocError::invalid_request());
         };
-        if pool_marker != self.control.extent.pool_marker()
-            || lease_id != self.control.extent.lease_id()
-        {
+        if pool_marker != self.control().pool_marker() || lease_id != self.control().lease_id() {
             return Err(AllocError::invalid_request());
         }
 
         let mut state = self
-            .control
+            .control()
             .state
             .lock()
             .map_err(|error| AllocError::synchronization(error.kind))?;

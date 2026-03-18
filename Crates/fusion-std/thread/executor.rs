@@ -50,6 +50,7 @@ pub use fusion_sys::event::{
     EventInterest, EventKey, EventModel, EventNotification, EventPoller as ReactorPoller,
     EventReadiness, EventRecord, EventSourceHandle, EventSupport,
 };
+use fusion_sys::fiber::{FiberError, FiberErrorKind};
 use fusion_sys::thread::system_thread;
 
 use super::{GreenPool, ThreadPool};
@@ -1252,9 +1253,11 @@ unsafe fn clone_async_task_waker(data: *const ()) -> RawWaker {
                     current.checked_add(1)
                 })
                 .is_ok()
-        {}
+        {
+            return RawWaker::new(data, &ASYNC_TASK_WAKER_VTABLE);
+        }
     }
-    RawWaker::new(data, &ASYNC_TASK_WAKER_VTABLE)
+    noop_async_task_raw_waker()
 }
 
 unsafe fn wake_async_task_waker(data: *const ()) {
@@ -1307,11 +1310,28 @@ unsafe fn drop_async_task_waker(data: *const ()) {
     }
 }
 
+const fn noop_async_task_raw_waker() -> RawWaker {
+    RawWaker::new(core::ptr::null(), &NOOP_ASYNC_TASK_WAKER_VTABLE)
+}
+
+const unsafe fn clone_noop_async_task_waker(_: *const ()) -> RawWaker {
+    noop_async_task_raw_waker()
+}
+
+const unsafe fn wake_noop_async_task_waker(_: *const ()) {}
+
 static ASYNC_TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     clone_async_task_waker,
     wake_async_task_waker,
     wake_async_task_waker_by_ref,
     drop_async_task_waker,
+);
+
+static NOOP_ASYNC_TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    clone_noop_async_task_waker,
+    wake_noop_async_task_waker,
+    wake_noop_async_task_waker,
+    wake_noop_async_task_waker,
 );
 
 /// Public spawned-task handle.
@@ -1738,7 +1758,7 @@ impl Executor {
 
         Ok(Self::with_scheduler(
             self.config,
-            SchedulerBinding::GreenPool(green.clone()),
+            SchedulerBinding::GreenPool(green.try_clone().map_err(executor_error_from_fiber)?),
         ))
     }
 }
@@ -1818,6 +1838,16 @@ const fn executor_error_from_thread_pool(error: super::ThreadPoolError) -> Execu
         | fusion_sys::thread::ThreadErrorKind::SchedulerDenied
         | fusion_sys::thread::ThreadErrorKind::StackDenied
         | fusion_sys::thread::ThreadErrorKind::Platform(_) => {
+            ExecutorError::Sync(SyncErrorKind::Invalid)
+        }
+    }
+}
+
+const fn executor_error_from_fiber(error: FiberError) -> ExecutorError {
+    match error.kind() {
+        FiberErrorKind::Unsupported => ExecutorError::Unsupported,
+        FiberErrorKind::ResourceExhausted => ExecutorError::Sync(SyncErrorKind::Overflow),
+        FiberErrorKind::Invalid | FiberErrorKind::StateConflict | FiberErrorKind::Context(_) => {
             ExecutorError::Sync(SyncErrorKind::Invalid)
         }
     }

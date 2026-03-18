@@ -225,7 +225,9 @@ fn green_pool_supports_guarded_stacks_and_rejects_oversized_jobs() {
             runs_for_job.fetch_add(1, Ordering::AcqRel);
         })
         .expect("guarded green pool should spawn a bounded job");
-    let clone = handle.clone();
+    let clone = handle
+        .try_clone()
+        .expect("green handle should clone honestly");
     handle
         .join()
         .expect("first handle should observe green completion");
@@ -388,7 +390,7 @@ fn fiber_pool_stack_stats_follow_telemetry_policy() {
         .expect("telemetry-enabled pool should report stack stats");
     assert_eq!(stats.total_growth_events, 0);
     assert_eq!(stats.peak_committed_pages, 1);
-    assert_eq!(stats.committed_distribution, vec![(1, 1)]);
+    assert_eq!(stats.committed_distribution.as_slice(), &[(1, 1)]);
     assert_eq!(stats.at_capacity_count, 0);
 
     gate.store(1, Ordering::Release);
@@ -416,7 +418,9 @@ fn green_pool_supports_typed_child_results_and_cooperative_join() {
     let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
     let fibers = GreenPool::new(&GreenPoolConfig::new(), &carrier)
         .expect("green pool should build on the carrier pool");
-    let child_pool = fibers.clone();
+    let child_pool = fibers
+        .try_clone()
+        .expect("green pool should clone honestly");
 
     let parent = fibers
         .spawn(move || {

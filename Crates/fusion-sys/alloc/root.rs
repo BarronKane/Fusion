@@ -11,7 +11,7 @@ use crate::mem::resource::{
 use super::{
     AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocResult,
     AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind, AssignedPoolExtent, BoundedArena,
-    HeapAllocator, MemoryPool, MemoryPoolContributor, MemoryPoolPolicy, PoolHandle, Slab,
+    HeapAllocator, Immortal, MemoryPool, MemoryPoolContributor, MemoryPoolPolicy, PoolHandle, Slab,
 };
 
 #[derive(Debug)]
@@ -142,7 +142,13 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         }
 
         let page = system_mem().page_info().alloc_granule.get();
-        let requested_len = super::align_up(min_capacity.max(page), page)?;
+        let requested_len = super::align_up(
+            min_capacity
+                .max(page)
+                .checked_add(page)
+                .ok_or_else(AllocError::invalid_request)?,
+            page,
+        )?;
 
         let mut request = ResourceRequest::anonymous_private(requested_len);
         request.name = Some("fusion-alloc-system-default");
@@ -240,6 +246,34 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         Slab::from_assigned_extent(domain.info.id, domain.info.policy, extent)
     }
 
+    /// Returns an immortal slab strategy view for `domain`.
+    ///
+    /// Dropping the wrapper intentionally leaves the assigned backing alive until process exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain does not exist, slab allocation is denied by policy, or
+    /// the domain owns no realized backing pool.
+    pub fn immortal_slab<const SIZE: usize, const COUNT: usize>(
+        &self,
+        domain: AllocatorDomainId,
+    ) -> Result<Slab<SIZE, COUNT, Immortal>, AllocError> {
+        let domain = self
+            .domain_record(domain)
+            .ok_or_else(AllocError::invalid_domain)?;
+        if !domain.info.policy.allows(AllocModeSet::SLAB) {
+            return Err(AllocError::policy_denied());
+        }
+        let slot_align = Slab::<SIZE, COUNT, Immortal>::slot_align_for_domain()?;
+        let request = Slab::<SIZE, COUNT, Immortal>::extent_request(slot_align)?;
+        let extent = domain.assign_extent(&request)?;
+        Slab::<SIZE, COUNT, Immortal>::from_assigned_extent(
+            domain.info.id,
+            domain.info.policy,
+            extent,
+        )
+    }
+
     /// Returns a bounded-arena strategy view for `domain`.
     ///
     /// # Errors
@@ -253,6 +287,24 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
     ) -> Result<BoundedArena, AllocError> {
         let max_align = 64;
         self.arena_with_alignment(domain, capacity, max_align)
+    }
+
+    /// Returns an immortal bounded-arena strategy view for `domain`.
+    ///
+    /// Immortal arenas keep their backing alive until process exit and therefore do not expose
+    /// `reset()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain does not exist, arena allocation is denied by policy, or
+    /// the domain owns no realized backing pool.
+    pub fn immortal_arena(
+        &self,
+        domain: AllocatorDomainId,
+        capacity: usize,
+    ) -> Result<BoundedArena<Immortal>, AllocError> {
+        let max_align = 64;
+        self.immortal_arena_with_alignment(domain, capacity, max_align)
     }
 
     /// Returns a bounded-arena strategy view for `domain` with explicit maximum alignment.
@@ -273,17 +325,44 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         if !domain.info.policy.allows(AllocModeSet::ARENA) {
             return Err(AllocError::policy_denied());
         }
-        let request = BoundedArena::extent_request(capacity, max_align)?;
-        let control_request = BoundedArena::control_extent_request()?;
+        let request = BoundedArena::<super::Mortal>::extent_request(capacity, max_align)?;
         let extent = domain.assign_extent(&request)?;
-        let control_extent = domain.assign_extent(&control_request)?;
-        BoundedArena::from_assigned_extents(
+        BoundedArena::from_assigned_extent(
             domain.info.id,
             capacity,
             max_align,
             domain.info.policy,
             extent,
-            control_extent,
+        )
+    }
+
+    /// Returns an immortal bounded-arena strategy view for `domain` with explicit maximum
+    /// alignment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain does not exist, arena allocation is denied by policy, or
+    /// the domain owns no realized backing pool.
+    pub fn immortal_arena_with_alignment(
+        &self,
+        domain: AllocatorDomainId,
+        capacity: usize,
+        max_align: usize,
+    ) -> Result<BoundedArena<Immortal>, AllocError> {
+        let domain = self
+            .domain_record(domain)
+            .ok_or_else(AllocError::invalid_domain)?;
+        if !domain.info.policy.allows(AllocModeSet::ARENA) {
+            return Err(AllocError::policy_denied());
+        }
+        let request = BoundedArena::<Immortal>::extent_request(capacity, max_align)?;
+        let extent = domain.assign_extent(&request)?;
+        BoundedArena::<Immortal>::from_assigned_extent(
+            domain.info.id,
+            capacity,
+            max_align,
+            domain.info.policy,
+            extent,
         )
     }
 

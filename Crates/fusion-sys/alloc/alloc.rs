@@ -24,6 +24,8 @@ mod control;
 mod domain;
 mod error;
 mod heap;
+mod lifetime;
+mod metadata;
 mod policy;
 mod root;
 mod slab;
@@ -34,6 +36,8 @@ pub use domain::{AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind};
 #[allow(unused_imports)]
 pub use error::{AllocError, AllocErrorKind};
 pub use heap::HeapAllocator;
+pub use lifetime::{Immortal, LifetimePolicy, Mortal};
+pub(crate) use metadata::{AllocSubsystemKind, MetadataPageHeader, front_metadata_layout};
 pub use policy::{AllocCapabilities, AllocHazards, AllocModeSet, AllocPolicy};
 #[allow(unused_imports)]
 pub use root::{Allocator, AllocatorBuilder};

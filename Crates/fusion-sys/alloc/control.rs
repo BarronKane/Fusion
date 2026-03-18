@@ -3,9 +3,14 @@ use core::mem::{ManuallyDrop, align_of, size_of};
 use core::ops::Deref;
 use core::ptr::{self, NonNull, addr_of_mut};
 
-use crate::sync::{SharedHeader, SharedRelease};
+use crate::sync::{Retainable, SharedBacking, SharedHeader, SharedRelease};
 
-use super::{AllocError, AssignedPoolExtent, MemoryPoolExtentRequest};
+use fusion_pal::sys::mem::Region;
+
+use super::{
+    AllocError, AssignedPoolExtent, MemoryPoolExtentRequest, MemoryPoolLeaseId,
+    MemoryPoolMemberInfo,
+};
 
 #[repr(C)]
 struct ControlBlock<T> {
@@ -30,6 +35,18 @@ impl<T> fmt::Debug for ControlLease<T> {
 }
 
 impl<T> ControlLease<T> {
+    /// Returns the concrete control-block size used for one `ControlLease<T>`.
+    #[must_use]
+    pub(crate) const fn backing_size() -> usize {
+        size_of::<ControlBlock<T>>()
+    }
+
+    /// Returns the concrete control-block alignment used for one `ControlLease<T>`.
+    #[must_use]
+    pub(crate) const fn backing_align() -> usize {
+        align_of::<ControlBlock<T>>()
+    }
+
     /// Returns the extent request needed to host one control block for `T`.
     ///
     /// # Errors
@@ -88,9 +105,48 @@ impl<T> ControlLease<T> {
         core::ptr::from_ref(&self.block().value)
     }
 
+    const fn extent_ref(&self) -> &AssignedPoolExtent {
+        // SAFETY: the control block keeps the assigned extent live until the final lease drops.
+        unsafe { &*((&raw const self.block().extent).cast::<AssignedPoolExtent>()) }
+    }
+
+    #[must_use]
+    pub(crate) const fn region(&self) -> Region {
+        self.extent_ref().region()
+    }
+
+    #[must_use]
+    pub(crate) const fn pool_marker(&self) -> usize {
+        self.extent_ref().pool_marker()
+    }
+
+    #[must_use]
+    pub(crate) const fn lease_id(&self) -> MemoryPoolLeaseId {
+        self.extent_ref().lease_id()
+    }
+
+    #[must_use]
+    pub(crate) const fn member(&self) -> MemoryPoolMemberInfo {
+        self.extent_ref().member()
+    }
+
     const fn block(&self) -> &ControlBlock<T> {
         // SAFETY: `ptr` always points at a live control block while a lease exists.
         unsafe { self.ptr.as_ref() }
+    }
+}
+
+impl<T> Retainable for ControlLease<T> {
+    type Error = AllocError;
+
+    fn try_retain(&self) -> Result<Self, Self::Error> {
+        self.try_clone()
+    }
+}
+
+unsafe impl<T> SharedBacking<T> for ControlLease<T> {
+    fn as_ptr(&self) -> *const T {
+        Self::as_ptr(self)
     }
 }
 

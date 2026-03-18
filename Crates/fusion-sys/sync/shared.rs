@@ -1,4 +1,7 @@
 use core::fmt;
+use core::marker::PhantomData;
+use core::ops::Deref;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use fusion_pal::sys::sync::SyncError;
@@ -94,6 +97,94 @@ impl fmt::Display for SharedRelease {
             Self::Remaining => f.write_str("shared control still has live owners"),
             Self::Last => f.write_str("shared control reached its final owner"),
         }
+    }
+}
+
+/// Fallible retain/clone contract for shared lifetime handles.
+pub trait Retainable: Sized {
+    /// Error reported when the handle cannot be retained honestly.
+    type Error;
+
+    /// Attempts to retain one additional handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns the backing-specific error when the handle cannot be retained honestly.
+    fn try_retain(&self) -> Result<Self, Self::Error>;
+}
+
+/// Shared-handle contract for stable shared backing.
+///
+/// # Safety
+///
+/// Implementors must guarantee that the returned pointer remains valid for as long as every
+/// retained handle produced through this contract stays alive.
+pub unsafe trait SharedBacking<T>: Retainable {
+    /// Returns the stable payload pointer backing this shared handle.
+    fn as_ptr(&self) -> *const T;
+}
+
+/// Stable retained handle to immortal backing that outlives the entire process.
+pub struct RetainedHandle<T: 'static> {
+    ptr: NonNull<T>,
+    _marker: PhantomData<&'static T>,
+}
+
+impl<T: 'static> Copy for RetainedHandle<T> {}
+
+impl<T: 'static> Clone for RetainedHandle<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+unsafe impl<T: Sync + 'static> Send for RetainedHandle<T> {}
+unsafe impl<T: Sync + 'static> Sync for RetainedHandle<T> {}
+
+impl<T: 'static> RetainedHandle<T> {
+    /// Creates a retained handle from process-lifetime static backing.
+    #[must_use]
+    pub fn from_static(value: &'static T) -> Self {
+        Self {
+            ptr: NonNull::from(value),
+            _marker: PhantomData,
+        }
+    }
+
+    pub(crate) const fn from_nonnull(ptr: NonNull<T>) -> Self {
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns the stable payload pointer.
+    #[must_use]
+    pub const fn as_ptr(&self) -> *const T {
+        self.ptr.as_ptr()
+    }
+}
+
+impl<T: 'static> Deref for RetainedHandle<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `RetainedHandle<T>` is only constructed from immortal backing.
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
+impl<T: 'static> AsRef<T> for RetainedHandle<T> {
+    fn as_ref(&self) -> &T {
+        self
+    }
+}
+
+impl<T: 'static> fmt::Debug for RetainedHandle<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RetainedHandle")
+            .field("ptr", &self.ptr)
+            .finish_non_exhaustive()
     }
 }
 
