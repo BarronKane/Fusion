@@ -6,9 +6,9 @@
 use core::num::NonZeroUsize;
 
 use crate::pal::mem::{
-    Advise, MapFlags, MapReplaceRequest, MapRequest, MemAdviceCaps, MemAdvise, MemBackingCaps,
-    MemBase, MemCaps, MemCommit, MemError, MemLock, MemMap, MemMapReplace, MemPlacementCaps,
-    MemProtect, MemQuery, MemSupport, PageInfo, Protect, Region, RegionInfo,
+    Address, Advise, MapFlags, MapReplaceRequest, MapRequest, MemAdviceCaps, MemAdvise,
+    MemBackingCaps, MemBase, MemCaps, MemCommit, MemError, MemLock, MemMap, MemMapReplace,
+    MemPlacementCaps, MemProtect, MemQuery, MemSupport, PageInfo, Protect, Region, RegionInfo,
 };
 
 /// Placeholder iOS implementation of the fusion-pal memory provider contract.
@@ -84,7 +84,7 @@ impl MemProtect for IosMem {
 impl MemCommit for IosMem {}
 
 impl MemQuery for IosMem {
-    fn query(&self, _addr: core::ptr::NonNull<u8>) -> Result<RegionInfo, MemError> {
+    fn query(&self, _addr: Address) -> Result<RegionInfo, MemError> {
         Err(MemError::unsupported())
     }
 }

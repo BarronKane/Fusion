@@ -68,11 +68,16 @@ impl<T> ControlLease<T> {
         if region.len < size_of::<ControlBlock<T>>() {
             return Err(AllocError::invalid_request());
         }
-        if !(region.base.as_ptr() as usize).is_multiple_of(align_of::<ControlBlock<T>>()) {
+        if !region
+            .base
+            .get()
+            .is_multiple_of(align_of::<ControlBlock<T>>())
+        {
             return Err(AllocError::invalid_request());
         }
 
-        let ptr = region.base.cast::<ControlBlock<T>>();
+        let ptr = NonNull::new(region.base.cast::<ControlBlock<T>>())
+            .ok_or_else(AllocError::invalid_request)?;
         // SAFETY: the assigned extent is uniquely owned here, sufficiently aligned, and large
         // enough to host the control block exactly once.
         unsafe {

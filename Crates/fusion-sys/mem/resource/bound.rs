@@ -41,9 +41,7 @@
 //! memory and pre-existing board memory are different acquisition stories, even when both end
 //! up represented as `MemoryResource`s.
 
-use core::ptr::NonNull;
-
-use fusion_pal::sys::mem::{Placement, Protect, Region, RegionInfo};
+use fusion_pal::sys::mem::{Address, Placement, Protect, Region, RegionInfo};
 
 use super::{
     MemoryDomain, MemoryGeometry, MemoryResource, QueryableResource, ResolvedResource,
@@ -166,12 +164,12 @@ impl QueryableResource for BoundMemoryResource {
     /// Returns an error when query is not supported for this bound resource, when `addr`
     /// does not lie within the governed range, or when the bound state is not precise enough
     /// to answer the point query truthfully.
-    fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, ResourceError> {
+    fn query(&self, addr: Address) -> Result<RegionInfo, ResourceError> {
         if !self.ops().contains(ResourceOpSet::QUERY) {
             return Err(ResourceError::unsupported_operation());
         }
 
-        if !self.range().contains(addr.as_ptr()) {
+        if !self.range().contains_addr(addr) {
             return Err(ResourceError::invalid_range());
         }
 

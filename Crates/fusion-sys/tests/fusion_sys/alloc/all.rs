@@ -1,7 +1,7 @@
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
-use fusion_pal::sys::mem::{CachePolicy, Protect, Region};
+use fusion_pal::sys::mem::{Address, CachePolicy, Protect, Region};
 use fusion_sys::alloc::{
     MemoryPool, MemoryPoolContributor, MemoryPoolContributorOrigin, MemoryPoolErrorKind,
     MemoryPoolExtentRequest, MemoryPoolPolicy,
@@ -29,7 +29,10 @@ fn aligned_region(len: usize, align: usize) -> Region {
     // SAFETY: the layout is valid and the allocation is intentionally leaked for the test.
     let ptr = unsafe { alloc_zeroed(layout) };
     let base = NonNull::new(ptr).expect("test allocation should succeed");
-    Region { base, len }
+    Region {
+        base: Address::from(base),
+        len,
+    }
 }
 
 fn general_contract() -> ResourceContract {
@@ -327,7 +330,7 @@ fn pool_honors_actual_address_alignment_for_leased_views() {
         .expect("aligned lease should allocate");
     let view = pool.lease_view(&lease).expect("lease view should exist");
     let raw = view.as_range_view();
-    let addr = unsafe { raw.base().as_ptr() as usize };
+    let addr = raw.base_addr().get();
     assert_eq!(addr % 2048, 0);
 }
 

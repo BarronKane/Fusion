@@ -193,12 +193,16 @@ impl<L: LifetimePolicy> BoundedArena<L> {
             max_align,
         )?;
         let region = extent.region();
-        let usable_base = (region.base.as_ptr() as usize)
+        let usable_base = region
+            .base
+            .get()
             .checked_add(layout.payload_offset)
             .ok_or_else(AllocError::invalid_request)?;
         if region.len < layout.total_len
             || usable_base % max_align != 0
-            || !(region.base.as_ptr() as usize)
+            || !region
+                .base
+                .get()
                 .is_multiple_of(ControlLease::<ArenaControl>::backing_align())
         {
             return Err(AllocError::invalid_request());
@@ -268,7 +272,7 @@ impl<L: LifetimePolicy> BoundedArena<L> {
     }
 
     fn payload_base(&self) -> Result<usize, AllocError> {
-        (self.control().region().base.as_ptr() as usize)
+        (self.control().region().base.get())
             .checked_add(self.control().header.payload_offset)
             .ok_or_else(AllocError::invalid_request)
     }

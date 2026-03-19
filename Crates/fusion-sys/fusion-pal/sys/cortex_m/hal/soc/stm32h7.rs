@@ -1,9 +1,10 @@
+#![allow(clippy::doc_markdown)]
+
 //! STM32H7 Cortex-M SoC family scaffold.
 //!
-//! This family is intentionally left conservative until the exact part-selection model is in
-//! place. Some STM32H7 derivatives are single-core, others are heterogeneous dual-core parts,
-//! and pretending that one flat file can surface all of that honestly today would be very
-//! efficient lying.
+//! This family remains conservative until part-selection is modeled explicitly. The public
+//! surface matches the RP2350 board so higher layers can consume a uniform selected-board API,
+//! but the board facts stay empty rather than making up a family-wide memory map.
 
 use crate::pal::hal::{
     HardwareAuthoritySet, HardwareError, HardwareTopologySummary, HardwareWriteSummary,
@@ -13,8 +14,9 @@ use crate::pal::thread::{ThreadCoreId, ThreadError, ThreadId, ThreadLogicalCpuId
 use super::board_contract::{self, CortexMSocBoard};
 
 pub use super::board_contract::{
-    CortexMSocBoard as CortexMSoc, CortexMSocChipIdSupport, CortexMSocDescriptor,
-    CortexMSocExecutionObservation,
+    CortexMClockDescriptor, CortexMMemoryRegionDescriptor, CortexMMemoryRegionKind,
+    CortexMPeripheralDescriptor, CortexMSocBoard as CortexMSoc, CortexMSocChipIdSupport,
+    CortexMSocChipIdentity, CortexMSocDescriptor, CortexMSocExecutionObservation,
 };
 
 /// Compile-time descriptor for the STM32H7 family scaffold.
@@ -22,7 +24,7 @@ pub const DESCRIPTOR: CortexMSocDescriptor = CortexMSocDescriptor {
     name: "stm32h7",
     topology_summary: None,
     topology_authorities: HardwareAuthoritySet::empty(),
-    chip_id_support: CortexMSocChipIdSupport::RegisterReadable,
+    chip_id_support: CortexMSocChipIdSupport::Unsupported,
 };
 
 /// STM32H7 SoC provider.
@@ -68,6 +70,15 @@ pub fn selected_soc_name() -> &'static str {
 #[must_use]
 pub fn selected_soc_chip_id_support() -> CortexMSocChipIdSupport {
     board_contract::selected_soc_chip_id_support(system_soc())
+}
+
+/// Returns the runtime chip identity for the selected SoC.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC cannot surface a truthful chip identity.
+pub fn chip_identity() -> Result<CortexMSocChipIdentity, HardwareError> {
+    board_contract::chip_identity(system_soc())
 }
 
 /// Returns the truthful topology summary for the selected Cortex-M SoC.
@@ -116,4 +127,22 @@ pub fn current_execution_location() -> Result<CortexMSocExecutionObservation, Th
 /// Returns an error if the selected SoC cannot identify the currently executing core.
 pub fn current_thread_id() -> Result<ThreadId, ThreadError> {
     board_contract::current_thread_id(system_soc())
+}
+
+/// Returns the selected STM32H7 memory map.
+#[must_use]
+pub fn memory_map() -> &'static [CortexMMemoryRegionDescriptor] {
+    board_contract::memory_map(system_soc())
+}
+
+/// Returns the selected STM32H7 peripheral descriptors.
+#[must_use]
+pub fn peripherals() -> &'static [CortexMPeripheralDescriptor] {
+    board_contract::peripherals(system_soc())
+}
+
+/// Returns the selected STM32H7 clock-tree descriptors.
+#[must_use]
+pub fn clock_tree() -> &'static [CortexMClockDescriptor] {
+    board_contract::clock_tree(system_soc())
 }

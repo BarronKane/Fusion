@@ -1,7 +1,7 @@
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
-use fusion_pal::sys::mem::{CachePolicy, Protect, Region};
+use fusion_pal::sys::mem::{Address, CachePolicy, Protect, Region};
 use fusion_sys::alloc::{
     AllocErrorKind, AllocModeSet, AllocPolicy, AllocationStrategy, Allocator,
     CriticalSafetyRequirements,
@@ -20,7 +20,10 @@ fn aligned_region(len: usize, align: usize) -> Region {
     // SAFETY: the layout is valid and intentionally leaked for the test.
     let ptr = unsafe { alloc_zeroed(layout) };
     let base = NonNull::new(ptr).expect("test allocation should succeed");
-    Region { base, len }
+    Region {
+        base: Address::from(base),
+        len,
+    }
 }
 
 fn shifted_region(len: usize, align: usize, offset: usize) -> Region {
@@ -32,7 +35,10 @@ fn shifted_region(len: usize, align: usize, offset: usize) -> Region {
     // SAFETY: the layout is valid and intentionally leaked for the test.
     let ptr = unsafe { alloc_zeroed(layout) };
     let base = NonNull::new(unsafe { ptr.add(offset) }).expect("shifted allocation should exist");
-    Region { base, len }
+    Region {
+        base: Address::from(base),
+        len,
+    }
 }
 
 const fn general_geometry() -> MemoryGeometry {

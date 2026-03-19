@@ -140,11 +140,15 @@ impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> Slab<SIZE, COUNT,
         )?;
         let region = extent.region();
         if region.len < layout.total_len
-            || !(region.base.as_ptr() as usize).is_multiple_of(align_of::<SlabMetadata<COUNT>>())
+            || !region
+                .base
+                .get()
+                .is_multiple_of(align_of::<SlabMetadata<COUNT>>())
         {
             return Err(AllocError::invalid_request());
         }
-        let metadata = region.base.cast::<SlabMetadata<COUNT>>();
+        let metadata = NonNull::new(region.base.cast::<SlabMetadata<COUNT>>())
+            .ok_or_else(AllocError::invalid_request)?;
         // SAFETY: the assigned extent is uniquely owned here, properly aligned for the slab
         // metadata, and reserves front-loaded metadata space ahead of the slab payload region.
         unsafe {
@@ -181,7 +185,10 @@ impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> Slab<SIZE, COUNT,
     }
 
     fn payload_base(&self) -> Result<usize, AllocError> {
-        ((self.extent().region().base.as_ptr().cast::<u8>()) as usize)
+        self.extent()
+            .region()
+            .base
+            .get()
             .checked_add(self.metadata().header.payload_offset)
             .ok_or_else(AllocError::invalid_request)
     }

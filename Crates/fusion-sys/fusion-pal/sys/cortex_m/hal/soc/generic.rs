@@ -1,3 +1,5 @@
+#![allow(clippy::doc_markdown)]
+
 //! Generic Cortex-M SoC fallback used when no board feature is selected.
 
 use crate::pal::hal::{
@@ -8,8 +10,9 @@ use crate::pal::thread::{ThreadCoreId, ThreadError, ThreadId, ThreadLogicalCpuId
 use super::board_contract::{self, CortexMSocBoard};
 
 pub use super::board_contract::{
-    CortexMSocBoard as CortexMSoc, CortexMSocChipIdSupport, CortexMSocDescriptor,
-    CortexMSocExecutionObservation,
+    CortexMClockDescriptor, CortexMMemoryRegionDescriptor, CortexMMemoryRegionKind,
+    CortexMPeripheralDescriptor, CortexMSocBoard as CortexMSoc, CortexMSocChipIdSupport,
+    CortexMSocChipIdentity, CortexMSocDescriptor, CortexMSocExecutionObservation,
 };
 
 const DESCRIPTOR: CortexMSocDescriptor = CortexMSocDescriptor {
@@ -64,6 +67,15 @@ pub fn selected_soc_chip_id_support() -> CortexMSocChipIdSupport {
     board_contract::selected_soc_chip_id_support(system_soc())
 }
 
+/// Returns the runtime chip identity for the selected SoC.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC cannot surface a truthful chip identity.
+pub fn chip_identity() -> Result<CortexMSocChipIdentity, HardwareError> {
+    board_contract::chip_identity(system_soc())
+}
+
 /// Returns the truthful topology summary for the selected Cortex-M SoC.
 ///
 /// # Errors
@@ -110,4 +122,22 @@ pub fn current_execution_location() -> Result<CortexMSocExecutionObservation, Th
 /// Returns an error if the selected SoC cannot identify the currently executing core.
 pub fn current_thread_id() -> Result<ThreadId, ThreadError> {
     board_contract::current_thread_id(system_soc())
+}
+
+/// Returns the selected generic Cortex-M memory map.
+#[must_use]
+pub fn memory_map() -> &'static [CortexMMemoryRegionDescriptor] {
+    board_contract::memory_map(system_soc())
+}
+
+/// Returns the selected generic Cortex-M peripheral descriptors.
+#[must_use]
+pub fn peripherals() -> &'static [CortexMPeripheralDescriptor] {
+    board_contract::peripherals(system_soc())
+}
+
+/// Returns the selected generic Cortex-M clock descriptors.
+#[must_use]
+pub fn clock_tree() -> &'static [CortexMClockDescriptor] {
+    board_contract::clock_tree(system_soc())
 }

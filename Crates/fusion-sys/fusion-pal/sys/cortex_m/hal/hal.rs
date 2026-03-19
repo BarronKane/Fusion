@@ -16,7 +16,8 @@ use crate::pal::thread::{ThreadClusterId, ThreadCoreClassId, ThreadCoreId, Threa
 pub use self::core::{CortexMCpuid, read_cpuid};
 #[allow(unused_imports)]
 pub use self::soc::board::{
-    CortexMSocChipIdSupport, selected_soc_chip_id_support, selected_soc_name,
+    CortexMSocChipIdSupport, CortexMSocChipIdentity, chip_identity as selected_soc_chip_identity,
+    selected_soc_chip_id_support, selected_soc_name,
 };
 
 #[cfg(all(feature = "soc-rp2350", feature = "soc-stm32h7"))]

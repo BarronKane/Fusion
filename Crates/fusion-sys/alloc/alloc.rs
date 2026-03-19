@@ -192,14 +192,17 @@ impl PoolHandle {
     ) -> Result<Self, AllocError> {
         let region = pool_control_region::<MEMBERS, EXTENTS>()?;
         if region.len < size_of::<PoolControlBlock<MEMBERS, EXTENTS>>()
-            || !(region.base.as_ptr() as usize)
+            || !region
+                .base
+                .get()
                 .is_multiple_of(core::mem::align_of::<PoolControlBlock<MEMBERS, EXTENTS>>())
         {
             let _ = unsafe { system_mem().unmap(region) };
             return Err(AllocError::invalid_request());
         }
 
-        let ptr = region.base.cast::<PoolControlBlock<MEMBERS, EXTENTS>>();
+        let ptr = NonNull::new(region.base.cast::<PoolControlBlock<MEMBERS, EXTENTS>>())
+            .ok_or_else(AllocError::invalid_request)?;
         // SAFETY: the mapped control region is uniquely owned here, properly aligned, and large
         // enough to host exactly one pool control block.
         unsafe {

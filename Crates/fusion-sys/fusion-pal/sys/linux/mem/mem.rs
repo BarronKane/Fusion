@@ -6,7 +6,6 @@
 
 use core::ffi::c_void;
 use core::num::NonZeroUsize;
-use core::ptr::NonNull;
 use core::str;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -19,7 +18,7 @@ use rustix::param;
 use rustix::system;
 
 use crate::pal::mem::{
-    Advise, Backing, CachePolicy, MapFlags, MapReplaceRequest, MapRequest, MemAdviceCaps,
+    Address, Advise, Backing, CachePolicy, MapFlags, MapReplaceRequest, MapRequest, MemAdviceCaps,
     MemAdvise, MemBackingCaps, MemBase, MemCaps, MemCommit, MemError, MemErrorKind, MemLock,
     MemMap, MemMapReplace, MemPlacementCaps, MemProtect, MemQuery, MemSupport, PageInfo, Placement,
     Protect, Region, RegionAttrs, RegionInfo, ReplacePlacement,
@@ -320,14 +319,14 @@ impl LinuxMem {
     }
 
     fn coerce_region(ptr: *mut c_void, len: usize) -> Result<Region, MemError> {
-        let base = NonNull::new(ptr.cast::<u8>()).ok_or(MemError::invalid_addr())?;
+        let base = Address::new(ptr.cast::<u8>() as usize);
         let len = Self::mapped_extent(len)?;
         Ok(Region { base, len })
     }
 
     fn enforce_no_replace(region: Region, requested: Placement) -> Result<Region, MemError> {
         match requested {
-            Placement::FixedNoReplace(addr) if region.base.as_ptr() as usize != addr => {
+            Placement::FixedNoReplace(addr) if region.base.get() != addr => {
                 // Older kernels may ignore `MAP_FIXED_NOREPLACE` as a non-binding placement hint.
                 // If that happens, the returned address will not match and we fail closed here.
                 let _ = unsafe { mm::munmap(region.base.as_ptr().cast::<c_void>(), region.len) };
@@ -393,7 +392,6 @@ impl LinuxMem {
             return None;
         }
 
-        let base = NonNull::new(start as *mut u8)?;
         let mut protect = Protect::empty();
         let perm_bytes = perms.as_bytes();
         if perm_bytes.first() == Some(&b'r') {
@@ -413,7 +411,7 @@ impl LinuxMem {
 
         Some(RegionInfo {
             region: Region {
-                base,
+                base: Address::new(start),
                 len: end.checked_sub(start)?,
             },
             protect,
@@ -565,8 +563,8 @@ impl MemProtect for LinuxMem {
 impl MemCommit for LinuxMem {}
 
 impl MemQuery for LinuxMem {
-    fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, MemError> {
-        Self::query_proc_maps(addr.as_ptr() as usize)
+    fn query(&self, addr: Address) -> Result<RegionInfo, MemError> {
+        Self::query_proc_maps(addr.get())
     }
 }
 
@@ -762,7 +760,7 @@ mod tests {
         let region = unsafe { mem.map(&anon_request(page)) }.expect("seed map");
 
         let mut req = anon_request(page);
-        req.placement = Placement::FixedNoReplace(region.base.as_ptr() as usize);
+        req.placement = Placement::FixedNoReplace(region.base.get());
         let err = unsafe { mem.map(&req) }.expect_err("fixed-no-replace should fail");
         assert_eq!(err.kind, MemErrorKind::Busy);
 
@@ -782,7 +780,7 @@ mod tests {
             flags: MapFlags::PRIVATE,
             attrs: RegionAttrs::VIRTUAL_ONLY,
             cache: CachePolicy::Default,
-            placement: ReplacePlacement::FixedReplace(region.base.as_ptr() as usize),
+            placement: ReplacePlacement::FixedReplace(region.base.get()),
             backing: Backing::Anonymous,
         };
 
@@ -799,7 +797,7 @@ mod tests {
         let region = unsafe { mem.map(&anon_request(page)) }.expect("map");
         let info = mem.query(region.base).expect("query");
 
-        assert!(info.region.contains(region.base.as_ptr() as usize));
+        assert!(info.region.contains(region.base.get()));
         assert!(info.region.len >= region.len);
         assert!(info.protect.contains(Protect::READ));
         assert!(info.protect.contains(Protect::WRITE));

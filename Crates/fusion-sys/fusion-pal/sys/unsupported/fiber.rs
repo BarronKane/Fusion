@@ -60,7 +60,11 @@ impl UnsupportedFiberHost {
     /// # Errors
     ///
     /// Always returns `Unsupported` on this backend.
-    pub fn promote_elastic_page(&self, _base: usize, _len: usize) -> Result<(), FiberHostError> {
+    pub const fn promote_elastic_page(
+        &self,
+        _base: usize,
+        _len: usize,
+    ) -> Result<(), FiberHostError> {
         Err(FiberHostError::unsupported())
     }
 
@@ -69,7 +73,7 @@ impl UnsupportedFiberHost {
     /// # Errors
     ///
     /// Always returns `Unsupported` on this backend.
-    pub fn install_signal_stack(&self) -> Result<PlatformFiberSignalStack, FiberHostError> {
+    pub const fn install_signal_stack(&self) -> Result<PlatformFiberSignalStack, FiberHostError> {
         Err(FiberHostError::unsupported())
     }
 
@@ -78,7 +82,7 @@ impl UnsupportedFiberHost {
     /// # Errors
     ///
     /// Always returns `Unsupported` on this backend.
-    pub fn create_wake_signal(&self) -> Result<PlatformFiberWakeSignal, FiberHostError> {
+    pub const fn create_wake_signal(&self) -> Result<PlatformFiberWakeSignal, FiberHostError> {
         Err(FiberHostError::unsupported())
     }
 
@@ -87,7 +91,7 @@ impl UnsupportedFiberHost {
     /// # Errors
     ///
     /// Always returns `Unsupported` when a valid token is supplied on this backend.
-    pub fn notify_wake_token(&self, token: PlatformWakeToken) -> Result<(), FiberHostError> {
+    pub const fn notify_wake_token(&self, token: PlatformWakeToken) -> Result<(), FiberHostError> {
         if token.is_valid() {
             Err(FiberHostError::unsupported())
         } else {
@@ -102,7 +106,7 @@ impl PlatformFiberWakeSignal {
     /// # Errors
     ///
     /// Always returns `Unsupported` on this backend.
-    pub fn source_handle(&self) -> Result<usize, FiberHostError> {
+    pub const fn source_handle(&self) -> Result<usize, FiberHostError> {
         Err(FiberHostError::unsupported())
     }
 
@@ -117,7 +121,7 @@ impl PlatformFiberWakeSignal {
     /// # Errors
     ///
     /// Always returns `Unsupported` on this backend.
-    pub fn signal(&self) -> Result<(), FiberHostError> {
+    pub const fn signal(&self) -> Result<(), FiberHostError> {
         Err(FiberHostError::unsupported())
     }
 
@@ -126,7 +130,7 @@ impl PlatformFiberWakeSignal {
     /// # Errors
     ///
     /// Always returns `Unsupported` on this backend.
-    pub fn drain(&self) -> Result<(), FiberHostError> {
+    pub const fn drain(&self) -> Result<(), FiberHostError> {
         Err(FiberHostError::unsupported())
     }
 }

@@ -35,7 +35,7 @@
 //! That fits ordinary VM, fixed board-level carveouts, mapped physical ranges, and MMIO
 //! windows. If future work needs to model non-addressable device-local heaps or opaque memory
 //! objects, that should likely become a sibling abstraction rather than forcing this module to
-//! lie about having a meaningful `*mut u8` base pointer.
+//! lie about having a meaningful CPU-visible base address.
 //!
 //! Downstream callers are therefore given borrowed [`RangeView`] values rather than naked fusion-pal
 //! [`Region`] descriptors as the primary safe surface. A raw address range is still the truth
@@ -51,12 +51,11 @@
 //! `VirtualMemoryResource` strictly VM-shaped, and let future provider layers unify multiple
 //! concrete memory domains without pretending they all originate from the same create call.
 
-use ::core::ptr::NonNull;
-
 use fusion_pal::sys::mem::{
-    Advise, Backing, CachePolicy, MapFlags, MapRequest, MemAdviceCaps, MemAdvise, MemBackingCaps,
-    MemBase, MemCaps, MemCommit, MemLock, MemMap, MemPlacementCaps, MemProtect, MemQuery,
-    MemSupport, PageInfo, Placement, Protect, Region, RegionAttrs, RegionInfo, system_mem,
+    Address, Advise, Backing, CachePolicy, MapFlags, MapRequest, MemAdviceCaps, MemAdvise,
+    MemBackingCaps, MemBase, MemCaps, MemCommit, MemLock, MemMap, MemPlacementCaps, MemProtect,
+    MemQuery, MemSupport, PageInfo, Placement, Protect, Region, RegionAttrs, RegionInfo,
+    system_mem,
 };
 
 mod attrs;
@@ -187,7 +186,7 @@ pub trait QueryableResource: MemoryResource {
     ///
     /// # Errors
     /// Returns an error when querying is unsupported or `addr` is not valid for the resource.
-    fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, ResourceError>;
+    fn query(&self, addr: Address) -> Result<RegionInfo, ResourceError>;
 }
 
 /// Extension trait for resources that support protection changes.
@@ -686,12 +685,12 @@ impl LockableResource for VirtualMemoryResource {
 }
 
 impl QueryableResource for VirtualMemoryResource {
-    fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, ResourceError> {
+    fn query(&self, addr: Address) -> Result<RegionInfo, ResourceError> {
         if !self.ops().contains(ResourceOpSet::QUERY) {
             return Err(ResourceError::unsupported_operation());
         }
 
-        if !self.contains(addr.as_ptr()) {
+        if !self.range().contains_addr(addr) {
             return Err(ResourceError::invalid_range());
         }
 
@@ -1047,7 +1046,7 @@ pub(super) fn placement_preference_honored(
 ) -> bool {
     match preference {
         PlacementPreference::Anywhere => true,
-        PlacementPreference::Hint(addr) => region.base.as_ptr() as usize == addr,
+        PlacementPreference::Hint(addr) => region.base.get() == addr,
         PlacementPreference::PreferredNode(node) => provider
             .query(region.base)
             .is_ok_and(|info| placement_matches_node(info.placement, node)),
@@ -1061,9 +1060,7 @@ pub(super) fn verify_required_placement(
 ) -> Result<(), ResourceError> {
     match placement {
         None => Ok(()),
-        Some(RequiredPlacement::FixedNoReplace(addr)) if region.base.as_ptr() as usize == addr => {
-            Ok(())
-        }
+        Some(RequiredPlacement::FixedNoReplace(addr)) if region.base.get() == addr => Ok(()),
         Some(RequiredPlacement::FixedNoReplace(_)) => Err(ResourceError::unsupported_request()),
         Some(RequiredPlacement::RequiredNode(node)) => {
             provider.query(region.base).map_or(Ok(()), |info| {
@@ -1414,14 +1411,10 @@ mod tests {
     fn queries_resource_region_snapshot() {
         let request = ResourceRequest::anonymous_private(16 * 1024);
         let resource = VirtualMemoryResource::create(&request).expect("resource");
-        let info = resource
-            .query(unsafe { resource.view().base() })
-            .expect("query");
+        let base = resource.view().base_addr();
+        let info = resource.query(base).expect("query");
 
-        assert!(
-            info.region
-                .contains(unsafe { resource.view().base() }.as_ptr() as usize)
-        );
+        assert!(info.region.contains(base.get()));
         assert!(info.region.len >= resource.len());
         assert!(info.protect.contains(Protect::READ));
         assert!(info.protect.contains(Protect::WRITE));
@@ -1432,9 +1425,10 @@ mod tests {
         let request = ResourceRequest::anonymous_private(16 * 1024);
         let first = VirtualMemoryResource::create(&request).expect("first resource");
         let second = VirtualMemoryResource::create(&request).expect("second resource");
+        let second_base = second.view().base_addr();
 
         let err = first
-            .query(unsafe { second.view().base() })
+            .query(second_base)
             .expect_err("foreign address should be rejected");
 
         assert_eq!(err.kind, ResourceErrorKind::InvalidRange);
@@ -1491,11 +1485,11 @@ mod tests {
         assert_eq!(trailing.view().len(), page);
         assert_eq!(
             leading.view().checked_end_addr(),
-            Some(unsafe { resource.view().base() }.as_ptr() as usize)
+            Some(resource.view().base_addr().get())
         );
         assert_eq!(
             resource.view().checked_end_addr(),
-            Some(unsafe { trailing.view().base() }.as_ptr() as usize)
+            Some(trailing.view().base_addr().get())
         );
     }
 
@@ -1504,9 +1498,10 @@ mod tests {
         let first = AddressReservation::create(&ReservationRequest::new(16 * 1024)).expect("first");
         let second =
             AddressReservation::create(&ReservationRequest::new(16 * 1024)).expect("second");
+        let second_base = second.view().base_addr();
 
         let err = first
-            .query(unsafe { second.view().base() })
+            .query(second_base)
             .expect_err("foreign address should be rejected");
 
         assert_eq!(err.kind, ResourceErrorKind::InvalidRange);
@@ -1547,7 +1542,7 @@ mod tests {
         spec.additional_hazards = ResourceHazardSet::EXTERNAL_MUTATION;
 
         let bound = BoundMemoryResource::new(spec).expect("bound resource");
-        let info = bound.query(unsafe { bound.range().base() }).expect("query");
+        let info = bound.query(bound.range().base_addr()).expect("query");
 
         assert_eq!(bound.domain(), MemoryDomain::StaticRegion);
         assert_eq!(bound.backing_kind(), ResourceBackingKind::StaticRegion);

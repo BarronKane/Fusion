@@ -1,3 +1,5 @@
+#![allow(clippy::doc_markdown)]
+
 //! Selected Cortex-M SoC board wiring.
 
 #[path = "board/board.rs"]

@@ -385,8 +385,7 @@ impl<const MEMBERS: usize, const EXTENTS: usize> MemoryPool<MEMBERS, EXTENTS> {
         let member = self.members.get(member_index)?.as_ref()?;
         let base = {
             let view = member.handle.view();
-            // SAFETY: the handle remains owned by the pool for the duration of this borrow.
-            unsafe { view.base().as_ptr() as usize }
+            view.base_addr().get()
         };
         let start_addr = base.checked_add(free_range.offset)?;
         let aligned_start = align_up(start_addr, request.align)?;

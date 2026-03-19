@@ -2,8 +2,7 @@ use super::{
     BoundMemoryResource, MemoryResource, QueryableResource, RangeView, ResolvedResource,
     ResourceError, ResourceInfo, ResourceRange, ResourceState, VirtualMemoryResource,
 };
-use core::ptr::NonNull;
-use fusion_pal::sys::mem::RegionInfo;
+use fusion_pal::sys::mem::{Address, RegionInfo};
 
 /// Owned sum type for concrete `fusion-sys::mem::resource` instances.
 ///
@@ -72,7 +71,7 @@ impl MemoryResource for MemoryResourceHandle {
 }
 
 impl QueryableResource for MemoryResourceHandle {
-    fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, ResourceError> {
+    fn query(&self, addr: Address) -> Result<RegionInfo, ResourceError> {
         match self {
             Self::Virtual(resource) => resource.query(addr),
             Self::Bound(resource) => resource.query(addr),

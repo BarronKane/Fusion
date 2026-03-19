@@ -440,7 +440,10 @@ impl<T: Copy> MappedVec<T> {
 
         Ok(Self {
             region: Some(region),
-            ptr: region.base.cast::<T>(),
+            ptr: region
+                .base
+                .as_non_null::<T>()
+                .ok_or_else(FiberError::invalid)?,
             len: 0,
             capacity,
         })
@@ -626,7 +629,7 @@ impl MetadataCursor {
             return Err(FiberError::invalid());
         }
 
-        let base = self.region.base.as_ptr() as usize;
+        let base = self.region.base.get();
         let start = fiber_align_up(
             base.checked_add(self.offset)
                 .ok_or_else(FiberError::resource_exhausted)?,
@@ -1689,11 +1692,22 @@ impl FiberStackSlab {
         let stack = match &self.backing {
             FiberStackBackingState::Fixed(layout) => {
                 let usable = self.fixed_usable_region(slot_index, *layout)?;
-                FiberStack::new(usable.base, usable.len)?
+                FiberStack::new(
+                    usable
+                        .base
+                        .as_non_null::<u8>()
+                        .ok_or_else(FiberError::invalid)?,
+                    usable.len,
+                )?
             }
             FiberStackBackingState::Elastic { .. } => {
                 let slot = self.slot_region(slot_index)?;
-                FiberStack::new(slot.base, slot.len)?
+                FiberStack::new(
+                    slot.base
+                        .as_non_null::<u8>()
+                        .ok_or_else(FiberError::invalid)?,
+                    slot.len,
+                )?
             }
         };
 
@@ -2082,8 +2096,11 @@ impl ElasticRegistrySnapshot {
         unsafe { memory.protect(region, Protect::READ | Protect::WRITE) }
             .map_err(fiber_error_from_mem)?;
 
-        let header = region.base.cast::<ElasticRegistrySnapshotHeader>();
-        let entries_ptr = (region.base.as_ptr() as usize)
+        let header = core::ptr::NonNull::new(region.base.cast::<ElasticRegistrySnapshotHeader>())
+            .ok_or_else(FiberError::invalid)?;
+        let entries_ptr = region
+            .base
+            .get()
             .checked_add(entries_offset)
             .ok_or_else(FiberError::resource_exhausted)?
             as *mut ElasticRegistryEntry;
@@ -3287,13 +3304,17 @@ impl GreenPoolLease {
     fn new(inner: GreenPoolInner, metadata: GreenPoolMetadata) -> Result<Self, FiberError> {
         let region = green_pool_control_region()?;
         if region.len < size_of::<GreenPoolControlBlock>()
-            || !(region.base.as_ptr() as usize).is_multiple_of(align_of::<GreenPoolControlBlock>())
+            || !region
+                .base
+                .get()
+                .is_multiple_of(align_of::<GreenPoolControlBlock>())
         {
             let _ = unsafe { system_mem().unmap(region) };
             return Err(FiberError::invalid());
         }
 
-        let ptr = region.base.cast::<GreenPoolControlBlock>();
+        let ptr = core::ptr::NonNull::new(region.base.cast::<GreenPoolControlBlock>())
+            .ok_or_else(FiberError::invalid)?;
         // SAFETY: the control mapping is uniquely owned here, properly aligned, and large enough
         // to host exactly one green-pool control block.
         unsafe {

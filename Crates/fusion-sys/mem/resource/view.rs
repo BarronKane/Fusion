@@ -1,8 +1,7 @@
 use core::fmt;
 use core::marker::PhantomData;
-use core::ptr::NonNull;
 
-use fusion_pal::sys::mem::Region;
+use fusion_pal::sys::mem::{Address, Region};
 
 use super::{ResourceError, ResourceRange};
 
@@ -51,14 +50,14 @@ impl RangeView<'_> {
     /// Returns the exclusive end address of the governed range when it does not overflow the
     /// address space.
     #[must_use]
-    pub fn checked_end_addr(self) -> Option<usize> {
+    pub const fn checked_end_addr(self) -> Option<usize> {
         self.region.checked_end_addr()
     }
 
     /// Returns the exclusive end address of the governed range when it does not overflow the
     /// address space.
     #[must_use]
-    pub fn end_addr(self) -> Option<usize> {
+    pub const fn end_addr(self) -> Option<usize> {
         self.checked_end_addr()
     }
 
@@ -66,6 +65,12 @@ impl RangeView<'_> {
     #[must_use]
     pub fn contains(self, ptr: *const u8) -> bool {
         self.region.contains(ptr as usize)
+    }
+
+    /// Returns `true` when `addr` lies within the borrowed range.
+    #[must_use]
+    pub fn contains_addr(self, addr: Address) -> bool {
+        self.region.contains(addr.get())
     }
 
     /// Returns a checked borrowed subrange.
@@ -83,14 +88,20 @@ impl RangeView<'_> {
             .map_err(|_| ResourceError::invalid_range())
     }
 
+    /// Returns the raw base address of the borrowed range.
+    #[must_use]
+    pub const fn base_addr(self) -> Address {
+        self.region.base
+    }
+
     /// Returns the raw base pointer of the borrowed range.
     ///
     /// # Safety
     /// The returned pointer is only valid while the owning resource or reservation remains live
     /// and unchanged. Callers must not retain it beyond the borrow represented by this view.
     #[must_use]
-    pub const unsafe fn base(self) -> NonNull<u8> {
-        self.region.base
+    pub const unsafe fn base_ptr(self) -> *mut u8 {
+        self.region.base.as_ptr()
     }
 
     /// Returns the raw fusion-pal region descriptor behind this borrowed view.

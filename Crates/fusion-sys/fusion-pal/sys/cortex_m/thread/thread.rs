@@ -49,8 +49,9 @@ impl ThreadBase for CortexMThread {
     type Handle = CortexMThreadHandle;
 
     fn support(&self) -> ThreadSupport {
-        match super::super::hal::soc::board::current_execution_location() {
-            Ok(observation) => ThreadSupport {
+        super::super::hal::soc::board::current_execution_location().map_or_else(
+            |_| ThreadSupport::unsupported(),
+            |observation| ThreadSupport {
                 lifecycle: ThreadLifecycleSupport {
                     caps: ThreadLifecycleCaps::CURRENT_THREAD_ID
                         .union(ThreadLifecycleCaps::CURRENT_OBSERVE),
@@ -83,8 +84,7 @@ impl ThreadBase for CortexMThread {
                 stack: crate::pal::thread::ThreadStackSupport::unsupported(),
                 locality: ThreadLocalitySupport::unsupported(),
             },
-            Err(_) => ThreadSupport::unsupported(),
-        }
+        )
     }
 }
 

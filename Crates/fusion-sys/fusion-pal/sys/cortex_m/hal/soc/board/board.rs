@@ -1,9 +1,12 @@
+#![allow(clippy::doc_markdown)]
+
 //! Cortex-M SoC board contract and generic helpers.
 
 use crate::pal::hal::{
     HardwareAuthoritySet, HardwareError, HardwareGuarantee, HardwareTopologyCaps,
     HardwareTopologySummary, HardwareTopologySupport, HardwareWriteSummary,
 };
+use crate::pal::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
 use crate::pal::thread::{
     ThreadAuthoritySet, ThreadCoreId, ThreadError, ThreadExecutionLocation, ThreadId,
     ThreadLogicalCpuId, ThreadProcessorGroupId,
@@ -20,6 +23,25 @@ pub enum CortexMSocChipIdSupport {
     RegisterReadable,
 }
 
+/// Runtime chip-identity payload surfaced by the selected SoC board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CortexMSocChipIdentity {
+    /// Raw board-defined chip-identity word.
+    pub raw_chip_id: u32,
+    /// Parsed silicon revision when the SoC exposes one.
+    pub revision: Option<u8>,
+    /// Parsed part identifier when the SoC exposes one.
+    pub part: Option<u16>,
+    /// Parsed manufacturer identifier when the SoC exposes one.
+    pub manufacturer: Option<u16>,
+    /// Board-defined package selector when the SoC exposes one.
+    pub package: Option<u32>,
+    /// Board-defined platform selector when the SoC exposes one.
+    pub platform: Option<u32>,
+    /// Board-defined implementation or source revision when the SoC exposes one.
+    pub source_revision: Option<u32>,
+}
+
 /// Selected SoC descriptor used by the Cortex-M HAL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CortexMSocDescriptor {
@@ -34,6 +56,81 @@ pub struct CortexMSocDescriptor {
 pub struct CortexMSocExecutionObservation {
     pub location: ThreadExecutionLocation,
     pub authorities: ThreadAuthoritySet,
+}
+
+/// Coarse kind of board-visible Cortex-M memory region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CortexMMemoryRegionKind {
+    /// On-chip boot ROM or immutable mask ROM.
+    Rom,
+    /// Execute-in-place flash or external-memory alias window.
+    Xip,
+    /// On-chip SRAM visible to the CPU cores.
+    Sram,
+    /// MMIO, peripheral, or control window.
+    Mmio,
+}
+
+/// Static memory-region descriptor for a Cortex-M SoC board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CortexMMemoryRegionDescriptor {
+    /// Human-readable region name.
+    pub name: &'static str,
+    /// Coarse region kind.
+    pub kind: CortexMMemoryRegionKind,
+    /// Base address of the region.
+    pub base: usize,
+    /// Region length in bytes.
+    pub len: usize,
+    /// Effective protection contract for the region.
+    pub protect: Protect,
+    /// Effective region attributes.
+    pub attrs: RegionAttrs,
+    /// Effective cache policy.
+    pub cache: CachePolicy,
+    /// Coarse resource backing classification.
+    pub backing: MemResourceBackingKind,
+    /// Whether the region can be treated as allocator-usable backing.
+    pub allocatable: bool,
+}
+
+/// Bus fabric segment for a named Cortex-M peripheral block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CortexMPeripheralBus {
+    /// Low-bandwidth APB peripheral segment.
+    Apb,
+    /// High-bandwidth AHB peripheral segment.
+    Ahb,
+    /// Core-local single-cycle IO segment.
+    Sio,
+    /// Cortex private peripheral bus.
+    Ppb,
+}
+
+/// Static peripheral descriptor for a Cortex-M SoC board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CortexMPeripheralDescriptor {
+    /// Human-readable peripheral block name.
+    pub name: &'static str,
+    /// Fabric segment the peripheral is attached to.
+    pub bus: CortexMPeripheralBus,
+    /// Base address of the peripheral block.
+    pub base: usize,
+    /// Block length in bytes.
+    pub len: usize,
+}
+
+/// Static clock descriptor for a Cortex-M SoC board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CortexMClockDescriptor {
+    /// Clock name as surfaced by the board.
+    pub name: &'static str,
+    /// Primary clock-source selectors for this clock.
+    pub main_sources: &'static [&'static str],
+    /// Auxiliary clock-source selectors used by staged muxes for this clock.
+    pub aux_sources: &'static [&'static str],
+    /// Major consumers or sinks served by this clock.
+    pub consumers: &'static [&'static str],
 }
 
 impl CortexMSocDescriptor {
@@ -99,6 +196,7 @@ pub trait CortexMSocBoard: Copy {
     /// # Errors
     ///
     /// Returns an error if this SoC family cannot surface logical CPUs honestly.
+    #[allow(clippy::cast_possible_truncation)]
     fn write_logical_cpus(
         &self,
         output: &mut [ThreadLogicalCpuId],
@@ -124,6 +222,7 @@ pub trait CortexMSocBoard: Copy {
     /// # Errors
     ///
     /// Returns an error if this SoC family cannot surface core identities honestly.
+    #[allow(clippy::cast_possible_truncation)]
     fn write_cores(
         &self,
         output: &mut [ThreadCoreId],
@@ -149,6 +248,33 @@ pub trait CortexMSocBoard: Copy {
     fn current_execution_location(&self) -> Result<CortexMSocExecutionObservation, ThreadError> {
         generic_single_core_observation(self.descriptor()).ok_or_else(ThreadError::unsupported)
     }
+
+    /// Returns the current chip identity when this SoC can surface it honestly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selected SoC cannot surface a truthful chip identity.
+    fn chip_identity(&self) -> Result<CortexMSocChipIdentity, HardwareError> {
+        Err(HardwareError::unsupported())
+    }
+
+    /// Returns the static memory-region descriptors surfaced by this SoC board.
+    #[must_use]
+    fn memory_map(&self) -> &'static [CortexMMemoryRegionDescriptor] {
+        &[]
+    }
+
+    /// Returns the named peripheral blocks surfaced by this SoC board.
+    #[must_use]
+    fn peripherals(&self) -> &'static [CortexMPeripheralDescriptor] {
+        &[]
+    }
+
+    /// Returns the major board-visible clock descriptors surfaced by this SoC board.
+    #[must_use]
+    fn clock_tree(&self) -> &'static [CortexMClockDescriptor] {
+        &[]
+    }
 }
 
 /// Returns the descriptor for the selected SoC provider.
@@ -167,6 +293,15 @@ pub fn selected_soc_name<T: CortexMSocBoard>(soc: T) -> &'static str {
 #[must_use]
 pub fn selected_soc_chip_id_support<T: CortexMSocBoard>(soc: T) -> CortexMSocChipIdSupport {
     selected_soc(soc).chip_id_support
+}
+
+/// Returns the runtime chip identity for the selected SoC board.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC cannot surface a truthful chip identity.
+pub fn chip_identity<T: CortexMSocBoard>(soc: T) -> Result<CortexMSocChipIdentity, HardwareError> {
+    soc.chip_identity()
 }
 
 /// Returns the truthful topology summary for the selected Cortex-M SoC.
@@ -237,9 +372,27 @@ pub fn current_thread_id<T: CortexMSocBoard>(soc: T) -> Result<ThreadId, ThreadE
     Err(ThreadError::unsupported())
 }
 
+/// Returns the static memory-region descriptors for the selected SoC board.
+#[must_use]
+pub fn memory_map<T: CortexMSocBoard>(soc: T) -> &'static [CortexMMemoryRegionDescriptor] {
+    soc.memory_map()
+}
+
+/// Returns the named peripheral blocks for the selected SoC board.
+#[must_use]
+pub fn peripherals<T: CortexMSocBoard>(soc: T) -> &'static [CortexMPeripheralDescriptor] {
+    soc.peripherals()
+}
+
+/// Returns the major clock descriptors for the selected SoC board.
+#[must_use]
+pub fn clock_tree<T: CortexMSocBoard>(soc: T) -> &'static [CortexMClockDescriptor] {
+    soc.clock_tree()
+}
+
 /// Returns a single-core execution observation when the descriptor honestly implies one.
 #[must_use]
-pub(crate) fn generic_single_core_observation(
+fn generic_single_core_observation(
     descriptor: CortexMSocDescriptor,
 ) -> Option<CortexMSocExecutionObservation> {
     match descriptor.topology_summary {

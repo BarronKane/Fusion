@@ -4,6 +4,8 @@
 //! waiter queue hiding behind the curtains, and pretending otherwise would just be a more
 //! sophisticated form of lying.
 
+#![allow(clippy::cast_possible_truncation)]
+
 use core::hint::spin_loop;
 #[cfg(target_has_atomic = "8")]
 use core::sync::atomic::AtomicU8;
@@ -98,14 +100,14 @@ const CORTEX_M_RWLOCK_SUPPORT: RwLockSupport = RwLockSupport::unsupported();
 pub struct CortexMSync;
 
 /// Cortex-M raw mutex implemented with a local spin word.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CortexMRawMutex {
     #[cfg(target_has_atomic = "8")]
     state: AtomicU8,
 }
 
 /// Cortex-M raw once primitive implemented with a local spin word.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CortexMRawOnce {
     #[cfg(target_has_atomic = "8")]
     state: AtomicU8,
@@ -121,7 +123,7 @@ pub struct CortexMSemaphore {
 }
 
 /// Cortex-M raw reader/writer lock implemented with a local spin word.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CortexMRawRwLock {
     #[cfg(target_has_atomic = "16")]
     state: AtomicU16,
@@ -251,7 +253,7 @@ unsafe impl RawMutex for CortexMRawMutex {
     fn try_lock(&self) -> Result<bool, SyncError> {
         #[cfg(target_has_atomic = "8")]
         {
-            return Ok(self
+            Ok(self
                 .state
                 .compare_exchange(
                     MUTEX_UNLOCKED,
@@ -259,7 +261,7 @@ unsafe impl RawMutex for CortexMRawMutex {
                     Ordering::Acquire,
                     Ordering::Relaxed,
                 )
-                .is_ok());
+                .is_ok())
         }
 
         #[cfg(not(target_has_atomic = "8"))]
@@ -295,11 +297,11 @@ impl RawOnce for CortexMRawOnce {
     fn state(&self) -> OnceState {
         #[cfg(target_has_atomic = "8")]
         {
-            return match self.state.load(Ordering::Acquire) {
+            match self.state.load(Ordering::Acquire) {
                 ONCE_RUNNING => OnceState::Running,
                 ONCE_COMPLETE => OnceState::Complete,
                 _ => OnceState::Uninitialized,
-            };
+            }
         }
 
         #[cfg(not(target_has_atomic = "8"))]
@@ -346,7 +348,7 @@ impl RawOnce for CortexMRawOnce {
             while self.state.load(Ordering::Acquire) == ONCE_RUNNING {
                 spin_loop();
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(target_has_atomic = "8"))]
@@ -384,10 +386,10 @@ impl CortexMSemaphore {
                 return Err(SyncError::invalid());
             }
 
-            return Ok(Self {
+            Ok(Self {
                 permits: AtomicU16::new(initial as u16),
                 max: max as u16,
-            });
+            })
         }
 
         #[cfg(not(target_has_atomic = "16"))]
@@ -441,7 +443,7 @@ impl RawSemaphore for CortexMSemaphore {
     fn release(&self, permits: u32) -> Result<(), SyncError> {
         #[cfg(target_has_atomic = "16")]
         {
-            if permits > u16::MAX as u32 {
+            if permits > u32::from(u16::MAX) {
                 return Err(SyncError::overflow());
             }
 
@@ -473,7 +475,7 @@ impl RawSemaphore for CortexMSemaphore {
     fn max_permits(&self) -> u32 {
         #[cfg(target_has_atomic = "16")]
         {
-            return u32::from(self.max);
+            u32::from(self.max)
         }
 
         #[cfg(not(target_has_atomic = "16"))]
@@ -552,10 +554,10 @@ unsafe impl RawRwLock for CortexMRawRwLock {
     fn try_write_lock(&self) -> Result<bool, SyncError> {
         #[cfg(target_has_atomic = "16")]
         {
-            return Ok(self
+            Ok(self
                 .state
                 .compare_exchange(0, RWLOCK_WRITER, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok());
+                .is_ok())
         }
 
         #[cfg(not(target_has_atomic = "16"))]

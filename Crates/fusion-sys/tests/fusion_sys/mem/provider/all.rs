@@ -3,11 +3,10 @@
 //! These tests use tiny mock inventories to pin down the intended orchestration semantics
 //! before a real provider implementation exists.
 
+use core::mem::align_of;
 use core::num::NonZeroUsize;
-use core::ptr::NonNull;
-
 use fusion_pal::sys::mem::{
-    CachePolicy, MemAdviceCaps, MemBackingCaps, MemCatalogResource, MemCatalogResourceId,
+    Address, CachePolicy, MemAdviceCaps, MemBackingCaps, MemCatalogResource, MemCatalogResourceId,
     MemCatalogResourceOrigin, MemCatalogStrategy, MemCatalogStrategyCapacity, MemCatalogStrategyId,
     MemCatalogStrategyKind, MemCatalogStrategyOutput, MemDomain, MemGeometry, MemOvercommitPolicy,
     MemPlacementCaps, MemPoolResourceReadiness, MemResourceAttrs, MemResourceBackingKind,
@@ -68,7 +67,7 @@ impl MemoryProvider for MockProvider<'_> {
 
 const fn mock_region(len: usize) -> Region {
     Region {
-        base: NonNull::dangling(),
+        base: Address::new(align_of::<usize>()),
         len,
     }
 }

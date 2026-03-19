@@ -59,9 +59,8 @@ fn current_minor_faults() -> libc::c_long {
 fn baseline_private_heap_profile_maps_and_queries() {
     let resource = VirtualMemoryResource::create(&baseline_heap_request(page_len(4)))
         .expect("baseline heap should map");
-    let info = resource
-        .query(unsafe { resource.view().base() })
-        .expect("query");
+    let base = resource.view().base_addr();
+    let info = resource.query(base).expect("query");
 
     // The default Linux heap profile should be anonymous private RW memory with query support.
     assert_eq!(
@@ -134,13 +133,11 @@ fn reservation_materialization_profile_lands_in_reserved_window() {
     let target = reservation
         .subview(ResourceRange::new(page, page))
         .expect("target subview");
-    let target_base = unsafe { target.base() };
+    let target_base = target.base_addr();
     let target_len = target.len();
 
     let mut request = baseline_heap_request(page);
-    request.required_placement = Some(RequiredPlacement::FixedNoReplace(
-        target_base.as_ptr() as usize
-    ));
+    request.required_placement = Some(RequiredPlacement::FixedNoReplace(target_base.get()));
 
     // Materialization should land exactly in the requested hole and split the reservation
     // around it.
@@ -148,7 +145,7 @@ fn reservation_materialization_profile_lands_in_reserved_window() {
         .materialize_range(ResourceRange::new(page, page), &request)
         .expect("materialized");
 
-    assert_eq!(unsafe { materialized.resource.view().base() }, target_base);
+    assert_eq!(materialized.resource.view().base_addr(), target_base);
     assert_eq!(materialized.resource.len(), target_len);
     assert_eq!(
         materialized
@@ -184,9 +181,8 @@ fn file_backed_private_profile_maps_memfd_object() {
         0,
     );
     let resource = VirtualMemoryResource::create(&request).expect("file-backed resource");
-    let info = resource
-        .query(unsafe { resource.view().base() })
-        .expect("query");
+    let base = resource.view().base_addr();
+    let info = resource.query(base).expect("query");
 
     assert_eq!(resource.backing_kind(), ResourceBackingKind::FilePrivate);
     assert_eq!(
@@ -233,10 +229,10 @@ fn gigabyte_huge_page_memfd_profile_tracks_asymmetric_protection() {
     assert_eq!(resource.state().current_protect, StateValue::Asymmetric);
 
     let first_info = resource
-        .query(unsafe { resource.view().base() })
+        .query(resource.view().base_addr())
         .expect("first query");
     let second_info = resource
-        .query(unsafe { second_half.base() })
+        .query(second_half.base_addr())
         .expect("second query");
 
     assert_eq!(first_info.protect, Protect::READ);
@@ -270,7 +266,7 @@ fn gigabyte_heap_profile_touches_pages_and_tracks_asymmetric_state() {
         .view()
         .subrange(ResourceRange::new(half, page))
         .expect("upper-half subrange");
-    let base = unsafe { resource.view().base() }.as_ptr();
+    let base = unsafe { resource.view().base_ptr() };
     let tail_write_start = GIB - TAIL_WRITE_BYTES;
     let tail_write_probe = tail_write_start + page * 4;
 
@@ -308,11 +304,9 @@ fn gigabyte_heap_profile_touches_pages_and_tracks_asymmetric_state() {
     assert_eq!(resource.state().current_protect, StateValue::Asymmetric);
 
     let lower_info = resource
-        .query(unsafe { resource.view().base() })
+        .query(resource.view().base_addr())
         .expect("lower query");
-    let upper_info = resource
-        .query(unsafe { upper_page.base() })
-        .expect("upper query");
+    let upper_info = resource.query(upper_page.base_addr()).expect("upper query");
 
     assert_eq!(lower_info.protect, Protect::READ | Protect::WRITE);
     assert_eq!(upper_info.protect, Protect::READ);
@@ -339,7 +333,7 @@ fn anonymous_mapping_touch_loop_increases_minor_fault_count() {
 
     let resource =
         VirtualMemoryResource::create(&ResourceRequest::anonymous_private(len)).expect("resource");
-    let base = unsafe { resource.view().base() }.as_ptr();
+    let base = unsafe { resource.view().base_ptr() };
     let before = current_minor_faults();
 
     // Anonymous private memory is mapped lazily. The first write into each untouched page should

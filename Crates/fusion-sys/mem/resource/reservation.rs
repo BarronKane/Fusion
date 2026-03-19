@@ -1,9 +1,7 @@
-use core::ptr::NonNull;
-
 use fusion_pal::sys::mem::{
-    Backing, CachePolicy, MapFlags, MapReplaceRequest, MapRequest, MemBackingCaps, MemBase,
-    MemCaps, MemMap, MemMapReplace, MemPlacementCaps, MemProtect, MemQuery, PageInfo, Placement,
-    Protect, Region, RegionAttrs, RegionInfo, ReplacePlacement, system_mem,
+    Address, Backing, CachePolicy, MapFlags, MapReplaceRequest, MapRequest, MemBackingCaps,
+    MemBase, MemCaps, MemMap, MemMapReplace, MemPlacementCaps, MemProtect, MemQuery, PageInfo,
+    Placement, Protect, Region, RegionAttrs, RegionInfo, ReplacePlacement, system_mem,
 };
 
 use super::{
@@ -269,12 +267,12 @@ impl AddressReservation {
     /// # Errors
     /// Returns an error when query is unsupported for this reservation, when `addr` lies
     /// outside the reserved range, or when the backend rejects the query.
-    pub fn query(&self, addr: NonNull<u8>) -> Result<RegionInfo, ResourceError> {
+    pub fn query(&self, addr: Address) -> Result<RegionInfo, ResourceError> {
         if !self.support().ops.contains(ReservationOpSet::QUERY) {
             return Err(ResourceError::unsupported_operation());
         }
 
-        if !self.contains(addr.as_ptr()) {
+        if !self.view().contains_addr(addr) {
             return Err(ResourceError::invalid_range());
         }
 
@@ -370,7 +368,7 @@ impl AddressReservation {
                 flags: base_flags,
                 attrs: resource_attrs_for_request(request.backing),
                 cache: request.contract.cache_policy,
-                placement: ReplacePlacement::FixedReplace(region.base.as_ptr() as usize),
+                placement: ReplacePlacement::FixedReplace(region.base.get()),
                 backing: request_backing_to_mem(request.backing),
             };
             let preferred_request = MapReplaceRequest {
@@ -564,7 +562,7 @@ fn validate_materialization_request(
     region: Region,
     granule: usize,
 ) -> Result<(), ResourceError> {
-    let base = region.base.as_ptr() as usize;
+    let base = region.base.get();
     let normalized_len = normalize_len(request.len, granule)?;
 
     if normalized_len != region.len {

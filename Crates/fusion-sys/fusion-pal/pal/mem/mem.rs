@@ -503,11 +503,84 @@ pub struct DeviceMapRequest {
     pub cache: CachePolicy,
 }
 
+/// Raw CPU-visible address in the current execution context.
+///
+/// This is intentionally an address value, not a proof that the location is non-null,
+/// mapped, dereferenceable, or stable. Some truthful regions, especially on bare metal,
+/// can legitimately begin at address zero.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Address(pub usize);
+
+impl fmt::Debug for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#x}", self.0)
+    }
+}
+
+impl Address {
+    /// Creates an address wrapper from a raw address value.
+    #[must_use]
+    pub const fn new(addr: usize) -> Self {
+        Self(addr)
+    }
+
+    /// Returns the raw address value.
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+
+    /// Returns this address unchanged.
+    #[must_use]
+    pub const fn addr(self) -> Self {
+        self
+    }
+
+    /// Returns the address as a mutable raw pointer.
+    #[must_use]
+    pub const fn as_ptr(self) -> *mut u8 {
+        self.0 as *mut u8
+    }
+
+    /// Returns the address as a typed mutable raw pointer.
+    #[must_use]
+    pub const fn cast<T>(self) -> *mut T {
+        self.0 as *mut T
+    }
+
+    /// Returns the address as a non-null pointer when possible.
+    #[must_use]
+    pub const fn as_non_null<T>(self) -> Option<NonNull<T>> {
+        NonNull::new(self.cast::<T>())
+    }
+
+    /// Returns the address advanced by `offset` when it does not overflow the address space.
+    #[must_use]
+    pub const fn checked_add(self, offset: usize) -> Option<Self> {
+        match self.0.checked_add(offset) {
+            Some(addr) => Some(Self(addr)),
+            None => None,
+        }
+    }
+}
+
+impl From<usize> for Address {
+    fn from(value: usize) -> Self {
+        Self(value)
+    }
+}
+
+impl From<NonNull<u8>> for Address {
+    fn from(value: NonNull<u8>) -> Self {
+        Self(value.as_ptr() as usize)
+    }
+}
+
 /// Owned virtual or physical region returned by the backend.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Region {
     /// Base address of the region.
-    pub base: NonNull<u8>,
+    pub base: Address,
     /// Actual extent owned by this region handle, in bytes.
     ///
     /// This is the backend-owned extent, which may be page-rounded relative to the original
@@ -538,21 +611,21 @@ impl Region {
     /// Returns the exclusive end address of the region when it does not overflow the address
     /// space.
     #[must_use]
-    pub fn checked_end_addr(self) -> Option<usize> {
-        (self.base.as_ptr() as usize).checked_add(self.len)
+    pub const fn checked_end_addr(self) -> Option<usize> {
+        self.base.get().checked_add(self.len)
     }
 
     /// Returns the exclusive end address of the region when it does not overflow the address
     /// space.
     #[must_use]
-    pub fn end_addr(self) -> Option<usize> {
+    pub const fn end_addr(self) -> Option<usize> {
         self.checked_end_addr()
     }
 
     /// Returns `true` if the address lies within the region.
     #[must_use]
     pub fn contains(self, addr: usize) -> bool {
-        let start = self.base.as_ptr() as usize;
+        let start = self.base.get();
         self.checked_end_addr()
             .is_some_and(|end| addr >= start && addr < end)
     }
@@ -568,8 +641,7 @@ impl Region {
             return Err(MemError::out_of_bounds());
         }
 
-        let ptr = unsafe { self.base.as_ptr().add(offset) };
-        let base = NonNull::new(ptr).ok_or(MemError::invalid())?;
+        let base = self.base.checked_add(offset).ok_or(MemError::overflow())?;
         Ok(Self { base, len })
     }
 }
@@ -820,7 +892,7 @@ pub trait MemQuery: MemBase {
     ///
     /// # Errors
     /// Returns an error when query is unsupported or the backend cannot describe `addr`.
-    fn query(&self, _addr: NonNull<u8>) -> Result<RegionInfo, MemError> {
+    fn query(&self, _addr: Address) -> Result<RegionInfo, MemError> {
         Err(MemError::unsupported())
     }
 }
@@ -963,7 +1035,7 @@ mod tests {
     #[test]
     fn region_checked_end_addr_fails_closed_on_overflow() {
         let region = Region {
-            base: NonNull::new((usize::MAX - 1) as *mut u8).expect("non-null pointer"),
+            base: Address::new(usize::MAX - 1),
             len: 8,
         };
 
