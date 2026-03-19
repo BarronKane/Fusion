@@ -17,9 +17,11 @@ pub mod pal;
 /// Selected platform backend and public syscall-facing exports.
 pub mod sys;
 
-/// Enumeration of operating systems currently modeled by the fusion-pal.
+/// Enumeration of platforms currently modeled by the fusion-pal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Platform {
+    /// ARM Cortex-M bare-metal targets (no OS).
+    CortexM,
     /// Apple iOS and closely related Darwin mobile targets.
     Ios,
     /// Linux and Linux-compatible userspace environments.
@@ -29,6 +31,10 @@ pub enum Platform {
     /// Microsoft Windows targets.
     Windows,
 }
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+/// The platform variant selected for the current compilation target.
+pub const TARGET_PLATFORM: Platform = Platform::CortexM;
 
 #[cfg(target_os = "ios")]
 /// The platform variant selected for the current compilation target.

@@ -14,6 +14,9 @@ path = "fusion-sys.rs"
 
 [features]
 default = []
+sys-cortex-m = ["fusion-pal/sys-cortex-m"]
+soc-rp2350 = ["fusion-pal/soc-rp2350"]
+soc-stm32h7 = ["fusion-pal/soc-stm32h7"]
 sys-fusion-kn = ["fusion-pal/sys-fusion-kn"]
 
 [dependencies]

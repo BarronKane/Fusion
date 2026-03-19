@@ -30,15 +30,36 @@
 //! abstractions that become fiction under real assurance scrutiny.
 
 #[cfg(not(any(
+    all(target_os = "none", feature = "sys-cortex-m"),
     target_os = "ios",
     target_os = "linux",
     target_os = "macos",
     target_os = "windows"
 )))]
-compile_error!("fusion-pal currently supports only Linux, Windows, macOS, and iOS targets.");
+compile_error!(
+    "fusion-pal currently supports Linux, Windows, macOS, iOS, and Cortex-M (feature `sys-cortex-m`) targets."
+);
+
+#[cfg(all(feature = "sys-cortex-m", not(target_os = "none")))]
+compile_error!(
+    "fusion-pal feature `sys-cortex-m` requires a bare-metal target (target_os = \"none\")."
+);
+
+#[cfg(all(
+    any(feature = "soc-rp2350", feature = "soc-stm32h7"),
+    not(feature = "sys-cortex-m")
+))]
+compile_error!("fusion-pal Cortex-M SoC features require `sys-cortex-m`.");
 
 #[cfg(all(feature = "sys-fusion-kn", not(target_os = "linux")))]
 compile_error!("fusion-pal feature `sys-fusion-kn` currently supports only Linux targets.");
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+#[path = "cortex_m/cortex_m.rs"]
+/// Public Cortex-M backend surface for bare-metal targets.
+pub mod cortex_m;
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+use cortex_m as platform;
 
 #[cfg(target_os = "ios")]
 #[path = "ios/ios.rs"]

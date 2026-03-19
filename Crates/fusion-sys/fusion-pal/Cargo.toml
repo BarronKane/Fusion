@@ -14,6 +14,9 @@ path = "fusion-pal.rs"
 
 [features]
 default = []
+sys-cortex-m = ["dep:cortex-m", "dep:cortex-m-rt"]
+soc-rp2350 = []
+soc-stm32h7 = []
 sys-fusion-kn = ["dep:fusion-kn"]
 
 [lints]
@@ -22,6 +25,10 @@ workspace = true
 [dependencies]
 bitflags.workspace = true
 fusion-kn = { path = "../../fusion-kn", optional = true, default-features = false, features = ["client"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+cortex-m = { version = "0.7.7", optional = true, default-features = false }
+cortex-m-rt = { version = "0.7.5", optional = true, default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2.183", default-features = false }

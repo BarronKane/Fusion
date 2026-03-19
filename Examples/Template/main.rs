@@ -1,9 +1,7 @@
-use fusion_std::sync::{Mutex, RwLock, OnceLock, Semaphore};
+use fusion_std::sync::{Mutex, OnceLock, RwLock, Semaphore};
 use fusion_std::thread::{
-    Executor, ExecutorConfig, ExecutorMode,
-    ThreadPool, ThreadPoolConfig,
-    GreenPool, GreenPoolConfig,
-    JoinSet,
+    Executor, ExecutorConfig, ExecutorMode, GreenPool, GreenPoolConfig, JoinSet, ThreadPool,
+    ThreadPoolConfig,
 };
 
 fn main() {
@@ -34,9 +32,10 @@ fn main() {
     }
 
     // Green pool (requires a thread pool as carrier).
-    let green = pool.as_ref().ok().and_then(|pool| {
-        GreenPool::new(&GreenPoolConfig::new(), pool).ok()
-    });
+    let green = pool
+        .as_ref()
+        .ok()
+        .and_then(|pool| GreenPool::new(&GreenPoolConfig::new(), pool).ok());
     if let Some(ref green) = green {
         let handle = green.spawn(|| 42u32);
         if let Ok(handle) = handle {

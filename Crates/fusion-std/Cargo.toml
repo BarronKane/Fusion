@@ -19,6 +19,9 @@ path = "bin/fiber_fault_probe.rs"
 [features]
 default = ["std"]
 std = []
+sys-cortex-m = ["fusion-sys/sys-cortex-m"]
+soc-rp2350 = ["fusion-sys/soc-rp2350"]
+soc-stm32h7 = ["fusion-sys/soc-stm32h7"]
 sys-fusion-kn = ["fusion-sys/sys-fusion-kn"]
 
 [dependencies]

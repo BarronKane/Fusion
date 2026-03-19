@@ -1,0 +1,22 @@
+[package]
+name = "fusion-example-pico"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pico"
+path = "main.rs"
+
+[features]
+default = []
+
+[dependencies]
+fusion-std = { path = "../../Crates/fusion-std", default-features = false, features = ["sys-cortex-m"] }
+cortex-m = { version = "0.7.7", default-features = false }
+cortex-m-rt = { version = "0.7.5", default-features = false }
+
+[lints]
+workspace = true
