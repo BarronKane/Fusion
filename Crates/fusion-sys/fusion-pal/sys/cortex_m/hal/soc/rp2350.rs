@@ -98,14 +98,27 @@ const CORTEX_M_NVIC_ICER: *mut u32 = 0xE000_E180 as *mut u32;
 const CORTEX_M_NVIC_ICPR: *mut u32 = 0xE000_E280 as *mut u32;
 const RP2350_TIMER0_BASE: usize = 0x400b_0000;
 const RP2350_TIMER1_BASE: usize = 0x400b_8000;
+const RP2350_IO_BANK0_BASE: usize = 0x4002_8000;
+const RP2350_IO_QSPI_BASE: usize = 0x4003_0000;
 const RP2350_DMA_BASE: usize = 0x5000_0000;
+const RP2350_SPI0_BASE: usize = 0x4008_0000;
+const RP2350_SPI1_BASE: usize = 0x4008_8000;
 const RP2350_UART0_BASE: usize = 0x4007_0000;
 const RP2350_UART1_BASE: usize = 0x4007_8000;
 const RP2350_I2C0_BASE: usize = 0x4009_0000;
 const RP2350_I2C1_BASE: usize = 0x4009_8000;
+const RP2350_PIO0_BASE: usize = 0x5020_0000;
+const RP2350_PIO1_BASE: usize = 0x5030_0000;
+const RP2350_PIO2_BASE: usize = 0x5040_0000;
 const RP2350_EVENT_TIMEOUT_TIMER_BASE: usize = RP2350_TIMER0_BASE;
 const RP2350_EVENT_TIMEOUT_ALARM_INDEX: u16 = 3;
 const RP2350_EVENT_TIMEOUT_IRQN: u16 = 3;
+const RP2350_IO_BANK0_INTR0_OFFSET: usize = 0x230;
+const RP2350_IO_QSPI_INTR_OFFSET: usize = 0x218;
+const RP2350_IO_IRQ_WORD_STRIDE: usize = 0x4;
+const RP2350_GPIO_BANK0_SUMMARY_WORDS: usize = 6;
+const RP2350_GPIO_QSPI_SUMMARY_WORDS: usize = 1;
+const RP2350_GPIO_EDGE_EVENT_MASK: u32 = 0xCCCC_CCCC;
 const RP2350_TIMER_ALARM0_OFFSET: usize = 0x10;
 const RP2350_TIMER_ARMED_OFFSET: usize = 0x20;
 const RP2350_TIMER_TIMERAWL_OFFSET: usize = 0x28;
@@ -113,11 +126,17 @@ const RP2350_TIMER_INTR_OFFSET: usize = 0x3c;
 const RP2350_TIMER_INTE_OFFSET: usize = 0x40;
 const RP2350_TIMER_INTS_OFFSET: usize = 0x48;
 const RP2350_DMA_INTS0_OFFSET: usize = 0x40c;
+const RP2350_SPI_SSPMIS_OFFSET: usize = 0x1c;
+const RP2350_SPI_SSPICR_OFFSET: usize = 0x20;
+const RP2350_SPI_SSPICR_CLEARABLE_MASK: u32 = 0x3;
 const RP2350_UARTMIS_OFFSET: usize = 0x40;
 const RP2350_UARTICR_OFFSET: usize = 0x44;
 const RP2350_UARTICR_CLEARABLE_BITS: u32 = 0x0000_07ff;
 const RP2350_I2C_IC_INTR_STAT_OFFSET: usize = 0x2c;
 const RP2350_I2C_IC_CLR_INTR_OFFSET: usize = 0x40;
+const RP2350_PIO_IRQ_OFFSET: usize = 0x30;
+const RP2350_PIO_IRQ0_INTS_OFFSET: usize = 0x178;
+const RP2350_PIO_IRQ1_INTS_OFFSET: usize = 0x184;
 
 unsafe extern "C" {
     static __sheap: u8;
@@ -1564,6 +1583,118 @@ fn rp2350_owned_sram_region() -> Option<CortexMMemoryRegionDescriptor> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Rp2350Soc;
 
+/// Raw RP2350 GPIO-summary snapshot for one IO-bank IRQ line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rp2350GpioIrqSummary {
+    word_count: u8,
+    words: [u32; RP2350_GPIO_BANK0_SUMMARY_WORDS],
+}
+
+impl Rp2350GpioIrqSummary {
+    /// Returns the number of summary words that are valid for this bank.
+    #[must_use]
+    pub const fn word_count(self) -> usize {
+        self.word_count as usize
+    }
+
+    /// Returns one raw summary word when it exists.
+    #[must_use]
+    pub const fn word(self, index: usize) -> Option<u32> {
+        if index < self.word_count as usize {
+            Some(self.words[index])
+        } else {
+            None
+        }
+    }
+
+    /// Returns the raw 4-bit event nibble for one bank-local GPIO line.
+    #[must_use]
+    pub const fn line_events(self, line_index: u8) -> Option<u8> {
+        let word_index = (line_index / 8) as usize;
+        if word_index >= self.word_count as usize {
+            return None;
+        }
+        let shift = ((line_index % 8) * 4) as u32;
+        Some(((self.words[word_index] >> shift) & 0x0f) as u8)
+    }
+}
+
+/// Raw RP2350 PIO-summary snapshot for one PIO IRQ line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rp2350PioIrqSummary {
+    raw: u16,
+}
+
+impl Rp2350PioIrqSummary {
+    /// Returns the raw summary bits as surfaced by `PIO_IRQx_INTS`.
+    #[must_use]
+    pub const fn raw(self) -> u16 {
+        self.raw
+    }
+
+    /// Returns the internal PIO IRQ flags that can be cleared through `PIO_IRQ`.
+    #[must_use]
+    pub const fn internal_irq_flags(self) -> u8 {
+        (self.raw >> 8) as u8
+    }
+
+    /// Returns the state-machine TX-not-full summary bits.
+    #[must_use]
+    pub const fn tx_not_full_mask(self) -> u8 {
+        ((self.raw >> 4) & 0x0f) as u8
+    }
+
+    /// Returns the state-machine RX-not-empty summary bits.
+    #[must_use]
+    pub const fn rx_not_empty_mask(self) -> u8 {
+        (self.raw & 0x0f) as u8
+    }
+}
+
+/// Raw RP2350 SPI-summary snapshot for one SPI IRQ line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rp2350SpiIrqSummary {
+    raw: u8,
+}
+
+impl Rp2350SpiIrqSummary {
+    /// Returns the raw masked interrupt summary bits from `SPI_SSPMIS`.
+    #[must_use]
+    pub const fn raw(self) -> u8 {
+        self.raw
+    }
+
+    /// Returns whether TX threshold readiness is asserted.
+    #[must_use]
+    pub const fn tx(self) -> bool {
+        (self.raw & 0x8) != 0
+    }
+
+    /// Returns whether RX threshold readiness is asserted.
+    #[must_use]
+    pub const fn rx(self) -> bool {
+        (self.raw & 0x4) != 0
+    }
+
+    /// Returns whether receive timeout is asserted.
+    #[must_use]
+    pub const fn receive_timeout(self) -> bool {
+        (self.raw & 0x2) != 0
+    }
+
+    /// Returns whether receive overrun is asserted.
+    #[must_use]
+    pub const fn receive_overrun(self) -> bool {
+        (self.raw & 0x1) != 0
+    }
+
+    /// Returns the subset of pending causes that the shared SPI clear register can acknowledge.
+    #[must_use]
+    pub const fn clearable_mask(self) -> u8 {
+        self.raw & 0x3
+    }
+}
+
 impl Rp2350Soc {
     /// Creates a new RP2350 SoC provider.
     #[must_use]
@@ -1692,6 +1823,133 @@ const fn rp2350_i2c_base(irqn: u16) -> Option<usize> {
         37 => Some(RP2350_I2C1_BASE),
         _ => None,
     }
+}
+
+const fn rp2350_spi_base(irqn: u16) -> Option<usize> {
+    match irqn {
+        31 => Some(RP2350_SPI0_BASE),
+        32 => Some(RP2350_SPI1_BASE),
+        _ => None,
+    }
+}
+
+const fn rp2350_pio_base_and_irq_index(irqn: u16) -> Option<(usize, usize)> {
+    match irqn {
+        15 => Some((RP2350_PIO0_BASE, 0)),
+        16 => Some((RP2350_PIO0_BASE, 1)),
+        17 => Some((RP2350_PIO1_BASE, 0)),
+        18 => Some((RP2350_PIO1_BASE, 1)),
+        19 => Some((RP2350_PIO2_BASE, 0)),
+        20 => Some((RP2350_PIO2_BASE, 1)),
+        _ => None,
+    }
+}
+
+const fn rp2350_gpio_irq_bank(irqn: u16) -> Option<(usize, usize, usize)> {
+    match irqn {
+        21 | 22 => Some((
+            RP2350_IO_BANK0_BASE,
+            RP2350_IO_BANK0_INTR0_OFFSET,
+            RP2350_GPIO_BANK0_SUMMARY_WORDS,
+        )),
+        23 | 24 => Some((
+            RP2350_IO_QSPI_BASE,
+            RP2350_IO_QSPI_INTR_OFFSET,
+            RP2350_GPIO_QSPI_SUMMARY_WORDS,
+        )),
+        _ => None,
+    }
+}
+
+fn rp2350_gpio_irq_summary_snapshot(irqn: u16) -> Result<Rp2350GpioIrqSummary, HardwareError> {
+    let Some((base, intr0_offset, word_count)) = rp2350_gpio_irq_bank(irqn) else {
+        return Err(HardwareError::invalid());
+    };
+
+    let mut words = [0_u32; RP2350_GPIO_BANK0_SUMMARY_WORDS];
+    for (index, word) in words.iter_mut().take(word_count).enumerate() {
+        let register = (base + intr0_offset + (index * RP2350_IO_IRQ_WORD_STRIDE)) as *const u32;
+        // SAFETY: these are fixed RP2350 IO-bank raw-interrupt summary registers. Reads are
+        // side-effect free and simply snapshot the shared-summary state for driver-local handling.
+        *word = unsafe { ptr::read_volatile(register) };
+    }
+
+    Ok(Rp2350GpioIrqSummary {
+        word_count: word_count as u8,
+        words,
+    })
+}
+
+fn rp2350_gpio_irq_clear_edges(
+    irqn: u16,
+    word_index: usize,
+    edge_mask: u32,
+) -> Result<(), HardwareError> {
+    let Some((base, intr0_offset, word_count)) = rp2350_gpio_irq_bank(irqn) else {
+        return Err(HardwareError::invalid());
+    };
+    if word_index >= word_count {
+        return Err(HardwareError::invalid());
+    }
+
+    let register = (base + intr0_offset + (word_index * RP2350_IO_IRQ_WORD_STRIDE)) as *mut u32;
+    let clear_mask = edge_mask & RP2350_GPIO_EDGE_EVENT_MASK;
+    // SAFETY: the RP2350 IO-bank `INTR` registers use write-clear semantics for edge bits only.
+    // Masking to the architected edge subset avoids fabricating clears for level-triggered state.
+    unsafe { ptr::write_volatile(register, clear_mask) };
+    rp2350_nvic_write(CORTEX_M_NVIC_ICPR, irqn);
+    Ok(())
+}
+
+fn rp2350_pio_irq_summary_snapshot(irqn: u16) -> Result<Rp2350PioIrqSummary, HardwareError> {
+    let Some((base, irq_index)) = rp2350_pio_base_and_irq_index(irqn) else {
+        return Err(HardwareError::invalid());
+    };
+    let offset = if irq_index == 0 {
+        RP2350_PIO_IRQ0_INTS_OFFSET
+    } else {
+        RP2350_PIO_IRQ1_INTS_OFFSET
+    };
+    let register = (base + offset) as *const u32;
+    // SAFETY: `PIO_IRQx_INTS` is the read-only processor-facing summary for one PIO block.
+    let raw = unsafe { ptr::read_volatile(register) as u16 };
+    Ok(Rp2350PioIrqSummary { raw })
+}
+
+fn rp2350_pio_irq_clear_internal_flags(irqn: u16, flags: u8) -> Result<(), HardwareError> {
+    let Some((base, _)) = rp2350_pio_base_and_irq_index(irqn) else {
+        return Err(HardwareError::invalid());
+    };
+    let register = (base + RP2350_PIO_IRQ_OFFSET) as *mut u32;
+    // SAFETY: `PIO_IRQ` is the shared write-clear register for the PIO internal IRQ flags only.
+    unsafe { ptr::write_volatile(register, u32::from(flags)) };
+    rp2350_nvic_write(CORTEX_M_NVIC_ICPR, irqn);
+    Ok(())
+}
+
+fn rp2350_spi_irq_summary_snapshot(irqn: u16) -> Result<Rp2350SpiIrqSummary, HardwareError> {
+    let Some(base) = rp2350_spi_base(irqn) else {
+        return Err(HardwareError::invalid());
+    };
+    let register = (base + RP2350_SPI_SSPMIS_OFFSET) as *const u32;
+    // SAFETY: `SPI_SSPMIS` is the masked interrupt summary register for one SPI instance.
+    let raw = unsafe { ptr::read_volatile(register) as u8 };
+    Ok(Rp2350SpiIrqSummary { raw })
+}
+
+fn rp2350_spi_irq_acknowledge_clearable(irqn: u16) -> Result<u8, HardwareError> {
+    let Some(base) = rp2350_spi_base(irqn) else {
+        return Err(HardwareError::invalid());
+    };
+    let mis = (base + RP2350_SPI_SSPMIS_OFFSET) as *const u32;
+    let icr = (base + RP2350_SPI_SSPICR_OFFSET) as *mut u32;
+    // SAFETY: `SPI_SSPICR` is a write-clear register for RT/ROR causes only.
+    let clear_mask = unsafe { (ptr::read_volatile(mis) & RP2350_SPI_SSPICR_CLEARABLE_MASK) as u8 };
+    if clear_mask != 0 {
+        unsafe { ptr::write_volatile(icr, u32::from(clear_mask)) };
+        rp2350_nvic_write(CORTEX_M_NVIC_ICPR, irqn);
+    }
+    Ok(clear_mask)
 }
 
 fn rp2350_nvic_write(register_base: *mut u32, irqn: u16) {
@@ -2218,6 +2476,54 @@ pub fn irq_acknowledge(irqn: u16) -> Result<(), HardwareError> {
     board_contract::irq_acknowledge(system_soc(), irqn)
 }
 
+/// Returns a raw GPIO-summary snapshot for one RP2350 IO-bank IRQ line.
+///
+/// This is the driver-local escape hatch for shared-summary GPIO IRQs where the generic board
+/// contract intentionally refuses to lie about a universal acknowledge path.
+pub fn gpio_irq_summary(irqn: u16) -> Result<Rp2350GpioIrqSummary, HardwareError> {
+    rp2350_gpio_irq_summary_snapshot(irqn)
+}
+
+/// Clears edge-triggered GPIO causes for one RP2350 IO-bank IRQ summary word.
+///
+/// `word_index` is bank-local and `edge_mask` uses the raw nibble layout from `INTRx`.
+///
+/// # Errors
+///
+/// Returns an error when the IRQ line or word index is invalid for the selected bank.
+pub fn gpio_irq_clear_edges(
+    irqn: u16,
+    word_index: usize,
+    edge_mask: u32,
+) -> Result<(), HardwareError> {
+    rp2350_gpio_irq_clear_edges(irqn, word_index, edge_mask)
+}
+
+/// Returns a raw PIO-summary snapshot for one RP2350 PIO IRQ line.
+pub fn pio_irq_summary(irqn: u16) -> Result<Rp2350PioIrqSummary, HardwareError> {
+    rp2350_pio_irq_summary_snapshot(irqn)
+}
+
+/// Clears the internal PIO IRQ flags surfaced by one RP2350 PIO IRQ line.
+///
+/// This does not pretend FIFO threshold conditions are clearable; it only clears the internal
+/// `PIO_IRQ` flag byte.
+pub fn pio_irq_clear_internal_flags(irqn: u16, flags: u8) -> Result<(), HardwareError> {
+    rp2350_pio_irq_clear_internal_flags(irqn, flags)
+}
+
+/// Returns a raw SPI-summary snapshot for one RP2350 SPI IRQ line.
+pub fn spi_irq_summary(irqn: u16) -> Result<Rp2350SpiIrqSummary, HardwareError> {
+    rp2350_spi_irq_summary_snapshot(irqn)
+}
+
+/// Acknowledges the clearable SPI interrupt causes for one RP2350 SPI IRQ line.
+///
+/// The returned mask contains the RT/ROR bits that were actually cleared.
+pub fn spi_irq_acknowledge_clearable(irqn: u16) -> Result<u8, HardwareError> {
+    rp2350_spi_irq_acknowledge_clearable(irqn)
+}
+
 /// Returns the selected RP2350 clock-tree descriptors.
 #[must_use]
 pub fn clock_tree() -> &'static [CortexMClockDescriptor] {
@@ -2322,9 +2628,12 @@ mod tests {
         rp2350_chip_manufacturer,
         rp2350_chip_part,
         rp2350_chip_revision,
+        rp2350_gpio_irq_bank,
         rp2350_owned_sram_region_from_bounds,
+        rp2350_pio_base_and_irq_index,
         rp2350_power_mode_action,
         rp2350_public_device_id_from_words,
+        rp2350_spi_base,
     };
 
     #[test]
@@ -2398,6 +2707,71 @@ mod tests {
         assert!(!super::irq_acknowledge_supported(15));
         assert!(!super::irq_acknowledge_supported(21));
         assert!(!super::irq_acknowledge_supported(31));
+    }
+
+    #[test]
+    fn gpio_shared_summary_helpers_keep_bank_shape_honest() {
+        assert_eq!(
+            rp2350_gpio_irq_bank(21),
+            Some((
+                RP2350_IO_BANK0_BASE,
+                RP2350_IO_BANK0_INTR0_OFFSET,
+                RP2350_GPIO_BANK0_SUMMARY_WORDS,
+            ))
+        );
+        assert_eq!(
+            rp2350_gpio_irq_bank(23),
+            Some((
+                RP2350_IO_QSPI_BASE,
+                RP2350_IO_QSPI_INTR_OFFSET,
+                RP2350_GPIO_QSPI_SUMMARY_WORDS,
+            ))
+        );
+        assert_eq!(rp2350_gpio_irq_bank(31), None);
+
+        let summary = Rp2350GpioIrqSummary {
+            word_count: 1,
+            words: [0x0000_00c9, 0, 0, 0, 0, 0],
+        };
+        assert_eq!(summary.word_count(), 1);
+        assert_eq!(summary.word(0), Some(0x0000_00c9));
+        assert_eq!(summary.word(1), None);
+        assert_eq!(summary.line_events(0), Some(0x9));
+        assert_eq!(summary.line_events(1), Some(0xc));
+        assert_eq!(summary.line_events(8), None);
+    }
+
+    #[test]
+    fn pio_shared_summary_helpers_split_internal_and_fifo_causes() {
+        assert_eq!(
+            rp2350_pio_base_and_irq_index(15),
+            Some((RP2350_PIO0_BASE, 0))
+        );
+        assert_eq!(
+            rp2350_pio_base_and_irq_index(20),
+            Some((RP2350_PIO2_BASE, 1))
+        );
+        assert_eq!(rp2350_pio_base_and_irq_index(31), None);
+
+        let summary = Rp2350PioIrqSummary { raw: 0xa53c };
+        assert_eq!(summary.raw(), 0xa53c);
+        assert_eq!(summary.internal_irq_flags(), 0xa5);
+        assert_eq!(summary.tx_not_full_mask(), 0x3);
+        assert_eq!(summary.rx_not_empty_mask(), 0xc);
+    }
+
+    #[test]
+    fn spi_shared_summary_helpers_only_claim_clearable_rt_ror_bits() {
+        assert_eq!(rp2350_spi_base(31), Some(RP2350_SPI0_BASE));
+        assert_eq!(rp2350_spi_base(32), Some(RP2350_SPI1_BASE));
+        assert_eq!(rp2350_spi_base(33), None);
+
+        let summary = Rp2350SpiIrqSummary { raw: 0x0f };
+        assert!(summary.tx());
+        assert!(summary.rx());
+        assert!(summary.receive_timeout());
+        assert!(summary.receive_overrun());
+        assert_eq!(summary.clearable_mask(), 0x03);
     }
 
     #[test]

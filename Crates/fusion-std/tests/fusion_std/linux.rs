@@ -155,6 +155,47 @@ fusion_std::assert_generated_fiber_task_supported!(
     ExternalGeneratedContractTask
 );
 
+#[cfg(feature = "critical-safe-generated-contracts")]
+struct FeatureStrictGeneratedContractTask(u32);
+
+#[cfg(feature = "critical-safe-generated-contracts")]
+impl GeneratedExplicitFiberTask for FeatureStrictGeneratedContractTask {
+    type Output = u32;
+
+    fn run(self) -> Self::Output {
+        self.0 + 3
+    }
+}
+
+#[cfg(feature = "critical-safe-generated-contracts")]
+fusion_std::declare_generated_fiber_task_contract!(
+    FeatureStrictGeneratedContractTask,
+    NonZeroUsize::new(8 * 1024).unwrap(),
+    FiberTaskPriority::new(11),
+);
+
+#[cfg(feature = "critical-safe-generated-contracts")]
+const STRICT_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [FiberStackClassConfig {
+    class: match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
+        Ok(class) => class,
+        Err(_) => panic!("valid class"),
+    },
+    slots_per_carrier: 2,
+}];
+
+#[cfg(feature = "critical-safe-generated-contracts")]
+const STRICT_GENERATED_CONFIG: GreenPoolConfig<'static> =
+    match GreenPoolConfig::classed(&STRICT_GENERATED_CLASSES) {
+        Ok(config) => config,
+        Err(_) => panic!("classed config should build"),
+    };
+
+#[cfg(feature = "critical-safe-generated-contracts")]
+fusion_std::assert_generated_fiber_task_supported!(
+    STRICT_GENERATED_CONFIG,
+    FeatureStrictGeneratedContractTask
+);
+
 impl Drop for TestPipe {
     fn drop(&mut self) {
         unsafe {
@@ -208,6 +249,37 @@ fn downstream_generated_task_contracts_work_without_runtime_type_lookup() {
             .join()
             .expect("external generated task should complete"),
         7
+    );
+
+    green
+        .shutdown()
+        .expect("green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[cfg(feature = "critical-safe-generated-contracts")]
+#[test]
+fn strict_generated_contract_feature_bypasses_runtime_metadata_lookup() {
+    let _guard = lock_fusion_std_tests();
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+    let green =
+        GreenPool::new(&STRICT_GENERATED_CONFIG, &carrier).expect("green pool should build");
+
+    green
+        .validate_generated_task::<FeatureStrictGeneratedContractTask>()
+        .expect("strict generated task should validate from compile-time contract");
+
+    let handle = green
+        .spawn_generated(FeatureStrictGeneratedContractTask(5))
+        .expect("strict generated task should spawn from compile-time contract");
+    assert_eq!(
+        handle
+            .join()
+            .expect("strict generated task should complete"),
+        8
     );
 
     green
@@ -415,13 +487,12 @@ fn priority_green_pool_rejects_multi_carrier_topology_until_domain_semantics_exi
         GreenPoolConfig::classed(&priority_classes).expect("classed green config should build");
     config.scheduling = GreenScheduling::Priority;
 
-    let result = GreenPool::new(&config, &carriers);
-    assert!(result.is_err());
+    let error = GreenPool::new(&config, &carriers)
+        .expect_err("multi-carrier priority should remain unsupported until shared domains exist");
     assert_eq!(
-        result
-            .expect_err("multi-carrier priority should be rejected")
-            .kind(),
-        fusion_sys::fiber::FiberError::unsupported().kind()
+        error.kind(),
+        FiberError::unsupported().kind(),
+        "multi-carrier priority should still reject honestly",
     );
 
     carriers

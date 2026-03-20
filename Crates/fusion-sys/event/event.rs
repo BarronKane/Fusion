@@ -174,6 +174,18 @@ pub mod cortex_m {
         CortexMDmaRequestDescriptor,
         CortexMDmaTransferCaps,
         dma_requests as rp2350_dma_requests,
+        gpio_irq_clear_edges as rp2350_gpio_irq_clear_edges,
+        gpio_irq_summary as rp2350_gpio_irq_summary,
+        pio_irq_clear_internal_flags as rp2350_pio_irq_clear_internal_flags,
+        pio_irq_summary as rp2350_pio_irq_summary,
+        spi_irq_acknowledge_clearable as rp2350_spi_irq_acknowledge_clearable,
+        spi_irq_summary as rp2350_spi_irq_summary,
+    };
+    #[cfg(feature = "soc-rp2350")]
+    pub use fusion_pal::sys::cortex_m::hal::soc::board::{
+        Rp2350GpioIrqSummary,
+        Rp2350PioIrqSummary,
+        Rp2350SpiIrqSummary,
     };
 
     /// Typed wrapper for one Cortex-M external IRQ line used as an event source.
@@ -450,6 +462,36 @@ pub mod cortex_m {
             self.source()
                 .registration(EventInterest::READABLE, EventRegistrationMode::LevelSticky)
         }
+
+        /// Returns the current raw shared-summary snapshot for this GPIO IRQ source.
+        ///
+        /// This is the honest driver-local path for GPIO summary lines. It does not pretend the
+        /// PAL can generically acknowledge one GPIO bank without knowing which edge bits the
+        /// driver actually wants cleared.
+        ///
+        /// # Errors
+        ///
+        /// Returns any honest board-local failure while reading the current bank summary.
+        pub fn pending_summary(self) -> Result<Rp2350GpioIrqSummary, super::EventError> {
+            rp2350_gpio_irq_summary(self.source().irqn()).map_err(map_rp2350_hardware_error)
+        }
+
+        /// Clears one raw edge-event mask in the selected GPIO summary word.
+        ///
+        /// `word_index` is bank-local, and `edge_mask` uses the raw `INTRx` nibble layout.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when the word index is invalid for this bank or the board rejects the
+        /// request.
+        pub fn clear_edge_mask(
+            self,
+            word_index: usize,
+            edge_mask: u32,
+        ) -> Result<(), super::EventError> {
+            rp2350_gpio_irq_clear_edges(self.source().irqn(), word_index, edge_mask)
+                .map_err(map_rp2350_hardware_error)
+        }
     }
 
     #[cfg(feature = "soc-rp2350")]
@@ -490,6 +532,27 @@ pub mod cortex_m {
         pub const fn registration(self) -> EventRegistration {
             self.source()
                 .registration(EventInterest::READABLE, EventRegistrationMode::LevelSticky)
+        }
+
+        /// Returns the current raw shared-summary snapshot for this PIO IRQ source.
+        ///
+        /// # Errors
+        ///
+        /// Returns any honest board-local failure while reading the current PIO summary bits.
+        pub fn pending_summary(self) -> Result<Rp2350PioIrqSummary, super::EventError> {
+            rp2350_pio_irq_summary(self.source().irqn()).map_err(map_rp2350_hardware_error)
+        }
+
+        /// Clears the internal `PIO_IRQ` flag byte for this PIO source.
+        ///
+        /// This does not claim FIFO threshold conditions are clearable, because they are not.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when the board rejects the requested clear.
+        pub fn clear_internal_irq_flags(self, flags: u8) -> Result<(), super::EventError> {
+            rp2350_pio_irq_clear_internal_flags(self.source().irqn(), flags)
+                .map_err(map_rp2350_hardware_error)
         }
     }
 
@@ -551,6 +614,27 @@ pub mod cortex_m {
             self.source()
                 .registration(EventInterest::READABLE, EventRegistrationMode::LevelSticky)
         }
+
+        /// Returns the current raw shared-summary snapshot for this SPI IRQ source.
+        ///
+        /// # Errors
+        ///
+        /// Returns any honest board-local failure while reading the current SPI summary bits.
+        pub fn pending_summary(self) -> Result<Rp2350SpiIrqSummary, super::EventError> {
+            rp2350_spi_irq_summary(self.source().irqn()).map_err(map_rp2350_hardware_error)
+        }
+
+        /// Acknowledges the clearable RT/ROR causes for this SPI IRQ source.
+        ///
+        /// The returned bitmask contains the clearable causes that were actually acknowledged.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when the board rejects the requested clear.
+        pub fn acknowledge_clearable(self) -> Result<u8, super::EventError> {
+            rp2350_spi_irq_acknowledge_clearable(self.source().irqn())
+                .map_err(map_rp2350_hardware_error)
+        }
     }
 
     #[cfg(feature = "soc-rp2350")]
@@ -581,6 +665,22 @@ pub mod cortex_m {
                 EventInterest::READABLE,
                 EventRegistrationMode::LevelAckOnPoll,
             )
+        }
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    const fn map_rp2350_hardware_error(
+        error: fusion_pal::sys::hal::HardwareError,
+    ) -> super::EventError {
+        use fusion_pal::sys::hal::HardwareErrorKind;
+
+        match error.kind() {
+            HardwareErrorKind::Unsupported => super::EventError::unsupported(),
+            HardwareErrorKind::Invalid => super::EventError::invalid(),
+            HardwareErrorKind::Busy => super::EventError::busy(),
+            HardwareErrorKind::ResourceExhausted => super::EventError::resource_exhausted(),
+            HardwareErrorKind::StateConflict => super::EventError::state_conflict(),
+            HardwareErrorKind::Platform(code) => super::EventError::platform(code),
         }
     }
 }

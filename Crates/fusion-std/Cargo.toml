@@ -32,6 +32,7 @@ path = "bin/fiber_task_roots.rs"
 [features]
 default = ["std"]
 std = []
+critical-safe-generated-contracts = []
 sys-cortex-m = ["fusion-sys/sys-cortex-m"]
 soc-rp2350 = ["fusion-sys/soc-rp2350"]
 sys-fusion-kn = ["fusion-sys/sys-fusion-kn"]

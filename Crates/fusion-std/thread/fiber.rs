@@ -341,10 +341,22 @@ struct FiberTaskAge(u8);
 
 impl FiberTaskAge {
     const ZERO: Self = Self(0);
+    const MAX: Self = Self(u8::MAX);
 
     #[must_use]
     const fn get(self) -> u8 {
         self.0
+    }
+
+    #[must_use]
+    fn from_epoch_delta(delta: u64) -> Self {
+        if delta == 0 {
+            Self::ZERO
+        } else if delta >= u64::from(u8::MAX) {
+            Self::MAX
+        } else {
+            Self(u8::try_from(delta).unwrap_or(u8::MAX))
+        }
     }
 }
 
@@ -1481,13 +1493,24 @@ impl PriorityBucket {
     }
 }
 
+/// Strict-priority ready queue keyed by base-priority buckets with lazy epoch aging.
+///
+/// Invariants:
+/// - entries are physically linked into the bucket for their base `i8` priority
+/// - entries are never re-bucketed as they wait
+/// - waiting age is derived lazily from `epoch - enqueue_epoch`
+/// - within one bucket, the head is always the highest effective-priority entry because FIFO
+///   order preserves the oldest waiter first
+/// - dequeue therefore only needs to compare the heads of non-empty buckets instead of scanning
+///   every queued task
 #[derive(Debug)]
 struct MetadataPriorityQueue {
     buckets: MetadataSlice<PriorityBucket>,
     next: MetadataSlice<usize>,
-    priorities: MetadataSlice<i8>,
-    ages: MetadataSlice<u8>,
+    base_priorities: MetadataSlice<i8>,
+    enqueue_epochs: MetadataSlice<u64>,
     len: usize,
+    epoch: u64,
     non_empty: [usize; FIBER_PRIORITY_WORDS],
 }
 
@@ -1495,13 +1518,13 @@ impl MetadataPriorityQueue {
     fn new(
         buckets: MetadataSlice<PriorityBucket>,
         next: MetadataSlice<usize>,
-        priorities: MetadataSlice<i8>,
-        ages: MetadataSlice<u8>,
+        base_priorities: MetadataSlice<i8>,
+        enqueue_epochs: MetadataSlice<u64>,
     ) -> Result<Self, FiberError> {
         if next.is_empty()
             || buckets.len() != FIBER_PRIORITY_LEVELS
-            || priorities.len() != next.len()
-            || ages.len() != next.len()
+            || base_priorities.len() != next.len()
+            || enqueue_epochs.len() != next.len()
         {
             return Err(FiberError::invalid());
         }
@@ -1513,16 +1536,17 @@ impl MetadataPriorityQueue {
         for index in 0..next.len() {
             unsafe {
                 next.write(index, EMPTY_QUEUE_SLOT)?;
-                priorities.write(index, FiberTaskPriority::DEFAULT.get())?;
-                ages.write(index, FiberTaskAge::ZERO.get())?;
+                base_priorities.write(index, FiberTaskPriority::DEFAULT.get())?;
+                enqueue_epochs.write(index, 0)?;
             }
         }
         Ok(Self {
             buckets,
             next,
-            priorities,
-            ages,
+            base_priorities,
+            enqueue_epochs,
             len: 0,
+            epoch: 0,
             non_empty: [0; FIBER_PRIORITY_WORDS],
         })
     }
@@ -1539,16 +1563,15 @@ impl MetadataPriorityQueue {
             .copied()
             .ok_or_else(FiberError::invalid)?;
         self.next[value] = EMPTY_QUEUE_SLOT;
-        self.priorities[value] = priority.get();
-        self.ages[value] = FiberTaskAge::ZERO.get();
+        self.base_priorities[value] = priority.get();
+        self.enqueue_epochs[value] = self.epoch;
 
         if bucket.is_empty() {
             self.buckets[index] = PriorityBucket {
                 head: value,
                 tail: value,
             };
-            self.non_empty[index / usize::BITS as usize] |=
-                1usize << (index % usize::BITS as usize);
+            self.mark_bucket_non_empty(index);
         } else {
             self.next[bucket.tail] = value;
             self.buckets[index].tail = value;
@@ -1563,72 +1586,84 @@ impl MetadataPriorityQueue {
             return None;
         }
 
-        let mut selected = None::<(usize, usize, usize, FiberTaskPriority)>;
-
-        for bucket_index in (0..self.buckets.len()).rev() {
-            let mut previous = EMPTY_QUEUE_SLOT;
-            let mut current = self.buckets[bucket_index].head;
-            while current != EMPTY_QUEUE_SLOT {
-                let effective = self.effective_priority(current);
-                if selected
-                    .as_ref()
-                    .is_none_or(|(_, _, _, selected_effective)| effective > *selected_effective)
-                {
-                    selected = Some((bucket_index, previous, current, effective));
-                }
-                previous = current;
-                current = self.next[current];
-            }
-        }
-
-        let (bucket_index, previous, value, _) = selected?;
-        self.remove_value(bucket_index, previous, value);
-        self.ages[value] = FiberTaskAge::ZERO.get();
-        self.bump_waiting_ages();
+        let bucket_index = self.select_bucket_for_dequeue()?;
+        let value = self.pop_bucket_head(bucket_index)?;
+        self.epoch = self.epoch.saturating_add(1);
+        self.enqueue_epochs[value] = self.epoch;
         Some(value)
     }
 
     fn effective_priority(&self, value: usize) -> FiberTaskPriority {
-        FiberTaskPriority::new(self.priorities[value])
-            .effective_with_age(FiberTaskAge(self.ages[value]))
+        FiberTaskPriority::new(self.base_priorities[value])
+            .effective_with_age(self.waiting_age(value))
     }
 
-    fn remove_value(&mut self, bucket_index: usize, previous: usize, value: usize) {
-        let mut bucket = self.buckets[bucket_index];
-        let next = self.next[value];
-        if previous == EMPTY_QUEUE_SLOT {
-            bucket.head = next;
-        } else {
-            self.next[previous] = next;
+    fn waiting_age(&self, value: usize) -> FiberTaskAge {
+        FiberTaskAge::from_epoch_delta(self.epoch.saturating_sub(self.enqueue_epochs[value]))
+    }
+
+    fn head_effective_priority(&self, bucket_index: usize) -> Option<FiberTaskPriority> {
+        let candidate = self.buckets[bucket_index].head;
+        (candidate != EMPTY_QUEUE_SLOT).then(|| self.effective_priority(candidate))
+    }
+
+    fn select_bucket_for_dequeue(&self) -> Option<usize> {
+        let mut selected = None::<(usize, FiberTaskPriority)>;
+        let bits_per_word = usize::BITS as usize;
+
+        for word_index in (0..self.non_empty.len()).rev() {
+            let mut word = self.non_empty[word_index];
+            while word != 0 {
+                let highest_bit = usize::BITS as usize - 1 - word.leading_zeros() as usize;
+                let bucket_index = word_index * bits_per_word + highest_bit;
+                let effective = self.head_effective_priority(bucket_index)?;
+                if selected
+                    .as_ref()
+                    .is_none_or(|(selected_bucket, selected_effective)| {
+                        effective > *selected_effective
+                            || (effective == *selected_effective && bucket_index > *selected_bucket)
+                    })
+                {
+                    selected = Some((bucket_index, effective));
+                }
+                word &= !(1usize << highest_bit);
+            }
         }
 
+        selected.map(|(bucket_index, _)| bucket_index)
+    }
+
+    fn pop_bucket_head(&mut self, bucket_index: usize) -> Option<usize> {
+        let mut bucket = self.buckets[bucket_index];
+        let value = bucket.head;
+        if value == EMPTY_QUEUE_SLOT {
+            return None;
+        }
+        let next = self.next[value];
+        bucket.head = next;
         if bucket.tail == value {
-            bucket.tail = previous;
+            bucket.tail = next;
         }
         self.next[value] = EMPTY_QUEUE_SLOT;
 
         if bucket.head == EMPTY_QUEUE_SLOT {
             bucket = PriorityBucket::empty();
-            self.non_empty[bucket_index / usize::BITS as usize] &=
-                !(1usize << (bucket_index % usize::BITS as usize));
+            self.clear_bucket_non_empty(bucket_index);
         }
 
         self.buckets[bucket_index] = bucket;
         self.len -= 1;
+        Some(value)
     }
 
-    fn bump_waiting_ages(&mut self) {
-        if self.len == 0 {
-            return;
-        }
+    const fn mark_bucket_non_empty(&mut self, bucket_index: usize) {
+        self.non_empty[bucket_index / usize::BITS as usize] |=
+            1usize << (bucket_index % usize::BITS as usize);
+    }
 
-        for bucket_index in 0..self.buckets.len() {
-            let mut current = self.buckets[bucket_index].head;
-            while current != EMPTY_QUEUE_SLOT {
-                self.ages[current] = self.ages[current].saturating_add(1);
-                current = self.next[current];
-            }
-        }
+    const fn clear_bucket_non_empty(&mut self, bucket_index: usize) {
+        self.non_empty[bucket_index / usize::BITS as usize] &=
+            !(1usize << (bucket_index % usize::BITS as usize));
     }
 }
 
@@ -3732,7 +3767,7 @@ struct CarrierQueueSlices {
     priority_buckets: Option<MetadataSlice<PriorityBucket>>,
     priority_next: Option<MetadataSlice<usize>>,
     priority_values: Option<MetadataSlice<i8>>,
-    priority_ages: Option<MetadataSlice<u8>>,
+    priority_enqueue_epochs: Option<MetadataSlice<u64>>,
     waiters: Option<MetadataSlice<Option<CarrierWaiterRecord>>>,
 }
 
@@ -3752,7 +3787,9 @@ impl CarrierReadyQueue {
                 slices.priority_buckets.ok_or_else(FiberError::invalid)?,
                 slices.priority_next.ok_or_else(FiberError::invalid)?,
                 slices.priority_values.ok_or_else(FiberError::invalid)?,
-                slices.priority_ages.ok_or_else(FiberError::invalid)?,
+                slices
+                    .priority_enqueue_epochs
+                    .ok_or_else(FiberError::invalid)?,
             )?)),
         }
     }
@@ -4537,9 +4574,13 @@ impl GreenPoolMetadata {
                     bytes = bytes
                         .checked_add(task_capacity)
                         .ok_or_else(FiberError::resource_exhausted)?;
-                    bytes = fiber_align_up(bytes, align_of::<u8>())?;
+                    bytes = fiber_align_up(bytes, align_of::<u64>())?;
                     bytes = bytes
-                        .checked_add(task_capacity)
+                        .checked_add(
+                            size_of::<u64>()
+                                .checked_mul(task_capacity)
+                                .ok_or_else(FiberError::resource_exhausted)?,
+                        )
                         .ok_or_else(FiberError::resource_exhausted)?;
                 }
             }
@@ -4587,23 +4628,28 @@ impl GreenPoolMetadata {
         metadata.initialized_tasks = task_slots.len();
 
         for carrier_index in 0..carrier_count {
-            let (queue_entries, priority_buckets, priority_next, priority_values, priority_ages) =
-                match scheduling {
-                    GreenScheduling::Fifo | GreenScheduling::WorkStealing => (
-                        Some(cursor.reserve_slice::<usize>(task_capacity)?),
-                        None,
-                        None,
-                        None,
-                        None,
-                    ),
-                    GreenScheduling::Priority => (
-                        None,
-                        Some(cursor.reserve_slice::<PriorityBucket>(FIBER_PRIORITY_LEVELS)?),
-                        Some(cursor.reserve_slice::<usize>(task_capacity)?),
-                        Some(cursor.reserve_slice::<i8>(task_capacity)?),
-                        Some(cursor.reserve_slice::<u8>(task_capacity)?),
-                    ),
-                };
+            let (
+                queue_entries,
+                priority_buckets,
+                priority_next,
+                priority_values,
+                priority_enqueue_epochs,
+            ) = match scheduling {
+                GreenScheduling::Fifo | GreenScheduling::WorkStealing => (
+                    Some(cursor.reserve_slice::<usize>(task_capacity)?),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                GreenScheduling::Priority => (
+                    None,
+                    Some(cursor.reserve_slice::<PriorityBucket>(FIBER_PRIORITY_LEVELS)?),
+                    Some(cursor.reserve_slice::<usize>(task_capacity)?),
+                    Some(cursor.reserve_slice::<i8>(task_capacity)?),
+                    Some(cursor.reserve_slice::<u64>(task_capacity)?),
+                ),
+            };
             let waiters = if reactor_enabled {
                 Some(cursor.reserve_slice::<Option<CarrierWaiterRecord>>(task_capacity)?)
             } else {
@@ -4616,7 +4662,7 @@ impl GreenPoolMetadata {
                     priority_buckets,
                     priority_next,
                     priority_values,
-                    priority_ages,
+                    priority_enqueue_epochs,
                     waiters,
                 },
                 initial_steal_seed(carrier_index),
@@ -6558,12 +6604,276 @@ mod tests {
         assert!(huge_region.base.addr().get() > no_huge_region.base.addr().get());
     }
 
+    #[derive(Debug)]
+    struct BenchmarkPriorityQueueStorage {
+        buckets: Vec<PriorityBucket>,
+        next: Vec<usize>,
+        priorities: Vec<i8>,
+        enqueue_epochs: Vec<u64>,
+    }
+
+    impl BenchmarkPriorityQueueStorage {
+        fn new(capacity: usize) -> Self {
+            Self {
+                buckets: std::vec![PriorityBucket::empty(); FIBER_PRIORITY_LEVELS],
+                next: std::vec![EMPTY_QUEUE_SLOT; capacity],
+                priorities: std::vec![FiberTaskPriority::DEFAULT.get(); capacity],
+                enqueue_epochs: std::vec![0; capacity],
+            }
+        }
+
+        fn queue(&mut self) -> MetadataPriorityQueue {
+            MetadataPriorityQueue::new(
+                MetadataSlice {
+                    ptr: core::ptr::NonNull::new(self.buckets.as_mut_ptr())
+                        .expect("bucket slice pointer"),
+                    len: self.buckets.len(),
+                },
+                MetadataSlice {
+                    ptr: core::ptr::NonNull::new(self.next.as_mut_ptr())
+                        .expect("next slice pointer"),
+                    len: self.next.len(),
+                },
+                MetadataSlice {
+                    ptr: core::ptr::NonNull::new(self.priorities.as_mut_ptr())
+                        .expect("priority slice pointer"),
+                    len: self.priorities.len(),
+                },
+                MetadataSlice {
+                    ptr: core::ptr::NonNull::new(self.enqueue_epochs.as_mut_ptr())
+                        .expect("enqueue epoch slice pointer"),
+                    len: self.enqueue_epochs.len(),
+                },
+            )
+            .expect("priority queue builds")
+        }
+    }
+
+    #[derive(Debug)]
+    struct BenchmarkIndexQueueStorage {
+        entries: Vec<usize>,
+    }
+
+    impl BenchmarkIndexQueueStorage {
+        fn new(capacity: usize) -> Self {
+            Self {
+                entries: std::vec![0; capacity],
+            }
+        }
+
+        fn queue(&mut self) -> MetadataIndexQueue {
+            MetadataIndexQueue::new(MetadataSlice {
+                ptr: core::ptr::NonNull::new(self.entries.as_mut_ptr())
+                    .expect("index queue slice pointer"),
+                len: self.entries.len(),
+            })
+            .expect("index queue builds")
+        }
+    }
+
+    #[derive(Debug)]
+    struct FullScanPriorityQueueBenchmark {
+        buckets: Vec<PriorityBucket>,
+        next: Vec<usize>,
+        base_priorities: Vec<i8>,
+        enqueue_epochs: Vec<u64>,
+        len: usize,
+        epoch: u64,
+    }
+
+    impl FullScanPriorityQueueBenchmark {
+        fn new(capacity: usize) -> Self {
+            Self {
+                buckets: std::vec![PriorityBucket::empty(); FIBER_PRIORITY_LEVELS],
+                next: std::vec![EMPTY_QUEUE_SLOT; capacity],
+                base_priorities: std::vec![FiberTaskPriority::DEFAULT.get(); capacity],
+                enqueue_epochs: std::vec![0; capacity],
+                len: 0,
+                epoch: 0,
+            }
+        }
+
+        fn enqueue(&mut self, value: usize, priority: FiberTaskPriority) {
+            let index = priority.queue_index();
+            let bucket = self.buckets[index];
+            self.next[value] = EMPTY_QUEUE_SLOT;
+            self.base_priorities[value] = priority.get();
+            self.enqueue_epochs[value] = self.epoch;
+            if bucket.is_empty() {
+                self.buckets[index] = PriorityBucket {
+                    head: value,
+                    tail: value,
+                };
+            } else {
+                self.next[bucket.tail] = value;
+                self.buckets[index].tail = value;
+            }
+            self.len += 1;
+        }
+
+        fn dequeue(&mut self) -> Option<usize> {
+            let mut selected = None::<(usize, usize, FiberTaskPriority)>;
+            for bucket_index in (0..self.buckets.len()).rev() {
+                let mut current = self.buckets[bucket_index].head;
+                while current != EMPTY_QUEUE_SLOT {
+                    let effective = self.effective_priority(current);
+                    if selected
+                        .as_ref()
+                        .is_none_or(|(selected_bucket, _, selected_effective)| {
+                            effective > *selected_effective
+                                || (effective == *selected_effective
+                                    && bucket_index > *selected_bucket)
+                        })
+                    {
+                        selected = Some((bucket_index, current, effective));
+                    }
+                    current = self.next[current];
+                }
+            }
+
+            let (bucket_index, value, _) = selected?;
+            self.remove_value(bucket_index, value);
+            self.epoch = self.epoch.saturating_add(1);
+            self.enqueue_epochs[value] = self.epoch;
+            Some(value)
+        }
+
+        fn effective_priority(&self, value: usize) -> FiberTaskPriority {
+            FiberTaskPriority::new(self.base_priorities[value]).effective_with_age(
+                FiberTaskAge::from_epoch_delta(self.epoch.saturating_sub(self.enqueue_epochs[value])),
+            )
+        }
+
+        fn remove_value(&mut self, bucket_index: usize, value: usize) {
+            let mut bucket = self.buckets[bucket_index];
+            let mut previous = EMPTY_QUEUE_SLOT;
+            let mut current = bucket.head;
+            while current != EMPTY_QUEUE_SLOT && current != value {
+                previous = current;
+                current = self.next[current];
+            }
+            assert_eq!(
+                current, value,
+                "full-scan benchmark queue should find selected value"
+            );
+            let next = self.next[value];
+            if previous == EMPTY_QUEUE_SLOT {
+                bucket.head = next;
+            } else {
+                self.next[previous] = next;
+            }
+            if bucket.tail == value {
+                bucket.tail = if previous == EMPTY_QUEUE_SLOT {
+                    next
+                } else {
+                    previous
+                };
+            }
+            if bucket.head == EMPTY_QUEUE_SLOT {
+                bucket = PriorityBucket::empty();
+            }
+            self.next[value] = EMPTY_QUEUE_SLOT;
+            self.buckets[bucket_index] = bucket;
+            self.len -= 1;
+        }
+    }
+
+    const fn benchmark_priority_for(round: usize, value: usize) -> FiberTaskPriority {
+        let raw = round
+            .wrapping_mul(19)
+            .wrapping_add(value.wrapping_mul(37))
+            .to_le_bytes()[0];
+        FiberTaskPriority::new(i8::from_ne_bytes([raw]))
+    }
+
+    const fn benchmark_rounds(capacity: usize) -> usize {
+        match capacity {
+            0..=64 => 4096,
+            65..=256 => 2048,
+            _ => 1024,
+        }
+    }
+
+    fn nanos_per_op(duration: std::time::Duration, operations: usize) -> u128 {
+        duration.as_nanos() / operations.max(1) as u128
+    }
+
+    fn benchmark_fifo_queue(capacity: usize, rounds: usize) -> std::time::Duration {
+        let mut storage = BenchmarkIndexQueueStorage::new(capacity);
+        let mut queue = storage.queue();
+        let started = std::time::Instant::now();
+        for round in 0..rounds {
+            for value in 0..capacity {
+                queue
+                    .enqueue(round * capacity + value)
+                    .expect("fifo benchmark enqueue");
+            }
+            for _ in 0..capacity {
+                std::hint::black_box(queue.dequeue().expect("fifo benchmark dequeue"));
+            }
+        }
+        started.elapsed()
+    }
+
+    fn benchmark_priority_queue(capacity: usize, rounds: usize) -> std::time::Duration {
+        let mut storage = BenchmarkPriorityQueueStorage::new(capacity);
+        let mut queue = storage.queue();
+        let started = std::time::Instant::now();
+        for round in 0..rounds {
+            for value in 0..capacity {
+                queue
+                    .enqueue(value, benchmark_priority_for(round, value))
+                    .expect("priority benchmark enqueue");
+            }
+            for _ in 0..capacity {
+                std::hint::black_box(queue.dequeue().expect("priority benchmark dequeue"));
+            }
+        }
+        started.elapsed()
+    }
+
+    fn benchmark_full_scan_priority_queue(capacity: usize, rounds: usize) -> std::time::Duration {
+        let mut queue = FullScanPriorityQueueBenchmark::new(capacity);
+        let started = std::time::Instant::now();
+        for round in 0..rounds {
+            for value in 0..capacity {
+                queue.enqueue(value, benchmark_priority_for(round, value));
+            }
+            for _ in 0..capacity {
+                std::hint::black_box(
+                    queue
+                        .dequeue()
+                        .expect("full-scan priority benchmark dequeue"),
+                );
+            }
+        }
+        started.elapsed()
+    }
+
+    #[test]
+    #[ignore = "microbenchmark"]
+    fn benchmark_ready_queue_overheads() {
+        for capacity in [64usize, 256, 1024] {
+            let rounds = benchmark_rounds(capacity);
+            let operations = rounds * capacity * 2;
+            let fifo = benchmark_fifo_queue(capacity, rounds);
+            let strict = benchmark_priority_queue(capacity, rounds);
+            let full_scan = benchmark_full_scan_priority_queue(capacity, rounds);
+            std::eprintln!(
+                "capacity={capacity:>4} rounds={rounds:>4} ops={operations:>8} | fifo={} ns/op | strict={} ns/op | full-scan={} ns/op",
+                nanos_per_op(fifo, operations),
+                nanos_per_op(strict, operations),
+                nanos_per_op(full_scan, operations),
+            );
+        }
+    }
+
     #[test]
     fn priority_queue_dequeues_higher_priorities_first() {
         let mut buckets = [PriorityBucket::empty(); FIBER_PRIORITY_LEVELS];
         let mut next = [EMPTY_QUEUE_SLOT; 8];
         let mut priorities = [FiberTaskPriority::DEFAULT.get(); 8];
-        let mut ages = [FiberTaskAge::ZERO.get(); 8];
+        let mut enqueue_epochs = [0u64; 8];
         let bucket_slice = MetadataSlice {
             ptr: core::ptr::NonNull::new(buckets.as_mut_ptr()).expect("bucket slice pointer"),
             len: buckets.len(),
@@ -6576,13 +6886,18 @@ mod tests {
             ptr: core::ptr::NonNull::new(priorities.as_mut_ptr()).expect("priority slice pointer"),
             len: priorities.len(),
         };
-        let age_slice = MetadataSlice {
-            ptr: core::ptr::NonNull::new(ages.as_mut_ptr()).expect("age slice pointer"),
-            len: ages.len(),
+        let enqueue_epoch_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(enqueue_epochs.as_mut_ptr())
+                .expect("enqueue epoch slice pointer"),
+            len: enqueue_epochs.len(),
         };
-        let mut queue =
-            MetadataPriorityQueue::new(bucket_slice, next_slice, priority_slice, age_slice)
-                .expect("priority queue builds");
+        let mut queue = MetadataPriorityQueue::new(
+            bucket_slice,
+            next_slice,
+            priority_slice,
+            enqueue_epoch_slice,
+        )
+        .expect("priority queue builds");
 
         queue
             .enqueue(1, FiberTaskPriority::new(-5))
@@ -6605,7 +6920,7 @@ mod tests {
         let mut buckets = [PriorityBucket::empty(); FIBER_PRIORITY_LEVELS];
         let mut next = [EMPTY_QUEUE_SLOT; 8];
         let mut priorities = [FiberTaskPriority::DEFAULT.get(); 8];
-        let mut ages = [FiberTaskAge::ZERO.get(); 8];
+        let mut enqueue_epochs = [0u64; 8];
         let bucket_slice = MetadataSlice {
             ptr: core::ptr::NonNull::new(buckets.as_mut_ptr()).expect("bucket slice pointer"),
             len: buckets.len(),
@@ -6618,13 +6933,18 @@ mod tests {
             ptr: core::ptr::NonNull::new(priorities.as_mut_ptr()).expect("priority slice pointer"),
             len: priorities.len(),
         };
-        let age_slice = MetadataSlice {
-            ptr: core::ptr::NonNull::new(ages.as_mut_ptr()).expect("age slice pointer"),
-            len: ages.len(),
+        let enqueue_epoch_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(enqueue_epochs.as_mut_ptr())
+                .expect("enqueue epoch slice pointer"),
+            len: enqueue_epochs.len(),
         };
-        let mut queue =
-            MetadataPriorityQueue::new(bucket_slice, next_slice, priority_slice, age_slice)
-                .expect("priority queue builds");
+        let mut queue = MetadataPriorityQueue::new(
+            bucket_slice,
+            next_slice,
+            priority_slice,
+            enqueue_epoch_slice,
+        )
+        .expect("priority queue builds");
 
         queue
             .enqueue(1, FiberTaskPriority::DEFAULT)
@@ -6634,19 +6954,116 @@ mod tests {
             .expect("slightly higher-priority task should enqueue");
 
         assert_eq!(queue.dequeue(), Some(2));
-        assert_eq!(ages[1], 1);
+        assert_eq!(queue.waiting_age(1), FiberTaskAge(1));
 
         queue
             .enqueue(3, FiberTaskPriority::new(1))
             .expect("another slightly higher-priority task should enqueue");
         assert_eq!(queue.dequeue(), Some(3));
-        assert_eq!(ages[1], 2);
+        assert_eq!(queue.waiting_age(1), FiberTaskAge(2));
 
         queue
             .enqueue(4, FiberTaskPriority::new(1))
             .expect("third slightly higher-priority task should enqueue");
         assert_eq!(queue.dequeue(), Some(1));
-        assert_eq!(ages[1], 0);
+        assert_eq!(queue.waiting_age(1), FiberTaskAge::ZERO);
+    }
+
+    #[test]
+    fn priority_queue_prefers_higher_base_priority_when_effective_priorities_tie() {
+        let mut buckets = [PriorityBucket::empty(); FIBER_PRIORITY_LEVELS];
+        let mut next = [EMPTY_QUEUE_SLOT; 8];
+        let mut priorities = [FiberTaskPriority::DEFAULT.get(); 8];
+        let mut enqueue_epochs = [0u64; 8];
+        let bucket_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(buckets.as_mut_ptr()).expect("bucket slice pointer"),
+            len: buckets.len(),
+        };
+        let next_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(next.as_mut_ptr()).expect("next slice pointer"),
+            len: next.len(),
+        };
+        let priority_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(priorities.as_mut_ptr()).expect("priority slice pointer"),
+            len: priorities.len(),
+        };
+        let enqueue_epoch_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(enqueue_epochs.as_mut_ptr())
+                .expect("enqueue epoch slice pointer"),
+            len: enqueue_epochs.len(),
+        };
+        let mut queue = MetadataPriorityQueue::new(
+            bucket_slice,
+            next_slice,
+            priority_slice,
+            enqueue_epoch_slice,
+        )
+        .expect("priority queue builds");
+
+        queue
+            .enqueue(1, FiberTaskPriority::DEFAULT)
+            .expect("default-priority task should enqueue");
+        queue
+            .enqueue(7, FiberTaskPriority::new(10))
+            .expect("high-priority task should enqueue");
+        assert_eq!(queue.dequeue(), Some(7));
+
+        queue
+            .enqueue(2, FiberTaskPriority::new(1))
+            .expect("slightly higher-priority task should enqueue");
+
+        assert_eq!(queue.waiting_age(1), FiberTaskAge(1));
+        assert_eq!(queue.waiting_age(2), FiberTaskAge::ZERO);
+        assert_eq!(queue.effective_priority(1), FiberTaskPriority::new(1));
+        assert_eq!(queue.effective_priority(2), FiberTaskPriority::new(1));
+        assert_eq!(queue.dequeue(), Some(2));
+        assert_eq!(queue.dequeue(), Some(1));
+    }
+
+    #[test]
+    fn priority_queue_preserves_fifo_order_within_one_priority_bucket() {
+        let mut buckets = [PriorityBucket::empty(); FIBER_PRIORITY_LEVELS];
+        let mut next = [EMPTY_QUEUE_SLOT; 8];
+        let mut priorities = [FiberTaskPriority::DEFAULT.get(); 8];
+        let mut enqueue_epochs = [0u64; 8];
+        let bucket_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(buckets.as_mut_ptr()).expect("bucket slice pointer"),
+            len: buckets.len(),
+        };
+        let next_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(next.as_mut_ptr()).expect("next slice pointer"),
+            len: next.len(),
+        };
+        let priority_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(priorities.as_mut_ptr()).expect("priority slice pointer"),
+            len: priorities.len(),
+        };
+        let enqueue_epoch_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(enqueue_epochs.as_mut_ptr())
+                .expect("enqueue epoch slice pointer"),
+            len: enqueue_epochs.len(),
+        };
+        let mut queue = MetadataPriorityQueue::new(
+            bucket_slice,
+            next_slice,
+            priority_slice,
+            enqueue_epoch_slice,
+        )
+        .expect("priority queue builds");
+
+        queue
+            .enqueue(1, FiberTaskPriority::new(3))
+            .expect("first task should enqueue");
+        queue
+            .enqueue(2, FiberTaskPriority::new(3))
+            .expect("second task should enqueue");
+        queue
+            .enqueue(3, FiberTaskPriority::new(3))
+            .expect("third task should enqueue");
+
+        assert_eq!(queue.dequeue(), Some(1));
+        assert_eq!(queue.dequeue(), Some(2));
+        assert_eq!(queue.dequeue(), Some(3));
     }
 
     #[test]

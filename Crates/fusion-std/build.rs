@@ -4,10 +4,13 @@ use std::path::{Path, PathBuf};
 
 const MANIFEST_NAME: &str = "fiber-task.generated";
 const AUTO_MANIFEST_NAME: &str = "fusion-std-fiber-task.generated";
+const AUTO_REPORT_NAME: &str = "fusion-std-fiber-task.report";
 const OUTPUT_NAME: &str = "fiber_task_generated.rs";
 const GENERATED_METADATA_ENV: &str = "FUSION_FIBER_TASK_METADATA";
+const GENERATED_REPORT_ENV: &str = "FUSION_FIBER_TASK_REPORT";
+const STRICT_CONTRACTS_FEATURE_ENV: &str = "CARGO_FEATURE_CRITICAL_SAFE_GENERATED_CONTRACTS";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct GeneratedFiberTaskEntry {
     type_name: String,
     stack_bytes: usize,
@@ -15,45 +18,14 @@ struct GeneratedFiberTaskEntry {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={MANIFEST_NAME}");
-    println!("cargo:rerun-if-env-changed={GENERATED_METADATA_ENV}");
-
-    let manifest_dir = PathBuf::from(
-        env::var("CARGO_MANIFEST_DIR").expect("Cargo should always provide CARGO_MANIFEST_DIR"),
-    );
-    let manifest_path = manifest_dir.join(MANIFEST_NAME);
-    let auto_manifest_path = default_auto_manifest_path(&manifest_dir);
-    let analyzer_metadata = env::var_os(GENERATED_METADATA_ENV).map(PathBuf::from);
-    if let Some(path) = analyzer_metadata.as_ref()
-        && path.is_file()
-    {
-        println!("cargo:rerun-if-changed={}", path.display());
-    }
-    if auto_manifest_path.is_file() {
-        println!("cargo:rerun-if-changed={}", auto_manifest_path.display());
-    }
+    let (manifest_path, auto_manifest_candidates, auto_report_candidates) = setup_build_inputs();
     let output_path =
         PathBuf::from(env::var("OUT_DIR").expect("Cargo should provide OUT_DIR")).join(OUTPUT_NAME);
-
-    let metadata_source = analyzer_metadata
-        .as_deref()
-        .filter(|path| path.is_file())
-        .or_else(|| {
-            auto_manifest_path
-                .is_file()
-                .then_some(auto_manifest_path.as_path())
-        })
-        .unwrap_or(&manifest_path);
-    let entries = match load_generated_entries(metadata_source) {
-        Ok(entries) => entries,
-        Err(error) => panic!(
-            "fusion-std: failed to load generated fiber-task metadata from {}: {error}",
-            metadata_source.display()
-        ),
-    };
-
-    let generated = render_generated_entries(&entries);
+    let generated = generate_fiber_task_metadata(
+        &manifest_path,
+        &auto_manifest_candidates,
+        &auto_report_candidates,
+    );
     fs::write(&output_path, generated).unwrap_or_else(|error| {
         panic!(
             "fusion-std: failed to write {}: {error}",
@@ -62,16 +34,183 @@ fn main() {
     });
 }
 
-fn default_auto_manifest_path(manifest_dir: &Path) -> PathBuf {
-    if let Some(target_dir) = env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
-        return target_dir.join(AUTO_MANIFEST_NAME);
+fn setup_build_inputs() -> (PathBuf, Vec<PathBuf>, Vec<PathBuf>) {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed={MANIFEST_NAME}");
+    println!("cargo:rerun-if-env-changed={GENERATED_METADATA_ENV}");
+    println!("cargo:rerun-if-env-changed={GENERATED_REPORT_ENV}");
+    println!("cargo:rerun-if-env-changed={STRICT_CONTRACTS_FEATURE_ENV}");
+
+    let manifest_dir = PathBuf::from(
+        env::var("CARGO_MANIFEST_DIR").expect("Cargo should always provide CARGO_MANIFEST_DIR"),
+    );
+    let manifest_path = manifest_dir.join(MANIFEST_NAME);
+    let auto_manifest_candidates = candidate_auto_artifact_paths(&manifest_dir, AUTO_MANIFEST_NAME);
+    let auto_report_candidates = candidate_auto_artifact_paths(&manifest_dir, AUTO_REPORT_NAME);
+    let analyzer_metadata = env::var_os(GENERATED_METADATA_ENV).map(PathBuf::from);
+    let analyzer_report = env::var_os(GENERATED_REPORT_ENV).map(PathBuf::from);
+    if let Some(path) = analyzer_metadata.as_ref()
+        && path.is_file()
+    {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    if let Some(path) = analyzer_report.as_ref()
+        && path.is_file()
+    {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    for path in &auto_manifest_candidates {
+        if path.is_file() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+    for path in &auto_report_candidates {
+        if path.is_file() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+    (manifest_path, auto_manifest_candidates, auto_report_candidates)
+}
+
+fn generate_fiber_task_metadata(
+    manifest_path: &Path,
+    auto_manifest_candidates: &[PathBuf],
+    auto_report_candidates: &[PathBuf],
+) -> String {
+    let analyzer_metadata = env::var_os(GENERATED_METADATA_ENV).map(PathBuf::from);
+    let analyzer_report = env::var_os(GENERATED_REPORT_ENV).map(PathBuf::from);
+    let strict_generated_contracts = env::var_os(STRICT_CONTRACTS_FEATURE_ENV).is_some();
+    let explicit_metadata_source = analyzer_metadata.as_deref().filter(|path| path.is_file());
+    let explicit_report_source = analyzer_report.as_deref().filter(|path| path.is_file());
+    let auto_metadata_source = first_existing_path(auto_manifest_candidates).map(PathBuf::as_path);
+    let auto_report_source = first_existing_path(auto_report_candidates).map(PathBuf::as_path);
+    let metadata_source = if strict_generated_contracts {
+        explicit_metadata_source
+            .or(auto_metadata_source)
+            .unwrap_or_else(|| {
+                panic!(
+                    "fusion-std: strict generated-task contracts require analyzer output; run \
+                 `fusion_std_fiber_task_pipeline` or set {GENERATED_METADATA_ENV}"
+                )
+            })
+    } else if let Some(path) = explicit_metadata_source {
+        path
+    } else if let Some(path) = select_auto_generated_metadata_source(
+        auto_metadata_source,
+        auto_report_source,
+        manifest_path,
+    ) {
+        path
+    } else {
+        manifest_path
+    };
+    let report_source = explicit_report_source;
+    let mut entries = match load_generated_entries(metadata_source) {
+        Ok(entries) => entries,
+        Err(error) => panic!(
+            "fusion-std: failed to load generated fiber-task metadata from {}: {error}",
+            metadata_source.display()
+        ),
+    };
+    if !strict_generated_contracts
+        && metadata_source != manifest_path
+        && manifest_path.is_file()
+    {
+        let bridge_entries = match load_generated_entries(manifest_path) {
+            Ok(entries) => entries,
+            Err(error) => panic!(
+                "fusion-std: failed to load conservative bridge metadata from {}: {error}",
+                manifest_path.display()
+            ),
+        };
+        merge_entries_with_conservative_bridge(&mut entries, bridge_entries);
+    }
+    if strict_generated_contracts {
+        let Some(report_source) = report_source
+            .or_else(|| first_existing_path(auto_report_candidates).map(PathBuf::as_path))
+        else {
+            panic!(
+                "fusion-std: strict generated-task contracts require an analyzer report; \
+                 set {GENERATED_REPORT_ENV} or place {AUTO_REPORT_NAME} under target/"
+            )
+        };
+        if let Err(error) = assert_report_has_no_unresolved_symbols(report_source) {
+            panic!(
+                "fusion-std: strict generated-task contracts rejected analyzer report {}: \
+                 {error}",
+                report_source.display()
+            );
+        }
     }
 
-    manifest_dir
-        .parent()
-        .and_then(Path::parent)
-        .map_or_else(|| PathBuf::from("target"), PathBuf::from)
-        .join(AUTO_MANIFEST_NAME)
+    entries.sort_by(|left, right| left.type_name.cmp(&right.type_name));
+    render_generated_entries(&entries)
+}
+
+fn candidate_auto_artifact_paths(manifest_dir: &Path, artifact_name: &str) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(target_dir) = env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
+        if target_dir.is_absolute() {
+            roots.push(target_dir);
+        } else {
+            roots.push(manifest_dir.join(&target_dir));
+            if let Some(workspace_root) = workspace_root(manifest_dir) {
+                roots.push(workspace_root.join(&target_dir));
+            }
+        }
+    }
+
+    if let Some(workspace_root) = workspace_root(manifest_dir) {
+        roots.push(workspace_root.join("target"));
+    }
+    if let Some(parent) = manifest_dir.parent() {
+        roots.push(parent.join("target"));
+    }
+    roots.push(PathBuf::from("target"));
+
+    let mut candidates = Vec::new();
+    for root in roots {
+        if !candidates.contains(&root) {
+            candidates.push(root.join(artifact_name));
+        }
+    }
+    candidates
+}
+
+fn workspace_root(manifest_dir: &Path) -> Option<&Path> {
+    manifest_dir.parent().and_then(Path::parent)
+}
+
+fn first_existing_path(candidates: &[PathBuf]) -> Option<&PathBuf> {
+    candidates.iter().find(|path| path.is_file())
+}
+
+fn select_auto_generated_metadata_source<'a>(
+    metadata_source: Option<&'a Path>,
+    report_source: Option<&Path>,
+    manifest_path: &Path,
+) -> Option<&'a Path> {
+    let metadata_source = metadata_source?;
+    let Some(report_source) = report_source else {
+        println!(
+            "cargo:warning=fusion-std: ignoring auto-generated fiber-task metadata at {} because no analyzer report was found; falling back to {}",
+            metadata_source.display(),
+            manifest_path.display(),
+        );
+        return None;
+    };
+    match assert_report_has_no_unresolved_symbols(report_source) {
+        Ok(()) => Some(metadata_source),
+        Err(error) => {
+            println!(
+                "cargo:warning=fusion-std: ignoring auto-generated fiber-task metadata at {} because report {} is unresolved ({error}); falling back to {}",
+                metadata_source.display(),
+                report_source.display(),
+                manifest_path.display(),
+            );
+            None
+        }
+    }
 }
 
 fn load_generated_entries(path: &Path) -> Result<Vec<GeneratedFiberTaskEntry>, String> {
@@ -129,6 +268,20 @@ fn load_generated_entries(path: &Path) -> Result<Vec<GeneratedFiberTaskEntry>, S
     Ok(entries)
 }
 
+fn merge_entries_with_conservative_bridge(
+    entries: &mut Vec<GeneratedFiberTaskEntry>,
+    bridge_entries: Vec<GeneratedFiberTaskEntry>,
+) {
+    for bridge in bridge_entries {
+        if let Some(existing) = entries.iter_mut().find(|entry| entry.type_name == bridge.type_name)
+        {
+            existing.stack_bytes = existing.stack_bytes.max(bridge.stack_bytes);
+        } else {
+            entries.push(bridge);
+        }
+    }
+}
+
 fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
     let mut rendered = String::from(
         "const GENERATED_EXPLICIT_FIBER_TASKS: &[GeneratedExplicitFiberTaskMetadata] = &[\n",
@@ -169,6 +322,22 @@ fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
     }
 
     rendered
+}
+
+fn assert_report_has_no_unresolved_symbols(path: &Path) -> Result<(), String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    for (line_no, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.starts_with("# TODO: ") {
+            return Err(format!(
+                "unresolved analyzer contract at line {}: {}",
+                line_no + 1,
+                line
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn render_type_path(type_name: &str) -> String {
