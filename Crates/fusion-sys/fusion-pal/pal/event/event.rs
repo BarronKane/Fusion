@@ -25,6 +25,28 @@ pub struct EventSourceHandle(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EventKey(pub u64);
 
+/// Registration policy for a source handle attached to an event backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EventRegistrationMode {
+    /// Leave the source asserted until the producer or consumer clears it explicitly.
+    LevelSticky,
+    /// Acknowledge the source after surfacing one readiness notification.
+    LevelAckOnPoll,
+    /// Surface one readiness notification, then disable or drop the registration.
+    OneShot,
+}
+
+/// Full registration request for one event source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EventRegistration {
+    /// Source handle associated with the registration.
+    pub source: EventSourceHandle,
+    /// Interest set requested for the source.
+    pub interest: EventInterest,
+    /// Registration delivery policy requested for the source.
+    pub mode: EventRegistrationMode,
+}
+
 bitflags! {
     /// Requested interest set for a registered event source.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -144,6 +166,24 @@ pub trait EventSource: EventBase {
         interest: EventInterest,
     ) -> Result<EventKey, EventError>;
 
+    /// Registers a source handle with an explicit delivery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest registration failure, including invalid source handles, unsupported
+    /// interest or delivery modes, or backend resource exhaustion.
+    fn register_with(
+        &self,
+        poller: &mut Self::Poller,
+        registration: EventRegistration,
+    ) -> Result<EventKey, EventError> {
+        if registration.mode != EventRegistrationMode::LevelSticky {
+            return Err(EventError::unsupported());
+        }
+
+        self.register(poller, registration.source, registration.interest)
+    }
+
     /// Updates the registration interest for an existing source.
     ///
     /// # Errors
@@ -155,6 +195,24 @@ pub trait EventSource: EventBase {
         key: EventKey,
         interest: EventInterest,
     ) -> Result<(), EventError>;
+
+    /// Updates an existing registration with an explicit delivery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend failure when the registration cannot be updated.
+    fn reregister_with(
+        &self,
+        poller: &mut Self::Poller,
+        key: EventKey,
+        registration: EventRegistration,
+    ) -> Result<(), EventError> {
+        if registration.mode != EventRegistrationMode::LevelSticky {
+            return Err(EventError::unsupported());
+        }
+
+        self.reregister(poller, key, registration.interest)
+    }
 
     /// Removes a previously registered source.
     ///

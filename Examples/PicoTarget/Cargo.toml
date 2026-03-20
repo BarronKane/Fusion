@@ -14,7 +14,7 @@ path = "main.rs"
 default = []
 
 [dependencies]
-fusion-std = { path = "../../Crates/fusion-std", default-features = false, features = ["sys-cortex-m"] }
+fusion-std = { path = "../../Crates/fusion-std", default-features = false, features = ["sys-cortex-m", "soc-rp2350"] }
 cortex-m = { version = "0.7.7", default-features = false }
 cortex-m-rt = { version = "0.7.5", default-features = false }
 

@@ -16,7 +16,6 @@ path = "fusion-pal.rs"
 default = []
 sys-cortex-m = ["dep:cortex-m", "dep:cortex-m-rt"]
 soc-rp2350 = []
-soc-stm32h7 = []
 sys-fusion-kn = ["dep:fusion-kn"]
 
 [lints]

@@ -6,13 +6,17 @@ use crate::pal::hal::{
     HardwareAuthoritySet, HardwareError, HardwareTopologySummary, HardwareWriteSummary,
 };
 use crate::pal::thread::{ThreadCoreId, ThreadError, ThreadId, ThreadLogicalCpuId};
+use core::time::Duration;
 
 use super::board_contract::{self, CortexMSocBoard};
 
 pub use super::board_contract::{
-    CortexMClockDescriptor, CortexMMemoryRegionDescriptor, CortexMMemoryRegionKind,
-    CortexMPeripheralDescriptor, CortexMSocBoard as CortexMSoc, CortexMSocChipIdSupport,
-    CortexMSocChipIdentity, CortexMSocDescriptor, CortexMSocExecutionObservation,
+    CortexMClockDescriptor, CortexMDmaControllerDescriptor, CortexMDmaRequestClass,
+    CortexMDmaRequestDescriptor, CortexMFlashRegionDescriptor, CortexMIrqClass,
+    CortexMIrqDescriptor, CortexMMemoryRegionDescriptor, CortexMMemoryRegionKind,
+    CortexMPeripheralDescriptor, CortexMPowerModeDescriptor, CortexMSocBoard as CortexMSoc,
+    CortexMSocChipIdSupport, CortexMSocChipIdentity, CortexMSocDescriptor,
+    CortexMSocDeviceIdSupport, CortexMSocDeviceIdentity, CortexMSocExecutionObservation,
 };
 
 const DESCRIPTOR: CortexMSocDescriptor = CortexMSocDescriptor {
@@ -42,6 +46,10 @@ impl CortexMSocBoard for GenericCortexMSoc {
 
 /// Selected SoC provider type for generic Cortex-M builds.
 pub type SocDevice = GenericCortexMSoc;
+
+/// Whether local interrupt masking is sufficient to serialize local synchronization on this
+/// generic Cortex-M target.
+pub const LOCAL_CRITICAL_SECTION_SYNC_SAFE: bool = false;
 
 /// Returns the selected generic Cortex-M SoC provider.
 #[must_use]
@@ -74,6 +82,28 @@ pub fn selected_soc_chip_id_support() -> CortexMSocChipIdSupport {
 /// Returns an error if the selected SoC cannot surface a truthful chip identity.
 pub fn chip_identity() -> Result<CortexMSocChipIdentity, HardwareError> {
     board_contract::chip_identity(system_soc())
+}
+
+/// Returns the runtime per-device identity support class for the selected board.
+#[must_use]
+pub fn selected_soc_device_id_support() -> CortexMSocDeviceIdSupport {
+    board_contract::selected_soc_device_id_support(system_soc())
+}
+
+/// Returns the runtime per-device identity for the selected board.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot surface a truthful board identity.
+pub fn device_identity() -> Result<CortexMSocDeviceIdentity, HardwareError> {
+    board_contract::device_identity(system_soc())
+}
+
+/// Returns whether local interrupt masking is sufficient to serialize local synchronization on the
+/// selected generic Cortex-M target.
+#[must_use]
+pub fn local_critical_section_sync_safe() -> bool {
+    board_contract::local_critical_section_sync_safe(system_soc())
 }
 
 /// Returns the truthful topology summary for the selected Cortex-M SoC.
@@ -130,14 +160,153 @@ pub fn memory_map() -> &'static [CortexMMemoryRegionDescriptor] {
     board_contract::memory_map(system_soc())
 }
 
+/// Returns the number of board-owned runtime memory regions for the selected generic Cortex-M
+/// board.
+#[must_use]
+pub fn owned_memory_region_count() -> usize {
+    board_contract::owned_memory_region_count(system_soc())
+}
+
+/// Returns one board-owned runtime memory region for the selected generic Cortex-M board.
+#[must_use]
+pub fn owned_memory_region(index: usize) -> Option<CortexMMemoryRegionDescriptor> {
+    board_contract::owned_memory_region(system_soc(), index)
+}
+
 /// Returns the selected generic Cortex-M peripheral descriptors.
 #[must_use]
 pub fn peripherals() -> &'static [CortexMPeripheralDescriptor] {
     board_contract::peripherals(system_soc())
 }
 
+/// Returns the selected generic Cortex-M IRQ descriptors.
+#[must_use]
+pub fn irqs() -> &'static [CortexMIrqDescriptor] {
+    board_contract::irqs(system_soc())
+}
+
+/// Enables one named external IRQ line on the selected generic Cortex-M board.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot enable board-specific IRQ lines
+/// honestly.
+pub fn irq_enable(irqn: u16) -> Result<(), HardwareError> {
+    board_contract::irq_enable(system_soc(), irqn)
+}
+
+/// Disables one named external IRQ line on the selected generic Cortex-M board.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot disable board-specific IRQ lines
+/// honestly.
+pub fn irq_disable(irqn: u16) -> Result<(), HardwareError> {
+    board_contract::irq_disable(system_soc(), irqn)
+}
+
+/// Returns whether one IRQ line can be acknowledged generically on the selected generic
+/// Cortex-M board.
+#[must_use]
+pub fn irq_acknowledge_supported(irqn: u16) -> bool {
+    board_contract::irq_acknowledge_supported(system_soc(), irqn)
+}
+
+/// Acknowledges one IRQ line on the selected generic Cortex-M board.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot acknowledge board-specific IRQ lines
+/// honestly.
+pub fn irq_acknowledge(irqn: u16) -> Result<(), HardwareError> {
+    board_contract::irq_acknowledge(system_soc(), irqn)
+}
+
+/// Returns whether the selected generic Cortex-M board exposes a truthful finite event-timeout
+/// source.
+#[must_use]
+pub fn event_timeout_supported() -> bool {
+    board_contract::event_timeout_supported(system_soc())
+}
+
+/// Returns the board-reserved IRQ line used by the selected generic Cortex-M board's event
+/// timeout source.
+#[must_use]
+pub fn event_timeout_irq() -> Option<u16> {
+    board_contract::event_timeout_irq(system_soc())
+}
+
+/// Arms the selected generic Cortex-M board's event-timeout source.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot surface a truthful finite event-timeout
+/// source.
+pub fn arm_event_timeout(timeout: Duration) -> Result<(), HardwareError> {
+    board_contract::arm_event_timeout(system_soc(), timeout)
+}
+
+/// Cancels the selected generic Cortex-M board's event-timeout source.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot surface a truthful finite event-timeout
+/// source.
+pub fn cancel_event_timeout() -> Result<(), HardwareError> {
+    board_contract::cancel_event_timeout(system_soc())
+}
+
+/// Returns whether the selected generic Cortex-M board's event-timeout source has fired.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot surface a truthful finite event-timeout
+/// source.
+pub fn event_timeout_fired() -> Result<bool, HardwareError> {
+    board_contract::event_timeout_fired(system_soc())
+}
+
 /// Returns the selected generic Cortex-M clock descriptors.
 #[must_use]
 pub fn clock_tree() -> &'static [CortexMClockDescriptor] {
     board_contract::clock_tree(system_soc())
+}
+
+/// Returns the selected generic Cortex-M DMA controller descriptors.
+#[must_use]
+pub fn dma_controllers() -> &'static [CortexMDmaControllerDescriptor] {
+    board_contract::dma_controllers(system_soc())
+}
+
+/// Returns the selected generic Cortex-M DMA request descriptors.
+#[must_use]
+pub fn dma_requests() -> &'static [CortexMDmaRequestDescriptor] {
+    board_contract::dma_requests(system_soc())
+}
+
+/// Returns the selected generic Cortex-M power-mode descriptors.
+#[must_use]
+pub fn power_modes() -> &'static [CortexMPowerModeDescriptor] {
+    board_contract::power_modes(system_soc())
+}
+
+/// Returns the selected generic Cortex-M PAL-facing power descriptors.
+#[must_use]
+pub fn pal_power_modes() -> &'static [crate::pal::power::PowerModeDescriptor] {
+    board_contract::pal_power_modes(system_soc())
+}
+
+/// Enters one named power mode on the selected generic Cortex-M target.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot honestly enter board-specific modes.
+pub fn enter_power_mode(name: &str) -> Result<(), HardwareError> {
+    board_contract::enter_power_mode(system_soc(), name)
+}
+
+/// Returns the selected generic Cortex-M flash-region descriptors.
+#[must_use]
+pub fn flash_regions() -> &'static [CortexMFlashRegionDescriptor] {
+    board_contract::flash_regions(system_soc())
 }

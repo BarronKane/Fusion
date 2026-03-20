@@ -21,6 +21,9 @@ pub mod fiber;
 #[path = "mem/mem.rs"]
 /// fusion-sys memory contracts and resource abstractions.
 pub mod mem;
+#[path = "power/power.rs"]
+/// fusion-sys power-management contracts and wrappers.
+pub mod power;
 #[path = "sync/sync.rs"]
 /// fusion-sys synchronization primitives and wrappers.
 pub mod sync;

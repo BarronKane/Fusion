@@ -16,12 +16,16 @@ use crate::pal::thread::{ThreadClusterId, ThreadCoreClassId, ThreadCoreId, Threa
 pub use self::core::{CortexMCpuid, read_cpuid};
 #[allow(unused_imports)]
 pub use self::soc::board::{
-    CortexMSocChipIdSupport, CortexMSocChipIdentity, chip_identity as selected_soc_chip_identity,
-    selected_soc_chip_id_support, selected_soc_name,
+    CortexMIrqClass, CortexMIrqDescriptor, CortexMSocChipIdSupport, CortexMSocChipIdentity,
+    CortexMSocDeviceIdSupport, CortexMSocDeviceIdentity,
+    chip_identity as selected_soc_chip_identity, device_identity as selected_soc_device_identity,
+    enter_power_mode as selected_soc_enter_power_mode,
+    irq_acknowledge as selected_soc_irq_acknowledge,
+    irq_acknowledge_supported as selected_soc_irq_acknowledge_supported,
+    irq_disable as selected_soc_irq_disable, irq_enable as selected_soc_irq_enable,
+    irqs as selected_soc_irqs, selected_soc_chip_id_support, selected_soc_device_id_support,
+    selected_soc_name,
 };
-
-#[cfg(all(feature = "soc-rp2350", feature = "soc-stm32h7"))]
-compile_error!("select at most one Cortex-M SoC feature for fusion-pal");
 
 /// Selected Cortex-M hardware provider type.
 #[derive(Debug, Clone, Copy, Default)]

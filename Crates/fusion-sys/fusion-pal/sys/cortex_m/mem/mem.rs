@@ -95,12 +95,16 @@ impl MemCommit for CortexMMem {}
 impl MemQuery for CortexMMem {
     fn query(&self, addr: Address) -> Result<RegionInfo, MemError> {
         let address = addr.get();
-        let descriptor = selected_memory_map()
-            .iter()
-            .find(|descriptor| contains_addr(descriptor.base, descriptor.len, address))
+        let descriptor = selected_owned_memory_region_containing(address)
+            .or_else(|| {
+                selected_memory_map()
+                    .iter()
+                    .copied()
+                    .find(|descriptor| contains_addr(descriptor.base, descriptor.len, address))
+            })
             .ok_or_else(MemError::invalid_addr)?;
 
-        let region = region_from_descriptor(*descriptor);
+        let region = region_from_descriptor(descriptor);
 
         Ok(RegionInfo {
             region,
@@ -145,6 +149,21 @@ impl MemCatalog for CortexMMem {
             }
         }
 
+        for index in 0..selected_owned_memory_region_count() {
+            let Some(descriptor) = selected_owned_memory_region(index) else {
+                continue;
+            };
+            match domain_from_descriptor(descriptor) {
+                MemDomain::StaticRegion => discovered_domains |= MemDomainSet::STATIC_REGION,
+                MemDomain::Mmio => discovered_domains |= MemDomainSet::MMIO,
+                MemDomain::Physical => discovered_domains |= MemDomainSet::PHYSICAL,
+                MemDomain::VirtualAddressSpace => {
+                    discovered_domains |= MemDomainSet::VIRTUAL_ADDRESS_SPACE;
+                }
+                MemDomain::DeviceLocal => discovered_domains |= MemDomainSet::DEVICE_LOCAL,
+            }
+        }
+
         MemCatalogSupport {
             caps: MemCatalogCaps::RESOURCE_INVENTORY,
             discovered_domains,
@@ -153,11 +172,11 @@ impl MemCatalog for CortexMMem {
     }
 
     fn resource_count(&self) -> usize {
-        selected_memory_map().len()
+        selected_owned_memory_region_count().saturating_add(selected_memory_map().len())
     }
 
     fn resource(&self, index: usize) -> Option<MemCatalogResource> {
-        let descriptor = *selected_memory_map().get(index)?;
+        let descriptor = selected_catalog_resource(index)?;
 
         Some(MemCatalogResource {
             id: MemCatalogResourceId(u32::try_from(index).ok()?),
@@ -201,12 +220,40 @@ fn selected_memory_map() -> &'static [CortexMMemoryRegionDescriptor] {
     board::memory_map()
 }
 
+fn selected_owned_memory_region_count() -> usize {
+    board::owned_memory_region_count()
+}
+
+fn selected_owned_memory_region(index: usize) -> Option<CortexMMemoryRegionDescriptor> {
+    board::owned_memory_region(index)
+}
+
+fn selected_owned_memory_region_containing(addr: usize) -> Option<CortexMMemoryRegionDescriptor> {
+    for index in 0..selected_owned_memory_region_count() {
+        let descriptor = selected_owned_memory_region(index)?;
+        if contains_addr(descriptor.base, descriptor.len, addr) {
+            return Some(descriptor);
+        }
+    }
+
+    None
+}
+
+fn selected_catalog_resource(index: usize) -> Option<CortexMMemoryRegionDescriptor> {
+    let owned_count = selected_owned_memory_region_count();
+    if index < owned_count {
+        return selected_owned_memory_region(index);
+    }
+
+    selected_memory_map().get(index - owned_count).copied()
+}
+
 fn contains_addr(base: usize, len: usize, addr: usize) -> bool {
     base.checked_add(len)
         .is_some_and(|end| addr >= base && addr < end)
 }
 
-fn region_from_descriptor(descriptor: CortexMMemoryRegionDescriptor) -> Region {
+const fn region_from_descriptor(descriptor: CortexMMemoryRegionDescriptor) -> Region {
     Region {
         base: Address::new(descriptor.base),
         len: descriptor.len,

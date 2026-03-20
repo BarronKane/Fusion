@@ -13,6 +13,9 @@ pub mod hal;
 #[path = "mem/mem.rs"]
 /// iOS fusion-pal memory backend implementation.
 pub mod mem;
+#[path = "power/power.rs"]
+/// iOS fusion-pal power backend implementation.
+pub mod power;
 #[path = "sync/sync.rs"]
 /// iOS fusion-pal synchronization backend implementation.
 pub mod sync;

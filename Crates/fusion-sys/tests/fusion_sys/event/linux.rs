@@ -4,7 +4,7 @@ use core::time::Duration;
 
 use fusion_sys::event::{
     EventCaps, EventInterest, EventModel, EventNotification, EventReadiness, EventRecord,
-    EventSourceHandle, EventSystem,
+    EventRegistration, EventRegistrationMode, EventSourceHandle, EventSystem,
 };
 
 #[derive(Debug)]
@@ -103,4 +103,24 @@ fn linux_event_poller_reports_readable_pipes() {
     event
         .deregister(&mut poller, key)
         .expect("deregister should succeed");
+}
+
+#[test]
+fn linux_event_register_with_non_default_mode_is_honestly_unsupported() {
+    let event = EventSystem::new();
+    let mut poller = event.create().expect("poller should create");
+    let pipe = TestPipe::new();
+
+    let error = event
+        .register_with(
+            &mut poller,
+            EventRegistration {
+                source: pipe.source(),
+                interest: EventInterest::READABLE,
+                mode: EventRegistrationMode::OneShot,
+            },
+        )
+        .expect_err("linux backend should not pretend one-shot support through the generic path");
+
+    assert_eq!(error.kind(), fusion_sys::event::EventErrorKind::Unsupported);
 }

@@ -10,6 +10,8 @@ pub enum SyncFallbackKind {
     None,
     /// The primitive falls back to a spin-only implementation.
     SpinOnly,
+    /// The primitive falls back to a local interrupt-masked critical section.
+    CriticalSection,
 }
 
 /// Priority inversion handling offered by the backend for a mutex primitive.

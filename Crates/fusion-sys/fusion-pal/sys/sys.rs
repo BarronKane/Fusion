@@ -45,10 +45,7 @@ compile_error!(
     "fusion-pal feature `sys-cortex-m` requires a bare-metal target (target_os = \"none\")."
 );
 
-#[cfg(all(
-    any(feature = "soc-rp2350", feature = "soc-stm32h7"),
-    not(feature = "sys-cortex-m")
-))]
+#[cfg(all(feature = "soc-rp2350", not(feature = "sys-cortex-m")))]
 compile_error!("fusion-pal Cortex-M SoC features require `sys-cortex-m`.");
 
 #[cfg(all(feature = "sys-fusion-kn", not(target_os = "linux")))]
@@ -103,6 +100,8 @@ pub mod fusion_kn;
 pub mod hal;
 /// Public memory module re-exported from the selected private platform backend.
 pub mod mem;
+/// Public power module re-exported from the selected private platform backend.
+pub mod power;
 /// Public synchronization module re-exported from the selected private platform backend.
 pub mod sync;
 /// Public thread module re-exported from the selected private platform backend.

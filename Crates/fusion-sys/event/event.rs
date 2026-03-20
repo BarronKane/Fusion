@@ -9,7 +9,8 @@ use core::time::Duration;
 pub use fusion_pal::sys::event::{
     EventBase, EventCaps, EventCompletion, EventCompletionOp, EventCompletionOpKind, EventError,
     EventErrorKind, EventImplementationKind, EventInterest, EventKey, EventModel,
-    EventNotification, EventReadiness, EventRecord, EventSource, EventSourceHandle, EventSupport,
+    EventNotification, EventReadiness, EventRecord, EventRegistration, EventRegistrationMode,
+    EventSource, EventSourceHandle, EventSupport,
 };
 use fusion_pal::sys::event::{PlatformEvent, PlatformPoller, system_event as pal_system_event};
 
@@ -64,6 +65,19 @@ impl EventSystem {
         EventSource::register(&self.inner, &mut poller.inner, source, interest)
     }
 
+    /// Registers a source with an explicit delivery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend registration failure.
+    pub fn register_with(
+        &self,
+        poller: &mut EventPoller,
+        registration: EventRegistration,
+    ) -> Result<EventKey, EventError> {
+        EventSource::register_with(&self.inner, &mut poller.inner, registration)
+    }
+
     /// Updates an existing registration.
     ///
     /// # Errors
@@ -76,6 +90,20 @@ impl EventSystem {
         interest: EventInterest,
     ) -> Result<(), EventError> {
         EventSource::reregister(&self.inner, &mut poller.inner, key, interest)
+    }
+
+    /// Updates an existing registration with an explicit delivery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend re-registration failure.
+    pub fn reregister_with(
+        &self,
+        poller: &mut EventPoller,
+        key: EventKey,
+        registration: EventRegistration,
+    ) -> Result<(), EventError> {
+        EventSource::reregister_with(&self.inner, &mut poller.inner, key, registration)
     }
 
     /// Removes an existing registration.
@@ -118,5 +146,424 @@ impl EventSystem {
 impl Default for EventSystem {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+/// Cortex-M-specific event source helpers.
+pub mod cortex_m {
+    use super::{EventInterest, EventRegistration, EventRegistrationMode, EventSourceHandle};
+    #[cfg(feature = "soc-rp2350")]
+    use fusion_pal::sys::cortex_m::hal::soc::board::{
+        CortexMDmaRequestClass, CortexMDmaRequestDescriptor, CortexMDmaTransferCaps,
+        dma_requests as rp2350_dma_requests,
+    };
+
+    /// Typed wrapper for one Cortex-M external IRQ line used as an event source.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct CortexMIrqSource {
+        irqn: u16,
+    }
+
+    impl CortexMIrqSource {
+        /// Creates a typed Cortex-M IRQ event source.
+        #[must_use]
+        pub const fn new(irqn: u16) -> Self {
+            Self { irqn }
+        }
+
+        /// Returns the backing NVIC interrupt number.
+        #[must_use]
+        pub const fn irqn(self) -> u16 {
+            self.irqn
+        }
+
+        /// Returns the backend-neutral event source handle.
+        #[must_use]
+        pub const fn handle(self) -> EventSourceHandle {
+            EventSourceHandle(self.irqn as usize)
+        }
+
+        /// Builds a full event registration for this IRQ line.
+        #[must_use]
+        pub const fn registration(
+            self,
+            interest: EventInterest,
+            mode: EventRegistrationMode,
+        ) -> EventRegistration {
+            EventRegistration {
+                source: self.handle(),
+                interest,
+                mode,
+            }
+        }
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    /// Typed RP2350 timer-alarm event source helper.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Rp2350TimerAlarmSource {
+        /// `TIMER0_IRQ_0`
+        Timer0Alarm0,
+        /// `TIMER0_IRQ_1`
+        Timer0Alarm1,
+        /// `TIMER0_IRQ_2`
+        Timer0Alarm2,
+        /// `TIMER0_IRQ_3`
+        Timer0Alarm3,
+        /// `TIMER1_IRQ_0`
+        Timer1Alarm0,
+        /// `TIMER1_IRQ_1`
+        Timer1Alarm1,
+        /// `TIMER1_IRQ_2`
+        Timer1Alarm2,
+        /// `TIMER1_IRQ_3`
+        Timer1Alarm3,
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    impl Rp2350TimerAlarmSource {
+        /// Returns the typed Cortex-M IRQ source for this timer alarm.
+        #[must_use]
+        pub const fn source(self) -> CortexMIrqSource {
+            CortexMIrqSource::new(match self {
+                Self::Timer0Alarm0 => 0,
+                Self::Timer0Alarm1 => 1,
+                Self::Timer0Alarm2 => 2,
+                Self::Timer0Alarm3 => 3,
+                Self::Timer1Alarm0 => 4,
+                Self::Timer1Alarm1 => 5,
+                Self::Timer1Alarm2 => 6,
+                Self::Timer1Alarm3 => 7,
+            })
+        }
+
+        /// Returns the recommended registration for one timer-alarm readiness source.
+        #[must_use]
+        pub const fn registration(self) -> EventRegistration {
+            self.source().registration(
+                EventInterest::READABLE,
+                EventRegistrationMode::LevelAckOnPoll,
+            )
+        }
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    /// Typed RP2350 DMA IRQ-group event source helper.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Rp2350DmaIrqSource {
+        /// `DMA_IRQ_0`
+        Irq0,
+        /// `DMA_IRQ_1`
+        Irq1,
+        /// `DMA_IRQ_2`
+        Irq2,
+        /// `DMA_IRQ_3`
+        Irq3,
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    impl Rp2350DmaIrqSource {
+        /// Returns the typed Cortex-M IRQ source for this DMA IRQ group.
+        #[must_use]
+        pub const fn source(self) -> CortexMIrqSource {
+            CortexMIrqSource::new(match self {
+                Self::Irq0 => 10,
+                Self::Irq1 => 11,
+                Self::Irq2 => 12,
+                Self::Irq3 => 13,
+            })
+        }
+
+        /// Returns the recommended registration for one DMA IRQ group.
+        #[must_use]
+        pub const fn registration(self) -> EventRegistration {
+            self.source().registration(
+                EventInterest::READABLE,
+                EventRegistrationMode::LevelAckOnPoll,
+            )
+        }
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    /// Typed RP2350 DMA channel helper.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct Rp2350DmaChannel(u8);
+
+    #[cfg(feature = "soc-rp2350")]
+    impl Rp2350DmaChannel {
+        /// Total number of hardware DMA channels surfaced by RP2350.
+        pub const COUNT: u8 = 16;
+
+        /// Creates a typed DMA channel selector when the index is valid.
+        #[must_use]
+        pub const fn new(index: u8) -> Option<Self> {
+            if index < Self::COUNT {
+                Some(Self(index))
+            } else {
+                None
+            }
+        }
+
+        /// Returns the zero-based hardware channel index.
+        #[must_use]
+        pub const fn index(self) -> u8 {
+            self.0
+        }
+
+        /// Returns the DMA IRQ group that reports completion for this channel.
+        #[must_use]
+        pub const fn irq_source(self) -> Rp2350DmaIrqSource {
+            match self.0 / 4 {
+                0 => Rp2350DmaIrqSource::Irq0,
+                1 => Rp2350DmaIrqSource::Irq1,
+                2 => Rp2350DmaIrqSource::Irq2,
+                _ => Rp2350DmaIrqSource::Irq3,
+            }
+        }
+
+        /// Returns the recommended registration for this channel's completion group.
+        #[must_use]
+        pub const fn registration(self) -> EventRegistration {
+            self.irq_source().registration()
+        }
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    /// Typed RP2350 DMA request helper over the selected board descriptor table.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct Rp2350DmaRequest {
+        descriptor: &'static CortexMDmaRequestDescriptor,
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    impl Rp2350DmaRequest {
+        /// Returns all surfaced RP2350 DMA request descriptors.
+        #[must_use]
+        pub fn all() -> &'static [CortexMDmaRequestDescriptor] {
+            rp2350_dma_requests()
+        }
+
+        /// Looks up one DMA request by its hardware request-line selector.
+        #[must_use]
+        pub fn from_request_line(request_line: u16) -> Option<Self> {
+            Self::all()
+                .iter()
+                .find(|descriptor| descriptor.request_line == request_line)
+                .map(|descriptor| Self { descriptor })
+        }
+
+        /// Returns the underlying board descriptor for this DMA request.
+        #[must_use]
+        pub const fn descriptor(self) -> &'static CortexMDmaRequestDescriptor {
+            self.descriptor
+        }
+
+        /// Returns the hardware request-line selector.
+        #[must_use]
+        pub const fn request_line(self) -> u16 {
+            self.descriptor.request_line
+        }
+
+        /// Returns the coarse request class.
+        #[must_use]
+        pub const fn class(self) -> CortexMDmaRequestClass {
+            self.descriptor.class
+        }
+
+        /// Returns the associated peripheral block when one exists.
+        #[must_use]
+        pub const fn peripheral(self) -> Option<&'static str> {
+            self.descriptor.peripheral
+        }
+
+        /// Returns the peripheral-local endpoint name when one exists.
+        #[must_use]
+        pub const fn endpoint(self) -> Option<&'static str> {
+            self.descriptor.endpoint
+        }
+
+        /// Returns the coarse transfer capabilities for this request.
+        #[must_use]
+        pub const fn transfer_caps(self) -> CortexMDmaTransferCaps {
+            self.descriptor.transfer_caps
+        }
+
+        /// Returns the completion IRQ registration recommended for a specific DMA channel.
+        #[must_use]
+        pub const fn registration_for_channel(
+            self,
+            channel: Rp2350DmaChannel,
+        ) -> EventRegistration {
+            let _ = self;
+            channel.registration()
+        }
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    /// Typed RP2350 GPIO-bank IRQ event source helper.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Rp2350GpioIrqSource {
+        /// `IO_IRQ_BANK0`
+        Bank0,
+        /// `IO_IRQ_BANK0_NS`
+        Bank0NonSecure,
+        /// `IO_IRQ_QSPI`
+        Qspi,
+        /// `IO_IRQ_QSPI_NS`
+        QspiNonSecure,
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    impl Rp2350GpioIrqSource {
+        /// Returns the typed Cortex-M IRQ source for this GPIO-bank IRQ.
+        #[must_use]
+        pub const fn source(self) -> CortexMIrqSource {
+            CortexMIrqSource::new(match self {
+                Self::Bank0 => 21,
+                Self::Bank0NonSecure => 22,
+                Self::Qspi => 23,
+                Self::QspiNonSecure => 24,
+            })
+        }
+
+        /// Returns the recommended registration for one GPIO-bank IRQ.
+        #[must_use]
+        pub const fn registration(self) -> EventRegistration {
+            self.source()
+                .registration(EventInterest::READABLE, EventRegistrationMode::LevelSticky)
+        }
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    /// Typed RP2350 PIO IRQ event source helper.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Rp2350PioIrqSource {
+        /// `PIO0_IRQ_0`
+        Pio0Irq0,
+        /// `PIO0_IRQ_1`
+        Pio0Irq1,
+        /// `PIO1_IRQ_0`
+        Pio1Irq0,
+        /// `PIO1_IRQ_1`
+        Pio1Irq1,
+        /// `PIO2_IRQ_0`
+        Pio2Irq0,
+        /// `PIO2_IRQ_1`
+        Pio2Irq1,
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    impl Rp2350PioIrqSource {
+        /// Returns the typed Cortex-M IRQ source for this PIO IRQ.
+        #[must_use]
+        pub const fn source(self) -> CortexMIrqSource {
+            CortexMIrqSource::new(match self {
+                Self::Pio0Irq0 => 15,
+                Self::Pio0Irq1 => 16,
+                Self::Pio1Irq0 => 17,
+                Self::Pio1Irq1 => 18,
+                Self::Pio2Irq0 => 19,
+                Self::Pio2Irq1 => 20,
+            })
+        }
+
+        /// Returns the recommended registration for one PIO IRQ.
+        #[must_use]
+        pub const fn registration(self) -> EventRegistration {
+            self.source()
+                .registration(EventInterest::READABLE, EventRegistrationMode::LevelSticky)
+        }
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    /// Typed RP2350 UART IRQ event source helper.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Rp2350UartIrqSource {
+        /// `UART0_IRQ`
+        Uart0,
+        /// `UART1_IRQ`
+        Uart1,
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    impl Rp2350UartIrqSource {
+        /// Returns the typed Cortex-M IRQ source for this UART IRQ.
+        #[must_use]
+        pub const fn source(self) -> CortexMIrqSource {
+            CortexMIrqSource::new(match self {
+                Self::Uart0 => 33,
+                Self::Uart1 => 34,
+            })
+        }
+
+        /// Returns the recommended registration for one UART IRQ.
+        #[must_use]
+        pub const fn registration(self) -> EventRegistration {
+            self.source().registration(
+                EventInterest::READABLE,
+                EventRegistrationMode::LevelAckOnPoll,
+            )
+        }
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    /// Typed RP2350 SPI IRQ event source helper.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Rp2350SpiIrqSource {
+        /// `SPI0_IRQ`
+        Spi0,
+        /// `SPI1_IRQ`
+        Spi1,
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    impl Rp2350SpiIrqSource {
+        /// Returns the typed Cortex-M IRQ source for this SPI IRQ.
+        #[must_use]
+        pub const fn source(self) -> CortexMIrqSource {
+            CortexMIrqSource::new(match self {
+                Self::Spi0 => 31,
+                Self::Spi1 => 32,
+            })
+        }
+
+        /// Returns the recommended registration for one SPI IRQ.
+        #[must_use]
+        pub const fn registration(self) -> EventRegistration {
+            self.source()
+                .registration(EventInterest::READABLE, EventRegistrationMode::LevelSticky)
+        }
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    /// Typed RP2350 I2C IRQ event source helper.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Rp2350I2cIrqSource {
+        /// `I2C0_IRQ`
+        I2c0,
+        /// `I2C1_IRQ`
+        I2c1,
+    }
+
+    #[cfg(feature = "soc-rp2350")]
+    impl Rp2350I2cIrqSource {
+        /// Returns the typed Cortex-M IRQ source for this I2C IRQ.
+        #[must_use]
+        pub const fn source(self) -> CortexMIrqSource {
+            CortexMIrqSource::new(match self {
+                Self::I2c0 => 36,
+                Self::I2c1 => 37,
+            })
+        }
+
+        /// Returns the recommended registration for one I2C IRQ.
+        #[must_use]
+        pub const fn registration(self) -> EventRegistration {
+            self.source().registration(
+                EventInterest::READABLE,
+                EventRegistrationMode::LevelAckOnPoll,
+            )
+        }
     }
 }

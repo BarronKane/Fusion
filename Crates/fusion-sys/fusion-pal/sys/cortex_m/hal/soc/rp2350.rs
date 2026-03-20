@@ -7,12 +7,16 @@
 //! the major peripheral blocks, and the board-visible clock domains from the RP2350 datasheet
 //! and Pico SDK clock model.
 
+use core::arch::asm;
 use core::ptr;
+use core::sync::atomic::{Ordering, compiler_fence};
+use core::time::Duration;
 
 use crate::pal::hal::{
     HardwareAuthoritySet, HardwareError, HardwareTopologySummary, HardwareWriteSummary,
 };
 use crate::pal::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
+use crate::pal::power::{PowerModeDepth, PowerModeDescriptor};
 use crate::pal::thread::{
     ThreadAuthoritySet, ThreadCoreId, ThreadError, ThreadExecutionLocation, ThreadId,
     ThreadLogicalCpuId, ThreadProcessorGroupId,
@@ -21,9 +25,12 @@ use crate::pal::thread::{
 use super::board_contract::{self, CortexMSocBoard};
 
 pub use super::board_contract::{
-    CortexMClockDescriptor, CortexMMemoryRegionDescriptor, CortexMMemoryRegionKind,
-    CortexMPeripheralBus, CortexMPeripheralDescriptor, CortexMSocBoard as CortexMSoc,
-    CortexMSocChipIdSupport, CortexMSocChipIdentity, CortexMSocDescriptor,
+    CortexMClockDescriptor, CortexMDmaControllerDescriptor, CortexMDmaRequestClass,
+    CortexMDmaRequestDescriptor, CortexMDmaTransferCaps, CortexMFlashRegionDescriptor,
+    CortexMIrqClass, CortexMIrqDescriptor, CortexMMemoryRegionDescriptor, CortexMMemoryRegionKind,
+    CortexMPeripheralBus, CortexMPeripheralDescriptor, CortexMPowerModeDescriptor,
+    CortexMSocBoard as CortexMSoc, CortexMSocChipIdSupport, CortexMSocChipIdentity,
+    CortexMSocDescriptor, CortexMSocDeviceIdSupport, CortexMSocDeviceIdentity,
     CortexMSocExecutionObservation,
 };
 
@@ -42,6 +49,11 @@ pub const DESCRIPTOR: CortexMSocDescriptor = CortexMSocDescriptor {
     chip_id_support: CortexMSocChipIdSupport::RegisterReadable,
 };
 
+/// Whether local interrupt masking is sufficient to serialize local synchronization on RP2350.
+pub const LOCAL_CRITICAL_SECTION_SYNC_SAFE: bool = false;
+/// Runtime per-device identity support class for RP2350 boards.
+pub const DEVICE_ID_SUPPORT: CortexMSocDeviceIdSupport = CortexMSocDeviceIdSupport::OtpReadable;
+
 const APB_SLOT_BYTES: usize = 0x0000_8000;
 const AHB_SLOT_BYTES: usize = 0x0010_0000;
 const ROM_BYTES: usize = 32 * 1024;
@@ -56,7 +68,40 @@ const RP2350_SYSINFO_CHIP_ID: *const u32 = 0x4000_0000 as *const u32;
 const RP2350_SYSINFO_PLATFORM: *const u32 = 0x4000_0008 as *const u32;
 const RP2350_SYSINFO_GITREF_RP2350: *const u32 = 0x4000_0014 as *const u32;
 const RP2350_SYSINFO_CHIP_INFO: *const u32 = 0x4000_0018 as *const u32;
+const RP2350_OTP_DATA: *const u32 = 0x4013_0000 as *const u32;
 const RP2350_SIO_CPUID: *const u32 = 0xd000_0000 as *const u32;
+const CORTEX_M_SCB_SCR: *mut u32 = 0xE000_ED10 as *mut u32;
+const CORTEX_M_SCB_SCR_SLEEPDEEP: u32 = 1 << 2;
+const CORTEX_M_NVIC_ISER: *mut u32 = 0xE000_E100 as *mut u32;
+const CORTEX_M_NVIC_ICER: *mut u32 = 0xE000_E180 as *mut u32;
+const CORTEX_M_NVIC_ICPR: *mut u32 = 0xE000_E280 as *mut u32;
+const RP2350_TIMER0_BASE: usize = 0x400b_0000;
+const RP2350_TIMER1_BASE: usize = 0x400b_8000;
+const RP2350_DMA_BASE: usize = 0x5000_0000;
+const RP2350_UART0_BASE: usize = 0x4007_0000;
+const RP2350_UART1_BASE: usize = 0x4007_8000;
+const RP2350_I2C0_BASE: usize = 0x4009_0000;
+const RP2350_I2C1_BASE: usize = 0x4009_8000;
+const RP2350_EVENT_TIMEOUT_TIMER_BASE: usize = RP2350_TIMER0_BASE;
+const RP2350_EVENT_TIMEOUT_ALARM_INDEX: u16 = 3;
+const RP2350_EVENT_TIMEOUT_IRQN: u16 = 3;
+const RP2350_TIMER_ALARM0_OFFSET: usize = 0x10;
+const RP2350_TIMER_ARMED_OFFSET: usize = 0x20;
+const RP2350_TIMER_TIMERAWL_OFFSET: usize = 0x28;
+const RP2350_TIMER_INTR_OFFSET: usize = 0x3c;
+const RP2350_TIMER_INTE_OFFSET: usize = 0x40;
+const RP2350_TIMER_INTS_OFFSET: usize = 0x48;
+const RP2350_DMA_INTS0_OFFSET: usize = 0x40c;
+const RP2350_UARTMIS_OFFSET: usize = 0x40;
+const RP2350_UARTICR_OFFSET: usize = 0x44;
+const RP2350_UARTICR_CLEARABLE_BITS: u32 = 0x0000_07ff;
+const RP2350_I2C_IC_INTR_STAT_OFFSET: usize = 0x2c;
+const RP2350_I2C_IC_CLR_INTR_OFFSET: usize = 0x40;
+
+unsafe extern "C" {
+    static __sheap: u8;
+    static _stack_end: u8;
+}
 
 const CLK_REF_MAIN_SOURCES: &[&str] = &[
     "rosc_clkr_ref",
@@ -127,6 +172,13 @@ const CLK_ADC_AUX_SOURCES: &[&str] = &[
     "xosc_clksrc",
 ];
 const CLK_ADC_CONSUMERS: &[&str] = &["adc"];
+const RP2350_SLEEP_WAKE_SOURCES: &[&str] = &["irq", "sev", "timer", "gpio"];
+const RP2350_SLEEP_GATED_DOMAINS: &[&str] = &["core pipeline"];
+const RP2350_DEEP_SLEEP_WAKE_SOURCES: &[&str] = &["irq", "gpio", "timer"];
+const RP2350_DEEP_SLEEP_GATED_DOMAINS: &[&str] = &["clk_sys", "clk_peri", "core pipeline"];
+const RP2350_FLASH_BYTES: usize = 4 * 1024 * 1024;
+const RP2350_FLASH_ERASE_BLOCK_BYTES: usize = 4 * 1024;
+const RP2350_FLASH_PROGRAM_GRANULE_BYTES: usize = 256;
 
 const MEMORY_MAP: [CortexMMemoryRegionDescriptor; 8] = [
     CortexMMemoryRegionDescriptor {
@@ -177,7 +229,7 @@ const MEMORY_MAP: [CortexMMemoryRegionDescriptor; 8] = [
             .union(RegionAttrs::EXECUTABLE),
         cache: CachePolicy::Default,
         backing: MemResourceBackingKind::StaticRegion,
-        allocatable: true,
+        allocatable: false,
     },
     CortexMMemoryRegionDescriptor {
         name: "apb-peripherals",
@@ -498,6 +550,876 @@ const PERIPHERALS: [CortexMPeripheralDescriptor; 45] = [
     },
 ];
 
+const fn irq(
+    name: &'static str,
+    irqn: u16,
+    peripheral: Option<&'static str>,
+    class: CortexMIrqClass,
+    endpoint: Option<&'static str>,
+    nonsecure: bool,
+) -> CortexMIrqDescriptor {
+    CortexMIrqDescriptor {
+        name,
+        irqn,
+        peripheral,
+        class,
+        endpoint,
+        nonsecure,
+    }
+}
+
+const IRQS: [CortexMIrqDescriptor; 52] = [
+    irq(
+        "timer0-irq0",
+        0,
+        Some("timer0"),
+        CortexMIrqClass::Timer,
+        Some("irq0"),
+        false,
+    ),
+    irq(
+        "timer0-irq1",
+        1,
+        Some("timer0"),
+        CortexMIrqClass::Timer,
+        Some("irq1"),
+        false,
+    ),
+    irq(
+        "timer0-irq2",
+        2,
+        Some("timer0"),
+        CortexMIrqClass::Timer,
+        Some("irq2"),
+        false,
+    ),
+    irq(
+        "timer0-irq3",
+        3,
+        Some("timer0"),
+        CortexMIrqClass::Timer,
+        Some("irq3"),
+        false,
+    ),
+    irq(
+        "timer1-irq0",
+        4,
+        Some("timer1"),
+        CortexMIrqClass::Timer,
+        Some("irq0"),
+        false,
+    ),
+    irq(
+        "timer1-irq1",
+        5,
+        Some("timer1"),
+        CortexMIrqClass::Timer,
+        Some("irq1"),
+        false,
+    ),
+    irq(
+        "timer1-irq2",
+        6,
+        Some("timer1"),
+        CortexMIrqClass::Timer,
+        Some("irq2"),
+        false,
+    ),
+    irq(
+        "timer1-irq3",
+        7,
+        Some("timer1"),
+        CortexMIrqClass::Timer,
+        Some("irq3"),
+        false,
+    ),
+    irq(
+        "pwm-wrap0",
+        8,
+        Some("pwm"),
+        CortexMIrqClass::Pwm,
+        Some("wrap0"),
+        false,
+    ),
+    irq(
+        "pwm-wrap1",
+        9,
+        Some("pwm"),
+        CortexMIrqClass::Pwm,
+        Some("wrap1"),
+        false,
+    ),
+    irq(
+        "dma-irq0",
+        10,
+        Some("dma"),
+        CortexMIrqClass::Dma,
+        Some("irq0"),
+        false,
+    ),
+    irq(
+        "dma-irq1",
+        11,
+        Some("dma"),
+        CortexMIrqClass::Dma,
+        Some("irq1"),
+        false,
+    ),
+    irq(
+        "dma-irq2",
+        12,
+        Some("dma"),
+        CortexMIrqClass::Dma,
+        Some("irq2"),
+        false,
+    ),
+    irq(
+        "dma-irq3",
+        13,
+        Some("dma"),
+        CortexMIrqClass::Dma,
+        Some("irq3"),
+        false,
+    ),
+    irq(
+        "usbctrl",
+        14,
+        Some("usbctrl"),
+        CortexMIrqClass::Usb,
+        None,
+        false,
+    ),
+    irq(
+        "pio0-irq0",
+        15,
+        Some("pio0"),
+        CortexMIrqClass::Pio,
+        Some("irq0"),
+        false,
+    ),
+    irq(
+        "pio0-irq1",
+        16,
+        Some("pio0"),
+        CortexMIrqClass::Pio,
+        Some("irq1"),
+        false,
+    ),
+    irq(
+        "pio1-irq0",
+        17,
+        Some("pio1"),
+        CortexMIrqClass::Pio,
+        Some("irq0"),
+        false,
+    ),
+    irq(
+        "pio1-irq1",
+        18,
+        Some("pio1"),
+        CortexMIrqClass::Pio,
+        Some("irq1"),
+        false,
+    ),
+    irq(
+        "pio2-irq0",
+        19,
+        Some("pio2"),
+        CortexMIrqClass::Pio,
+        Some("irq0"),
+        false,
+    ),
+    irq(
+        "pio2-irq1",
+        20,
+        Some("pio2"),
+        CortexMIrqClass::Pio,
+        Some("irq1"),
+        false,
+    ),
+    irq(
+        "io-bank0",
+        21,
+        Some("io_bank0"),
+        CortexMIrqClass::Gpio,
+        None,
+        false,
+    ),
+    irq(
+        "io-bank0-ns",
+        22,
+        Some("io_bank0"),
+        CortexMIrqClass::Gpio,
+        None,
+        true,
+    ),
+    irq(
+        "io-qspi",
+        23,
+        Some("io_qspi"),
+        CortexMIrqClass::Gpio,
+        None,
+        false,
+    ),
+    irq(
+        "io-qspi-ns",
+        24,
+        Some("io_qspi"),
+        CortexMIrqClass::Gpio,
+        None,
+        true,
+    ),
+    irq(
+        "sio-fifo",
+        25,
+        Some("sio"),
+        CortexMIrqClass::Sio,
+        Some("fifo"),
+        false,
+    ),
+    irq(
+        "sio-bell",
+        26,
+        Some("sio"),
+        CortexMIrqClass::Sio,
+        Some("bell"),
+        false,
+    ),
+    irq(
+        "sio-fifo-ns",
+        27,
+        Some("sio"),
+        CortexMIrqClass::Sio,
+        Some("fifo"),
+        true,
+    ),
+    irq(
+        "sio-bell-ns",
+        28,
+        Some("sio"),
+        CortexMIrqClass::Sio,
+        Some("bell"),
+        true,
+    ),
+    irq(
+        "sio-mtimecmp",
+        29,
+        Some("sio"),
+        CortexMIrqClass::Sio,
+        Some("mtimecmp"),
+        false,
+    ),
+    irq(
+        "clocks",
+        30,
+        Some("clocks"),
+        CortexMIrqClass::Clock,
+        None,
+        false,
+    ),
+    irq("spi0", 31, Some("spi0"), CortexMIrqClass::Spi, None, false),
+    irq("spi1", 32, Some("spi1"), CortexMIrqClass::Spi, None, false),
+    irq(
+        "uart0",
+        33,
+        Some("uart0"),
+        CortexMIrqClass::Uart,
+        None,
+        false,
+    ),
+    irq(
+        "uart1",
+        34,
+        Some("uart1"),
+        CortexMIrqClass::Uart,
+        None,
+        false,
+    ),
+    irq(
+        "adc-fifo",
+        35,
+        Some("adc"),
+        CortexMIrqClass::Adc,
+        Some("fifo"),
+        false,
+    ),
+    irq("i2c0", 36, Some("i2c0"), CortexMIrqClass::I2c, None, false),
+    irq("i2c1", 37, Some("i2c1"), CortexMIrqClass::I2c, None, false),
+    irq("otp", 38, Some("otp"), CortexMIrqClass::Otp, None, false),
+    irq("trng", 39, Some("trng"), CortexMIrqClass::Trng, None, false),
+    irq(
+        "proc0-cti",
+        40,
+        Some("proc0"),
+        CortexMIrqClass::CoreTrace,
+        Some("cti"),
+        false,
+    ),
+    irq(
+        "proc1-cti",
+        41,
+        Some("proc1"),
+        CortexMIrqClass::CoreTrace,
+        Some("cti"),
+        false,
+    ),
+    irq(
+        "pll-sys",
+        42,
+        Some("pll_sys"),
+        CortexMIrqClass::Pll,
+        None,
+        false,
+    ),
+    irq(
+        "pll-usb",
+        43,
+        Some("pll_usb"),
+        CortexMIrqClass::Pll,
+        None,
+        false,
+    ),
+    irq(
+        "powman-pow",
+        44,
+        Some("powman"),
+        CortexMIrqClass::Power,
+        Some("pow"),
+        false,
+    ),
+    irq(
+        "powman-timer",
+        45,
+        Some("powman"),
+        CortexMIrqClass::Power,
+        Some("timer"),
+        false,
+    ),
+    irq("spare0", 46, None, CortexMIrqClass::Spare, Some("0"), false),
+    irq("spare1", 47, None, CortexMIrqClass::Spare, Some("1"), false),
+    irq("spare2", 48, None, CortexMIrqClass::Spare, Some("2"), false),
+    irq("spare3", 49, None, CortexMIrqClass::Spare, Some("3"), false),
+    irq("spare4", 50, None, CortexMIrqClass::Spare, Some("4"), false),
+    irq("spare5", 51, None, CortexMIrqClass::Spare, Some("5"), false),
+];
+
+const DMA_CONTROLLERS: [CortexMDmaControllerDescriptor; 1] = [CortexMDmaControllerDescriptor {
+    name: "dma",
+    base: 0x5000_0000,
+    channel_count: 16,
+    transfer_caps: CortexMDmaTransferCaps::MEMORY_TO_MEMORY
+        .union(CortexMDmaTransferCaps::MEMORY_TO_PERIPHERAL)
+        .union(CortexMDmaTransferCaps::PERIPHERAL_TO_MEMORY)
+        .union(CortexMDmaTransferCaps::CHANNEL_CHAINING),
+}];
+
+const DMA_PERIPHERAL_TX_CAPS: CortexMDmaTransferCaps = CortexMDmaTransferCaps::MEMORY_TO_PERIPHERAL;
+const DMA_PERIPHERAL_RX_CAPS: CortexMDmaTransferCaps = CortexMDmaTransferCaps::PERIPHERAL_TO_MEMORY;
+const DMA_PACER_CAPS: CortexMDmaTransferCaps = CortexMDmaTransferCaps::MEMORY_TO_MEMORY
+    .union(CortexMDmaTransferCaps::MEMORY_TO_PERIPHERAL)
+    .union(CortexMDmaTransferCaps::PERIPHERAL_TO_MEMORY);
+
+const fn dma_request(
+    name: &'static str,
+    request_line: u16,
+    peripheral: Option<&'static str>,
+    class: CortexMDmaRequestClass,
+    endpoint: Option<&'static str>,
+    transfer_caps: CortexMDmaTransferCaps,
+) -> CortexMDmaRequestDescriptor {
+    CortexMDmaRequestDescriptor {
+        name,
+        request_line,
+        peripheral,
+        class,
+        endpoint,
+        transfer_caps,
+    }
+}
+
+const DMA_REQUESTS: [CortexMDmaRequestDescriptor; 60] = [
+    dma_request(
+        "pio0-tx0",
+        0,
+        Some("pio0"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx0"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio0-tx1",
+        1,
+        Some("pio0"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx1"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio0-tx2",
+        2,
+        Some("pio0"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx2"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio0-tx3",
+        3,
+        Some("pio0"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx3"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio0-rx0",
+        4,
+        Some("pio0"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx0"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pio0-rx1",
+        5,
+        Some("pio0"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx1"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pio0-rx2",
+        6,
+        Some("pio0"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx2"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pio0-rx3",
+        7,
+        Some("pio0"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx3"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pio1-tx0",
+        8,
+        Some("pio1"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx0"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio1-tx1",
+        9,
+        Some("pio1"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx1"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio1-tx2",
+        10,
+        Some("pio1"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx2"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio1-tx3",
+        11,
+        Some("pio1"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx3"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio1-rx0",
+        12,
+        Some("pio1"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx0"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pio1-rx1",
+        13,
+        Some("pio1"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx1"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pio1-rx2",
+        14,
+        Some("pio1"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx2"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pio1-rx3",
+        15,
+        Some("pio1"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx3"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pio2-tx0",
+        16,
+        Some("pio2"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx0"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio2-tx1",
+        17,
+        Some("pio2"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx1"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio2-tx2",
+        18,
+        Some("pio2"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx2"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio2-tx3",
+        19,
+        Some("pio2"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx3"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "pio2-rx0",
+        20,
+        Some("pio2"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx0"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pio2-rx1",
+        21,
+        Some("pio2"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx1"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pio2-rx2",
+        22,
+        Some("pio2"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx2"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pio2-rx3",
+        23,
+        Some("pio2"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx3"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "spi0-tx",
+        24,
+        Some("spi0"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "spi0-rx",
+        25,
+        Some("spi0"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "spi1-tx",
+        26,
+        Some("spi1"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "spi1-rx",
+        27,
+        Some("spi1"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "uart0-tx",
+        28,
+        Some("uart0"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "uart0-rx",
+        29,
+        Some("uart0"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "uart1-tx",
+        30,
+        Some("uart1"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "uart1-rx",
+        31,
+        Some("uart1"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap0",
+        32,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap0"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap1",
+        33,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap1"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap2",
+        34,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap2"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap3",
+        35,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap3"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap4",
+        36,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap4"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap5",
+        37,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap5"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap6",
+        38,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap6"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap7",
+        39,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap7"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap8",
+        40,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap8"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap9",
+        41,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap9"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap10",
+        42,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap10"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "pwm-wrap11",
+        43,
+        Some("pwm"),
+        CortexMDmaRequestClass::PeripheralPacer,
+        Some("wrap11"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "i2c0-tx",
+        44,
+        Some("i2c0"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "i2c0-rx",
+        45,
+        Some("i2c0"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "i2c1-tx",
+        46,
+        Some("i2c1"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "i2c1-rx",
+        47,
+        Some("i2c1"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "adc",
+        48,
+        Some("adc"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("fifo"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "xip-stream",
+        49,
+        Some("xip_aux"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("stream"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "xip-qmitx",
+        50,
+        Some("xip_qmi"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("tx"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "xip-qmirx",
+        51,
+        Some("xip_qmi"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("rx"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "hstx",
+        52,
+        Some("hstx"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("fifo"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "coresight-trace",
+        53,
+        Some("coresight"),
+        CortexMDmaRequestClass::PeripheralRx,
+        Some("trace"),
+        DMA_PERIPHERAL_RX_CAPS,
+    ),
+    dma_request(
+        "sha256",
+        54,
+        Some("sha256"),
+        CortexMDmaRequestClass::PeripheralTx,
+        Some("fifo"),
+        DMA_PERIPHERAL_TX_CAPS,
+    ),
+    dma_request(
+        "dma-timer0",
+        59,
+        None,
+        CortexMDmaRequestClass::TimerPacer,
+        Some("timer0"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "dma-timer1",
+        60,
+        None,
+        CortexMDmaRequestClass::TimerPacer,
+        Some("timer1"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "dma-timer2",
+        61,
+        None,
+        CortexMDmaRequestClass::TimerPacer,
+        Some("timer2"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "dma-timer3",
+        62,
+        None,
+        CortexMDmaRequestClass::TimerPacer,
+        Some("timer3"),
+        DMA_PACER_CAPS,
+    ),
+    dma_request(
+        "force",
+        63,
+        None,
+        CortexMDmaRequestClass::Force,
+        None,
+        DMA_PACER_CAPS,
+    ),
+];
+
 const CLOCK_TREE: [CortexMClockDescriptor; 6] = [
     CortexMClockDescriptor {
         name: "clk_ref",
@@ -536,6 +1458,86 @@ const CLOCK_TREE: [CortexMClockDescriptor; 6] = [
         consumers: CLK_ADC_CONSUMERS,
     },
 ];
+
+const POWER_MODES: [CortexMPowerModeDescriptor; 2] = [
+    CortexMPowerModeDescriptor {
+        name: "sleep-wfi",
+        uses_wfi: true,
+        uses_wfe: false,
+        deep_sleep: false,
+        wake_sources: RP2350_SLEEP_WAKE_SOURCES,
+        gated_domains: RP2350_SLEEP_GATED_DOMAINS,
+    },
+    CortexMPowerModeDescriptor {
+        name: "deep-sleep-wfi",
+        uses_wfi: true,
+        uses_wfe: false,
+        deep_sleep: true,
+        wake_sources: RP2350_DEEP_SLEEP_WAKE_SOURCES,
+        gated_domains: RP2350_DEEP_SLEEP_GATED_DOMAINS,
+    },
+];
+
+const PAL_POWER_MODES: [PowerModeDescriptor; 2] = [
+    PowerModeDescriptor {
+        name: "sleep-wfi",
+        depth: PowerModeDepth::Sleep,
+        wake_sources: RP2350_SLEEP_WAKE_SOURCES,
+        gated_domains: RP2350_SLEEP_GATED_DOMAINS,
+    },
+    PowerModeDescriptor {
+        name: "deep-sleep-wfi",
+        depth: PowerModeDepth::DeepSleep,
+        wake_sources: RP2350_DEEP_SLEEP_WAKE_SOURCES,
+        gated_domains: RP2350_DEEP_SLEEP_GATED_DOMAINS,
+    },
+];
+
+// NOTE: the current selected RP2350 board contract follows the open Pico 2 W schematic and the
+// local PicoTarget linker layout, both of which assume a 32 Mbit / 4 MiB external flash
+// population. Raspberry Pi's Pico 2 W prose datasheet currently disagrees and mentions a
+// W25Q16JV instead, so this must split into a truly board-specific module if that ambiguity ever
+// becomes more than documentation slop.
+const FLASH_REGIONS: [CortexMFlashRegionDescriptor; 1] = [CortexMFlashRegionDescriptor {
+    name: "qspi-flash-xip",
+    base: 0x1000_0000,
+    len: RP2350_FLASH_BYTES,
+    erase_block_bytes: RP2350_FLASH_ERASE_BLOCK_BYTES,
+    program_granule_bytes: RP2350_FLASH_PROGRAM_GRANULE_BYTES,
+    xip: true,
+    writable: true,
+    requires_xip_quiesce: true,
+}];
+
+const fn rp2350_owned_sram_region_from_bounds(
+    heap_start: usize,
+    stack_end: usize,
+) -> Option<CortexMMemoryRegionDescriptor> {
+    if stack_end <= heap_start {
+        return None;
+    }
+
+    Some(CortexMMemoryRegionDescriptor {
+        name: "board-sram-free",
+        kind: CortexMMemoryRegionKind::Sram,
+        base: heap_start,
+        len: stack_end - heap_start,
+        protect: Protect::READ.union(Protect::WRITE),
+        attrs: RegionAttrs::STATIC_REGION
+            .union(RegionAttrs::DMA_VISIBLE)
+            .union(RegionAttrs::CACHEABLE)
+            .union(RegionAttrs::COHERENT),
+        cache: CachePolicy::Default,
+        backing: MemResourceBackingKind::StaticRegion,
+        allocatable: true,
+    })
+}
+
+fn rp2350_owned_sram_region() -> Option<CortexMMemoryRegionDescriptor> {
+    let heap_start = (&raw const __sheap) as usize;
+    let stack_end = (&raw const _stack_end) as usize;
+    rp2350_owned_sram_region_from_bounds(heap_start, stack_end)
+}
 
 /// RP2350 SoC provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -587,9 +1589,289 @@ fn rp2350_chip_identity() -> CortexMSocChipIdentity {
     }
 }
 
+const fn rp2350_public_device_id_from_words(words: [u16; 4]) -> u64 {
+    (words[0] as u64)
+        | ((words[1] as u64) << 16)
+        | ((words[2] as u64) << 32)
+        | ((words[3] as u64) << 48)
+}
+
+fn rp2350_read_otp_data_word(offset: usize) -> u16 {
+    // SAFETY: OTP_DATA is a fixed memory-mapped APB window. The RP2350 datasheet defines
+    // CHIPID0..3 at offsets 0x000..0x003 inside this word-addressed window; reading the lower
+    // 16 bits of each row surfaces the public 64-bit device identifier.
+    unsafe { (ptr::read_volatile(RP2350_OTP_DATA.add(offset)) & 0xffff) as u16 }
+}
+
+fn rp2350_device_identity() -> CortexMSocDeviceIdentity {
+    let public_device_id = rp2350_public_device_id_from_words([
+        rp2350_read_otp_data_word(0),
+        rp2350_read_otp_data_word(1),
+        rp2350_read_otp_data_word(2),
+        rp2350_read_otp_data_word(3),
+    ]);
+
+    let mut bytes = [0_u8; 16];
+    bytes[..8].copy_from_slice(&public_device_id.to_le_bytes());
+
+    CortexMSocDeviceIdentity {
+        bytes,
+        len: 8,
+        public: true,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rp2350PowerModeAction {
+    SleepWfi,
+    DeepSleepWfi,
+}
+
+fn rp2350_power_mode_action(name: &str) -> Option<Rp2350PowerModeAction> {
+    match name {
+        "sleep-wfi" => Some(Rp2350PowerModeAction::SleepWfi),
+        "deep-sleep-wfi" => Some(Rp2350PowerModeAction::DeepSleepWfi),
+        _ => None,
+    }
+}
+
+fn rp2350_irq_is_known(irqn: u16) -> bool {
+    IRQS.iter().any(|descriptor| descriptor.irqn == irqn)
+}
+
+fn rp2350_timer_base_and_alarm_bit(irqn: u16) -> Option<(usize, u32)> {
+    match irqn {
+        0..=3 => Some((RP2350_TIMER0_BASE, 1_u32 << u32::from(irqn))),
+        4..=7 => Some((RP2350_TIMER1_BASE, 1_u32 << u32::from(irqn - 4))),
+        _ => None,
+    }
+}
+
+const fn rp2350_dma_irq_group(irqn: u16) -> Option<usize> {
+    match irqn {
+        10 => Some(0),
+        11 => Some(1),
+        12 => Some(2),
+        13 => Some(3),
+        _ => None,
+    }
+}
+
+const fn rp2350_uart_base(irqn: u16) -> Option<usize> {
+    match irqn {
+        33 => Some(RP2350_UART0_BASE),
+        34 => Some(RP2350_UART1_BASE),
+        _ => None,
+    }
+}
+
+const fn rp2350_i2c_base(irqn: u16) -> Option<usize> {
+    match irqn {
+        36 => Some(RP2350_I2C0_BASE),
+        37 => Some(RP2350_I2C1_BASE),
+        _ => None,
+    }
+}
+
+fn rp2350_nvic_write(register_base: *mut u32, irqn: u16) {
+    let register_index = usize::from(irqn / 32);
+    let bit = u32::from(irqn % 32);
+    // SAFETY: NVIC ISER/ICER/ICPR are architected Cortex-M register blocks. These writes affect
+    // only the selected IRQ line and do not require aliasing any Rust-managed memory.
+    unsafe { ptr::write_volatile(register_base.add(register_index), 1_u32 << bit) };
+}
+
+fn rp2350_irq_enable_line(irqn: u16) -> Result<(), HardwareError> {
+    if !rp2350_irq_is_known(irqn) {
+        return Err(HardwareError::invalid());
+    }
+
+    rp2350_nvic_write(CORTEX_M_NVIC_ISER, irqn);
+    Ok(())
+}
+
+/// TODO: clears both ICER and ICPR - disabling clears pending. Reasonable default,
+/// TODO: but can't 'disable but remember pending'.
+fn rp2350_irq_disable_line(irqn: u16) -> Result<(), HardwareError> {
+    if !rp2350_irq_is_known(irqn) {
+        return Err(HardwareError::invalid());
+    }
+
+    rp2350_nvic_write(CORTEX_M_NVIC_ICER, irqn);
+    rp2350_nvic_write(CORTEX_M_NVIC_ICPR, irqn);
+    Ok(())
+}
+
+fn rp2350_irq_acknowledge_line(irqn: u16) -> Result<(), HardwareError> {
+    if let Some((timer_base, alarm_bit)) = rp2350_timer_base_and_alarm_bit(irqn) {
+        let intr = (timer_base + RP2350_TIMER_INTR_OFFSET) as *mut u32;
+        // SAFETY: TIMERx_INTR is the timer raw-interrupt write-clear register for one RP2350 timer
+        // block. Writing the selected alarm bit acknowledges that timer interrupt source.
+        unsafe { ptr::write_volatile(intr, alarm_bit) };
+        rp2350_nvic_write(CORTEX_M_NVIC_ICPR, irqn);
+        return Ok(());
+    }
+
+    if let Some(group) = rp2350_dma_irq_group(irqn) {
+        let ints = (RP2350_DMA_BASE + RP2350_DMA_INTS0_OFFSET + (group * 0x10)) as *mut u32;
+        // SAFETY: DMA_INTSn is the RP2350 DMA masked interrupt-status register for one IRQ group.
+        // It is write-clear, so writing back the currently asserted channel mask acknowledges the
+        // surfaced DMA group without fabricating per-channel semantics the board contract does not
+        // own.
+        unsafe {
+            let pending_mask = ptr::read_volatile(ints);
+            if pending_mask != 0 {
+                ptr::write_volatile(ints, pending_mask);
+            }
+        }
+        rp2350_nvic_write(CORTEX_M_NVIC_ICPR, irqn);
+        return Ok(());
+    }
+
+    if let Some(uart_base) = rp2350_uart_base(irqn) {
+        let mis = (uart_base + RP2350_UARTMIS_OFFSET) as *const u32;
+        let icr = (uart_base + RP2350_UARTICR_OFFSET) as *mut u32;
+        // SAFETY: UARTMIS exposes the masked interrupt status for one RP2350 UART instance, and
+        // UARTICR is the matching write-clear register. Writing back the asserted clearable bits
+        // acknowledges exactly the generic UART interrupt causes this board contract can own.
+        unsafe {
+            let pending_mask = ptr::read_volatile(mis) & RP2350_UARTICR_CLEARABLE_BITS;
+            if pending_mask != 0 {
+                ptr::write_volatile(icr, pending_mask);
+            }
+        }
+        rp2350_nvic_write(CORTEX_M_NVIC_ICPR, irqn);
+        return Ok(());
+    }
+
+    if let Some(i2c_base) = rp2350_i2c_base(irqn) {
+        let intr_stat = (i2c_base + RP2350_I2C_IC_INTR_STAT_OFFSET) as *const u32;
+        let clr_intr = (i2c_base + RP2350_I2C_IC_CLR_INTR_OFFSET) as *const u32;
+        // SAFETY: IC_INTR_STAT exposes the current masked interrupt causes for one RP2350 I2C
+        // instance, and reading IC_CLR_INTR clears the board-visible latched causes without
+        // inventing finer-grained semantics than the shared IRQ line actually has.
+        unsafe {
+            if ptr::read_volatile(intr_stat) != 0 {
+                let _ = ptr::read_volatile(clr_intr);
+            }
+        }
+        rp2350_nvic_write(CORTEX_M_NVIC_ICPR, irqn);
+        return Ok(());
+    }
+
+    Err(HardwareError::unsupported())
+}
+
+fn rp2350_event_timeout_deadline(timeout: Duration) -> u32 {
+    let micros = timeout.as_micros();
+    let delta = u32::try_from(micros).unwrap_or(u32::MAX);
+    let timerawl = (RP2350_EVENT_TIMEOUT_TIMER_BASE + RP2350_TIMER_TIMERAWL_OFFSET) as *const u32;
+    // SAFETY: TIMERAWL is a side-effect-free raw read of the RP2350 timer low word.
+    let now = unsafe { ptr::read_volatile(timerawl) };
+    now.wrapping_add(delta.max(1))
+}
+
+fn rp2350_arm_event_timeout(timeout: Duration) -> Result<(), HardwareError> {
+    let deadline = rp2350_event_timeout_deadline(timeout);
+    let alarm_bit = 1_u32 << u32::from(RP2350_EVENT_TIMEOUT_ALARM_INDEX);
+    let timer_base = RP2350_EVENT_TIMEOUT_TIMER_BASE;
+    let interrupt_clear = (timer_base + RP2350_TIMER_INTR_OFFSET) as *mut u32;
+    let interrupt_enable = (timer_base + RP2350_TIMER_INTE_OFFSET) as *mut u32;
+    let alarm = (timer_base
+        + RP2350_TIMER_ALARM0_OFFSET
+        + (usize::from(RP2350_EVENT_TIMEOUT_ALARM_INDEX) * 4)) as *mut u32;
+
+    rp2350_irq_enable_line(RP2350_EVENT_TIMEOUT_IRQN)?;
+
+    // SAFETY: these are the RP2350 timer interrupt-clear, interrupt-enable, and alarm registers
+    // for the reserved backend timeout alarm.
+    unsafe {
+        ptr::write_volatile(interrupt_clear, alarm_bit);
+        let current_enable = ptr::read_volatile(interrupt_enable);
+        ptr::write_volatile(interrupt_enable, current_enable | alarm_bit);
+        ptr::write_volatile(alarm, deadline);
+    }
+    rp2350_nvic_write(CORTEX_M_NVIC_ICPR, RP2350_EVENT_TIMEOUT_IRQN);
+    Ok(())
+}
+
+fn rp2350_cancel_event_timeout_alarm() -> Result<(), HardwareError> {
+    let alarm_bit = 1_u32 << u32::from(RP2350_EVENT_TIMEOUT_ALARM_INDEX);
+    let timer_base = RP2350_EVENT_TIMEOUT_TIMER_BASE;
+    let armed = (timer_base + RP2350_TIMER_ARMED_OFFSET) as *mut u32;
+    let interrupt_clear = (timer_base + RP2350_TIMER_INTR_OFFSET) as *mut u32;
+    let interrupt_enable = (timer_base + RP2350_TIMER_INTE_OFFSET) as *mut u32;
+
+    // SAFETY: these are the RP2350 timer armed, interrupt-clear, and interrupt-enable registers
+    // for the reserved backend timeout alarm.
+    unsafe {
+        let current_enable = ptr::read_volatile(interrupt_enable);
+        ptr::write_volatile(interrupt_enable, current_enable & !alarm_bit);
+        ptr::write_volatile(armed, alarm_bit);
+        ptr::write_volatile(interrupt_clear, alarm_bit);
+    }
+    rp2350_irq_disable_line(RP2350_EVENT_TIMEOUT_IRQN)?;
+    Ok(())
+}
+
+fn rp2350_event_timeout_fired_now() -> bool {
+    let alarm_bit = 1_u32 << u32::from(RP2350_EVENT_TIMEOUT_ALARM_INDEX);
+    let ints = (RP2350_EVENT_TIMEOUT_TIMER_BASE + RP2350_TIMER_INTS_OFFSET) as *const u32;
+    // SAFETY: TIMERx_INTS is a side-effect-free masked status register for the reserved backend
+    // timeout alarm.
+    let masked_status = unsafe { ptr::read_volatile(ints) };
+    (masked_status & alarm_bit) != 0
+}
+
+fn rp2350_enter_power_action(action: Rp2350PowerModeAction) {
+    let (use_wfi, deep_sleep) = match action {
+        Rp2350PowerModeAction::SleepWfi => (true, false),
+        Rp2350PowerModeAction::DeepSleepWfi => (true, true),
+    };
+
+    let previous_scr = unsafe { ptr::read_volatile(CORTEX_M_SCB_SCR) };
+    let next_scr = if deep_sleep {
+        previous_scr | CORTEX_M_SCB_SCR_SLEEPDEEP
+    } else {
+        previous_scr & !CORTEX_M_SCB_SCR_SLEEPDEEP
+    };
+
+    unsafe {
+        ptr::write_volatile(CORTEX_M_SCB_SCR, next_scr);
+    }
+    compiler_fence(Ordering::SeqCst);
+
+    // SAFETY: `WFI` / `WFE` are the architected Cortex-M low-power entry instructions. The SCR
+    // deep-sleep bit is restored immediately after wake so callers do not inherit a sticky mode
+    // change by surprise.
+    unsafe {
+        if use_wfi {
+            asm!(
+                "dsb",
+                "wfi",
+                "isb",
+                options(nomem, nostack, preserves_flags)
+            );
+        } else {
+            asm!(
+                "dsb",
+                "wfe",
+                "isb",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        ptr::write_volatile(CORTEX_M_SCB_SCR, previous_scr);
+    }
+    compiler_fence(Ordering::SeqCst);
+}
+
 impl CortexMSocBoard for Rp2350Soc {
     fn descriptor(&self) -> CortexMSocDescriptor {
         DESCRIPTOR
+    }
+
+    fn local_critical_section_sync_safe(&self) -> bool {
+        LOCAL_CRITICAL_SECTION_SYNC_SAFE
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -654,16 +1936,104 @@ impl CortexMSocBoard for Rp2350Soc {
         Ok(rp2350_chip_identity())
     }
 
+    fn device_identity_support(&self) -> CortexMSocDeviceIdSupport {
+        DEVICE_ID_SUPPORT
+    }
+
+    fn device_identity(&self) -> Result<CortexMSocDeviceIdentity, HardwareError> {
+        Ok(rp2350_device_identity())
+    }
+
     fn memory_map(&self) -> &'static [CortexMMemoryRegionDescriptor] {
         &MEMORY_MAP
+    }
+
+    fn owned_memory_region_count(&self) -> usize {
+        usize::from(rp2350_owned_sram_region().is_some())
+    }
+
+    fn owned_memory_region(&self, index: usize) -> Option<CortexMMemoryRegionDescriptor> {
+        match index {
+            0 => rp2350_owned_sram_region(),
+            _ => None,
+        }
     }
 
     fn peripherals(&self) -> &'static [CortexMPeripheralDescriptor] {
         &PERIPHERALS
     }
 
+    fn irqs(&self) -> &'static [CortexMIrqDescriptor] {
+        &IRQS
+    }
+
+    fn irq_enable(&self, irqn: u16) -> Result<(), HardwareError> {
+        rp2350_irq_enable_line(irqn)
+    }
+
+    fn irq_disable(&self, irqn: u16) -> Result<(), HardwareError> {
+        rp2350_irq_disable_line(irqn)
+    }
+
+    fn irq_acknowledge_supported(&self, irqn: u16) -> bool {
+        rp2350_timer_base_and_alarm_bit(irqn).is_some()
+            || rp2350_dma_irq_group(irqn).is_some()
+            || rp2350_uart_base(irqn).is_some()
+            || rp2350_i2c_base(irqn).is_some()
+    }
+
+    fn irq_acknowledge(&self, irqn: u16) -> Result<(), HardwareError> {
+        rp2350_irq_acknowledge_line(irqn)
+    }
+
     fn clock_tree(&self) -> &'static [CortexMClockDescriptor] {
         &CLOCK_TREE
+    }
+
+    fn dma_controllers(&self) -> &'static [CortexMDmaControllerDescriptor] {
+        &DMA_CONTROLLERS
+    }
+
+    fn dma_requests(&self) -> &'static [CortexMDmaRequestDescriptor] {
+        &DMA_REQUESTS
+    }
+
+    fn power_modes(&self) -> &'static [CortexMPowerModeDescriptor] {
+        &POWER_MODES
+    }
+
+    fn event_timeout_supported(&self) -> bool {
+        true
+    }
+
+    fn event_timeout_irq(&self) -> Option<u16> {
+        Some(RP2350_EVENT_TIMEOUT_IRQN)
+    }
+
+    fn arm_event_timeout(&self, timeout: Duration) -> Result<(), HardwareError> {
+        rp2350_arm_event_timeout(timeout)
+    }
+
+    fn cancel_event_timeout(&self) -> Result<(), HardwareError> {
+        rp2350_cancel_event_timeout_alarm()
+    }
+
+    fn event_timeout_fired(&self) -> Result<bool, HardwareError> {
+        Ok(rp2350_event_timeout_fired_now())
+    }
+
+    fn pal_power_modes(&self) -> &'static [PowerModeDescriptor] {
+        &PAL_POWER_MODES
+    }
+
+    fn enter_power_mode(&self, name: &str) -> Result<(), HardwareError> {
+        let action = rp2350_power_mode_action(name).ok_or_else(HardwareError::unsupported)?;
+        rp2350_enter_power_action(action);
+        Ok(())
+    }
+
+    fn flash_regions(&self) -> &'static [CortexMFlashRegionDescriptor] {
+        &FLASH_REGIONS
     }
 }
 
@@ -692,6 +2062,28 @@ pub fn selected_soc_chip_id_support() -> CortexMSocChipIdSupport {
 /// Returns an error if the selected SoC cannot surface a truthful chip identity.
 pub fn chip_identity() -> Result<CortexMSocChipIdentity, HardwareError> {
     board_contract::chip_identity(system_soc())
+}
+
+/// Returns the runtime per-device identity support class for the selected board.
+#[must_use]
+pub fn selected_soc_device_id_support() -> CortexMSocDeviceIdSupport {
+    board_contract::selected_soc_device_id_support(system_soc())
+}
+
+/// Returns the runtime per-device identity for the selected board.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot surface a truthful device identity.
+pub fn device_identity() -> Result<CortexMSocDeviceIdentity, HardwareError> {
+    board_contract::device_identity(system_soc())
+}
+
+/// Returns whether local interrupt masking is sufficient to serialize local synchronization on the
+/// selected RP2350 target.
+#[must_use]
+pub fn local_critical_section_sync_safe() -> bool {
+    board_contract::local_critical_section_sync_safe(system_soc())
 }
 
 /// Returns the truthful topology summary for the selected Cortex-M SoC.
@@ -748,10 +2140,61 @@ pub fn memory_map() -> &'static [CortexMMemoryRegionDescriptor] {
     board_contract::memory_map(system_soc())
 }
 
+/// Returns the number of board-owned runtime memory regions for the selected RP2350 board.
+#[must_use]
+pub fn owned_memory_region_count() -> usize {
+    board_contract::owned_memory_region_count(system_soc())
+}
+
+/// Returns one board-owned runtime memory region for the selected RP2350 board.
+#[must_use]
+pub fn owned_memory_region(index: usize) -> Option<CortexMMemoryRegionDescriptor> {
+    board_contract::owned_memory_region(system_soc(), index)
+}
+
 /// Returns the selected RP2350 peripheral descriptors.
 #[must_use]
 pub fn peripherals() -> &'static [CortexMPeripheralDescriptor] {
     board_contract::peripherals(system_soc())
+}
+
+/// Returns the selected RP2350 IRQ descriptors.
+#[must_use]
+pub fn irqs() -> &'static [CortexMIrqDescriptor] {
+    board_contract::irqs(system_soc())
+}
+
+/// Enables one named external IRQ line on the selected RP2350 board.
+///
+/// # Errors
+///
+/// Returns an error if the requested IRQ line is unknown.
+pub fn irq_enable(irqn: u16) -> Result<(), HardwareError> {
+    board_contract::irq_enable(system_soc(), irqn)
+}
+
+/// Disables one named external IRQ line on the selected RP2350 board.
+///
+/// # Errors
+///
+/// Returns an error if the requested IRQ line is unknown.
+pub fn irq_disable(irqn: u16) -> Result<(), HardwareError> {
+    board_contract::irq_disable(system_soc(), irqn)
+}
+
+/// Returns whether one IRQ line can be acknowledged generically on the selected RP2350 board.
+#[must_use]
+pub fn irq_acknowledge_supported(irqn: u16) -> bool {
+    board_contract::irq_acknowledge_supported(system_soc(), irqn)
+}
+
+/// Acknowledges one IRQ line on the selected RP2350 board.
+///
+/// # Errors
+///
+/// Returns an error if the IRQ line cannot be acknowledged generically by the board contract.
+pub fn irq_acknowledge(irqn: u16) -> Result<(), HardwareError> {
+    board_contract::irq_acknowledge(system_soc(), irqn)
 }
 
 /// Returns the selected RP2350 clock-tree descriptors.
@@ -760,11 +2203,93 @@ pub fn clock_tree() -> &'static [CortexMClockDescriptor] {
     board_contract::clock_tree(system_soc())
 }
 
+/// Returns the selected RP2350 DMA controller descriptors.
+#[must_use]
+pub fn dma_controllers() -> &'static [CortexMDmaControllerDescriptor] {
+    board_contract::dma_controllers(system_soc())
+}
+
+/// Returns the selected RP2350 DMA request descriptors.
+#[must_use]
+pub fn dma_requests() -> &'static [CortexMDmaRequestDescriptor] {
+    board_contract::dma_requests(system_soc())
+}
+
+/// Returns the selected RP2350 power-mode descriptors.
+#[must_use]
+pub fn power_modes() -> &'static [CortexMPowerModeDescriptor] {
+    board_contract::power_modes(system_soc())
+}
+
+/// Returns whether the selected RP2350 board exposes a truthful finite event-timeout source.
+#[must_use]
+pub fn event_timeout_supported() -> bool {
+    board_contract::event_timeout_supported(system_soc())
+}
+
+/// Returns the board-reserved IRQ line used by the selected RP2350 board's event timeout source.
+#[must_use]
+pub fn event_timeout_irq() -> Option<u16> {
+    board_contract::event_timeout_irq(system_soc())
+}
+
+/// Arms the selected RP2350 board's event-timeout source.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot surface finite event timeouts honestly.
+pub fn arm_event_timeout(timeout: Duration) -> Result<(), HardwareError> {
+    board_contract::arm_event_timeout(system_soc(), timeout)
+}
+
+/// Cancels the selected RP2350 board's event-timeout source.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot surface finite event timeouts honestly.
+pub fn cancel_event_timeout() -> Result<(), HardwareError> {
+    board_contract::cancel_event_timeout(system_soc())
+}
+
+/// Returns whether the selected RP2350 board's event-timeout source has fired.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot surface finite event timeouts honestly.
+pub fn event_timeout_fired() -> Result<bool, HardwareError> {
+    board_contract::event_timeout_fired(system_soc())
+}
+
+/// Returns the selected RP2350 PAL-facing power descriptors.
+#[must_use]
+pub fn pal_power_modes() -> &'static [PowerModeDescriptor] {
+    board_contract::pal_power_modes(system_soc())
+}
+
+/// Enters one named power mode on the selected RP2350 target.
+///
+/// # Errors
+///
+/// Returns an error if the selected RP2350 target cannot honestly enter the named mode.
+pub fn enter_power_mode(name: &str) -> Result<(), HardwareError> {
+    board_contract::enter_power_mode(system_soc(), name)
+}
+
+/// Returns the selected RP2350 flash/XIP descriptors.
+#[must_use]
+pub fn flash_regions() -> &'static [CortexMFlashRegionDescriptor] {
+    board_contract::flash_regions(system_soc())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CLK_REF_AUX_SOURCES, CLK_REF_MAIN_SOURCES, CLOCK_TREE, rp2350_chip_manufacturer,
-        rp2350_chip_part, rp2350_chip_revision,
+        CLK_REF_AUX_SOURCES, CLK_REF_MAIN_SOURCES, CLOCK_TREE, CortexMDmaRequestClass,
+        CortexMIrqClass, CortexMSocDeviceIdSupport, DEVICE_ID_SUPPORT, DMA_CONTROLLERS,
+        DMA_REQUESTS, FLASH_REGIONS, IRQS, MEMORY_MAP, POWER_MODES, Rp2350PowerModeAction,
+        rp2350_chip_manufacturer, rp2350_chip_part, rp2350_chip_revision,
+        rp2350_owned_sram_region_from_bounds, rp2350_power_mode_action,
+        rp2350_public_device_id_from_words,
     };
 
     #[test]
@@ -785,5 +2310,107 @@ mod tests {
 
         assert_eq!(clk_ref.main_sources, CLK_REF_MAIN_SOURCES);
         assert_eq!(clk_ref.aux_sources, CLK_REF_AUX_SOURCES);
+    }
+
+    #[test]
+    fn sram_region_is_not_marked_allocatable_without_a_board_carveout() {
+        let sram = MEMORY_MAP
+            .iter()
+            .find(|descriptor| descriptor.name == "sram")
+            .expect("sram descriptor should exist");
+
+        assert!(!sram.allocatable);
+    }
+
+    #[test]
+    fn dma_and_power_surfaces_are_exposed_for_rp2350() {
+        assert_eq!(DMA_CONTROLLERS[0].channel_count, 16);
+        assert_eq!(DMA_REQUESTS[0].name, "pio0-tx0");
+        assert_eq!(DMA_REQUESTS[55].name, "dma-timer0");
+        assert_eq!(POWER_MODES[0].name, "sleep-wfi");
+    }
+
+    #[test]
+    fn dma_request_metadata_tracks_endpoint_shape() {
+        assert_eq!(DMA_REQUESTS[0].class, CortexMDmaRequestClass::PeripheralTx);
+        assert_eq!(DMA_REQUESTS[0].endpoint, Some("tx0"));
+        assert_eq!(DMA_REQUESTS[48].class, CortexMDmaRequestClass::PeripheralRx);
+        assert_eq!(DMA_REQUESTS[48].endpoint, Some("fifo"));
+        assert_eq!(DMA_REQUESTS[55].class, CortexMDmaRequestClass::TimerPacer);
+        assert_eq!(DMA_REQUESTS[55].endpoint, Some("timer0"));
+        assert_eq!(DMA_REQUESTS[59].class, CortexMDmaRequestClass::Force);
+        assert_eq!(DMA_REQUESTS[59].endpoint, None);
+    }
+
+    #[test]
+    fn irq_surface_covers_rp2350_nvic_lines() {
+        assert_eq!(IRQS.len(), 52);
+        assert_eq!(IRQS[10].name, "dma-irq0");
+        assert_eq!(IRQS[10].irqn, 10);
+        assert_eq!(IRQS[10].class, CortexMIrqClass::Dma);
+        assert_eq!(IRQS[22].name, "io-bank0-ns");
+        assert!(IRQS[22].nonsecure);
+        assert_eq!(IRQS[44].name, "powman-pow");
+        assert_eq!(IRQS[44].class, CortexMIrqClass::Power);
+    }
+
+    #[test]
+    fn generic_irq_acknowledge_support_tracks_only_honest_shared_clear_paths() {
+        assert!(super::irq_acknowledge_supported(0));
+        assert!(super::irq_acknowledge_supported(10));
+        assert!(super::irq_acknowledge_supported(33));
+        assert!(super::irq_acknowledge_supported(36));
+        assert!(!super::irq_acknowledge_supported(15));
+        assert!(!super::irq_acknowledge_supported(21));
+        assert!(!super::irq_acknowledge_supported(31));
+    }
+
+    #[test]
+    fn public_device_id_words_pack_little_endian() {
+        let identity = rp2350_public_device_id_from_words([0x0123, 0x4567, 0x89ab, 0xcdef]);
+        assert_eq!(identity, 0xcdef_89ab_4567_0123);
+    }
+
+    #[test]
+    fn device_identity_surface_is_marked_otp_readable() {
+        assert_eq!(DEVICE_ID_SUPPORT, CortexMSocDeviceIdSupport::OtpReadable);
+    }
+
+    #[test]
+    fn rp2350_power_mode_names_map_to_actions() {
+        assert_eq!(
+            rp2350_power_mode_action("sleep-wfi"),
+            Some(Rp2350PowerModeAction::SleepWfi)
+        );
+        assert_eq!(
+            rp2350_power_mode_action("deep-sleep-wfi"),
+            Some(Rp2350PowerModeAction::DeepSleepWfi)
+        );
+        assert_eq!(rp2350_power_mode_action("nonsense"), None);
+    }
+
+    #[test]
+    fn flash_surface_tracks_selected_board_geometry() {
+        assert_eq!(FLASH_REGIONS[0].name, "qspi-flash-xip");
+        assert_eq!(FLASH_REGIONS[0].base, 0x1000_0000);
+        assert_eq!(FLASH_REGIONS[0].len, 4 * 1024 * 1024);
+        assert_eq!(FLASH_REGIONS[0].erase_block_bytes, 4 * 1024);
+        assert_eq!(FLASH_REGIONS[0].program_granule_bytes, 256);
+        assert!(FLASH_REGIONS[0].xip);
+        assert!(FLASH_REGIONS[0].writable);
+        assert!(FLASH_REGIONS[0].requires_xip_quiesce);
+    }
+
+    #[test]
+    fn owned_sram_region_requires_a_real_gap_between_heap_and_stack() {
+        assert!(rp2350_owned_sram_region_from_bounds(0x2000_1000, 0x2000_1000).is_none());
+        assert!(rp2350_owned_sram_region_from_bounds(0x2000_1004, 0x2000_1000).is_none());
+
+        let region = rp2350_owned_sram_region_from_bounds(0x2000_1000, 0x2000_9000)
+            .expect("owned region should be surfaced when the board reserves a stack gap");
+        assert_eq!(region.name, "board-sram-free");
+        assert_eq!(region.base, 0x2000_1000);
+        assert_eq!(region.len, 0x8000);
+        assert!(region.allocatable);
     }
 }

@@ -7,7 +7,7 @@ use core::mem::{ManuallyDrop, MaybeUninit, align_of, size_of};
 use core::num::NonZeroUsize;
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull, addr_of_mut};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use core::time::Duration;
 
 use crate::sync::{
@@ -40,7 +40,24 @@ use fusion_pal::hal::{HardwareTopologyQuery as _, system_hardware};
 const INLINE_GREEN_JOB_BYTES: usize = 256;
 const INLINE_GREEN_RESULT_BYTES: usize = 256;
 const CARRIER_EVENT_BATCH: usize = 64;
-const STEAL_SEED_MIX: u64 = 0x9e37_79b9_7f4a_7c15;
+#[cfg(target_pointer_width = "64")]
+const STEAL_SEED_MIX: usize = 0x9e37_79b9_7f4a_7c15;
+#[cfg(not(target_pointer_width = "64"))]
+const STEAL_SEED_MIX: usize = 0x7f4a_7c15;
+
+#[allow(clippy::cast_possible_truncation)]
+const fn wake_token_to_word(token: PlatformWakeToken) -> usize {
+    let raw = token.into_raw();
+    if raw > usize::MAX as u64 {
+        0
+    } else {
+        raw as usize
+    }
+}
+
+const fn word_to_wake_token(raw: usize) -> PlatformWakeToken {
+    PlatformWakeToken::from_raw(raw as u64)
+}
 
 /// Scheduling policy for green threads on top of carrier workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1021,9 +1038,9 @@ struct ElasticStackMeta {
     telemetry: FiberTelemetry,
     initial_committed_pages: u32,
     max_committed_pages: u32,
-    fiber_id: AtomicU64,
+    fiber_id: AtomicUsize,
     carrier_id: AtomicUsize,
-    capacity_token: AtomicU64,
+    capacity_token: AtomicUsize,
     initial_detector_page: usize,
     initial_guard_page: usize,
     detector_page: AtomicUsize,
@@ -1521,9 +1538,11 @@ impl FiberStackSlab {
                             .map_err(|_| FiberError::resource_exhausted())?,
                         max_committed_pages: u32::try_from(layout.max / layout.detector)
                             .map_err(|_| FiberError::resource_exhausted())?,
-                        fiber_id: AtomicU64::new(0),
+                        fiber_id: AtomicUsize::new(0),
                         carrier_id: AtomicUsize::new(0),
-                        capacity_token: AtomicU64::new(PlatformWakeToken::invalid().into_raw()),
+                        capacity_token: AtomicUsize::new(wake_token_to_word(
+                            PlatformWakeToken::invalid(),
+                        )),
                         initial_detector_page: detector.base.addr().get(),
                         initial_guard_page: guard.base.addr().get(),
                         detector_page: AtomicUsize::new(detector.base.addr().get()),
@@ -1941,8 +1960,10 @@ impl FiberStackSlab {
         meta.capacity_pending.store(false, Ordering::Release);
         meta.fiber_id.store(0, Ordering::Release);
         meta.carrier_id.store(0, Ordering::Release);
-        meta.capacity_token
-            .store(PlatformWakeToken::invalid().into_raw(), Ordering::Release);
+        meta.capacity_token.store(
+            wake_token_to_word(PlatformWakeToken::invalid()),
+            Ordering::Release,
+        );
         meta.occupied.store(false, Ordering::Release);
         meta.growth_events.store(0, Ordering::Release);
         meta.committed_pages.store(0, Ordering::Release);
@@ -1974,10 +1995,13 @@ impl FiberStackSlab {
             return Ok(());
         };
         let meta = metadata.get(slot_index).ok_or_else(FiberError::invalid)?;
-        meta.fiber_id.store(fiber_id, Ordering::Release);
+        meta.fiber_id.store(
+            usize::try_from(fiber_id).unwrap_or(usize::MAX),
+            Ordering::Release,
+        );
         meta.carrier_id.store(carrier_id, Ordering::Release);
         meta.capacity_token
-            .store(capacity_token.into_raw(), Ordering::Release);
+            .store(wake_token_to_word(capacity_token), Ordering::Release);
         Ok(())
     }
 
@@ -1994,7 +2018,7 @@ impl FiberStackSlab {
         }
 
         Ok(Some(FiberCapacityEvent {
-            fiber_id: meta.fiber_id.load(Ordering::Acquire),
+            fiber_id: meta.fiber_id.load(Ordering::Acquire) as u64,
             carrier_id: meta.carrier_id.load(Ordering::Acquire),
             committed_pages: Self::current_committed_pages(meta),
             reservation_pages: meta.max_committed_pages,
@@ -2282,7 +2306,7 @@ fn try_promote_elastic_stack_meta(meta: &ElasticStackMeta, fault_addr: usize) ->
     meta.at_capacity.store(at_capacity, Ordering::Release);
     if at_capacity && !previously_at_capacity {
         meta.capacity_pending.store(true, Ordering::Release);
-        let token = PlatformWakeToken::from_raw(meta.capacity_token.load(Ordering::Acquire));
+        let token = word_to_wake_token(meta.capacity_token.load(Ordering::Acquire));
         let _ = system_fiber_host().notify_wake_token(token);
     }
     if !matches!(meta.telemetry, FiberTelemetry::Disabled) {
@@ -2402,6 +2426,7 @@ impl CarrierReactorState {
         self.wake.signal().map_err(fiber_error_from_host)
     }
 
+    #[allow(clippy::missing_const_for_fn)]
     fn capacity_token(&self) -> PlatformWakeToken {
         self.capacity.token()
     }
@@ -2517,14 +2542,14 @@ struct CarrierQueue {
     queue: SyncMutex<MetadataIndexQueue>,
     ready: Semaphore,
     reactor: Option<CarrierReactorState>,
-    steal_state: AtomicU64,
+    steal_state: AtomicUsize,
 }
 
 impl CarrierQueue {
     fn new(
         queue_entries: MetadataSlice<usize>,
         waiters: Option<MetadataSlice<Option<CarrierWaiterRecord>>>,
-        seed: u64,
+        seed: usize,
     ) -> Result<Self, FiberError> {
         let capacity = queue_entries.len();
         Ok(Self {
@@ -2538,7 +2563,7 @@ impl CarrierQueue {
                 Some(waiters) => Some(CarrierReactorState::new(waiters)?),
                 None => None,
             },
-            steal_state: AtomicU64::new(seed.max(1)),
+            steal_state: AtomicUsize::new(seed.max(1)),
         })
     }
 
@@ -2571,8 +2596,8 @@ impl CarrierQueue {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    let peers = u64::try_from(carrier_count - 1).unwrap_or(u64::MAX);
-                    let offset = usize::try_from(next % peers).unwrap_or(0);
+                    let peers = carrier_count - 1;
+                    let offset = next % peers;
                     return offset + 1;
                 }
                 Err(observed) => current = observed.max(1),
@@ -3407,7 +3432,7 @@ struct GreenPoolInner {
     shutdown: AtomicBool,
     client_refs: AtomicUsize,
     active: AtomicUsize,
-    next_id: AtomicU64,
+    next_id: AtomicUsize,
     next_carrier: AtomicUsize,
     carriers: MetadataSlice<CarrierQueue>,
     tasks: GreenTaskRegistry,
@@ -3821,7 +3846,7 @@ impl GreenPool {
                 shutdown: AtomicBool::new(false),
                 client_refs: AtomicUsize::new(1),
                 active: AtomicUsize::new(0),
-                next_id: AtomicU64::new(1),
+                next_id: AtomicUsize::new(1),
                 next_carrier: AtomicUsize::new(0),
                 carriers,
                 tasks,
@@ -3891,7 +3916,7 @@ impl GreenPool {
             }
         };
 
-        let id = self.inner.next_id.fetch_add(1, Ordering::AcqRel);
+        let id = self.inner.next_id.fetch_add(1, Ordering::AcqRel) as u64;
         let carrier =
             self.inner.next_carrier.fetch_add(1, Ordering::AcqRel) % self.inner.carriers.len();
         let slot_index = match self.inner.tasks.reserve_slot() {
@@ -4124,14 +4149,12 @@ fn automatic_huge_page_policy(backing: FiberStackBacking) -> HugePagePolicy {
     }
 }
 
-const fn initial_steal_seed(carrier_index: usize) -> u64 {
-    let seed = (carrier_index as u64)
-        .wrapping_add(1)
-        .wrapping_mul(STEAL_SEED_MIX);
+const fn initial_steal_seed(carrier_index: usize) -> usize {
+    let seed = carrier_index.wrapping_add(1).wrapping_mul(STEAL_SEED_MIX);
     if seed == 0 { 1 } else { seed }
 }
 
-const fn xorshift64(mut state: u64) -> u64 {
+const fn xorshift64(mut state: usize) -> usize {
     state ^= state << 13;
     state ^= state >> 7;
     state ^= state << 17;
@@ -4152,10 +4175,14 @@ unsafe fn green_task_entry(context: *mut ()) -> FiberReturn {
         }
     };
 
+    #[cfg(feature = "std")]
     if run_green_job_contained(runner).is_err() {
         let _ = slot.set_state(id, GreenTaskState::Failed(FiberError::state_conflict()));
         return FiberReturn::new(usize::MAX);
     }
+
+    #[cfg(not(feature = "std"))]
+    run_green_job_contained(runner);
 
     FiberReturn::new(0)
 }
@@ -4386,6 +4413,7 @@ fn run_capacity_callback_contained(callback: fn(FiberCapacityEvent), event: Fibe
     }
 }
 
+#[cfg(feature = "std")]
 fn run_green_job_contained(runner: InlineGreenJobRunner) -> Result<(), ()> {
     #[cfg(feature = "std")]
     {
@@ -4393,12 +4421,11 @@ fn run_green_job_contained(runner: InlineGreenJobRunner) -> Result<(), ()> {
 
         catch_unwind(AssertUnwindSafe(|| runner.run())).map_err(|_| ())
     }
+}
 
-    #[cfg(not(feature = "std"))]
-    {
-        runner.run();
-        Ok(())
-    }
+#[cfg(not(feature = "std"))]
+fn run_green_job_contained(runner: InlineGreenJobRunner) {
+    runner.run();
 }
 
 /// Public alias for the carrier-backed stackful scheduler surface.
@@ -4413,7 +4440,7 @@ mod tests {
     use std::vec::Vec;
 
     static CAPACITY_EVENT_CALLS: AtomicU32 = AtomicU32::new(0);
-    static LAST_CAPACITY_FIBER_ID: AtomicU64 = AtomicU64::new(0);
+    static LAST_CAPACITY_FIBER_ID: AtomicUsize = AtomicUsize::new(0);
     static LAST_CAPACITY_CARRIER_ID: AtomicUsize = AtomicUsize::new(usize::MAX);
     static LAST_CAPACITY_COMMITTED: AtomicU32 = AtomicU32::new(0);
     static LAST_CAPACITY_RESERVATION: AtomicU32 = AtomicU32::new(0);
@@ -4428,7 +4455,10 @@ mod tests {
 
     fn record_capacity_event(event: FiberCapacityEvent) {
         CAPACITY_EVENT_CALLS.fetch_add(1, Ordering::AcqRel);
-        LAST_CAPACITY_FIBER_ID.store(event.fiber_id, Ordering::Release);
+        LAST_CAPACITY_FIBER_ID.store(
+            usize::try_from(event.fiber_id).unwrap_or(usize::MAX),
+            Ordering::Release,
+        );
         LAST_CAPACITY_CARRIER_ID.store(event.carrier_id, Ordering::Release);
         LAST_CAPACITY_COMMITTED.store(event.committed_pages, Ordering::Release);
         LAST_CAPACITY_RESERVATION.store(event.reservation_pages, Ordering::Release);
@@ -4897,8 +4927,8 @@ mod tests {
 
     #[test]
     fn steal_seed_randomizes_the_first_victim_choice() {
-        let first = usize::try_from(xorshift64(initial_steal_seed(0)) % 7).unwrap_or(0) + 1;
-        let second = usize::try_from(xorshift64(initial_steal_seed(1)) % 7).unwrap_or(0) + 1;
+        let first = (xorshift64(initial_steal_seed(0)) % 7) + 1;
+        let second = (xorshift64(initial_steal_seed(1)) % 7) + 1;
         assert_ne!(first, second);
     }
 }

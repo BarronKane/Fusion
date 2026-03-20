@@ -38,7 +38,7 @@ use core::pin::Pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use core::time::Duration;
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use crate::sync::{Mutex as SyncMutex, Semaphore, SyncError, SyncErrorKind};
 use fusion_sys::alloc::{
@@ -48,7 +48,7 @@ use fusion_sys::event::EventSystem;
 pub use fusion_sys::event::{
     EventCompletion, EventCompletionOp, EventCompletionOpKind, EventError, EventErrorKind,
     EventInterest, EventKey, EventModel, EventNotification, EventPoller as ReactorPoller,
-    EventReadiness, EventRecord, EventSourceHandle, EventSupport,
+    EventReadiness, EventRecord, EventRegistration, EventSourceHandle, EventSupport,
 };
 use fusion_sys::fiber::{FiberError, FiberErrorKind};
 use fusion_sys::thread::system_thread;
@@ -200,6 +200,19 @@ impl Reactor {
         self.inner.register(poller, source, interest)
     }
 
+    /// Registers a source with an explicit backend delivery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend registration failure.
+    pub fn register_with(
+        &self,
+        poller: &mut ReactorPoller,
+        registration: EventRegistration,
+    ) -> Result<EventKey, EventError> {
+        self.inner.register_with(poller, registration)
+    }
+
     /// Updates an existing source registration.
     ///
     /// # Errors
@@ -212,6 +225,20 @@ impl Reactor {
         interest: EventInterest,
     ) -> Result<(), EventError> {
         self.inner.reregister(poller, key, interest)
+    }
+
+    /// Updates an existing source registration with an explicit backend delivery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend re-registration failure.
+    pub fn reregister_with(
+        &self,
+        poller: &mut ReactorPoller,
+        key: EventKey,
+        registration: EventRegistration,
+    ) -> Result<(), EventError> {
+        self.inner.reregister_with(poller, key, registration)
     }
 
     /// Removes a source registration from the backend reactor.
@@ -609,6 +636,8 @@ where
     F::Output: Send + 'static,
 {
     let future = unsafe { Pin::new_unchecked(&mut *ptr.cast::<F>()) };
+
+    #[cfg(feature = "std")]
     match poll_future_contained(future, context) {
         Ok(Poll::Ready(output)) => {
             result
@@ -619,6 +648,18 @@ where
         }
         Ok(Poll::Pending) => Ok(Poll::Pending),
         Err(()) => Err(ExecutorError::TaskPanicked),
+    }
+
+    #[cfg(not(feature = "std"))]
+    match poll_future_contained(future, context) {
+        Poll::Ready(output) => {
+            result
+                .lock()
+                .map_err(executor_error_from_sync)?
+                .store(output)?;
+            Ok(Poll::Ready(()))
+        }
+        Poll::Pending => Ok(Poll::Pending),
     }
 }
 
@@ -632,7 +673,7 @@ unsafe fn drop_inline_async_value<T>(ptr: *mut u8) {
 struct AsyncTaskWakerData {
     core_ptr: AtomicUsize,
     slot_index: usize,
-    generation: AtomicU64,
+    generation: AtomicUsize,
 }
 
 impl AsyncTaskWakerData {
@@ -640,7 +681,7 @@ impl AsyncTaskWakerData {
         Self {
             core_ptr: AtomicUsize::new(0),
             slot_index,
-            generation: AtomicU64::new(0),
+            generation: AtomicUsize::new(0),
         }
     }
 
@@ -657,16 +698,19 @@ impl AsyncTaskWakerData {
     }
 
     fn set_generation(&self, generation: u64) {
-        self.generation.store(generation, Ordering::Release);
+        self.generation.store(
+            usize::try_from(generation).unwrap_or(usize::MAX),
+            Ordering::Release,
+        );
     }
 
     fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.generation.load(Ordering::Acquire) as u64
     }
 }
 
 struct AsyncTaskSlot {
-    generation: AtomicU64,
+    generation: AtomicUsize,
     core: SyncMutex<Option<ControlLease<ExecutorCore>>>,
     future: SyncMutex<InlineAsyncFutureStorage>,
     result: SyncMutex<InlineAsyncResultStorage>,
@@ -694,7 +738,7 @@ impl fmt::Debug for AsyncTaskSlot {
 impl AsyncTaskSlot {
     fn new(slot_index: usize) -> Result<Self, ExecutorError> {
         Ok(Self {
-            generation: AtomicU64::new(0),
+            generation: AtomicUsize::new(0),
             core: SyncMutex::new(None),
             future: SyncMutex::new(InlineAsyncFutureStorage::empty()),
             result: SyncMutex::new(InlineAsyncResultStorage::empty()),
@@ -723,7 +767,7 @@ impl AsyncTaskSlot {
     }
 
     fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.generation.load(Ordering::Acquire) as u64
     }
 
     fn state(&self) -> u8 {
@@ -737,11 +781,11 @@ impl AsyncTaskSlot {
 
         let previous = self
             .generation
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current: usize| {
                 current.checked_add(1)
             })
             .map_err(|_| executor_overflow())?;
-        let generation = previous.checked_add(1).ok_or_else(executor_overflow)?;
+        let generation = previous.checked_add(1).ok_or_else(executor_overflow)? as u64;
 
         self.future
             .lock()
@@ -784,7 +828,7 @@ impl AsyncTaskSlot {
             return Err(ExecutorError::Stopped);
         }
         self.waker_refs
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current: usize| {
                 current.checked_add(1)
             })
             .map_err(|_| executor_overflow())?;
@@ -980,7 +1024,7 @@ impl AsyncTaskSlot {
         }
         let previous = self
             .waker_refs
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current: usize| {
                 current.checked_sub(1)
             })
             .map_err(|_| executor_invalid())?;
@@ -1117,7 +1161,7 @@ impl ExecutorRegistry {
 struct ExecutorCore {
     current_queue: CurrentQueue,
     scheduler: SchedulerBinding,
-    next_id: AtomicU64,
+    next_id: AtomicUsize,
     registry: ExecutorRegistry,
 }
 
@@ -1133,11 +1177,14 @@ impl ExecutorCore {
     fn allocate_task_id(&self) -> Result<TaskId, ExecutorError> {
         let sequence = self
             .next_id
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current: usize| {
                 current.checked_add(1)
             })
             .map_err(|_| executor_overflow())?;
-        Ok(TaskId::new(core::ptr::from_ref(self) as usize, sequence))
+        Ok(TaskId::new(
+            core::ptr::from_ref(self) as usize,
+            sequence as u64,
+        ))
     }
 
     fn registry(&self) -> Result<&AsyncTaskRegistry, ExecutorError> {
@@ -1249,7 +1296,7 @@ unsafe fn clone_async_task_waker(data: *const ()) -> RawWaker {
             && slot.generation() == generation
             && slot
                 .waker_refs
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current: usize| {
                     current.checked_add(1)
                 })
                 .is_ok()
@@ -1587,7 +1634,7 @@ impl Executor {
                         ExecutorCore {
                             current_queue: CurrentQueue::new(),
                             scheduler,
-                            next_id: AtomicU64::new(1),
+                            next_id: AtomicUsize::new(1),
                             registry: ExecutorRegistry::new(TASK_REGISTRY_CAPACITY),
                         },
                     )
@@ -1781,6 +1828,7 @@ fn run_scheduled_slot_ptr(core: usize, slot_index: usize, generation: u64) {
     core.run_slot_by_ref(slot_index, generation);
 }
 
+#[cfg(feature = "std")]
 fn poll_future_contained<F>(
     future: Pin<&mut F>,
     context: &mut Context<'_>,
@@ -1795,11 +1843,15 @@ where
 
         catch_unwind(AssertUnwindSafe(|| future.poll(context))).map_err(|_| ())
     }
+}
 
-    #[cfg(not(feature = "std"))]
-    {
-        Ok(future.poll(context))
-    }
+#[cfg(not(feature = "std"))]
+fn poll_future_contained<F>(future: Pin<&mut F>, context: &mut Context<'_>) -> Poll<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    future.poll(context)
 }
 
 const fn executor_error_from_sync(error: SyncError) -> ExecutorError {

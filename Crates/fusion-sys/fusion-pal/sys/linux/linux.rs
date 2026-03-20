@@ -13,6 +13,9 @@ pub mod hal;
 #[path = "mem/mem.rs"]
 /// Linux fusion-pal memory backend implementation.
 pub mod mem;
+#[path = "power/power.rs"]
+/// Linux fusion-pal power backend implementation.
+pub mod power;
 #[path = "sync/sync.rs"]
 /// Linux fusion-pal synchronization backend implementation.
 pub mod sync;

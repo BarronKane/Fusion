@@ -4,6 +4,7 @@
 //! backend can surface honestly today is the current execution context and, for SoCs that can
 //! identify the active core, the current logical CPU location.
 
+use core::arch::asm;
 use core::time::Duration;
 
 use crate::pal::thread::{
@@ -11,8 +12,8 @@ use crate::pal::thread::{
     ThreadId, ThreadIdentityStability, ThreadLifecycle, ThreadLifecycleCaps,
     ThreadLifecycleSupport, ThreadLocalitySupport, ThreadObservation, ThreadObservationControl,
     ThreadPlacementCaps, ThreadPlacementControl, ThreadPlacementOutcome, ThreadPlacementRequest,
-    ThreadPlacementSupport, ThreadPriorityRange, ThreadRunState, ThreadSchedulerClass,
-    ThreadSchedulerControl, ThreadSchedulerModel, ThreadSchedulerObservation,
+    ThreadPlacementSupport, ThreadPriorityRange, ThreadRunState, ThreadSchedulerCaps,
+    ThreadSchedulerClass, ThreadSchedulerControl, ThreadSchedulerModel, ThreadSchedulerObservation,
     ThreadSchedulerRequest, ThreadSchedulerSupport, ThreadStackObservation,
     ThreadStackObservationControl, ThreadSupport, ThreadSuspendControl, ThreadTermination,
 };
@@ -49,8 +50,16 @@ impl ThreadBase for CortexMThread {
     type Handle = CortexMThreadHandle;
 
     fn support(&self) -> ThreadSupport {
+        let scheduler = scheduler_support();
+
         super::super::hal::soc::board::current_execution_location().map_or_else(
-            |_| ThreadSupport::unsupported(),
+            |_| ThreadSupport {
+                lifecycle: ThreadLifecycleSupport::unsupported(),
+                placement: ThreadPlacementSupport::unsupported(),
+                scheduler,
+                stack: crate::pal::thread::ThreadStackSupport::unsupported(),
+                locality: ThreadLocalitySupport::unsupported(),
+            },
             |observation| ThreadSupport {
                 lifecycle: ThreadLifecycleSupport {
                     caps: ThreadLifecycleCaps::CURRENT_THREAD_ID
@@ -70,17 +79,7 @@ impl ThreadBase for CortexMThread {
                     authorities: observation.authorities,
                     implementation: crate::pal::thread::ThreadImplementationKind::Native,
                 },
-                scheduler: ThreadSchedulerSupport {
-                    caps: crate::pal::thread::ThreadSchedulerCaps::empty(),
-                    model: ThreadSchedulerModel::Unknown,
-                    priority: ThreadGuarantee::Unsupported,
-                    realtime: ThreadGuarantee::Unsupported,
-                    deadline: ThreadGuarantee::Unsupported,
-                    observation: ThreadGuarantee::Unsupported,
-                    default_priority_range: None,
-                    authorities: ThreadAuthoritySet::empty(),
-                    implementation: crate::pal::thread::ThreadImplementationKind::Unsupported,
-                },
+                scheduler,
                 stack: crate::pal::thread::ThreadStackSupport::unsupported(),
                 locality: ThreadLocalitySupport::unsupported(),
             },
@@ -144,11 +143,41 @@ impl ThreadSchedulerControl for CortexMThread {
     }
 
     fn yield_now(&self) -> Result<(), ThreadError> {
-        Err(ThreadError::unsupported())
+        // SAFETY: YIELD is an architected Cortex-M hint instruction. It does not dereference
+        // memory or manipulate Rust-visible state beyond providing a voluntary execution hint.
+        unsafe { asm!("yield", options(nomem, nostack, preserves_flags)) };
+        Ok(())
     }
 
-    fn sleep_for(&self, _duration: Duration) -> Result<(), ThreadError> {
-        Err(ThreadError::unsupported())
+    fn sleep_for(&self, duration: Duration) -> Result<(), ThreadError> {
+        if duration.is_zero() {
+            return Ok(());
+        }
+
+        if !super::super::hal::soc::board::event_timeout_supported() {
+            return Err(ThreadError::unsupported());
+        }
+
+        super::super::hal::soc::board::arm_event_timeout(duration).map_err(map_hardware_error)?;
+
+        let sleep_result = loop {
+            // SAFETY: WFI is an architected Cortex-M idle instruction. It does not violate Rust
+            // aliasing or memory safety and simply yields until an interrupt becomes pending.
+            unsafe { asm!("wfi", options(nomem, nostack, preserves_flags)) };
+            match super::super::hal::soc::board::event_timeout_fired() {
+                Ok(true) => break Ok(()),
+                Ok(false) => {}
+                Err(error) => break Err(map_hardware_error(error)),
+            }
+        };
+
+        let cancel_result =
+            super::super::hal::soc::board::cancel_event_timeout().map_err(map_hardware_error);
+
+        match (sleep_result, cancel_result) {
+            (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
     }
 }
 
@@ -196,5 +225,38 @@ impl ThreadStackObservationControl for CortexMThread {
 
     fn observe_stack(&self, _handle: &Self::Handle) -> Result<ThreadStackObservation, ThreadError> {
         Err(ThreadError::unsupported())
+    }
+}
+
+fn scheduler_support() -> ThreadSchedulerSupport {
+    let mut caps = ThreadSchedulerCaps::YIELD;
+    let mut authorities = ThreadAuthoritySet::ISA;
+
+    if super::super::hal::soc::board::event_timeout_supported() {
+        caps |= ThreadSchedulerCaps::SLEEP_FOR;
+        authorities |= ThreadAuthoritySet::FIRMWARE;
+    }
+
+    ThreadSchedulerSupport {
+        caps,
+        model: ThreadSchedulerModel::Unknown,
+        priority: ThreadGuarantee::Unsupported,
+        realtime: ThreadGuarantee::Unsupported,
+        deadline: ThreadGuarantee::Unsupported,
+        observation: ThreadGuarantee::Unsupported,
+        default_priority_range: None,
+        authorities,
+        implementation: crate::pal::thread::ThreadImplementationKind::Emulated,
+    }
+}
+
+const fn map_hardware_error(error: crate::pal::hal::HardwareError) -> ThreadError {
+    match error.kind() {
+        crate::pal::hal::HardwareErrorKind::Unsupported => ThreadError::unsupported(),
+        crate::pal::hal::HardwareErrorKind::Invalid => ThreadError::invalid(),
+        crate::pal::hal::HardwareErrorKind::ResourceExhausted => ThreadError::resource_exhausted(),
+        crate::pal::hal::HardwareErrorKind::StateConflict => ThreadError::state_conflict(),
+        crate::pal::hal::HardwareErrorKind::Busy => ThreadError::busy(),
+        crate::pal::hal::HardwareErrorKind::Platform(code) => ThreadError::platform(code),
     }
 }

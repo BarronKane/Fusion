@@ -12,6 +12,9 @@ pub mod hal;
 #[path = "mem/mem.rs"]
 /// Backend-neutral memory vocabulary and unsafe fusion-pal traits.
 pub mod mem;
+#[path = "power/power.rs"]
+/// Backend-neutral power-management vocabulary and fusion-pal traits.
+pub mod power;
 #[path = "sync/sync.rs"]
 /// Backend-neutral synchronization vocabulary and low-level fusion-pal traits.
 pub mod sync;

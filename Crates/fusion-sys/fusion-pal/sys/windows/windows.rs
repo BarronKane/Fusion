@@ -13,6 +13,9 @@ pub mod hal;
 #[path = "mem/mem.rs"]
 /// Windows fusion-pal memory backend implementation.
 pub mod mem;
+#[path = "power/power.rs"]
+/// Windows fusion-pal power backend implementation.
+pub mod power;
 #[path = "sync/sync.rs"]
 /// Windows fusion-pal synchronization backend implementation.
 pub mod sync;
