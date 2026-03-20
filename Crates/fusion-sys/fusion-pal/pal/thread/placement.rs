@@ -1,7 +1,11 @@
 use crate::pal::hal::HardwareTopologyNodeId;
 
 use super::{
-    ThreadClusterId, ThreadCoreClassId, ThreadCoreId, ThreadGuarantee, ThreadLogicalCpuId,
+    ThreadClusterId,
+    ThreadCoreClassId,
+    ThreadCoreId,
+    ThreadGuarantee,
+    ThreadLogicalCpuId,
 };
 
 /// Constraint strength requested for thread placement.

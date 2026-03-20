@@ -52,9 +52,30 @@
 //! concrete memory domains without pretending they all originate from the same create call.
 
 use fusion_pal::sys::mem::{
-    Address, Advise, Backing, CachePolicy, MapFlags, MapRequest, MemAdviceCaps, MemAdvise,
-    MemBackingCaps, MemBase, MemCaps, MemCommit, MemLock, MemMap, MemPlacementCaps, MemProtect,
-    MemQuery, MemSupport, PageInfo, Placement, Protect, Region, RegionAttrs, RegionInfo,
+    Address,
+    Advise,
+    Backing,
+    CachePolicy,
+    MapFlags,
+    MapRequest,
+    MemAdviceCaps,
+    MemAdvise,
+    MemBackingCaps,
+    MemBase,
+    MemCaps,
+    MemCommit,
+    MemLock,
+    MemMap,
+    MemPlacementCaps,
+    MemProtect,
+    MemQuery,
+    MemSupport,
+    PageInfo,
+    Placement,
+    Protect,
+    Region,
+    RegionAttrs,
+    RegionInfo,
     system_mem,
 };
 
@@ -83,18 +104,33 @@ pub use handle::MemoryResourceHandle;
 pub use ops::{ResourceHazardSet, ResourceOpSet, ResourcePreferenceSet};
 pub use range::ResourceRange;
 pub use request::{
-    InitialResidency, InitialResourceState, IntegrityConstraints, OvercommitPolicy,
-    PlacementPreference, RequiredPlacement, ResourceBackingRequest, ResourceContract,
-    ResourceRequest, SharingPolicy,
+    InitialResidency,
+    InitialResourceState,
+    IntegrityConstraints,
+    OvercommitPolicy,
+    PlacementPreference,
+    RequiredPlacement,
+    ResourceBackingRequest,
+    ResourceContract,
+    ResourceRequest,
+    SharingPolicy,
 };
 pub use reservation::{
-    AddressReservation, MaterializedReservation, ReservationHazardSet, ReservationOpSet,
-    ReservationRequest, ReservationSupport, ResolvedAddressReservation,
+    AddressReservation,
+    MaterializedReservation,
+    ReservationHazardSet,
+    ReservationOpSet,
+    ReservationRequest,
+    ReservationSupport,
+    ResolvedAddressReservation,
 };
 pub use resolved::{ResolvedResource, ResourceInfo};
 pub use state::{ResourceState, ResourceStateProvenance, StateValue};
 pub use support::{
-    ResourceAcquireSupport, ResourceFeatureSupport, ResourceResidencySupport, ResourceSupport,
+    ResourceAcquireSupport,
+    ResourceFeatureSupport,
+    ResourceResidencySupport,
+    ResourceSupport,
 };
 pub use view::RangeView;
 
@@ -968,7 +1004,7 @@ pub(super) const fn required_placement_to_mem(
     match placement {
         None => Ok(None),
         Some(RequiredPlacement::FixedNoReplace(addr)) => {
-            if addr % granule != 0 {
+            if !addr.is_multiple_of(granule) {
                 return Err(ResourceError::invalid_request());
             }
             if !supported.contains(MemPlacementCaps::FIXED_NOREPLACE) {
@@ -999,7 +1035,7 @@ pub(super) const fn preferred_placement_to_mem(
     match placement {
         PlacementPreference::Anywhere => Ok((None, false)),
         PlacementPreference::Hint(addr) => {
-            if addr % granule != 0 {
+            if !addr.is_multiple_of(granule) {
                 return Err(ResourceError::invalid_request());
             }
             if supported.contains(MemPlacementCaps::HINT) {

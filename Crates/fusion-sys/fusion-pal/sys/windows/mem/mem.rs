@@ -7,9 +7,29 @@
 use core::num::NonZeroUsize;
 
 use crate::pal::mem::{
-    Address, Advise, MapFlags, MapReplaceRequest, MapRequest, MemAdviceCaps, MemAdvise,
-    MemBackingCaps, MemBase, MemCaps, MemCommit, MemError, MemLock, MemMap, MemMapReplace,
-    MemPlacementCaps, MemProtect, MemQuery, MemSupport, PageInfo, Protect, Region, RegionInfo,
+    Address,
+    Advise,
+    MapFlags,
+    MapReplaceRequest,
+    MapRequest,
+    MemAdviceCaps,
+    MemAdvise,
+    MemBackingCaps,
+    MemBase,
+    MemCaps,
+    MemCommit,
+    MemError,
+    MemLock,
+    MemMap,
+    MemMapReplace,
+    MemPlacementCaps,
+    MemProtect,
+    MemQuery,
+    MemSupport,
+    PageInfo,
+    Protect,
+    Region,
+    RegionInfo,
 };
 
 /// Placeholder Windows implementation of the fusion-pal memory provider contract.

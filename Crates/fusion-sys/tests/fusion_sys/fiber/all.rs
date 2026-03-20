@@ -6,8 +6,18 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use fusion_sys::fiber::{
-    ContextCaps, ContextErrorKind, ContextMigrationSupport, ContextStackLayout, ContextSwitch,
-    Fiber, FiberReturn, FiberStack, FiberSystem, FiberYield, PlatformSavedContext, system_context,
+    ContextCaps,
+    ContextErrorKind,
+    ContextMigrationSupport,
+    ContextStackLayout,
+    ContextSwitch,
+    Fiber,
+    FiberReturn,
+    FiberStack,
+    FiberSystem,
+    FiberYield,
+    PlatformSavedContext,
+    system_context,
     yield_now,
 };
 use std::thread;

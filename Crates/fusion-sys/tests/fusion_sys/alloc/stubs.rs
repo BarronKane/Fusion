@@ -3,13 +3,29 @@ use core::ptr::NonNull;
 
 use fusion_pal::sys::mem::{Address, CachePolicy, Protect, Region};
 use fusion_sys::alloc::{
-    AllocErrorKind, AllocModeSet, AllocPolicy, AllocationStrategy, Allocator,
+    AllocErrorKind,
+    AllocModeSet,
+    AllocPolicy,
+    AllocationStrategy,
+    Allocator,
     CriticalSafetyRequirements,
 };
 use fusion_sys::mem::resource::{
-    BoundMemoryResource, BoundResourceSpec, MemoryDomain, MemoryGeometry, MemoryResourceHandle,
-    OvercommitPolicy, ResourceAttrs, ResourceBackingKind, ResourceContract, ResourceOpSet,
-    ResourceResidencySupport, ResourceState, ResourceSupport, SharingPolicy, StateValue,
+    BoundMemoryResource,
+    BoundResourceSpec,
+    MemoryDomain,
+    MemoryGeometry,
+    MemoryResourceHandle,
+    OvercommitPolicy,
+    ResourceAttrs,
+    ResourceBackingKind,
+    ResourceContract,
+    ResourceOpSet,
+    ResourceResidencySupport,
+    ResourceState,
+    ResourceSupport,
+    SharingPolicy,
+    StateValue,
 };
 
 extern crate std;

@@ -1,6 +1,11 @@
 use crate::mem::provider::{
-    MemoryCompatibilityEnvelope, MemoryPoolClassId, MemoryResourceDescriptor, MemoryResourceId,
-    MemoryResourceReadiness, MemoryStrategyId, MemoryTopologyNodeId,
+    MemoryCompatibilityEnvelope,
+    MemoryPoolClassId,
+    MemoryResourceDescriptor,
+    MemoryResourceId,
+    MemoryResourceReadiness,
+    MemoryStrategyId,
+    MemoryTopologyNodeId,
 };
 use crate::mem::resource::{MemoryResource, MemoryResourceHandle, ResourceRange};
 

@@ -1,0 +1,11 @@
+# Explicit fiber-task roots for build-generated stack metadata.
+#
+# Format:
+# full::type::path = symbol[, priority]
+#
+# `symbol` is the function/root name used by the external stack analyzer to look up emitted stack
+# sizes or worst-case call-graph budgets. The analyzer can consume either explicit text inputs or a
+# real object artifact, then writes the normalized `fiber-task.generated` manifest consumed by the
+# build script.
+
+fusion_std::thread::fiber::GeneratedFiberTaskMetadataAnchorTask = generated_fiber_task_metadata_anchor, 5

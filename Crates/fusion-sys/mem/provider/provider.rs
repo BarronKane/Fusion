@@ -79,37 +79,68 @@ mod topology;
 
 pub use assessment::{MemoryPoolAssessment, MemoryPoolAssessmentVerdict, assess_pool_request};
 pub use builder::{
-    MemoryProviderBuildSpec, MemoryProviderConflictPolicy, MemoryProviderDiscoveryPolicy,
+    MemoryProviderBuildSpec,
+    MemoryProviderConflictPolicy,
+    MemoryProviderDiscoveryPolicy,
 };
 pub use from_pal::{
-    memory_object_from_catalog_resource, memory_resource_from_catalog_resource,
-    memory_strategy_from_catalog_strategy, topology_link_from_catalog, topology_node_from_catalog,
+    memory_object_from_catalog_resource,
+    memory_resource_from_catalog_resource,
+    memory_strategy_from_catalog_strategy,
+    topology_link_from_catalog,
+    topology_node_from_catalog,
 };
 pub use groups::{
-    MemoryGroupDescriptor, MemoryGroupId, MemoryGroupWriteSummary, MemoryPoolCandidateGroup,
-    write_candidate_groups, write_groups,
+    MemoryGroupDescriptor,
+    MemoryGroupId,
+    MemoryGroupWriteSummary,
+    MemoryPoolCandidateGroup,
+    write_candidate_groups,
+    write_groups,
 };
 pub use inventory::{
-    MemoryCompatibilityEnvelope, MemoryPoolClass, MemoryPoolClassId, MemoryProviderInventory,
-    MemoryResourceDescriptor, MemoryResourceId, MemoryStrategyCapacity, MemoryStrategyDescriptor,
-    MemoryStrategyId, MemoryStrategyKind, MemoryStrategyOutputDescriptor,
+    MemoryCompatibilityEnvelope,
+    MemoryPoolClass,
+    MemoryPoolClassId,
+    MemoryProviderInventory,
+    MemoryResourceDescriptor,
+    MemoryResourceId,
+    MemoryStrategyCapacity,
+    MemoryStrategyDescriptor,
+    MemoryStrategyId,
+    MemoryStrategyKind,
+    MemoryStrategyOutputDescriptor,
 };
 pub use object::{
-    MemoryObjectDescriptor, MemoryObjectEnvelope, MemoryObjectId, MemoryObjectOrigin,
+    MemoryObjectDescriptor,
+    MemoryObjectEnvelope,
+    MemoryObjectId,
+    MemoryObjectOrigin,
     MemoryResourceReadiness,
 };
 pub use plan::{
-    MemoryPoolPlan, MemoryPoolPlanStep, MemoryPoolPlanVerdict, MemoryPoolPreparationKind,
+    MemoryPoolPlan,
+    MemoryPoolPlanStep,
+    MemoryPoolPlanVerdict,
+    MemoryPoolPreparationKind,
     plan_pool_request,
 };
 pub use request::{MemoryPoolContractRequirements, MemoryPoolRequest};
 pub use support::{
-    CriticalSafetyRequirements, MemoryPoolAssessmentIssues, MemoryProviderCaps,
+    CriticalSafetyRequirements,
+    MemoryPoolAssessmentIssues,
+    MemoryProviderCaps,
     MemoryProviderSupport,
 };
 pub use topology::{
-    MemoryTopology, MemoryTopologyLink, MemoryTopologyLinkId, MemoryTopologyLinkKind,
-    MemoryTopologyNode, MemoryTopologyNodeId, MemoryTopologyNodeKind, MemoryTopologyPreference,
+    MemoryTopology,
+    MemoryTopologyLink,
+    MemoryTopologyLinkId,
+    MemoryTopologyLinkKind,
+    MemoryTopologyNode,
+    MemoryTopologyNodeId,
+    MemoryTopologyNodeKind,
+    MemoryTopologyPreference,
 };
 
 /// Pool-facing provider contract for inventory, topology, and resource orchestration.

@@ -5,10 +5,23 @@ pub mod core;
 pub mod soc;
 
 use crate::pal::hal::{
-    HardwareAuthoritySet, HardwareBase, HardwareCpuCaps, HardwareCpuDescription, HardwareCpuQuery,
-    HardwareCpuSupport, HardwareCpuVendor, HardwareError, HardwareGuarantee,
-    HardwareImplementationKind, HardwareSimdSet, HardwareStackAbi, HardwareSupport,
-    HardwareTopologyNodeId, HardwareTopologyQuery, HardwareTopologySummary, HardwareWriteSummary,
+    HardwareAuthoritySet,
+    HardwareBase,
+    HardwareCpuCaps,
+    HardwareCpuDescription,
+    HardwareCpuQuery,
+    HardwareCpuSupport,
+    HardwareCpuVendor,
+    HardwareError,
+    HardwareGuarantee,
+    HardwareImplementationKind,
+    HardwareSimdSet,
+    HardwareStackAbi,
+    HardwareSupport,
+    HardwareTopologyNodeId,
+    HardwareTopologyQuery,
+    HardwareTopologySummary,
+    HardwareWriteSummary,
 };
 use crate::pal::thread::{ThreadClusterId, ThreadCoreClassId, ThreadCoreId, ThreadLogicalCpuId};
 
@@ -16,14 +29,22 @@ use crate::pal::thread::{ThreadClusterId, ThreadCoreClassId, ThreadCoreId, Threa
 pub use self::core::{CortexMCpuid, read_cpuid};
 #[allow(unused_imports)]
 pub use self::soc::board::{
-    CortexMIrqClass, CortexMIrqDescriptor, CortexMSocChipIdSupport, CortexMSocChipIdentity,
-    CortexMSocDeviceIdSupport, CortexMSocDeviceIdentity,
-    chip_identity as selected_soc_chip_identity, device_identity as selected_soc_device_identity,
+    CortexMIrqClass,
+    CortexMIrqDescriptor,
+    CortexMSocChipIdSupport,
+    CortexMSocChipIdentity,
+    CortexMSocDeviceIdSupport,
+    CortexMSocDeviceIdentity,
+    chip_identity as selected_soc_chip_identity,
+    device_identity as selected_soc_device_identity,
     enter_power_mode as selected_soc_enter_power_mode,
     irq_acknowledge as selected_soc_irq_acknowledge,
     irq_acknowledge_supported as selected_soc_irq_acknowledge_supported,
-    irq_disable as selected_soc_irq_disable, irq_enable as selected_soc_irq_enable,
-    irqs as selected_soc_irqs, selected_soc_chip_id_support, selected_soc_device_id_support,
+    irq_disable as selected_soc_irq_disable,
+    irq_enable as selected_soc_irq_enable,
+    irqs as selected_soc_irqs,
+    selected_soc_chip_id_support,
+    selected_soc_device_id_support,
     selected_soc_name,
 };
 

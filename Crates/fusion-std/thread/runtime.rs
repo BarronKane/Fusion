@@ -1,8 +1,15 @@
 //! Domain 5: public runtime orchestration surface.
 
 use super::{
-    Executor, ExecutorConfig, FiberStackBacking, GreenGrowth, GreenPool, GreenPoolConfig,
-    GreenScheduling, ThreadPool, ThreadPoolConfig,
+    Executor,
+    ExecutorConfig,
+    FiberStackBacking,
+    GreenGrowth,
+    GreenPool,
+    GreenPoolConfig,
+    GreenScheduling,
+    ThreadPool,
+    ThreadPoolConfig,
 };
 
 /// Runtime profile selecting broad safety and elasticity policy.
@@ -99,7 +106,7 @@ pub struct RuntimeConfig<'a> {
     /// Carrier thread-pool configuration.
     pub thread_pool: ThreadPoolConfig<'a>,
     /// Optional green-thread configuration.
-    pub green: Option<GreenPoolConfig>,
+    pub green: Option<GreenPoolConfig<'a>>,
     /// Executor configuration.
     pub executor: ExecutorConfig,
     /// Optional deterministic constraints.
@@ -241,13 +248,18 @@ fn validate_runtime_config(config: &RuntimeConfig<'_>) -> Result<(), RuntimeErro
             return Err(RuntimeError::Unsupported);
         }
         if let Some(green) = config.green {
-            if !matches!(green.stack_backing, FiberStackBacking::Fixed { .. }) {
+            if green.task_capacity_per_carrier().is_err() {
+                return Err(RuntimeError::Unsupported);
+            }
+            if !green.uses_classes()
+                && !matches!(green.stack_backing, FiberStackBacking::Fixed { .. })
+            {
                 return Err(RuntimeError::Unsupported);
             }
             if !matches!(green.growth, GreenGrowth::Fixed) {
                 return Err(RuntimeError::Unsupported);
             }
-            if !matches!(green.scheduling, GreenScheduling::Fifo) {
+            if matches!(green.scheduling, GreenScheduling::WorkStealing) {
                 return Err(RuntimeError::Unsupported);
             }
         }

@@ -1,8 +1,12 @@
 //! iOS fusion-pal synchronization backend stub.
 
 use crate::pal::sync::{
-    SyncImplementationKind, UnsupportedRawMutex, UnsupportedRawOnce, UnsupportedRawRwLock,
-    UnsupportedSemaphore, UnsupportedSync,
+    SyncImplementationKind,
+    UnsupportedRawMutex,
+    UnsupportedRawOnce,
+    UnsupportedRawRwLock,
+    UnsupportedSemaphore,
+    UnsupportedSync,
 };
 
 /// Selected raw mutex type for iOS builds.

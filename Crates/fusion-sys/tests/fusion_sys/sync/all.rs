@@ -1,8 +1,19 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use fusion_sys::sync::{
-    Mutex, MutexCaps, Once, OnceLock, RawMutex, RwLock, Semaphore, SpinMutex, SyncError,
-    SyncErrorKind, SyncFallbackKind, SyncImplementationKind, ThinMutex,
+    Mutex,
+    MutexCaps,
+    Once,
+    OnceLock,
+    RawMutex,
+    RwLock,
+    Semaphore,
+    SpinMutex,
+    SyncError,
+    SyncErrorKind,
+    SyncFallbackKind,
+    SyncImplementationKind,
+    ThinMutex,
 };
 
 extern crate std;

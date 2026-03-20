@@ -1,7 +1,10 @@
 //! Unsupported hosted-fiber backend surface used by targets without a platform implementation.
 
 use crate::sys::fiber_common::{
-    FiberHostError, FiberHostSupport, PlatformElasticFaultHandler, PlatformWakeToken,
+    FiberHostError,
+    FiberHostSupport,
+    PlatformElasticFaultHandler,
+    PlatformWakeToken,
 };
 
 /// Unsupported hosted-fiber helper provider.

@@ -13,24 +13,45 @@ use core::sync::atomic::{Ordering, compiler_fence};
 use core::time::Duration;
 
 use crate::pal::hal::{
-    HardwareAuthoritySet, HardwareError, HardwareTopologySummary, HardwareWriteSummary,
+    HardwareAuthoritySet,
+    HardwareError,
+    HardwareTopologySummary,
+    HardwareWriteSummary,
 };
 use crate::pal::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
 use crate::pal::power::{PowerModeDepth, PowerModeDescriptor};
 use crate::pal::thread::{
-    ThreadAuthoritySet, ThreadCoreId, ThreadError, ThreadExecutionLocation, ThreadId,
-    ThreadLogicalCpuId, ThreadProcessorGroupId,
+    ThreadAuthoritySet,
+    ThreadCoreId,
+    ThreadError,
+    ThreadExecutionLocation,
+    ThreadId,
+    ThreadLogicalCpuId,
+    ThreadProcessorGroupId,
 };
 
 use super::board_contract::{self, CortexMSocBoard};
 
 pub use super::board_contract::{
-    CortexMClockDescriptor, CortexMDmaControllerDescriptor, CortexMDmaRequestClass,
-    CortexMDmaRequestDescriptor, CortexMDmaTransferCaps, CortexMFlashRegionDescriptor,
-    CortexMIrqClass, CortexMIrqDescriptor, CortexMMemoryRegionDescriptor, CortexMMemoryRegionKind,
-    CortexMPeripheralBus, CortexMPeripheralDescriptor, CortexMPowerModeDescriptor,
-    CortexMSocBoard as CortexMSoc, CortexMSocChipIdSupport, CortexMSocChipIdentity,
-    CortexMSocDescriptor, CortexMSocDeviceIdSupport, CortexMSocDeviceIdentity,
+    CortexMClockDescriptor,
+    CortexMDmaControllerDescriptor,
+    CortexMDmaRequestClass,
+    CortexMDmaRequestDescriptor,
+    CortexMDmaTransferCaps,
+    CortexMFlashRegionDescriptor,
+    CortexMIrqClass,
+    CortexMIrqDescriptor,
+    CortexMMemoryRegionDescriptor,
+    CortexMMemoryRegionKind,
+    CortexMPeripheralBus,
+    CortexMPeripheralDescriptor,
+    CortexMPowerModeDescriptor,
+    CortexMSocBoard as CortexMSoc,
+    CortexMSocChipIdSupport,
+    CortexMSocChipIdentity,
+    CortexMSocDescriptor,
+    CortexMSocDeviceIdSupport,
+    CortexMSocDeviceIdentity,
     CortexMSocExecutionObservation,
 };
 
@@ -2284,11 +2305,25 @@ pub fn flash_regions() -> &'static [CortexMFlashRegionDescriptor] {
 #[cfg(test)]
 mod tests {
     use super::{
-        CLK_REF_AUX_SOURCES, CLK_REF_MAIN_SOURCES, CLOCK_TREE, CortexMDmaRequestClass,
-        CortexMIrqClass, CortexMSocDeviceIdSupport, DEVICE_ID_SUPPORT, DMA_CONTROLLERS,
-        DMA_REQUESTS, FLASH_REGIONS, IRQS, MEMORY_MAP, POWER_MODES, Rp2350PowerModeAction,
-        rp2350_chip_manufacturer, rp2350_chip_part, rp2350_chip_revision,
-        rp2350_owned_sram_region_from_bounds, rp2350_power_mode_action,
+        CLK_REF_AUX_SOURCES,
+        CLK_REF_MAIN_SOURCES,
+        CLOCK_TREE,
+        CortexMDmaRequestClass,
+        CortexMIrqClass,
+        CortexMSocDeviceIdSupport,
+        DEVICE_ID_SUPPORT,
+        DMA_CONTROLLERS,
+        DMA_REQUESTS,
+        FLASH_REGIONS,
+        IRQS,
+        MEMORY_MAP,
+        POWER_MODES,
+        Rp2350PowerModeAction,
+        rp2350_chip_manufacturer,
+        rp2350_chip_part,
+        rp2350_chip_revision,
+        rp2350_owned_sram_region_from_bounds,
+        rp2350_power_mode_action,
         rp2350_public_device_id_from_words,
     };
 

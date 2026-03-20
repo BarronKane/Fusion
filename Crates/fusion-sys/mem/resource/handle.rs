@@ -1,6 +1,14 @@
 use super::{
-    BoundMemoryResource, MemoryResource, QueryableResource, RangeView, ResolvedResource,
-    ResourceError, ResourceInfo, ResourceRange, ResourceState, VirtualMemoryResource,
+    BoundMemoryResource,
+    MemoryResource,
+    QueryableResource,
+    RangeView,
+    ResolvedResource,
+    ResourceError,
+    ResourceInfo,
+    ResourceRange,
+    ResourceState,
+    VirtualMemoryResource,
 };
 use fusion_pal::sys::mem::{Address, RegionInfo};
 

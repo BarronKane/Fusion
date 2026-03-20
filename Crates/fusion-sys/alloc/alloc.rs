@@ -13,8 +13,19 @@
 use core::mem::{ManuallyDrop, size_of};
 use core::ptr::NonNull;
 use fusion_pal::sys::mem::{
-    Backing, CachePolicy, MapFlags, MapRequest, MemBase, MemError, MemErrorKind, MemMap, Placement,
-    Protect, Region, RegionAttrs, system_mem,
+    Backing,
+    CachePolicy,
+    MapFlags,
+    MapRequest,
+    MemBase,
+    MemError,
+    MemErrorKind,
+    MemMap,
+    Placement,
+    Protect,
+    Region,
+    RegionAttrs,
+    system_mem,
 };
 
 use crate::sync::{SharedHeader, SharedRelease};
@@ -45,15 +56,31 @@ pub use slab::Slab;
 
 #[allow(unused_imports)]
 pub use crate::mem::pool::{
-    MemoryPool, MemoryPoolBuilder, MemoryPoolContributor, MemoryPoolContributorOrigin,
-    MemoryPoolError, MemoryPoolErrorKind, MemoryPoolExtentRequest, MemoryPoolLease,
-    MemoryPoolLeaseId, MemoryPoolLeaseView, MemoryPoolMemberId, MemoryPoolMemberInfo,
-    MemoryPoolMetadataLayout, MemoryPoolPolicy, MemoryPoolProvisioningPolicy, MemoryPoolStats,
+    MemoryPool,
+    MemoryPoolBuilder,
+    MemoryPoolContributor,
+    MemoryPoolContributorOrigin,
+    MemoryPoolError,
+    MemoryPoolErrorKind,
+    MemoryPoolExtentRequest,
+    MemoryPoolLease,
+    MemoryPoolLeaseId,
+    MemoryPoolLeaseView,
+    MemoryPoolMemberId,
+    MemoryPoolMemberInfo,
+    MemoryPoolMetadataLayout,
+    MemoryPoolPolicy,
+    MemoryPoolProvisioningPolicy,
+    MemoryPoolStats,
 };
 pub use crate::mem::provider::CriticalSafetyRequirements;
 #[allow(unused_imports)]
 pub use crate::mem::resource::{
-    MemoryDomain, MemoryDomainSet, MemoryGeometry, ResourceAttrs, ResourceHazardSet,
+    MemoryDomain,
+    MemoryDomainSet,
+    MemoryGeometry,
+    ResourceAttrs,
+    ResourceHazardSet,
 };
 
 /// Request for one allocator-managed memory block.

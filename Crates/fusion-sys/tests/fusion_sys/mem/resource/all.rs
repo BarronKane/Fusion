@@ -6,9 +6,19 @@
 
 use fusion_pal::sys::mem::{IntegrityMode, MemPlacementCaps, Protect};
 use fusion_sys::mem::resource::{
-    CommitControlledResource, IntegrityConstraints, MemoryResource, OvercommitPolicy,
-    PlacementPreference, RequiredPlacement, ResourceErrorKind, ResourceFeatureSupport,
-    ResourceOpSet, ResourcePreferenceSet, ResourceRange, ResourceRequest, VirtualMemoryResource,
+    CommitControlledResource,
+    IntegrityConstraints,
+    MemoryResource,
+    OvercommitPolicy,
+    PlacementPreference,
+    RequiredPlacement,
+    ResourceErrorKind,
+    ResourceFeatureSupport,
+    ResourceOpSet,
+    ResourcePreferenceSet,
+    ResourceRange,
+    ResourceRequest,
+    VirtualMemoryResource,
 };
 
 use super::support::page_len;

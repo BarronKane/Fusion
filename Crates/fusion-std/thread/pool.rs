@@ -6,9 +6,19 @@ use core::mem::{MaybeUninit, align_of, size_of};
 use crate::sync::{Mutex as SyncMutex, SyncError, SyncErrorKind};
 use fusion_sys::alloc::{AllocRequest, AllocationStrategy, Allocator, ControlLease, Slab};
 use fusion_sys::thread::{
-    SystemPoolPlacement, SystemResizePolicy, SystemShutdownPolicy, SystemStealBoundary,
-    SystemThreadPool, SystemThreadPoolConfig, SystemThreadPoolError, SystemThreadPoolStats,
-    SystemWorkItem, ThreadLogicalCpuId, ThreadSchedulerRequest, ThreadStackRequest, ThreadSupport,
+    SystemPoolPlacement,
+    SystemResizePolicy,
+    SystemShutdownPolicy,
+    SystemStealBoundary,
+    SystemThreadPool,
+    SystemThreadPoolConfig,
+    SystemThreadPoolError,
+    SystemThreadPoolStats,
+    SystemWorkItem,
+    ThreadLogicalCpuId,
+    ThreadSchedulerRequest,
+    ThreadStackRequest,
+    ThreadSupport,
     ThreadSystem,
 };
 

@@ -1,6 +1,12 @@
 use fusion_std::sync::{Mutex, OnceLock, RwLock, Semaphore};
 use fusion_std::thread::{
-    Executor, ExecutorConfig, ExecutorMode, GreenPool, GreenPoolConfig, JoinSet, ThreadPool,
+    Executor,
+    ExecutorConfig,
+    ExecutorMode,
+    GreenPool,
+    GreenPoolConfig,
+    JoinSet,
+    ThreadPool,
     ThreadPoolConfig,
 };
 

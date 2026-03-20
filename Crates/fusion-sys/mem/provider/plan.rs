@@ -1,9 +1,14 @@
 use super::assessment::{
-    MemoryPoolAssessmentVerdict, analyze_pool_request, assessment_from_analysis,
+    MemoryPoolAssessmentVerdict,
+    analyze_pool_request,
+    assessment_from_analysis,
 };
 use super::groups::CandidateGroupKey;
 use super::{
-    MemoryPoolAssessmentIssues, MemoryPoolClassId, MemoryPoolRequest, MemoryProviderInventory,
+    MemoryPoolAssessmentIssues,
+    MemoryPoolClassId,
+    MemoryPoolRequest,
+    MemoryProviderInventory,
     MemoryProviderSupport,
 };
 use crate::mem::resource::ResourceRange;

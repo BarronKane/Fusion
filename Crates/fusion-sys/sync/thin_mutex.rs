@@ -1,7 +1,9 @@
 //! Thin non-recursive mutex that selects the strongest currently available backend path.
 
 use fusion_pal::sys::sync::{
-    PLATFORM_RAW_MUTEX_IMPLEMENTATION, PlatformRawMutex, SyncImplementationKind,
+    PLATFORM_RAW_MUTEX_IMPLEMENTATION,
+    PlatformRawMutex,
+    SyncImplementationKind,
 };
 
 use super::SpinMutex;

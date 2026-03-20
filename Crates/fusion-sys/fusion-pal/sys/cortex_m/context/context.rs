@@ -8,9 +8,19 @@ use core::arch::global_asm;
 use core::mem;
 
 use crate::pal::context::{
-    ContextAuthoritySet, ContextBase, ContextCaps, ContextError, ContextGuarantee,
-    ContextImplementationKind, ContextMigrationSupport, ContextStackDirection, ContextStackLayout,
-    ContextSupport, ContextSwitch, ContextTlsIsolation, RawContextEntry,
+    ContextAuthoritySet,
+    ContextBase,
+    ContextCaps,
+    ContextError,
+    ContextGuarantee,
+    ContextImplementationKind,
+    ContextMigrationSupport,
+    ContextStackDirection,
+    ContextStackLayout,
+    ContextSupport,
+    ContextSwitch,
+    ContextTlsIsolation,
+    RawContextEntry,
 };
 
 #[cfg(target_abi = "eabihf")]

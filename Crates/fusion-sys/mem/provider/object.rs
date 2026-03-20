@@ -1,8 +1,13 @@
 use fusion_pal::sys::mem::Region;
 
 use crate::mem::resource::{
-    MemoryDomain, ResourceAttrs, ResourceBackingKind, ResourceContract, ResourceHazardSet,
-    ResourceInfo, ResourceSupport,
+    MemoryDomain,
+    ResourceAttrs,
+    ResourceBackingKind,
+    ResourceContract,
+    ResourceHazardSet,
+    ResourceInfo,
+    ResourceSupport,
 };
 
 use super::MemoryTopologyNodeId;

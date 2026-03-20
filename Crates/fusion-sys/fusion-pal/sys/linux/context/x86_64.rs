@@ -8,9 +8,19 @@ use core::arch::{asm, global_asm};
 use core::mem;
 
 use crate::pal::context::{
-    ContextAuthoritySet, ContextBase, ContextCaps, ContextError, ContextGuarantee,
-    ContextImplementationKind, ContextMigrationSupport, ContextStackDirection, ContextStackLayout,
-    ContextSupport, ContextSwitch, ContextTlsIsolation, RawContextEntry,
+    ContextAuthoritySet,
+    ContextBase,
+    ContextCaps,
+    ContextError,
+    ContextGuarantee,
+    ContextImplementationKind,
+    ContextMigrationSupport,
+    ContextStackDirection,
+    ContextStackLayout,
+    ContextSupport,
+    ContextSwitch,
+    ContextTlsIsolation,
+    RawContextEntry,
 };
 
 global_asm!(include_str!("x86_64.S"));
@@ -163,7 +173,7 @@ fn validate_stack_layout(stack: ContextStackLayout) -> Result<usize, ContextErro
         .checked_add(stack.len.get())
         .ok_or_else(ContextError::invalid)?;
 
-    if top % STACK_ALIGNMENT != 0 {
+    if !top.is_multiple_of(STACK_ALIGNMENT) {
         return Err(ContextError::invalid());
     }
     if stack.len.get() < STACK_ALIGNMENT + RED_ZONE_BYTES + mem::size_of::<usize>() * 2 {

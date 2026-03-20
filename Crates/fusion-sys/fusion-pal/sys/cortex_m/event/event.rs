@@ -12,9 +12,22 @@ use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::pal::event::{
-    EventBase, EventCaps, EventCompletion, EventCompletionOp, EventError, EventInterest, EventKey,
-    EventModel, EventNotification, EventReadiness, EventRecord, EventRegistration,
-    EventRegistrationMode, EventSource, EventSourceHandle, EventSupport,
+    EventBase,
+    EventCaps,
+    EventCompletion,
+    EventCompletionOp,
+    EventError,
+    EventInterest,
+    EventKey,
+    EventModel,
+    EventNotification,
+    EventReadiness,
+    EventRecord,
+    EventRegistration,
+    EventRegistrationMode,
+    EventSource,
+    EventSourceHandle,
+    EventSupport,
 };
 
 const CORTEX_M_EVENT_QUEUE_CAPACITY: usize = 64;

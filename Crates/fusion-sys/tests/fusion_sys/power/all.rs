@@ -1,5 +1,9 @@
 use fusion_sys::power::{
-    PowerCaps, PowerErrorKind, PowerImplementationKind, PowerModeDepth, PowerSystem,
+    PowerCaps,
+    PowerErrorKind,
+    PowerImplementationKind,
+    PowerModeDepth,
+    PowerSystem,
 };
 
 #[test]

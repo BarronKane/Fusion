@@ -15,13 +15,23 @@ use core::fmt;
 
 use fusion_pal::hal::{HardwareTopologyQuery as _, system_hardware};
 use fusion_pal::sys::thread::{
-    ThreadConstraintMode, ThreadMigrationPolicy, ThreadPlacementPhase, ThreadPlacementTarget,
+    ThreadConstraintMode,
+    ThreadMigrationPolicy,
+    ThreadPlacementPhase,
+    ThreadPlacementTarget,
     ThreadStartMode,
 };
 
 use super::{
-    RawThreadEntry, ThreadConfig, ThreadError, ThreadLifecycleCaps, ThreadLogicalCpuId,
-    ThreadSchedulerRequest, ThreadStackRequest, ThreadSupport, ThreadSystem,
+    RawThreadEntry,
+    ThreadConfig,
+    ThreadError,
+    ThreadLifecycleCaps,
+    ThreadLogicalCpuId,
+    ThreadSchedulerRequest,
+    ThreadStackRequest,
+    ThreadSupport,
+    ThreadSystem,
 };
 use crate::sync::{OnceInitError, OnceLock, Semaphore, SyncError, SyncErrorKind, ThinMutex};
 use crate::thread::handle::ThreadHandle;

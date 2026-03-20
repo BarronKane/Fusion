@@ -1,6 +1,10 @@
 use fusion_sys::fiber::{
-    ContextCaps, ContextImplementationKind, ContextMigrationSupport, ContextStackDirection,
-    ContextTlsIsolation, FiberSystem,
+    ContextCaps,
+    ContextImplementationKind,
+    ContextMigrationSupport,
+    ContextStackDirection,
+    ContextTlsIsolation,
+    FiberSystem,
 };
 
 #[test]

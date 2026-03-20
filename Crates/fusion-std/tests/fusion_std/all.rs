@@ -1,11 +1,28 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use fusion_std::sync::{
-    Mutex, Once, OnceLock, RawMutex, RwLock, Semaphore, SpinMutex, SyncErrorKind, ThinMutex,
+    Mutex,
+    Once,
+    OnceLock,
+    RawMutex,
+    RwLock,
+    Semaphore,
+    SpinMutex,
+    SyncErrorKind,
+    ThinMutex,
 };
 use fusion_std::thread::{
-    Executor, ExecutorConfig, ExecutorError, ExecutorMode, ThreadConfig, ThreadEntryReturn,
-    ThreadErrorKind, ThreadJoinPolicy, ThreadLifecycleCaps, ThreadPool, ThreadPoolConfig,
+    Executor,
+    ExecutorConfig,
+    ExecutorError,
+    ExecutorMode,
+    ThreadConfig,
+    ThreadEntryReturn,
+    ThreadErrorKind,
+    ThreadJoinPolicy,
+    ThreadLifecycleCaps,
+    ThreadPool,
+    ThreadPoolConfig,
     system_thread,
 };
 use std::sync::Arc;

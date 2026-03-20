@@ -4,8 +4,16 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 
 use fusion_sys::thread::{
-    SystemThreadPool, SystemThreadPoolConfig, SystemWorkItem, ThreadConfig, ThreadEntryReturn,
-    ThreadErrorKind, ThreadLifecycleCaps, ThreadStackCaps, ThreadSystem, system_thread,
+    SystemThreadPool,
+    SystemThreadPoolConfig,
+    SystemWorkItem,
+    ThreadConfig,
+    ThreadEntryReturn,
+    ThreadErrorKind,
+    ThreadLifecycleCaps,
+    ThreadStackCaps,
+    ThreadSystem,
+    system_thread,
 };
 use std::sync::Arc;
 use std::thread;

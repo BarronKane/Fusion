@@ -21,10 +21,16 @@ mod stats;
 pub use builder::MemoryPoolBuilder;
 pub use error::{MemoryPoolError, MemoryPoolErrorKind};
 pub use extent::{
-    MemoryPoolExtentRequest, MemoryPoolLease, MemoryPoolLeaseId, MemoryPoolLeaseView,
+    MemoryPoolExtentRequest,
+    MemoryPoolLease,
+    MemoryPoolLeaseId,
+    MemoryPoolLeaseView,
 };
 pub use member::{
-    MemoryPoolContributor, MemoryPoolContributorOrigin, MemoryPoolMemberId, MemoryPoolMemberInfo,
+    MemoryPoolContributor,
+    MemoryPoolContributorOrigin,
+    MemoryPoolMemberId,
+    MemoryPoolMemberInfo,
 };
 pub use metadata::MemoryPoolMetadataLayout;
 pub use policy::{MemoryPoolPolicy, MemoryPoolProvisioningPolicy};

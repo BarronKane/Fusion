@@ -1,7 +1,12 @@
 //! Backend-neutral unsupported context implementation.
 
 use super::{
-    ContextBase, ContextError, ContextStackLayout, ContextSupport, ContextSwitch, RawContextEntry,
+    ContextBase,
+    ContextError,
+    ContextStackLayout,
+    ContextSupport,
+    ContextSwitch,
+    RawContextEntry,
 };
 
 /// Unsupported context provider placeholder.

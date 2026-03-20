@@ -3,8 +3,13 @@ extern crate std;
 use core::time::Duration;
 
 use fusion_sys::event::{
-    EventCaps, EventCompletionOp, EventCompletionOpKind, EventErrorKind, EventModel,
-    EventSourceHandle, EventSystem,
+    EventCaps,
+    EventCompletionOp,
+    EventCompletionOpKind,
+    EventErrorKind,
+    EventModel,
+    EventSourceHandle,
+    EventSystem,
 };
 
 #[test]

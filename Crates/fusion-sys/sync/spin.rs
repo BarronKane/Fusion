@@ -4,8 +4,16 @@ use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use fusion_pal::pal::sync::{
-    MutexCaps, MutexSupport, PriorityInheritanceSupport, ProcessScopeSupport, RawMutex,
-    RecursionSupport, RobustnessSupport, SyncError, SyncFallbackKind, SyncImplementationKind,
+    MutexCaps,
+    MutexSupport,
+    PriorityInheritanceSupport,
+    ProcessScopeSupport,
+    RawMutex,
+    RecursionSupport,
+    RobustnessSupport,
+    SyncError,
+    SyncFallbackKind,
+    SyncImplementationKind,
     TimeoutCaps,
 };
 

@@ -1,7 +1,13 @@
 use core::num::NonZeroUsize;
 
 use super::{
-    CachePolicy, IntegrityMode, MemAdviceCaps, MemBackingCaps, MemPlacementCaps, Protect, Region,
+    CachePolicy,
+    IntegrityMode,
+    MemAdviceCaps,
+    MemBackingCaps,
+    MemPlacementCaps,
+    Protect,
+    Region,
     TagMode,
 };
 use super::{MemTopologyLink, MemTopologyNode, MemTopologyNodeId};

@@ -3,8 +3,14 @@ extern crate std;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use fusion_sys::thread::{
-    ThreadConfig, ThreadConstraintMode, ThreadIdentityStability, ThreadPlacementPhase,
-    ThreadPlacementRequest, ThreadPlacementTarget, ThreadSchedulerClass, ThreadSchedulerModel,
+    ThreadConfig,
+    ThreadConstraintMode,
+    ThreadIdentityStability,
+    ThreadPlacementPhase,
+    ThreadPlacementRequest,
+    ThreadPlacementTarget,
+    ThreadSchedulerClass,
+    ThreadSchedulerModel,
     system_thread,
 };
 use rustix::thread::{self as rustix_thread, CpuSet};

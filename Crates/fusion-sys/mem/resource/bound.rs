@@ -44,10 +44,25 @@
 use fusion_pal::sys::mem::{Address, Placement, Protect, Region, RegionInfo};
 
 use super::{
-    MemoryDomain, MemoryGeometry, MemoryResource, QueryableResource, ResolvedResource,
-    ResourceAttrs, ResourceBackingKind, ResourceContract, ResourceError, ResourceHazardSet,
-    ResourceInfo, ResourceOpSet, ResourcePreferenceSet, ResourceState, ResourceSupport, StateValue,
-    core::ResourceCore, infer_resource_hazards, resource_region_attrs_from_attrs,
+    MemoryDomain,
+    MemoryGeometry,
+    MemoryResource,
+    QueryableResource,
+    ResolvedResource,
+    ResourceAttrs,
+    ResourceBackingKind,
+    ResourceContract,
+    ResourceError,
+    ResourceHazardSet,
+    ResourceInfo,
+    ResourceOpSet,
+    ResourcePreferenceSet,
+    ResourceState,
+    ResourceSupport,
+    StateValue,
+    core::ResourceCore,
+    infer_resource_hazards,
+    resource_region_attrs_from_attrs,
 };
 
 /// Specification for binding an externally governed range into a `MemoryResource`.

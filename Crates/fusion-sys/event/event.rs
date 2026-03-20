@@ -7,10 +7,25 @@
 use core::time::Duration;
 
 pub use fusion_pal::sys::event::{
-    EventBase, EventCaps, EventCompletion, EventCompletionOp, EventCompletionOpKind, EventError,
-    EventErrorKind, EventImplementationKind, EventInterest, EventKey, EventModel,
-    EventNotification, EventReadiness, EventRecord, EventRegistration, EventRegistrationMode,
-    EventSource, EventSourceHandle, EventSupport,
+    EventBase,
+    EventCaps,
+    EventCompletion,
+    EventCompletionOp,
+    EventCompletionOpKind,
+    EventError,
+    EventErrorKind,
+    EventImplementationKind,
+    EventInterest,
+    EventKey,
+    EventModel,
+    EventNotification,
+    EventReadiness,
+    EventRecord,
+    EventRegistration,
+    EventRegistrationMode,
+    EventSource,
+    EventSourceHandle,
+    EventSupport,
 };
 use fusion_pal::sys::event::{PlatformEvent, PlatformPoller, system_event as pal_system_event};
 
@@ -155,7 +170,9 @@ pub mod cortex_m {
     use super::{EventInterest, EventRegistration, EventRegistrationMode, EventSourceHandle};
     #[cfg(feature = "soc-rp2350")]
     use fusion_pal::sys::cortex_m::hal::soc::board::{
-        CortexMDmaRequestClass, CortexMDmaRequestDescriptor, CortexMDmaTransferCaps,
+        CortexMDmaRequestClass,
+        CortexMDmaRequestDescriptor,
+        CortexMDmaTransferCaps,
         dma_requests as rp2350_dma_requests,
     };
 

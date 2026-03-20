@@ -8,8 +8,19 @@ use core::mem::MaybeUninit;
 use core::time::Duration;
 
 use crate::pal::event::{
-    EventBase, EventCaps, EventCompletionOp, EventError, EventInterest, EventKey, EventModel,
-    EventNotification, EventReadiness, EventRecord, EventSource, EventSourceHandle, EventSupport,
+    EventBase,
+    EventCaps,
+    EventCompletionOp,
+    EventError,
+    EventInterest,
+    EventKey,
+    EventModel,
+    EventNotification,
+    EventReadiness,
+    EventRecord,
+    EventSource,
+    EventSourceHandle,
+    EventSupport,
 };
 
 const EPOLL_BATCH: usize = 64;

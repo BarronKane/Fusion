@@ -1,0 +1,10 @@
+# Conservative fallback budgets for unknown external or toolchain-level call edges discovered by
+# the post-codegen stack analyzer. These are intentionally blunt until the analyzer grows richer
+# symbol provenance and per-target contracts.
+memset = 256
+memcpy = 256
+memmove = 256
+memcmp = 128
+bcmp = 128
+core::panicking::panic_cannot_unwind = 512
+rust_begin_unwind = 1024

@@ -7,11 +7,26 @@ use rustix::io::{Errno, read};
 use rustix::thread::{self as rustix_thread, CpuSet};
 
 use crate::pal::hal::{
-    HardwareAuthoritySet, HardwareBase, HardwareCpuCaps, HardwareCpuDescription, HardwareCpuQuery,
-    HardwareCpuSupport, HardwareCpuVendor, HardwareError, HardwareErrorKind, HardwareGuarantee,
-    HardwareImplementationKind, HardwareSimdSet, HardwareStackAbi, HardwareSupport,
-    HardwareTopologyCaps, HardwareTopologyNodeId, HardwareTopologyQuery, HardwareTopologySummary,
-    HardwareTopologySupport, HardwareWriteSummary,
+    HardwareAuthoritySet,
+    HardwareBase,
+    HardwareCpuCaps,
+    HardwareCpuDescription,
+    HardwareCpuQuery,
+    HardwareCpuSupport,
+    HardwareCpuVendor,
+    HardwareError,
+    HardwareErrorKind,
+    HardwareGuarantee,
+    HardwareImplementationKind,
+    HardwareSimdSet,
+    HardwareStackAbi,
+    HardwareSupport,
+    HardwareTopologyCaps,
+    HardwareTopologyNodeId,
+    HardwareTopologyQuery,
+    HardwareTopologySummary,
+    HardwareTopologySupport,
+    HardwareWriteSummary,
 };
 use crate::pal::thread::{ThreadCoreId, ThreadLogicalCpuId, ThreadProcessorGroupId};
 
@@ -438,7 +453,7 @@ fn runtime_cache_line_bytes_from_cpu() -> Option<usize> {
     #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64::__cpuid;
 
-    let leaf1 = __cpuid(1);
+    let leaf1 = unsafe { __cpuid(1) };
     if (leaf1.edx & (1 << 19)) == 0 {
         return None;
     }
@@ -469,7 +484,7 @@ fn runtime_vendor() -> HardwareCpuVendor {
     #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64::__cpuid;
 
-    let leaf0 = __cpuid(0);
+    let leaf0 = unsafe { __cpuid(0) };
     let mut vendor = [0u8; 12];
     vendor[0..4].copy_from_slice(&leaf0.ebx.to_le_bytes());
     vendor[4..8].copy_from_slice(&leaf0.edx.to_le_bytes());
@@ -494,12 +509,12 @@ fn runtime_simd_set() -> HardwareSimdSet {
     #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 
-    let leaf0 = __cpuid(0);
+    let leaf0 = unsafe { __cpuid(0) };
     if leaf0.eax < 1 {
         return HardwareSimdSet::empty();
     }
 
-    let leaf1 = __cpuid(1);
+    let leaf1 = unsafe { __cpuid(1) };
     let mut simd = HardwareSimdSet::empty();
 
     if bit32(leaf1.edx, 25) {
@@ -534,7 +549,7 @@ fn runtime_simd_set() -> HardwareSimdSet {
     }
 
     if leaf0.eax >= 7 {
-        let leaf7 = __cpuid_count(7, 0);
+        let leaf7 = unsafe { __cpuid_count(7, 0) };
         if bit32(leaf7.ebx, 5) && os_avx {
             simd |= HardwareSimdSet::AVX2;
         }

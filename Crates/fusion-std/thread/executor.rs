@@ -42,13 +42,31 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use crate::sync::{Mutex as SyncMutex, Semaphore, SyncError, SyncErrorKind};
 use fusion_sys::alloc::{
-    AllocError, AllocErrorKind, Allocator, ArenaInitError, ArenaSlice, BoundedArena, ControlLease,
+    AllocError,
+    AllocErrorKind,
+    Allocator,
+    ArenaInitError,
+    ArenaSlice,
+    BoundedArena,
+    ControlLease,
 };
 use fusion_sys::event::EventSystem;
 pub use fusion_sys::event::{
-    EventCompletion, EventCompletionOp, EventCompletionOpKind, EventError, EventErrorKind,
-    EventInterest, EventKey, EventModel, EventNotification, EventPoller as ReactorPoller,
-    EventReadiness, EventRecord, EventRegistration, EventSourceHandle, EventSupport,
+    EventCompletion,
+    EventCompletionOp,
+    EventCompletionOpKind,
+    EventError,
+    EventErrorKind,
+    EventInterest,
+    EventKey,
+    EventModel,
+    EventNotification,
+    EventPoller as ReactorPoller,
+    EventReadiness,
+    EventRecord,
+    EventRegistration,
+    EventSourceHandle,
+    EventSupport,
 };
 use fusion_sys::fiber::{FiberError, FiberErrorKind};
 use fusion_sys::thread::system_thread;

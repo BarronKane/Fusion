@@ -3,18 +3,39 @@ use core::ptr::NonNull;
 
 use fusion_pal::sys::mem::{Address, CachePolicy, Protect, Region};
 use fusion_sys::alloc::{
-    MemoryPool, MemoryPoolContributor, MemoryPoolContributorOrigin, MemoryPoolErrorKind,
-    MemoryPoolExtentRequest, MemoryPoolPolicy,
+    MemoryPool,
+    MemoryPoolContributor,
+    MemoryPoolContributorOrigin,
+    MemoryPoolErrorKind,
+    MemoryPoolExtentRequest,
+    MemoryPoolPolicy,
 };
 use fusion_sys::mem::provider::{
-    MemoryObjectOrigin, MemoryPoolClassId, MemoryResourceDescriptor, MemoryResourceId,
-    MemoryResourceReadiness, MemoryTopologyNodeId,
+    MemoryObjectOrigin,
+    MemoryPoolClassId,
+    MemoryResourceDescriptor,
+    MemoryResourceId,
+    MemoryResourceReadiness,
+    MemoryTopologyNodeId,
 };
 use fusion_sys::mem::resource::{
-    BoundMemoryResource, BoundResourceSpec, MemoryDomain, MemoryGeometry, MemoryResource,
-    MemoryResourceHandle, OvercommitPolicy, ResourceAttrs, ResourceBackingKind, ResourceContract,
-    ResourceOpSet, ResourceRange, ResourceResidencySupport, ResourceState, ResourceSupport,
-    SharingPolicy, StateValue,
+    BoundMemoryResource,
+    BoundResourceSpec,
+    MemoryDomain,
+    MemoryGeometry,
+    MemoryResource,
+    MemoryResourceHandle,
+    OvercommitPolicy,
+    ResourceAttrs,
+    ResourceBackingKind,
+    ResourceContract,
+    ResourceOpSet,
+    ResourceRange,
+    ResourceResidencySupport,
+    ResourceState,
+    ResourceSupport,
+    SharingPolicy,
+    StateValue,
 };
 
 extern crate std;

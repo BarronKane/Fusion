@@ -1,8 +1,15 @@
 //! Backend-neutral unsupported event implementation.
 
 use super::{
-    EventBase, EventCompletionOp, EventError, EventInterest, EventKey, EventRecord, EventSource,
-    EventSourceHandle, EventSupport,
+    EventBase,
+    EventCompletionOp,
+    EventError,
+    EventInterest,
+    EventKey,
+    EventRecord,
+    EventSource,
+    EventSourceHandle,
+    EventSupport,
 };
 
 /// Unsupported event provider placeholder.

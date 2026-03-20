@@ -5,9 +5,20 @@ use core::time::Duration;
 use fusion_pal::sys::thread::{PlatformThread, system_thread as pal_system_thread};
 
 use super::{
-    RawThreadEntry, ThreadConfig, ThreadError, ThreadId, ThreadObservation, ThreadPlacementOutcome,
-    ThreadPlacementRequest, ThreadPriorityRange, ThreadSchedulerClass, ThreadSchedulerObservation,
-    ThreadSchedulerRequest, ThreadStackObservation, ThreadSupport, ThreadTermination,
+    RawThreadEntry,
+    ThreadConfig,
+    ThreadError,
+    ThreadId,
+    ThreadObservation,
+    ThreadPlacementOutcome,
+    ThreadPlacementRequest,
+    ThreadPriorityRange,
+    ThreadSchedulerClass,
+    ThreadSchedulerObservation,
+    ThreadSchedulerRequest,
+    ThreadStackObservation,
+    ThreadSupport,
+    ThreadTermination,
 };
 use crate::thread::handle::ThreadHandle;
 

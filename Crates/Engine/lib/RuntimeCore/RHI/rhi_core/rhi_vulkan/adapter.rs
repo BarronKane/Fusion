@@ -3,8 +3,12 @@ use fusion_rhi_core::api::adapter::Adapter;
 use fusion_rhi_core::rhi_error::{RHIError, RHIErrorEnum, Result};
 
 use ash::vk::{
-    Handle, PhysicalDevice, PhysicalDeviceFeatures, PhysicalDeviceFeatures2,
-    PhysicalDeviceProperties2, QueueFamilyProperties2,
+    Handle,
+    PhysicalDevice,
+    PhysicalDeviceFeatures,
+    PhysicalDeviceFeatures2,
+    PhysicalDeviceProperties2,
+    QueueFamilyProperties2,
 };
 
 use crate::VulkanRHI;

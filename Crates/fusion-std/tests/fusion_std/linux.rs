@@ -2,11 +2,40 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use fusion_pal::sys::mem::{MemAdviceCaps, MemBase, system_mem};
 use fusion_std::thread::{
-    DeterministicConstraints, EventInterest, EventNotification, EventReadiness, EventRecord,
-    EventSourceHandle, Executor, ExecutorConfig, ExecutorMode, FiberStackBacking, FiberTelemetry,
-    GreenPool, GreenPoolConfig, HugePagePolicy, HugePageSize, Runtime, RuntimeConfig, RuntimeError,
-    RuntimeProfile, ThreadPool, ThreadPoolConfig, wait_for_readiness, yield_now as green_yield_now,
+    DeterministicConstraints,
+    EventInterest,
+    EventNotification,
+    EventReadiness,
+    EventRecord,
+    EventSourceHandle,
+    Executor,
+    ExecutorConfig,
+    ExecutorMode,
+    ExplicitFiberTask,
+    FiberStackBacking,
+    FiberStackClass,
+    FiberStackClassConfig,
+    FiberTaskAttributes,
+    FiberTaskPriority,
+    FiberTelemetry,
+    GeneratedExplicitFiberTask,
+    GreenGrowth,
+    GreenPool,
+    GreenPoolConfig,
+    GreenScheduling,
+    HugePagePolicy,
+    HugePageSize,
+    Runtime,
+    RuntimeConfig,
+    RuntimeError,
+    RuntimeProfile,
+    ThreadPool,
+    ThreadPoolConfig,
+    generated_explicit_task_contract_attributes,
+    wait_for_readiness,
+    yield_now as green_yield_now,
 };
+use fusion_sys::fiber::FiberError;
 use fusion_sys::fiber::FiberSystem;
 use std::num::NonZeroUsize;
 use std::process::Command;
@@ -71,6 +100,61 @@ impl TestPipe {
     }
 }
 
+struct ExplicitContractTask(u32);
+
+impl ExplicitFiberTask for ExplicitContractTask {
+    type Output = u32;
+
+    const STACK_BYTES: NonZeroUsize = NonZeroUsize::new(6 * 1024).unwrap();
+    const PRIORITY: FiberTaskPriority = FiberTaskPriority::new(7);
+
+    fn run(self) -> Self::Output {
+        self.0 + 1
+    }
+}
+
+struct ExternalGeneratedContractTask(u32);
+
+impl GeneratedExplicitFiberTask for ExternalGeneratedContractTask {
+    type Output = u32;
+
+    fn run(self) -> Self::Output {
+        self.0 + 2
+    }
+
+    fn task_attributes() -> Result<FiberTaskAttributes, FiberError>
+    where
+        Self: Sized,
+    {
+        Ok(generated_explicit_task_contract_attributes::<Self>())
+    }
+}
+
+fusion_std::declare_generated_fiber_task_contract!(
+    ExternalGeneratedContractTask,
+    NonZeroUsize::new(8 * 1024).unwrap(),
+    FiberTaskPriority::new(9),
+);
+
+const EXTERNAL_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [FiberStackClassConfig {
+    class: match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
+        Ok(class) => class,
+        Err(_) => panic!("valid class"),
+    },
+    slots_per_carrier: 2,
+}];
+
+const EXTERNAL_GENERATED_CONFIG: GreenPoolConfig<'static> =
+    match GreenPoolConfig::classed(&EXTERNAL_GENERATED_CLASSES) {
+        Ok(config) => config,
+        Err(_) => panic!("classed config should build"),
+    };
+
+fusion_std::assert_generated_fiber_task_supported!(
+    EXTERNAL_GENERATED_CONFIG,
+    ExternalGeneratedContractTask
+);
+
 impl Drop for TestPipe {
     fn drop(&mut self) {
         unsafe {
@@ -106,6 +190,32 @@ fn automatic_green_pool_bootstraps_and_runs_work() {
             .expect("second automatic green task should complete"),
         23
     );
+}
+
+#[test]
+fn downstream_generated_task_contracts_work_without_runtime_type_lookup() {
+    let _guard = lock_fusion_std_tests();
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+    let green =
+        GreenPool::new(&EXTERNAL_GENERATED_CONFIG, &carrier).expect("green pool should build");
+
+    let handle = green
+        .spawn_generated(ExternalGeneratedContractTask(5))
+        .expect("external generated task should spawn from declared contract");
+    assert_eq!(
+        handle
+            .join()
+            .expect("external generated task should complete"),
+        7
+    );
+
+    green
+        .shutdown()
+        .expect("green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
 }
 
 #[test]
@@ -200,6 +310,121 @@ fn executor_green_pool_and_runtime_paths_are_real() {
         .shutdown()
         .expect("green pool should shut down cleanly");
     carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn deterministic_runtime_accepts_priority_class_backed_green_pools() {
+    let _guard = lock_fusion_std_tests();
+
+    let priority_classes = [
+        FiberStackClassConfig {
+            class: FiberStackClass::MIN,
+            slots_per_carrier: 16,
+        },
+        FiberStackClassConfig {
+            class: FiberStackClass::new(
+                NonZeroUsize::new(8 * 1024).expect("non-zero priority stack class"),
+            )
+            .expect("priority stack class should be valid"),
+            slots_per_carrier: 8,
+        },
+    ];
+    let mut priority_green =
+        GreenPoolConfig::classed(&priority_classes).expect("classed green config should build");
+    priority_green.growth = GreenGrowth::Fixed;
+    priority_green.scheduling = GreenScheduling::Priority;
+    let priority_runtime = Runtime::new(&RuntimeConfig {
+        profile: RuntimeProfile::Deterministic,
+        thread_pool: ThreadPoolConfig::new(),
+        green: Some(priority_green),
+        executor: ExecutorConfig {
+            mode: ExecutorMode::GreenPool,
+            ..ExecutorConfig::new()
+        },
+        deterministic: Some(DeterministicConstraints::strict()),
+        elastic: None,
+    })
+    .expect("deterministic runtime should accept strict-priority class-backed green pools");
+    let priority_task = priority_runtime
+        .executor()
+        .spawn(async { 19_u8 })
+        .expect("priority runtime executor should spawn onto the green pool");
+    assert_eq!(
+        priority_task
+            .join()
+            .expect("priority runtime executor task should complete"),
+        19
+    );
+}
+
+#[test]
+fn explicit_fiber_task_uses_compile_time_stack_contract() {
+    let _guard = lock_fusion_std_tests();
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+    let classes = [
+        FiberStackClassConfig {
+            class: FiberStackClass::MIN,
+            slots_per_carrier: 8,
+        },
+        FiberStackClassConfig {
+            class: FiberStackClass::new(
+                NonZeroUsize::new(8 * 1024).expect("non-zero explicit class"),
+            )
+            .expect("explicit class should be valid"),
+            slots_per_carrier: 4,
+        },
+    ];
+    let green = GreenPool::new(
+        &GreenPoolConfig::classed(&classes).expect("classed green config should build"),
+        &carrier,
+    )
+    .expect("green pool should build");
+
+    let task = green
+        .spawn_explicit(ExplicitContractTask(41))
+        .expect("explicit task should spawn");
+    assert_eq!(task.join().expect("explicit task should complete"), 42);
+
+    green
+        .shutdown()
+        .expect("green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn priority_green_pool_rejects_multi_carrier_topology_until_domain_semantics_exist() {
+    let _guard = lock_fusion_std_tests();
+
+    let carriers = ThreadPool::new(&ThreadPoolConfig {
+        min_threads: 2,
+        max_threads: 2,
+        placement: fusion_std::thread::PoolPlacement::Inherit,
+        ..ThreadPoolConfig::new()
+    })
+    .expect("two-carrier pool should build");
+    let priority_classes = [FiberStackClassConfig {
+        class: FiberStackClass::MIN,
+        slots_per_carrier: 4,
+    }];
+    let mut config =
+        GreenPoolConfig::classed(&priority_classes).expect("classed green config should build");
+    config.scheduling = GreenScheduling::Priority;
+
+    let result = GreenPool::new(&config, &carriers);
+    assert!(result.is_err());
+    assert_eq!(
+        result
+            .expect_err("multi-carrier priority should be rejected")
+            .kind(),
+        fusion_sys::fiber::FiberError::unsupported().kind()
+    );
+
+    carriers
         .shutdown()
         .expect("carrier pool should shut down cleanly");
 }

@@ -1,12 +1,21 @@
 use core::num::NonZeroUsize;
 
 use crate::mem::provider::{
-    CriticalSafetyRequirements, MemoryObjectEnvelope, MemoryObjectId, MemoryResourceReadiness,
+    CriticalSafetyRequirements,
+    MemoryObjectEnvelope,
+    MemoryObjectId,
+    MemoryResourceReadiness,
     MemoryTopologyNodeId,
 };
 use crate::mem::resource::{
-    MemoryDomain, MemoryGeometry, ResourceAcquireSupport, ResourceBackingKind, ResourceHazardSet,
-    ResourceInfo, ResourceState, ResourceSupport,
+    MemoryDomain,
+    MemoryGeometry,
+    ResourceAcquireSupport,
+    ResourceBackingKind,
+    ResourceHazardSet,
+    ResourceInfo,
+    ResourceState,
+    ResourceSupport,
 };
 
 /// Stable identifier for a provider-known pool-capable resource record.

@@ -8,7 +8,10 @@ use crate::sync::{Retainable, SharedBacking, SharedHeader, SharedRelease};
 use fusion_pal::sys::mem::Region;
 
 use super::{
-    AllocError, AssignedPoolExtent, MemoryPoolExtentRequest, MemoryPoolLeaseId,
+    AllocError,
+    AssignedPoolExtent,
+    MemoryPoolExtentRequest,
+    MemoryPoolLeaseId,
     MemoryPoolMemberInfo,
 };
 

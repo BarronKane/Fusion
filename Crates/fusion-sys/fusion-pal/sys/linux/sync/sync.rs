@@ -18,11 +18,35 @@ use rustix::io::Errno;
 use rustix::thread::futex;
 
 use crate::pal::sync::{
-    MutexCaps, MutexSupport, OnceBeginResult, OnceCaps, OnceState, OnceSupport,
-    PriorityInheritanceSupport, ProcessScopeSupport, RawMutex, RawOnce, RawRwLock, RawSemaphore,
-    RecursionSupport, RobustnessSupport, RwLockCaps, RwLockFairnessSupport, RwLockSupport,
-    SemaphoreCaps, SemaphoreSupport, SyncBase, SyncError, SyncErrorKind, SyncFallbackKind,
-    SyncImplementationKind, SyncSupport, TimeoutCaps, WaitCaps, WaitOutcome, WaitPrimitive,
+    MutexCaps,
+    MutexSupport,
+    OnceBeginResult,
+    OnceCaps,
+    OnceState,
+    OnceSupport,
+    PriorityInheritanceSupport,
+    ProcessScopeSupport,
+    RawMutex,
+    RawOnce,
+    RawRwLock,
+    RawSemaphore,
+    RecursionSupport,
+    RobustnessSupport,
+    RwLockCaps,
+    RwLockFairnessSupport,
+    RwLockSupport,
+    SemaphoreCaps,
+    SemaphoreSupport,
+    SyncBase,
+    SyncError,
+    SyncErrorKind,
+    SyncFallbackKind,
+    SyncImplementationKind,
+    SyncSupport,
+    TimeoutCaps,
+    WaitCaps,
+    WaitOutcome,
+    WaitPrimitive,
     WaitSupport,
 };
 
@@ -185,6 +209,12 @@ impl LinuxRawOnce {
     }
 }
 
+impl Default for LinuxRawOnce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RawOnce for LinuxRawOnce {
     fn support(&self) -> OnceSupport {
         LINUX_ONCE_SUPPORT
@@ -305,6 +335,12 @@ impl LinuxRawMutex {
                 }
             }
         }
+    }
+}
+
+impl Default for LinuxRawMutex {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -489,6 +525,12 @@ impl LinuxRawRwLock {
         // uphold that assumption, the release protocol needs a different design rather than
         // pretending an error can be surfaced from a `Drop`-driven unlock path.
         let _ = self.gate.lock();
+    }
+}
+
+impl Default for LinuxRawRwLock {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

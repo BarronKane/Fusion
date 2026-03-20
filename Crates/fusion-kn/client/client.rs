@@ -5,9 +5,15 @@
 //! validation rules.
 
 use crate::contract::wire::{
-    FusionKnCapabilityFlags, FusionKnCommand, FusionKnMessageFlags, FusionKnMessageHeader,
-    FusionKnNegotiationRequest, FusionKnNegotiationResponse, FusionKnStatusCode,
-    FusionKnTransportKind, FusionKnWireError,
+    FusionKnCapabilityFlags,
+    FusionKnCommand,
+    FusionKnMessageFlags,
+    FusionKnMessageHeader,
+    FusionKnNegotiationRequest,
+    FusionKnNegotiationResponse,
+    FusionKnStatusCode,
+    FusionKnTransportKind,
+    FusionKnWireError,
 };
 
 /// Abstract transport for sending and receiving mediated Fusion kernel messages.
@@ -183,7 +189,8 @@ where
 mod tests {
     use super::*;
     use crate::contract::wire::{
-        FUSION_KN_PROTOCOL_VERSION_MAJOR, FUSION_KN_PROTOCOL_VERSION_MINOR,
+        FUSION_KN_PROTOCOL_VERSION_MAJOR,
+        FUSION_KN_PROTOCOL_VERSION_MINOR,
     };
 
     extern crate std;

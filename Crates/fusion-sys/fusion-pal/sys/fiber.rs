@@ -7,10 +7,16 @@
 
 /// Concrete hosted-fiber support vocabulary shared across supported backends.
 pub use super::fiber_common::{
-    FiberHostError, FiberHostErrorKind, FiberHostSupport, PlatformElasticFaultHandler,
+    FiberHostError,
+    FiberHostErrorKind,
+    FiberHostSupport,
+    PlatformElasticFaultHandler,
     PlatformWakeToken,
 };
 /// Concrete hosted-fiber support types and constructor for the selected platform.
 pub use super::platform::fiber::{
-    PlatformFiberHost, PlatformFiberSignalStack, PlatformFiberWakeSignal, system_fiber_host,
+    PlatformFiberHost,
+    PlatformFiberSignalStack,
+    PlatformFiberWakeSignal,
+    system_fiber_host,
 };

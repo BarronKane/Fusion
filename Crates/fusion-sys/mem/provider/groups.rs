@@ -1,6 +1,10 @@
 use super::{
-    MemoryCompatibilityEnvelope, MemoryPoolAssessmentVerdict, MemoryPoolClassId, MemoryPoolRequest,
-    MemoryProviderInventory, MemoryTopologyNodeId,
+    MemoryCompatibilityEnvelope,
+    MemoryPoolAssessmentVerdict,
+    MemoryPoolClassId,
+    MemoryPoolRequest,
+    MemoryProviderInventory,
+    MemoryTopologyNodeId,
 };
 
 /// Ephemeral identifier for a provider-authored compatibility group within one inventory

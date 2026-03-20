@@ -1,13 +1,25 @@
 use fusion_pal::sys::mem::{CachePolicy, Protect};
 
 use super::{
-    CriticalSafetyRequirements, MemoryObjectDescriptor, MemoryObjectEnvelope, MemoryPoolClass,
-    MemoryResourceDescriptor, MemoryStrategyDescriptor, MemoryTopologyPreference,
+    CriticalSafetyRequirements,
+    MemoryObjectDescriptor,
+    MemoryObjectEnvelope,
+    MemoryPoolClass,
+    MemoryResourceDescriptor,
+    MemoryStrategyDescriptor,
+    MemoryTopologyPreference,
 };
 use crate::mem::provider::support::{matches_node_requirement, matches_safety_envelope};
 use crate::mem::resource::{
-    IntegrityConstraints, MemoryDomain, MemoryDomainSet, OvercommitPolicy, ResourceAttrs,
-    ResourceFeatureSupport, ResourceHazardSet, ResourceOpSet, ResourceResidencySupport,
+    IntegrityConstraints,
+    MemoryDomain,
+    MemoryDomainSet,
+    OvercommitPolicy,
+    ResourceAttrs,
+    ResourceFeatureSupport,
+    ResourceHazardSet,
+    ResourceOpSet,
+    ResourceResidencySupport,
     SharingPolicy,
 };
 

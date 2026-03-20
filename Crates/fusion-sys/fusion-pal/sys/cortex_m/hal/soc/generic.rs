@@ -3,7 +3,10 @@
 //! Generic Cortex-M SoC fallback used when no board feature is selected.
 
 use crate::pal::hal::{
-    HardwareAuthoritySet, HardwareError, HardwareTopologySummary, HardwareWriteSummary,
+    HardwareAuthoritySet,
+    HardwareError,
+    HardwareTopologySummary,
+    HardwareWriteSummary,
 };
 use crate::pal::thread::{ThreadCoreId, ThreadError, ThreadId, ThreadLogicalCpuId};
 use core::time::Duration;
@@ -11,12 +14,24 @@ use core::time::Duration;
 use super::board_contract::{self, CortexMSocBoard};
 
 pub use super::board_contract::{
-    CortexMClockDescriptor, CortexMDmaControllerDescriptor, CortexMDmaRequestClass,
-    CortexMDmaRequestDescriptor, CortexMFlashRegionDescriptor, CortexMIrqClass,
-    CortexMIrqDescriptor, CortexMMemoryRegionDescriptor, CortexMMemoryRegionKind,
-    CortexMPeripheralDescriptor, CortexMPowerModeDescriptor, CortexMSocBoard as CortexMSoc,
-    CortexMSocChipIdSupport, CortexMSocChipIdentity, CortexMSocDescriptor,
-    CortexMSocDeviceIdSupport, CortexMSocDeviceIdentity, CortexMSocExecutionObservation,
+    CortexMClockDescriptor,
+    CortexMDmaControllerDescriptor,
+    CortexMDmaRequestClass,
+    CortexMDmaRequestDescriptor,
+    CortexMFlashRegionDescriptor,
+    CortexMIrqClass,
+    CortexMIrqDescriptor,
+    CortexMMemoryRegionDescriptor,
+    CortexMMemoryRegionKind,
+    CortexMPeripheralDescriptor,
+    CortexMPowerModeDescriptor,
+    CortexMSocBoard as CortexMSoc,
+    CortexMSocChipIdSupport,
+    CortexMSocChipIdentity,
+    CortexMSocDescriptor,
+    CortexMSocDeviceIdSupport,
+    CortexMSocDeviceIdentity,
+    CortexMSocExecutionObservation,
 };
 
 const DESCRIPTOR: CortexMSocDescriptor = CortexMSocDescriptor {

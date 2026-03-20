@@ -7,9 +7,22 @@ use core::ptr::{self, NonNull};
 use crate::sync::{Mutex, RetainedHandle};
 
 use super::{
-    AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
-    AllocResult, AllocSubsystemKind, AllocationBacking, AllocationStrategy, AllocatorDomainId,
-    AssignedPoolExtent, Immortal, LifetimePolicy, MetadataPageHeader, Mortal,
+    AllocCapabilities,
+    AllocError,
+    AllocHazards,
+    AllocModeSet,
+    AllocPolicy,
+    AllocRequest,
+    AllocResult,
+    AllocSubsystemKind,
+    AllocationBacking,
+    AllocationStrategy,
+    AllocatorDomainId,
+    AssignedPoolExtent,
+    Immortal,
+    LifetimePolicy,
+    MetadataPageHeader,
+    Mortal,
     front_metadata_layout,
 };
 

@@ -18,10 +18,35 @@ use rustix::param;
 use rustix::system;
 
 use crate::pal::mem::{
-    Address, Advise, Backing, CachePolicy, MapFlags, MapReplaceRequest, MapRequest, MemAdviceCaps,
-    MemAdvise, MemBackingCaps, MemBase, MemCaps, MemCommit, MemError, MemErrorKind, MemLock,
-    MemMap, MemMapReplace, MemPlacementCaps, MemProtect, MemQuery, MemSupport, PageInfo, Placement,
-    Protect, Region, RegionAttrs, RegionInfo, ReplacePlacement,
+    Address,
+    Advise,
+    Backing,
+    CachePolicy,
+    MapFlags,
+    MapReplaceRequest,
+    MapRequest,
+    MemAdviceCaps,
+    MemAdvise,
+    MemBackingCaps,
+    MemBase,
+    MemCaps,
+    MemCommit,
+    MemError,
+    MemErrorKind,
+    MemLock,
+    MemMap,
+    MemMapReplace,
+    MemPlacementCaps,
+    MemProtect,
+    MemQuery,
+    MemSupport,
+    PageInfo,
+    Placement,
+    Protect,
+    Region,
+    RegionAttrs,
+    RegionInfo,
+    ReplacePlacement,
 };
 use crate::sys::sync::{OnceBeginResult, PlatformRawOnce, RawOnce};
 
@@ -268,7 +293,7 @@ impl LinuxMem {
                 {
                     return Err(MemError::unsupported());
                 }
-                if addr % page == 0 {
+                if addr.is_multiple_of(page) {
                     Ok(())
                 } else {
                     Err(MemError::misaligned())
@@ -285,7 +310,7 @@ impl LinuxMem {
 
         match placement {
             ReplacePlacement::FixedReplace(addr) => {
-                if addr % page == 0 {
+                if addr.is_multiple_of(page) {
                     Ok(())
                 } else {
                     Err(MemError::misaligned())

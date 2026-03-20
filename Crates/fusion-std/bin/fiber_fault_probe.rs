@@ -6,7 +6,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use fusion_std::thread::{
-    FiberStackBacking, FiberTelemetry, GreenPool, GreenPoolConfig, ThreadPool, ThreadPoolConfig,
+    FiberStackBacking,
+    FiberTelemetry,
+    GreenPool,
+    GreenPoolConfig,
+    ThreadPool,
+    ThreadPoolConfig,
 };
 
 #[inline(never)]

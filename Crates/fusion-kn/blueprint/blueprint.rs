@@ -3,7 +3,9 @@
 use crate::contract::KernelBoundaryContract;
 use crate::evidence::{DO_178C_KERNEL_BASELINE, KernelEvidenceExpectation};
 use crate::module::{
-    KernelBuildRequirements, KernelIntegrationModel, KernelModuleMetadata,
+    KernelBuildRequirements,
+    KernelIntegrationModel,
+    KernelModuleMetadata,
     rust_for_linux_out_of_tree_requirements,
 };
 

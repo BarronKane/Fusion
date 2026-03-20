@@ -3,8 +3,15 @@
 use crate::pal::thread::{ThreadClusterId, ThreadCoreClassId, ThreadCoreId, ThreadLogicalCpuId};
 
 use super::{
-    HardwareBase, HardwareCpuDescription, HardwareCpuQuery, HardwareError, HardwareStackAbi,
-    HardwareSupport, HardwareTopologyNodeId, HardwareTopologyQuery, HardwareTopologySummary,
+    HardwareBase,
+    HardwareCpuDescription,
+    HardwareCpuQuery,
+    HardwareError,
+    HardwareStackAbi,
+    HardwareSupport,
+    HardwareTopologyNodeId,
+    HardwareTopologyQuery,
+    HardwareTopologySummary,
     HardwareWriteSummary,
 };
 

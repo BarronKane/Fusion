@@ -3,8 +3,16 @@ extern crate std;
 use core::time::Duration;
 
 use fusion_sys::event::{
-    EventCaps, EventInterest, EventModel, EventNotification, EventReadiness, EventRecord,
-    EventRegistration, EventRegistrationMode, EventSourceHandle, EventSystem,
+    EventCaps,
+    EventInterest,
+    EventModel,
+    EventNotification,
+    EventReadiness,
+    EventRecord,
+    EventRegistration,
+    EventRegistrationMode,
+    EventSourceHandle,
+    EventSystem,
 };
 
 #[derive(Debug)]

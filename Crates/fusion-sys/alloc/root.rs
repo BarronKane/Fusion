@@ -5,13 +5,32 @@ use fusion_pal::pal::mem::MemBase;
 use fusion_pal::sys::mem::system_mem;
 
 use crate::mem::resource::{
-    MemoryResource, MemoryResourceHandle, ResourceInfo, ResourceRequest, VirtualMemoryResource,
+    MemoryResource,
+    MemoryResourceHandle,
+    ResourceInfo,
+    ResourceRequest,
+    VirtualMemoryResource,
 };
 
 use super::{
-    AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocResult,
-    AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind, AssignedPoolExtent, BoundedArena,
-    HeapAllocator, Immortal, MemoryPool, MemoryPoolContributor, MemoryPoolPolicy, PoolHandle, Slab,
+    AllocCapabilities,
+    AllocError,
+    AllocHazards,
+    AllocModeSet,
+    AllocPolicy,
+    AllocResult,
+    AllocatorDomainId,
+    AllocatorDomainInfo,
+    AllocatorDomainKind,
+    AssignedPoolExtent,
+    BoundedArena,
+    HeapAllocator,
+    Immortal,
+    MemoryPool,
+    MemoryPoolContributor,
+    MemoryPoolPolicy,
+    PoolHandle,
+    Slab,
 };
 
 #[derive(Debug)]

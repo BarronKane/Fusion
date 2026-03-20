@@ -13,11 +13,23 @@ use libc::{self, c_void};
 
 use super::mem::system_mem;
 use crate::pal::mem::{
-    Backing, CachePolicy, MapFlags, MapRequest, MemBase, MemError, MemErrorKind, MemMap, Protect,
-    Region, RegionAttrs,
+    Backing,
+    CachePolicy,
+    MapFlags,
+    MapRequest,
+    MemBase,
+    MemError,
+    MemErrorKind,
+    MemMap,
+    Protect,
+    Region,
+    RegionAttrs,
 };
 use crate::sys::fiber_common::{
-    FiberHostError, FiberHostSupport, PlatformElasticFaultHandler, PlatformWakeToken,
+    FiberHostError,
+    FiberHostSupport,
+    PlatformElasticFaultHandler,
+    PlatformWakeToken,
 };
 
 /// Linux hosted-fiber helper provider.

@@ -1,6 +1,10 @@
 use super::{
-    MemoryObjectDescriptor, MemoryPoolClass, MemoryResourceDescriptor, MemoryStrategyDescriptor,
-    MemoryTopologyLink, MemoryTopologyNode,
+    MemoryObjectDescriptor,
+    MemoryPoolClass,
+    MemoryResourceDescriptor,
+    MemoryStrategyDescriptor,
+    MemoryTopologyLink,
+    MemoryTopologyNode,
 };
 
 /// Policy for how a provider should obtain its initial inventory.

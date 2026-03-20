@@ -1,6 +1,15 @@
 use fusion_sys::sync::{
-    MutexCaps, Once, OnceCaps, RwLock, RwLockCaps, RwLockFairnessSupport, Semaphore, SemaphoreCaps,
-    SyncFallbackKind, SyncImplementationKind, ThinMutex,
+    MutexCaps,
+    Once,
+    OnceCaps,
+    RwLock,
+    RwLockCaps,
+    RwLockFairnessSupport,
+    Semaphore,
+    SemaphoreCaps,
+    SyncFallbackKind,
+    SyncImplementationKind,
+    ThinMutex,
 };
 
 #[test]

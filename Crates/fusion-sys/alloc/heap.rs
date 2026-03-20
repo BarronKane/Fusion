@@ -1,8 +1,16 @@
 use core::fmt;
 
 use super::{
-    AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
-    AllocResult, AllocationStrategy, AllocatorDomainId, PoolHandle,
+    AllocCapabilities,
+    AllocError,
+    AllocHazards,
+    AllocModeSet,
+    AllocPolicy,
+    AllocRequest,
+    AllocResult,
+    AllocationStrategy,
+    AllocatorDomainId,
+    PoolHandle,
 };
 
 /// General-purpose allocator surface for non-critical-safe heap behavior.

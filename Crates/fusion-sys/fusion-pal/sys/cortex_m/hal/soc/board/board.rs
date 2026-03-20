@@ -3,13 +3,23 @@
 //! Cortex-M SoC board contract and generic helpers.
 
 use crate::pal::hal::{
-    HardwareAuthoritySet, HardwareError, HardwareGuarantee, HardwareTopologyCaps,
-    HardwareTopologySummary, HardwareTopologySupport, HardwareWriteSummary,
+    HardwareAuthoritySet,
+    HardwareError,
+    HardwareGuarantee,
+    HardwareTopologyCaps,
+    HardwareTopologySummary,
+    HardwareTopologySupport,
+    HardwareWriteSummary,
 };
 use crate::pal::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
 use crate::pal::thread::{
-    ThreadAuthoritySet, ThreadCoreId, ThreadError, ThreadExecutionLocation, ThreadId,
-    ThreadLogicalCpuId, ThreadProcessorGroupId,
+    ThreadAuthoritySet,
+    ThreadCoreId,
+    ThreadError,
+    ThreadExecutionLocation,
+    ThreadId,
+    ThreadLogicalCpuId,
+    ThreadProcessorGroupId,
 };
 use core::time::Duration;
 

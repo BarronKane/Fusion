@@ -11,9 +11,20 @@ use std::ptr::{read_volatile, write_bytes, write_volatile};
 
 use fusion_pal::sys::mem::{BorrowedBackingHandle, Protect};
 use fusion_sys::mem::resource::{
-    AddressReservation, InitialResidency, MemoryResource, ProtectableResource, QueryableResource,
-    RequiredPlacement, ReservationRequest, ResourceBackingKind, ResourceHazardSet,
-    ResourcePreferenceSet, ResourceRange, ResourceRequest, StateValue, VirtualMemoryResource,
+    AddressReservation,
+    InitialResidency,
+    MemoryResource,
+    ProtectableResource,
+    QueryableResource,
+    RequiredPlacement,
+    ReservationRequest,
+    ResourceBackingKind,
+    ResourceHazardSet,
+    ResourcePreferenceSet,
+    ResourceRange,
+    ResourceRequest,
+    StateValue,
+    VirtualMemoryResource,
 };
 use rustix::fd::IntoRawFd;
 use rustix::fs::{MemfdFlags, memfd_create};

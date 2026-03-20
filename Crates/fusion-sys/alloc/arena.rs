@@ -8,10 +8,25 @@ use core::slice;
 use crate::sync::{Mutex, RetainedHandle};
 
 use super::{
-    AllocCapabilities, AllocError, AllocHazards, AllocModeSet, AllocPolicy, AllocRequest,
-    AllocResult, AllocSubsystemKind, AllocationBacking, AllocationStrategy, AllocatorDomainId,
-    AssignedPoolExtent, ControlLease, Immortal, LifetimePolicy, MetadataPageHeader, Mortal,
-    align_up, front_metadata_layout,
+    AllocCapabilities,
+    AllocError,
+    AllocHazards,
+    AllocModeSet,
+    AllocPolicy,
+    AllocRequest,
+    AllocResult,
+    AllocSubsystemKind,
+    AllocationBacking,
+    AllocationStrategy,
+    AllocatorDomainId,
+    AssignedPoolExtent,
+    ControlLease,
+    Immortal,
+    LifetimePolicy,
+    MetadataPageHeader,
+    Mortal,
+    align_up,
+    front_metadata_layout,
 };
 
 #[derive(Debug)]
@@ -199,7 +214,7 @@ impl<L: LifetimePolicy> BoundedArena<L> {
             .checked_add(layout.payload_offset)
             .ok_or_else(AllocError::invalid_request)?;
         if region.len < layout.total_len
-            || usable_base % max_align != 0
+            || !usable_base.is_multiple_of(max_align)
             || !region
                 .base
                 .get()

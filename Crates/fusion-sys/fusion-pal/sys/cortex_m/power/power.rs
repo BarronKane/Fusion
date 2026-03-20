@@ -1,7 +1,12 @@
 //! Cortex-M bare-metal power backend.
 
 use crate::pal::power::{
-    PowerBase, PowerCaps, PowerControl, PowerError, PowerImplementationKind, PowerModeDescriptor,
+    PowerBase,
+    PowerCaps,
+    PowerControl,
+    PowerError,
+    PowerImplementationKind,
+    PowerModeDescriptor,
     PowerSupport,
 };
 

@@ -2,8 +2,15 @@
 
 use fusion_pal::sys::power::{PlatformPower, system_power as pal_system_power};
 pub use fusion_pal::sys::power::{
-    PowerBase, PowerCaps, PowerControl, PowerError, PowerErrorKind, PowerImplementationKind,
-    PowerModeDepth, PowerModeDescriptor, PowerSupport,
+    PowerBase,
+    PowerCaps,
+    PowerControl,
+    PowerError,
+    PowerErrorKind,
+    PowerImplementationKind,
+    PowerModeDepth,
+    PowerModeDescriptor,
+    PowerSupport,
 };
 
 /// fusion-sys power provider wrapper around the selected fusion-pal backend.

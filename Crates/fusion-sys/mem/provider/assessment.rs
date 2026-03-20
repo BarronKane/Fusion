@@ -1,7 +1,10 @@
 use super::groups::{CandidateGroupRecord, preferred_candidate_group};
 use super::support::{CandidateStageCounts, MemoryPoolAssessmentIssues, candidate_stage_counts};
 use super::{
-    MemoryPoolClassId, MemoryPoolRequest, MemoryProviderCaps, MemoryProviderInventory,
+    MemoryPoolClassId,
+    MemoryPoolRequest,
+    MemoryProviderCaps,
+    MemoryProviderInventory,
     MemoryProviderSupport,
 };
 

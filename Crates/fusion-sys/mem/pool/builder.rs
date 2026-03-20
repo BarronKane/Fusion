@@ -2,7 +2,11 @@ use core::array;
 
 use super::member::{MemoryPoolContributor, MemoryPoolMember};
 use super::{
-    MemoryPool, MemoryPoolError, MemoryPoolMemberId, MemoryPoolPolicy, MemoryPoolProvisioningPolicy,
+    MemoryPool,
+    MemoryPoolError,
+    MemoryPoolMemberId,
+    MemoryPoolPolicy,
+    MemoryPoolProvisioningPolicy,
 };
 
 /// Builder for a fixed-capacity `MemoryPool`.

@@ -1,7 +1,9 @@
 use bitflags::bitflags;
 
 use super::{
-    ThreadIdentityStability, scheduler::ThreadPriorityRange, scheduler::ThreadSchedulerModel,
+    ThreadIdentityStability,
+    scheduler::ThreadPriorityRange,
+    scheduler::ThreadSchedulerModel,
 };
 
 /// Shared authority bitset specialized for thread support.

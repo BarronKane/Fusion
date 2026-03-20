@@ -8,9 +8,22 @@ use core::sync::atomic::AtomicU32;
 use core::time::Duration;
 
 use super::{
-    MutexSupport, OnceBeginResult, OnceState, OnceSupport, RawMutex, RawOnce, RawRwLock,
-    RawSemaphore, RwLockSupport, SemaphoreSupport, SyncBase, SyncError, SyncSupport, WaitOutcome,
-    WaitPrimitive, WaitSupport,
+    MutexSupport,
+    OnceBeginResult,
+    OnceState,
+    OnceSupport,
+    RawMutex,
+    RawOnce,
+    RawRwLock,
+    RawSemaphore,
+    RwLockSupport,
+    SemaphoreSupport,
+    SyncBase,
+    SyncError,
+    SyncSupport,
+    WaitOutcome,
+    WaitPrimitive,
+    WaitSupport,
 };
 
 /// Unsupported synchronization provider placeholder.
