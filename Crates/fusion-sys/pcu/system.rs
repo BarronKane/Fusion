@@ -1,29 +1,38 @@
 //! fusion-sys programmable-IO wrapper over the selected fusion-pal backend.
 
+use crate::event::EventSourceHandle;
 use fusion_pal::sys::pcu::{PlatformPcu, system_pcu as pal_system_pcu};
 
 use super::{
     PcuBase,
     PcuControl,
+    PcuDmaAttachment,
     PcuEngineClaim,
     PcuEngineDescriptor,
     PcuEngineId,
     PcuError,
+    PcuEventAttachment,
+    PcuIrExecutionConfig,
+    PcuIrInstruction,
     PcuIrProgram,
     PcuLaneClaim,
     PcuLaneDescriptor,
     PcuLaneId,
     PcuLaneMask,
+    PcuPipelineHandoff,
+    PcuPipelineStage,
+    PcuPipelineStageLease,
     PcuProgramImage,
     PcuProgramLease,
     PcuProgramSource,
     PcuSupport,
 };
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 use super::{
-    PcuIrExecutionConfig,
     PcuIrInSource,
-    PcuIrInstruction,
     PcuIrIrqAction,
     PcuIrJumpCondition,
     PcuIrMovDestination,
@@ -34,53 +43,139 @@ use super::{
     PcuIrWaitCondition,
 };
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_INSTRUCTION_LIMIT: usize = 32;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_MAJOR_JMP: u16 = 0x0000;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_MAJOR_WAIT: u16 = 0x2000;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_MAJOR_IN: u16 = 0x4000;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_MAJOR_OUT: u16 = 0x6000;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_MAJOR_PUSH: u16 = 0x8000;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_MAJOR_PULL: u16 = 0x8080;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_MAJOR_MOV: u16 = 0xa000;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_MAJOR_IRQ: u16 = 0xc000;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_MAJOR_SET: u16 = 0xe000;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
+const RP2350_PIO_SM_CLKDIV_RESET: u32 = 0x0001_0000;
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
+const RP2350_PIO_SM_EXECCTRL_RESET: u32 = 0x0001_f000;
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
+const RP2350_PIO_SM_SHIFTCTRL_RESET: u32 = 0x000c_0000;
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
+const RP2350_PIO_SM_PINCTRL_RESET: u32 = 0x1400_0000;
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_SRC_DEST_PINS: u16 = 0;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_SRC_DEST_X: u16 = 1;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_SRC_DEST_Y: u16 = 2;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_SRC_DEST_NULL: u16 = 3;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_SRC_DEST_PINDIRS: u16 = 4;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_SRC_DEST_EXEC: u16 = 4;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_SRC_DEST_STATUS: u16 = 5;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_SRC_DEST_PC: u16 = 5;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_SRC_DEST_ISR: u16 = 6;
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const RP2350_PIO_SRC_DEST_OSR: u16 = 7;
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_instr_and_args(instr_bits: u16, arg1: u16, arg2: u16) -> u16 {
     instr_bits | (arg1 << 5) | (arg2 & 0x1f)
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_jmp_condition(condition: PcuIrJumpCondition, target: u8) -> u16 {
     let arg1 = match condition {
         PcuIrJumpCondition::Always => 0,
@@ -95,7 +190,10 @@ const fn rp2350_encode_jmp_condition(condition: PcuIrJumpCondition, target: u8) 
     rp2350_encode_instr_and_args(RP2350_PIO_MAJOR_JMP, arg1, target as u16)
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_wait_pin(polarity: bool, pin: u8) -> u16 {
     rp2350_encode_instr_and_args(
         RP2350_PIO_MAJOR_WAIT,
@@ -104,12 +202,18 @@ const fn rp2350_encode_wait_pin(polarity: bool, pin: u8) -> u16 {
     )
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_irq_index(relative: bool, irq: u8) -> u16 {
     (if relative { 0x10 } else { 0 }) | irq as u16
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_wait_irq(polarity: bool, relative: bool, irq: u8) -> u16 {
     rp2350_encode_instr_and_args(
         RP2350_PIO_MAJOR_WAIT,
@@ -118,7 +222,10 @@ const fn rp2350_encode_wait_irq(polarity: bool, relative: bool, irq: u8) -> u16 
     )
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_in(source: PcuIrInSource, count: u8) -> u16 {
     let arg1 = match source {
         PcuIrInSource::Pins => RP2350_PIO_SRC_DEST_PINS,
@@ -129,14 +236,13 @@ const fn rp2350_encode_in(source: PcuIrInSource, count: u8) -> u16 {
         PcuIrInSource::Isr => RP2350_PIO_SRC_DEST_ISR,
         PcuIrInSource::Osr => RP2350_PIO_SRC_DEST_OSR,
     };
-    rp2350_encode_instr_and_args(
-        RP2350_PIO_MAJOR_IN,
-        arg1,
-        rp2350_encode_bit_count(count),
-    )
+    rp2350_encode_instr_and_args(RP2350_PIO_MAJOR_IN, arg1, rp2350_encode_bit_count(count))
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_out(destination: PcuIrOutDestination, count: u8) -> u16 {
     let arg1 = match destination {
         PcuIrOutDestination::Pins => RP2350_PIO_SRC_DEST_PINS,
@@ -148,14 +254,13 @@ const fn rp2350_encode_out(destination: PcuIrOutDestination, count: u8) -> u16 {
         PcuIrOutDestination::Isr => RP2350_PIO_SRC_DEST_ISR,
         PcuIrOutDestination::Exec => RP2350_PIO_SRC_DEST_OSR,
     };
-    rp2350_encode_instr_and_args(
-        RP2350_PIO_MAJOR_OUT,
-        arg1,
-        rp2350_encode_bit_count(count),
-    )
+    rp2350_encode_instr_and_args(RP2350_PIO_MAJOR_OUT, arg1, rp2350_encode_bit_count(count))
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_push(if_full: bool, block: bool) -> u16 {
     rp2350_encode_instr_and_args(
         RP2350_PIO_MAJOR_PUSH,
@@ -164,7 +269,10 @@ const fn rp2350_encode_push(if_full: bool, block: bool) -> u16 {
     )
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_pull(if_empty: bool, block: bool) -> u16 {
     rp2350_encode_instr_and_args(
         RP2350_PIO_MAJOR_PULL,
@@ -173,7 +281,10 @@ const fn rp2350_encode_pull(if_empty: bool, block: bool) -> u16 {
     )
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_mov(
     destination: PcuIrMovDestination,
     operation: PcuIrMovOperation,
@@ -205,7 +316,10 @@ const fn rp2350_encode_mov(
     rp2350_encode_instr_and_args(RP2350_PIO_MAJOR_MOV, dest, op | src)
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_irq(action: PcuIrIrqAction, relative: bool, index: u8) -> u16 {
     let arg1 = match action {
         PcuIrIrqAction::Set => 0,
@@ -219,7 +333,10 @@ const fn rp2350_encode_irq(action: PcuIrIrqAction, relative: bool, index: u8) ->
     )
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_set(destination: PcuIrSetDestination, value: u8) -> u16 {
     let arg1 = match destination {
         PcuIrSetDestination::Pins => RP2350_PIO_SRC_DEST_PINS,
@@ -230,7 +347,10 @@ const fn rp2350_encode_set(destination: PcuIrSetDestination, value: u8) -> u16 {
     rp2350_encode_instr_and_args(RP2350_PIO_MAJOR_SET, arg1, value as u16)
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_nop() -> u16 {
     rp2350_encode_instr_and_args(
         RP2350_PIO_MAJOR_MOV,
@@ -239,22 +359,29 @@ const fn rp2350_encode_nop() -> u16 {
     )
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_delay(cycles: u8) -> u16 {
     ((cycles as u16) - 1) << 8
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 const fn rp2350_encode_bit_count(count: u8) -> u16 {
     if count == 32 { 0 } else { count as u16 }
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
 const fn rp2350_execution_is_default(execution: &PcuIrExecutionConfig) -> bool {
     execution.clocking.divider_integer.is_none()
         && execution.clocking.divider_fractional.is_none()
         && execution.pins.input_base.is_none()
+        && execution.pins.input_count.is_none()
         && execution.pins.output_base.is_none()
+        && execution.pins.output_count.is_none()
         && execution.pins.set_base.is_none()
         && execution.pins.set_count.is_none()
         && execution.pins.sideset_base.is_none()
@@ -269,16 +396,197 @@ const fn rp2350_execution_is_default(execution: &PcuIrExecutionConfig) -> bool {
         && execution.wrap_source.is_none()
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
-const fn validate_rp2350_execution(execution: &PcuIrExecutionConfig) -> Result<(), PcuError> {
-    if rp2350_execution_is_default(execution) {
-        Ok(())
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
+const fn rp2350_pinctrl_count(value: u8, maximum: u8) -> Result<u32, PcuError> {
+    if value <= maximum {
+        Ok(if value == 32 { 0 } else { value as u32 })
     } else {
-        Err(PcuError::unsupported())
+        Err(PcuError::invalid())
     }
 }
 
-#[cfg(any(test, all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
+fn rp2350_effective_output_count(
+    execution: &PcuIrExecutionConfig,
+    instructions: Option<&[PcuIrInstruction]>,
+) -> Result<u8, PcuError> {
+    if let Some(explicit) = execution.pins.output_count {
+        if explicit <= 32 {
+            return Ok(explicit);
+        }
+        return Err(PcuError::invalid());
+    }
+
+    let mut count = 0u8;
+    if let Some(instructions) = instructions {
+        for instruction in instructions {
+            match *instruction {
+                PcuIrInstruction::Out {
+                    destination: PcuIrOutDestination::Pins | PcuIrOutDestination::PinDirs,
+                    bit_count,
+                } => {
+                    count = count.max(bit_count);
+                }
+                PcuIrInstruction::Mov {
+                    destination: PcuIrMovDestination::Pins,
+                    ..
+                } => {
+                    count = 32;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
+fn rp2350_effective_set_count(
+    execution: &PcuIrExecutionConfig,
+    instructions: Option<&[PcuIrInstruction]>,
+) -> Result<u8, PcuError> {
+    if let Some(explicit) = execution.pins.set_count {
+        if explicit <= 5 {
+            return Ok(explicit);
+        }
+        return Err(PcuError::invalid());
+    }
+
+    let mut uses_set_pins = false;
+    if let Some(instructions) = instructions {
+        for instruction in instructions {
+            if matches!(
+                *instruction,
+                PcuIrInstruction::Set {
+                    destination: PcuIrSetDestination::Pins | PcuIrSetDestination::PinDirs,
+                    ..
+                }
+            ) {
+                uses_set_pins = true;
+                break;
+            }
+        }
+    }
+
+    Ok(if uses_set_pins { 5 } else { 0 })
+}
+
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
+fn rp2350_build_execution_registers(
+    execution: &PcuIrExecutionConfig,
+    instructions: Option<&[PcuIrInstruction]>,
+) -> Result<(u32, u32, u32, u32), PcuError> {
+    let divider_integer = execution.clocking.divider_integer.unwrap_or(1);
+    let divider_fractional = execution.clocking.divider_fractional.unwrap_or(0);
+    if divider_integer == 0 && divider_fractional != 0 {
+        return Err(PcuError::invalid());
+    }
+
+    let input_base = execution.pins.input_base.unwrap_or(0);
+    let input_count = execution.pins.input_count.unwrap_or(32);
+    let output_base = execution.pins.output_base.unwrap_or(0);
+    let output_count = rp2350_effective_output_count(execution, instructions)?;
+    let set_base = execution.pins.set_base.unwrap_or(0);
+    let set_count = rp2350_effective_set_count(execution, instructions)?;
+    let sideset_base = execution.pins.sideset_base.unwrap_or(0);
+    let sideset_count = execution.pins.sideset_count.unwrap_or(0);
+    let sideset_field_count = sideset_count
+        .checked_add(u8::from(execution.pins.sideset_optional))
+        .ok_or_else(PcuError::invalid)?;
+    let jmp_pin = execution.pins.jmp_pin.unwrap_or(0);
+    let wrap_target = execution.wrap_target.unwrap_or(0);
+    let wrap_source = execution.wrap_source.unwrap_or(31);
+    let autopush_threshold = execution.shift.autopush_threshold.unwrap_or(0);
+    let autopull_threshold = execution.shift.autopull_threshold.unwrap_or(0);
+
+    if input_base > 31
+        || output_base > 31
+        || set_base > 31
+        || sideset_base > 31
+        || jmp_pin > 31
+        || wrap_target > 31
+        || wrap_source > 31
+        || input_count == 0
+        || input_count > 32
+        || sideset_field_count > 5
+        || autopush_threshold > 32
+        || autopull_threshold > 32
+    {
+        return Err(PcuError::invalid());
+    }
+
+    let mut clkdiv = RP2350_PIO_SM_CLKDIV_RESET;
+    clkdiv &= !(0xffff_u32 << 16);
+    clkdiv &= !(0xff_u32 << 8);
+    clkdiv |= u32::from(divider_integer) << 16;
+    clkdiv |= u32::from(divider_fractional) << 8;
+
+    let mut execctrl = RP2350_PIO_SM_EXECCTRL_RESET;
+    execctrl &= !(1_u32 << 30);
+    execctrl &= !(0x1f_u32 << 24);
+    execctrl &= !(0x1f_u32 << 12);
+    execctrl &= !(0x1f_u32 << 7);
+    execctrl |= u32::from(execution.pins.sideset_optional) << 30;
+    execctrl |= u32::from(jmp_pin) << 24;
+    execctrl |= u32::from(wrap_source) << 12;
+    execctrl |= u32::from(wrap_target) << 7;
+
+    let mut shiftctrl = RP2350_PIO_SM_SHIFTCTRL_RESET;
+    shiftctrl &= !(0x1f_u32 << 25);
+    shiftctrl &= !(0x1f_u32 << 20);
+    shiftctrl &= !(1_u32 << 19);
+    shiftctrl &= !(1_u32 << 18);
+    shiftctrl &= !(1_u32 << 17);
+    shiftctrl &= !(1_u32 << 16);
+    shiftctrl &= !0x1f_u32;
+    shiftctrl |= rp2350_pinctrl_count(autopull_threshold, 32)? << 25;
+    shiftctrl |= rp2350_pinctrl_count(autopush_threshold, 32)? << 20;
+    shiftctrl |= u32::from(
+        execution.shift.out_direction.unwrap_or_default() == super::PcuIrShiftDirection::Right,
+    ) << 19;
+    shiftctrl |= u32::from(
+        execution.shift.in_direction.unwrap_or_default() == super::PcuIrShiftDirection::Right,
+    ) << 18;
+    shiftctrl |= u32::from(execution.shift.autopull_threshold.is_some()) << 17;
+    shiftctrl |= u32::from(execution.shift.autopush_threshold.is_some()) << 16;
+    shiftctrl |= rp2350_pinctrl_count(input_count, 32)?;
+
+    let mut pinctrl = RP2350_PIO_SM_PINCTRL_RESET;
+    pinctrl &= !(0x7_u32 << 29);
+    pinctrl &= !(0x7_u32 << 26);
+    pinctrl &= !(0x3f_u32 << 20);
+    pinctrl &= !(0x1f_u32 << 15);
+    pinctrl &= !(0x1f_u32 << 10);
+    pinctrl &= !(0x1f_u32 << 5);
+    pinctrl &= !0x1f_u32;
+    pinctrl |= u32::from(sideset_field_count) << 29;
+    pinctrl |= rp2350_pinctrl_count(set_count, 5)? << 26;
+    pinctrl |= rp2350_pinctrl_count(output_count, 32)? << 20;
+    pinctrl |= u32::from(input_base) << 15;
+    pinctrl |= u32::from(sideset_base) << 10;
+    pinctrl |= u32::from(set_base) << 5;
+    pinctrl |= u32::from(output_base);
+
+    Ok((clkdiv, execctrl, shiftctrl, pinctrl))
+}
+
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
 fn lower_rp2350_program<'a>(
     program: &PcuIrProgram<'_>,
     storage: &'a mut [u16],
@@ -286,7 +594,6 @@ fn lower_rp2350_program<'a>(
     if program.instructions.is_empty() {
         return Err(PcuError::invalid());
     }
-    validate_rp2350_execution(&program.execution)?;
     if program.instructions.len() > RP2350_PIO_INSTRUCTION_LIMIT {
         return Err(PcuError::resource_exhausted());
     }
@@ -340,12 +647,8 @@ fn lower_rp2350_program<'a>(
                 }
                 rp2350_encode_out(destination, bit_count)
             }
-            PcuIrInstruction::Push { if_full, blocking } => {
-                rp2350_encode_push(if_full, blocking)
-            }
-            PcuIrInstruction::Pull { if_empty, blocking } => {
-                rp2350_encode_pull(if_empty, blocking)
-            }
+            PcuIrInstruction::Push { if_full, blocking } => rp2350_encode_push(if_full, blocking),
+            PcuIrInstruction::Pull { if_empty, blocking } => rp2350_encode_pull(if_empty, blocking),
             PcuIrInstruction::Mov {
                 destination,
                 operation,
@@ -415,6 +718,26 @@ impl PcuSystem {
         PcuBase::lanes(&self.inner, engine)
     }
 
+    fn engine_descriptor(
+        self,
+        engine: PcuEngineId,
+    ) -> Result<&'static PcuEngineDescriptor, PcuError> {
+        self.engines()
+            .iter()
+            .find(|descriptor| descriptor.id == engine)
+            .ok_or_else(PcuError::invalid)
+    }
+
+    fn resolved_execution_for_source(
+        source: PcuProgramSource<'_>,
+        execution_override: Option<PcuIrExecutionConfig>,
+    ) -> Option<PcuIrExecutionConfig> {
+        execution_override.or(match source {
+            PcuProgramSource::Native(_) => None,
+            PcuProgramSource::Ir(program) => Some(program.execution),
+        })
+    }
+
     /// Claims one engine exclusively.
     ///
     /// # Errors
@@ -444,6 +767,65 @@ impl PcuSystem {
         lanes: PcuLaneMask,
     ) -> Result<PcuLaneClaim, PcuError> {
         PcuControl::claim_lanes(&self.inner, engine, lanes)
+    }
+
+    /// Returns one DMA pacing attachment for the TX FIFO of the supplied lane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the engine is unknown or does not expose per-lane TX DREQ
+    /// selectors.
+    pub fn tx_dma_attachment(&self, lane: PcuLaneId) -> Result<PcuDmaAttachment, PcuError> {
+        let engine = self.engine_descriptor(lane.engine)?;
+        if lane.index >= engine.lane_count {
+            return Err(PcuError::invalid());
+        }
+        let base = engine.tx_dreq_base.ok_or_else(PcuError::unsupported)?;
+        Ok(PcuDmaAttachment::tx_for_lane(
+            lane,
+            base + u16::from(lane.index),
+        ))
+    }
+
+    /// Returns one DMA pacing attachment for the RX FIFO of the supplied lane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the engine is unknown or does not expose per-lane RX DREQ
+    /// selectors.
+    pub fn rx_dma_attachment(&self, lane: PcuLaneId) -> Result<PcuDmaAttachment, PcuError> {
+        let engine = self.engine_descriptor(lane.engine)?;
+        if lane.index >= engine.lane_count {
+            return Err(PcuError::invalid());
+        }
+        let base = engine.rx_dreq_base.ok_or_else(PcuError::unsupported)?;
+        Ok(PcuDmaAttachment::rx_for_lane(
+            lane,
+            base + u16::from(lane.index),
+        ))
+    }
+
+    /// Returns one event attachment for one engine-local IRQ output.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the engine is unknown or the requested IRQ output does not
+    /// exist.
+    pub fn engine_event_attachment(
+        &self,
+        engine: PcuEngineId,
+        line_index: usize,
+    ) -> Result<PcuEventAttachment, PcuError> {
+        let descriptor = self.engine_descriptor(engine)?;
+        let irqn = *descriptor
+            .irq_lines
+            .get(line_index)
+            .ok_or_else(PcuError::invalid)?;
+        Ok(PcuEventAttachment {
+            engine,
+            irqn,
+            source: EventSourceHandle(usize::from(irqn)),
+        })
     }
 
     /// Releases one previously claimed lane mask.
@@ -511,11 +893,54 @@ impl PcuSystem {
         source: PcuProgramSource<'_>,
         lowering_storage: &mut [u16],
     ) -> Result<PcuProgramLease, PcuError> {
+        self.load_program_source_with_execution(claim, None, source, None, lowering_storage)
+    }
+
+    /// Loads one native or portable program source into one claimed engine and applies any
+    /// supplied execution-state configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend load, lowering, or execution-configuration failure.
+    pub fn load_program_source_with_execution(
+        &self,
+        claim: &PcuEngineClaim,
+        lane_claim: Option<&PcuLaneClaim>,
+        source: PcuProgramSource<'_>,
+        execution_override: Option<PcuIrExecutionConfig>,
+        lowering_storage: &mut [u16],
+    ) -> Result<PcuProgramLease, PcuError> {
         match source {
-            PcuProgramSource::Native(image) => self.load_program(claim, image),
+            PcuProgramSource::Native(image) => {
+                let lease = self.load_program(claim, image)?;
+                if let (Some(lane_claim), Some(execution)) = (
+                    lane_claim,
+                    Self::resolved_execution_for_source(
+                        PcuProgramSource::Native(image),
+                        execution_override,
+                    ),
+                ) {
+                    Self::apply_execution_config_for_program(*lane_claim, &execution, None)?;
+                }
+                Ok(lease)
+            }
             PcuProgramSource::Ir(program) => {
                 let image = self.lower_program(program, lowering_storage)?;
-                self.load_program(claim, &image)
+                let lease = self.load_program(claim, &image)?;
+                if let (Some(lane_claim), Some(execution)) = (
+                    lane_claim,
+                    Self::resolved_execution_for_source(
+                        PcuProgramSource::Ir(program),
+                        execution_override,
+                    ),
+                ) {
+                    Self::apply_execution_config_for_program(
+                        *lane_claim,
+                        &execution,
+                        Some(program.instructions),
+                    )?;
+                }
+                Ok(lease)
             }
         }
     }
@@ -582,6 +1007,207 @@ impl PcuSystem {
     pub fn read_rx_fifo(&self, claim: &PcuLaneClaim, lane: PcuLaneId) -> Result<u32, PcuError> {
         PcuControl::read_rx_fifo(&self.inner, claim, lane)
     }
+
+    /// Applies one execution-state bundle to a claimed lane set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the selected backend cannot realize the requested execution
+    /// state.
+    pub fn configure_execution(
+        &self,
+        claim: &PcuLaneClaim,
+        execution: &PcuIrExecutionConfig,
+    ) -> Result<(), PcuError> {
+        Self::apply_execution_config_for_program(*claim, execution, None)
+    }
+
+    #[allow(clippy::missing_const_for_fn)]
+    fn apply_execution_config_for_program(
+        claim: PcuLaneClaim,
+        execution: &PcuIrExecutionConfig,
+        instructions: Option<&[PcuIrInstruction]>,
+    ) -> Result<(), PcuError> {
+        if rp2350_execution_is_default(execution) {
+            return Ok(());
+        }
+        #[cfg(all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350"))]
+        {
+            let (clkdiv, execctrl, shiftctrl, pinctrl) =
+                rp2350_build_execution_registers(execution, instructions)?;
+            return fusion_pal::sys::cortex_m::hal::soc::board::apply_pcu_execution_config(
+                &claim, clkdiv, execctrl, shiftctrl, pinctrl,
+            );
+        }
+        #[cfg(not(all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")))]
+        {
+            let _ = claim;
+            let _ = execution;
+            let _ = instructions;
+            Err(PcuError::unsupported())
+        }
+    }
+
+    fn claim_pipeline_resources(
+        self,
+        stage: &PcuPipelineStage<'_>,
+    ) -> Result<(PcuEngineClaim, PcuLaneClaim), PcuError> {
+        let requested_lanes = u8::try_from(stage.lanes.bits().count_ones()).unwrap_or(u8::MAX);
+        if let Some(engine) = stage.engine {
+            let engine_claim = self.claim_engine(engine)?;
+            match self.claim_lanes(engine, stage.lanes) {
+                Ok(lane_claim) => return Ok((engine_claim, lane_claim)),
+                Err(error) => {
+                    let _ = self.release_engine(engine_claim);
+                    return Err(error);
+                }
+            }
+        }
+
+        let mut last_error = PcuError::unsupported();
+        for descriptor in self.engines() {
+            if requested_lanes > descriptor.lane_count {
+                continue;
+            }
+            let Ok(engine_claim) = self.claim_engine(descriptor.id) else {
+                continue;
+            };
+            match self.claim_lanes(descriptor.id, stage.lanes) {
+                Ok(lane_claim) => return Ok((engine_claim, lane_claim)),
+                Err(error) => {
+                    last_error = error;
+                    let _ = self.release_engine(engine_claim);
+                }
+            }
+        }
+        Err(last_error)
+    }
+
+    /// Claims, loads, and configures one pipeline stage.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest claim, load, or execution-configuration failure.
+    pub fn prepare_pipeline_stage<'a>(
+        &self,
+        stage: &PcuPipelineStage<'a>,
+        lowering_storage: &mut [u16],
+    ) -> Result<PcuPipelineStageLease<'a>, PcuError> {
+        let (engine_claim, lane_claim) = self.claim_pipeline_resources(stage)?;
+        let program_lease = match self.load_program_source_with_execution(
+            &engine_claim,
+            Some(&lane_claim),
+            stage.program,
+            stage.execution,
+            lowering_storage,
+        ) {
+            Ok(lease) => lease,
+            Err(error) => {
+                let _ = self.release_lanes(lane_claim);
+                let _ = self.release_engine(engine_claim);
+                return Err(error);
+            }
+        };
+
+        Ok(PcuPipelineStageLease {
+            name: stage.name,
+            engine_claim,
+            lane_claim,
+            program_lease,
+            trigger: stage.trigger,
+            handoff: stage.handoff,
+        })
+    }
+
+    /// Starts one prepared pipeline stage.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend control failure.
+    pub fn activate_pipeline_stage(
+        &self,
+        stage: &PcuPipelineStageLease<'_>,
+    ) -> Result<(), PcuError> {
+        self.start_lanes(&stage.lane_claim)
+    }
+
+    /// Releases one prepared pipeline stage and its claimed resources.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first honest failure encountered while stopping, unloading, or releasing the
+    /// stage.
+    pub fn release_pipeline_stage(&self, stage: PcuPipelineStageLease<'_>) -> Result<(), PcuError> {
+        self.stop_lanes(&stage.lane_claim)?;
+        self.unload_program(&stage.engine_claim, stage.program_lease)?;
+        self.release_lanes(stage.lane_claim)?;
+        self.release_engine(stage.engine_claim)
+    }
+
+    /// Performs one staged handoff from the current stage into the next stage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the selected handoff mode is unsupported for the prepared
+    /// stages.
+    pub fn handoff_pipeline_stage(
+        &self,
+        current: &PcuPipelineStageLease<'_>,
+        next: &PcuPipelineStageLease<'_>,
+    ) -> Result<(), PcuError> {
+        match next.handoff {
+            PcuPipelineHandoff::Manual => Ok(()),
+            PcuPipelineHandoff::StopThenStart => {
+                self.stop_lanes(&current.lane_claim)?;
+                self.start_lanes(&next.lane_claim)
+            }
+            PcuPipelineHandoff::PreloadedStartThenStop => {
+                if current.engine_claim.engine() == next.engine_claim.engine() {
+                    return Err(PcuError::unsupported());
+                }
+                self.start_lanes(&next.lane_claim)?;
+                self.stop_lanes(&current.lane_claim)
+            }
+            PcuPipelineHandoff::RestartClaimedLanes => Err(PcuError::unsupported()),
+        }
+    }
+
+    /// Reprograms one prepared stage in place and restarts the claimed lanes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the next stage is incompatible with the current claim or the
+    /// backend cannot reload or restart the lanes.
+    pub fn reprogram_pipeline_stage<'a>(
+        &self,
+        current: &mut PcuPipelineStageLease<'a>,
+        next: &PcuPipelineStage<'a>,
+        lowering_storage: &mut [u16],
+    ) -> Result<(), PcuError> {
+        let next_engine = next.engine.unwrap_or_else(|| current.engine_claim.engine());
+        if next_engine != current.engine_claim.engine()
+            || next.lanes.bits() != current.lane_claim.lanes().bits()
+        {
+            return Err(PcuError::unsupported());
+        }
+
+        self.stop_lanes(&current.lane_claim)?;
+        self.unload_program(&current.engine_claim, current.program_lease)?;
+        let program_lease = self.load_program_source_with_execution(
+            &current.engine_claim,
+            Some(&current.lane_claim),
+            next.program,
+            next.execution,
+            lowering_storage,
+        )?;
+        self.restart_lanes(&current.lane_claim)?;
+        self.start_lanes(&current.lane_claim)?;
+        current.name = next.name;
+        current.program_lease = program_lease;
+        current.trigger = next.trigger;
+        current.handoff = next.handoff;
+        Ok(())
+    }
 }
 
 impl Default for PcuSystem {
@@ -641,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn rp2350_lowering_rejects_non_default_execution_config() {
+    fn rp2350_lowering_keeps_non_default_execution_for_later_application() {
         let program = PcuIrProgram::new(super::super::PcuProgramId(1), &[PcuIrInstruction::Nop])
             .with_execution(PcuIrExecutionConfig {
                 wrap_target: Some(0),
@@ -649,16 +1275,20 @@ mod tests {
                 ..PcuIrExecutionConfig::default()
             });
         let mut storage = [0_u16; 1];
-        let error = lower_rp2350_program(&program, &mut storage)
-            .expect_err("non-default execution config should stay unsupported without control wiring");
-        assert_eq!(error.kind(), PcuError::unsupported().kind());
+        let image = lower_rp2350_program(&program, &mut storage).expect(
+            "instruction lowering should stay independent from execution-state application",
+        );
+        assert_eq!(image.words, &[rp2350_encode_nop()]);
     }
 
     #[test]
     fn rp2350_lowering_maps_exact_delay_cycles() {
         let program = PcuIrProgram::new(
             super::super::PcuProgramId(2),
-            &[PcuIrInstruction::Delay { cycles: 1 }, PcuIrInstruction::Delay { cycles: 32 }],
+            &[
+                PcuIrInstruction::Delay { cycles: 1 },
+                PcuIrInstruction::Delay { cycles: 32 },
+            ],
         );
         let mut storage = [0_u16; 2];
         let image = lower_rp2350_program(&program, &mut storage).expect("delays should lower");
@@ -697,5 +1327,97 @@ mod tests {
                 rp2350_encode_jmp_condition(PcuIrJumpCondition::PinHigh, 1),
             ]
         );
+    }
+
+    #[test]
+    fn rp2350_execution_registers_encode_supported_state() {
+        let execution = PcuIrExecutionConfig {
+            clocking: super::super::PcuIrClockConfig {
+                divider_integer: Some(2),
+                divider_fractional: Some(64),
+            },
+            pins: super::super::PcuIrPinConfig {
+                input_base: Some(3),
+                input_count: Some(6),
+                output_base: Some(5),
+                output_count: Some(8),
+                set_base: Some(7),
+                set_count: Some(2),
+                sideset_base: Some(9),
+                sideset_count: Some(2),
+                sideset_optional: true,
+                jmp_pin: Some(11),
+            },
+            shift: super::super::PcuIrShiftConfig {
+                in_direction: Some(super::super::PcuIrShiftDirection::Left),
+                out_direction: Some(super::super::PcuIrShiftDirection::Right),
+                autopush_threshold: Some(8),
+                autopull_threshold: Some(16),
+            },
+            wrap_target: Some(1),
+            wrap_source: Some(9),
+        };
+
+        let (clkdiv, execctrl, shiftctrl, pinctrl) =
+            rp2350_build_execution_registers(&execution, None).expect("config should encode");
+
+        assert_eq!(clkdiv, 0x0002_4000);
+        assert_eq!(execctrl, 0x4b00_9080);
+        assert_eq!(shiftctrl, 0x208b_0006);
+        assert_eq!(pinctrl, 0x6881_a4e5);
+    }
+
+    #[test]
+    fn rp2350_execution_registers_derive_output_and_set_counts_from_program() {
+        let program = PcuIrProgram::new(
+            super::super::PcuProgramId(12),
+            &[
+                PcuIrInstruction::Out {
+                    destination: PcuIrOutDestination::Pins,
+                    bit_count: 6,
+                },
+                PcuIrInstruction::Mov {
+                    destination: PcuIrMovDestination::Pins,
+                    operation: PcuIrMovOperation::None,
+                    source: PcuIrMovSource::Osr,
+                },
+                PcuIrInstruction::Set {
+                    destination: PcuIrSetDestination::Pins,
+                    value: 7,
+                },
+            ],
+        )
+        .with_execution(PcuIrExecutionConfig {
+            pins: super::super::PcuIrPinConfig {
+                output_base: Some(2),
+                set_base: Some(4),
+                ..super::super::PcuIrPinConfig::default()
+            },
+            ..PcuIrExecutionConfig::default()
+        });
+
+        let (_, _, _, pinctrl) =
+            rp2350_build_execution_registers(&program.execution, Some(program.instructions))
+                .expect("program-derived counts should encode");
+
+        assert_eq!((pinctrl >> 26) & 0x7, 5);
+        assert_eq!((pinctrl >> 20) & 0x3f, 0);
+        assert_eq!(pinctrl & 0x1f, 2);
+        assert_eq!((pinctrl >> 5) & 0x1f, 4);
+    }
+
+    #[test]
+    fn rp2350_execution_registers_reject_invalid_fractional_zero_divider() {
+        let execution = PcuIrExecutionConfig {
+            clocking: super::super::PcuIrClockConfig {
+                divider_integer: Some(0),
+                divider_fractional: Some(1),
+            },
+            ..PcuIrExecutionConfig::default()
+        };
+
+        let error = rp2350_build_execution_registers(&execution, None)
+            .expect_err("fractional divider without integer component should fail");
+        assert_eq!(error.kind(), PcuError::invalid().kind());
     }
 }

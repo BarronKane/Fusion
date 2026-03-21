@@ -100,10 +100,10 @@ pub mod fusion_kn;
 pub mod hal;
 /// Public memory module re-exported from the selected private platform backend.
 pub mod mem;
-/// Public power module re-exported from the selected private platform backend.
-pub mod power;
 /// Public programmable-IO module re-exported from the selected private platform backend.
 pub mod pcu;
+/// Public power module re-exported from the selected private platform backend.
+pub mod power;
 /// Public synchronization module re-exported from the selected private platform backend.
 pub mod sync;
 /// Public thread module re-exported from the selected private platform backend.

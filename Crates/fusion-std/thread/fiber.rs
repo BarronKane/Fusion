@@ -296,6 +296,53 @@ pub struct FiberStackClassConfig {
     pub class: FiberStackClass,
     /// Number of stack slots provisioned per carrier for this class.
     pub slots_per_carrier: usize,
+    /// Number of slots committed together when this class-backed pool grows on demand.
+    pub growth_chunk: usize,
+}
+
+impl FiberStackClassConfig {
+    /// Creates one checked class-backed pool entry.
+    ///
+    /// By default, the growth chunk matches the full slot count for the class. Use
+    /// [`FiberStackClassConfig::with_growth_chunk`] to tighten on-demand commit size without
+    /// dragging the legacy pool-wide knob back into the class-backed model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the class would provision zero slots.
+    pub const fn new(class: FiberStackClass, slots_per_carrier: usize) -> Result<Self, FiberError> {
+        if slots_per_carrier == 0 {
+            return Err(FiberError::invalid());
+        }
+        Ok(Self {
+            class,
+            slots_per_carrier,
+            growth_chunk: slots_per_carrier,
+        })
+    }
+
+    /// Returns one copy of this class entry with an explicit on-demand growth chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the chunk is zero or larger than the slot count for this class.
+    pub const fn with_growth_chunk(mut self, growth_chunk: usize) -> Result<Self, FiberError> {
+        if growth_chunk == 0 || growth_chunk > self.slots_per_carrier {
+            return Err(FiberError::invalid());
+        }
+        self.growth_chunk = growth_chunk;
+        Ok(self)
+    }
+
+    const fn validate(self) -> Result<Self, FiberError> {
+        if self.slots_per_carrier == 0
+            || self.growth_chunk == 0
+            || self.growth_chunk > self.slots_per_carrier
+        {
+            return Err(FiberError::invalid());
+        }
+        Ok(self)
+    }
 }
 
 /// Strict-priority value attached to one fiber task.
@@ -633,8 +680,8 @@ pub struct FiberPoolConfig<'a> {
     pub guard_pages: usize,
     /// Legacy number of reservations committed together when one slab-backed pool grows.
     ///
-    /// When `classes` is non-empty, each class pool derives its own effective chunk from this
-    /// upper bound and its configured slot count.
+    /// Class-backed pools carry per-class growth chunks in [`FiberStackClassConfig`] instead of
+    /// consulting this field.
     pub growth_chunk: usize,
     /// Legacy maximum live fibers admitted per carrier worker.
     ///
@@ -705,10 +752,10 @@ impl<'a> FiberPoolConfig<'a> {
         let mut largest: Option<FiberStackClass> = None;
         let mut index = 0usize;
         while index < classes.len() {
-            let class = classes[index];
-            if class.slots_per_carrier == 0 {
-                return Err(FiberError::invalid());
-            }
+            let class = match classes[index].validate() {
+                Ok(class) => class,
+                Err(error) => return Err(error),
+            };
             if let Some(previous_class) = previous
                 && previous_class.size_bytes().get() >= class.class.size_bytes().get()
             {
@@ -762,11 +809,74 @@ impl<'a> FiberPoolConfig<'a> {
 
     /// Returns one copy of this configuration with explicit class-based provisioning.
     ///
-    /// This is a low-level override that does not normalize the legacy single-slab fields.
-    /// Prefer [`FiberPoolConfig::classed`] for public class-first configuration.
+    /// This is a low-level override that does not normalize the legacy single-slab fields or
+    /// validate per-class growth semantics. Prefer [`FiberPoolConfig::classed`] for public
+    /// class-first configuration.
     #[must_use]
     pub const fn with_classes(mut self, classes: &'a [FiberStackClassConfig]) -> Self {
         self.classes = classes;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit guard-page count.
+    #[must_use]
+    pub const fn with_guard_pages(mut self, guard_pages: usize) -> Self {
+        self.guard_pages = guard_pages;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit scheduling policy.
+    #[must_use]
+    pub const fn with_scheduling(mut self, scheduling: GreenScheduling) -> Self {
+        self.scheduling = scheduling;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit growth policy.
+    #[must_use]
+    pub const fn with_growth(mut self, growth: GreenGrowth) -> Self {
+        self.growth = growth;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit telemetry policy.
+    #[must_use]
+    pub const fn with_telemetry(mut self, telemetry: FiberTelemetry) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit capacity-response policy.
+    #[must_use]
+    pub const fn with_capacity_policy(mut self, capacity_policy: CapacityPolicy) -> Self {
+        self.capacity_policy = capacity_policy;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit huge-page preference.
+    #[must_use]
+    pub const fn with_huge_pages(mut self, huge_pages: HugePagePolicy) -> Self {
+        self.huge_pages = huge_pages;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit legacy chunk size.
+    ///
+    /// This only affects legacy single-envelope pools. Class-backed pools carry their own
+    /// `growth_chunk` in [`FiberStackClassConfig`].
+    #[must_use]
+    pub const fn with_legacy_growth_chunk(mut self, growth_chunk: usize) -> Self {
+        self.growth_chunk = growth_chunk;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit legacy capacity.
+    ///
+    /// This only affects legacy single-envelope pools. Class-backed pools derive total capacity
+    /// from their class table.
+    #[must_use]
+    pub const fn with_legacy_capacity(mut self, max_fibers_per_carrier: usize) -> Self {
+        self.max_fibers_per_carrier = max_fibers_per_carrier;
         self
     }
 
@@ -3006,14 +3116,13 @@ impl FiberStackClassPools {
                     return Err(FiberError::invalid());
                 }
 
-                let class_growth_chunk = config.growth_chunk.min(class.slots_per_carrier).max(1);
                 let class_config = FiberPoolConfig {
                     stack_backing: FiberStackBacking::Fixed {
                         stack_size: class.class.size_bytes(),
                     },
                     classes: &[],
                     guard_pages: config.guard_pages,
-                    growth_chunk: class_growth_chunk,
+                    growth_chunk: class.growth_chunk,
                     max_fibers_per_carrier: class.slots_per_carrier,
                     scheduling: config.scheduling,
                     growth: config.growth,
@@ -6024,13 +6133,18 @@ mod tests {
         NonZeroUsize::new(8 * 1024).expect("non-zero supported generated stack"),
     );
 
-    const COMPILE_TIME_EXPLICIT_CLASSES: [FiberStackClassConfig; 1] = [FiberStackClassConfig {
-        class: match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
+    const COMPILE_TIME_EXPLICIT_CLASSES: [FiberStackClassConfig; 1] = [
+        match FiberStackClassConfig::new(
+            match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
+                Ok(class) => class,
+                Err(_) => panic!("valid class"),
+            },
+            2,
+        ) {
             Ok(class) => class,
-            Err(_) => panic!("valid class"),
+            Err(_) => panic!("valid compile-time class config"),
         },
-        slots_per_carrier: 2,
-    }];
+    ];
 
     const COMPILE_TIME_EXPLICIT_CONFIG: FiberPoolConfig<'static> =
         match FiberPoolConfig::classed(&COMPILE_TIME_EXPLICIT_CLASSES) {
@@ -6110,21 +6224,24 @@ mod tests {
     fn class_store_selects_smallest_matching_pool() {
         let support = GreenPool::support();
         let classes = [
-            FiberStackClassConfig {
-                class: FiberStackClass::new(NonZeroUsize::new(4 * 1024).expect("non-zero class"))
+            FiberStackClassConfig::new(
+                FiberStackClass::new(NonZeroUsize::new(4 * 1024).expect("non-zero class"))
                     .expect("valid class"),
-                slots_per_carrier: 1,
-            },
-            FiberStackClassConfig {
-                class: FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class"))
+                1,
+            )
+            .expect("valid class config"),
+            FiberStackClassConfig::new(
+                FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class"))
                     .expect("valid class"),
-                slots_per_carrier: 1,
-            },
-            FiberStackClassConfig {
-                class: FiberStackClass::new(NonZeroUsize::new(16 * 1024).expect("non-zero class"))
+                1,
+            )
+            .expect("valid class config"),
+            FiberStackClassConfig::new(
+                FiberStackClass::new(NonZeroUsize::new(16 * 1024).expect("non-zero class"))
                     .expect("valid class"),
-                slots_per_carrier: 1,
-            },
+                1,
+            )
+            .expect("valid class config"),
         ];
         let config = FiberPoolConfig::classed(&classes).expect("classed config should build");
         let store = FiberStackStore::new(
@@ -6164,15 +6281,13 @@ mod tests {
     #[test]
     fn classed_config_derives_capacity_and_largest_backing() {
         let classes = [
-            FiberStackClassConfig {
-                class: FiberStackClass::MIN,
-                slots_per_carrier: 3,
-            },
-            FiberStackClassConfig {
-                class: FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class"))
+            FiberStackClassConfig::new(FiberStackClass::MIN, 3).expect("valid class config"),
+            FiberStackClassConfig::new(
+                FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class"))
                     .expect("valid class"),
-                slots_per_carrier: 5,
-            },
+                5,
+            )
+            .expect("valid class config"),
         ];
         let config = FiberPoolConfig::classed(&classes).expect("classed config should build");
 
@@ -6190,17 +6305,54 @@ mod tests {
     }
 
     #[test]
+    fn class_store_uses_per_class_growth_chunks() {
+        let support = GreenPool::support();
+        let classes = [
+            FiberStackClassConfig::new(FiberStackClass::MIN, 4)
+                .expect("valid class config")
+                .with_growth_chunk(2)
+                .expect("valid class growth chunk"),
+            FiberStackClassConfig::new(
+                FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class"))
+                    .expect("valid class"),
+                6,
+            )
+            .expect("valid class config")
+            .with_growth_chunk(3)
+            .expect("valid class growth chunk"),
+        ];
+        let config = FiberPoolConfig::classed(&classes)
+            .expect("classed config should build")
+            .with_growth(GreenGrowth::OnDemand);
+        let store = FiberStackStore::new(
+            &config,
+            support.context.min_stack_alignment.max(16),
+            support.context.stack_direction,
+        )
+        .expect("class store should build");
+
+        let FiberStackStore::Classes(pools) = store else {
+            panic!("expected class-backed store");
+        };
+        assert_eq!(pools.entry(0).expect("first pool").slab.chunk_size, 2);
+        assert_eq!(pools.entry(0).expect("first pool").slab.initial_slots, 2);
+        assert_eq!(pools.entry(1).expect("second pool").slab.chunk_size, 3);
+        assert_eq!(pools.entry(1).expect("second pool").slab.initial_slots, 3);
+    }
+
+    #[test]
     fn classed_config_validates_explicit_task_contracts() {
-        let classes = [FiberStackClassConfig {
-            class: FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class"))
+        let classes = [FiberStackClassConfig::new(
+            FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class"))
                 .expect("valid class"),
-            slots_per_carrier: 2,
-        }];
+            2,
+        )
+        .expect("valid class config")];
         let config = FiberPoolConfig::classed(&classes).expect("classed config should build");
 
         assert!(
             config
-                .validate_generated_task::<GeneratedFiberTaskMetadataAnchorTask>()
+                .validate_generated_task::<SupportedGeneratedContractTask>()
                 .is_ok()
         );
 
@@ -6243,7 +6395,8 @@ mod tests {
     #[test]
     fn generated_task_contracts_work_in_const_context() {
         const VALIDATION: Result<(), FiberError> = COMPILE_TIME_EXPLICIT_CONFIG
-            .validate_generated_task_contract::<SupportedGeneratedContractTask>();
+            .validate_generated_task_contract::<SupportedGeneratedContractTask>(
+        );
 
         assert_eq!(
             <SupportedGeneratedContractTask as GeneratedExplicitFiberTaskContract>::ATTRIBUTES
@@ -6256,53 +6409,10 @@ mod tests {
     }
 
     #[test]
-    fn generated_explicit_task_metadata_resolves_from_build_output() {
-        let support = GreenPool::support();
-        let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
-        let classes = [FiberStackClassConfig {
-            class: FiberStackClass::new(
-                NonZeroUsize::new(8 * 1024).expect("non-zero generated class"),
-            )
-            .expect("generated class should be valid"),
-            slots_per_carrier: 2,
-        }];
-        let green = GreenPool::new(
-            &FiberPoolConfig::classed(&classes).expect("classed config should build"),
-            &carrier,
-        )
-        .expect("green pool should build");
-
-        assert_eq!(
-            core::any::type_name::<GeneratedFiberTaskMetadataAnchorTask>(),
-            "fusion_std::thread::fiber::GeneratedFiberTaskMetadataAnchorTask"
-        );
-
-        let handle = green
-            .spawn_generated(GeneratedFiberTaskMetadataAnchorTask(41))
-            .expect("generated explicit task should spawn");
-        assert_eq!(
-            handle
-                .join()
-                .expect("generated explicit task should complete"),
-            42
-        );
-
-        green
-            .shutdown()
-            .expect("green pool should shut down cleanly");
-        carrier
-            .shutdown()
-            .expect("carrier pool should shut down cleanly");
-        let _ = support;
-    }
-
-    #[test]
     fn live_pool_validates_generated_task_contracts_before_spawn() {
         let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
-        let classes = [FiberStackClassConfig {
-            class: FiberStackClass::MIN,
-            slots_per_carrier: 2,
-        }];
+        let classes =
+            [FiberStackClassConfig::new(FiberStackClass::MIN, 2).expect("valid class config")];
         let green = GreenPool::new(
             &FiberPoolConfig::classed(&classes).expect("classed config should build"),
             &carrier,

@@ -13,12 +13,12 @@ pub mod hal;
 #[path = "mem/mem.rs"]
 /// Cortex-M bare-metal memory backend implementation.
 pub mod mem;
-#[path = "power/power.rs"]
-/// Cortex-M bare-metal power backend implementation.
-pub mod power;
 #[path = "pcu/pcu.rs"]
 /// Cortex-M bare-metal programmable-IO backend implementation.
 pub mod pcu;
+#[path = "power/power.rs"]
+/// Cortex-M bare-metal power backend implementation.
+pub mod power;
 #[path = "sync/sync.rs"]
 /// Cortex-M bare-metal synchronization backend implementation.
 pub mod sync;

@@ -30,8 +30,12 @@ pub struct PcuIrShiftConfig {
 pub struct PcuIrPinConfig {
     /// Input pin base when explicitly configured.
     pub input_base: Option<u8>,
+    /// Number of visible input pins when explicitly configured.
+    pub input_count: Option<u8>,
     /// Output pin base when explicitly configured.
     pub output_base: Option<u8>,
+    /// Number of output pins asserted by OUT/MOV PINS when explicitly configured.
+    pub output_count: Option<u8>,
     /// SET pin base when explicitly configured.
     pub set_base: Option<u8>,
     /// SET pin count when explicitly configured.
@@ -200,9 +204,15 @@ pub enum PcuIrInstruction {
     /// Wait for one deterministic condition.
     Wait(PcuIrWaitCondition),
     /// Conditional or unconditional branch.
-    Jump { condition: PcuIrJumpCondition, target: u8 },
+    Jump {
+        condition: PcuIrJumpCondition,
+        target: u8,
+    },
     /// Shift data into lane-local state.
-    In { source: PcuIrInSource, bit_count: u8 },
+    In {
+        source: PcuIrInSource,
+        bit_count: u8,
+    },
     /// Shift data out of lane-local state.
     Out {
         destination: PcuIrOutDestination,
@@ -256,7 +266,9 @@ impl<'a> PcuIrProgram<'a> {
                 },
                 pins: PcuIrPinConfig {
                     input_base: None,
+                    input_count: None,
                     output_base: None,
+                    output_count: None,
                     set_base: None,
                     set_count: None,
                     sideset_base: None,

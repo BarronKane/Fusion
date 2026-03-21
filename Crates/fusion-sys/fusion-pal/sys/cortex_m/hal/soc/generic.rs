@@ -424,3 +424,14 @@ pub fn write_pcu_tx_fifo(
 pub fn read_pcu_rx_fifo(_claim: &PcuLaneClaim, _lane: PcuLaneId) -> Result<u32, PcuError> {
     Err(PcuError::unsupported())
 }
+
+/// Applies one programmable-IO execution-state bundle on the selected generic Cortex-M target.
+pub fn apply_pcu_execution_config(
+    _claim: &PcuLaneClaim,
+    _clkdiv: u32,
+    _execctrl: u32,
+    _shiftctrl: u32,
+    _pinctrl: u32,
+) -> Result<(), PcuError> {
+    Err(PcuError::unsupported())
+}

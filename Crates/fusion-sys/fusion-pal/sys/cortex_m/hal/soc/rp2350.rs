@@ -142,6 +142,11 @@ const RP2350_PIO_FSTAT_OFFSET: usize = 0x04;
 const RP2350_PIO_TXF0_OFFSET: usize = 0x10;
 const RP2350_PIO_RXF0_OFFSET: usize = 0x20;
 const RP2350_PIO_INSTR_MEM0_OFFSET: usize = 0x48;
+const RP2350_PIO_SM_STRIDE: usize = 0x14;
+const RP2350_PIO_SM0_CLKDIV_OFFSET: usize = 0xc8;
+const RP2350_PIO_SM0_EXECCTRL_OFFSET: usize = 0xcc;
+const RP2350_PIO_SM0_SHIFTCTRL_OFFSET: usize = 0xd0;
+const RP2350_PIO_SM0_PINCTRL_OFFSET: usize = 0xdc;
 const RP2350_PIO_CTRL_SM_ENABLE_MASK: u32 = 0x0000_000f;
 const RP2350_PIO_CTRL_SM_RESTART_SHIFT: u32 = 4;
 const RP2350_PIO_CTRL_CLKDIV_RESTART_SHIFT: u32 = 8;
@@ -2668,7 +2673,8 @@ pub fn unload_pcu_program(claim: &PcuEngineClaim, lease: PcuProgramLease) -> Res
 /// Starts one claimed RP2350 PIO lane set.
 pub fn start_pcu_lanes(claim: &PcuLaneClaim) -> Result<(), PcuError> {
     let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
-    let register = rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)? + RP2350_PIO_CTRL_OFFSET;
+    let register =
+        rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)? + RP2350_PIO_CTRL_OFFSET;
     rp2350_atomic_register_set(register, u32::from(bits) & RP2350_PIO_CTRL_SM_ENABLE_MASK);
     Ok(())
 }
@@ -2676,7 +2682,8 @@ pub fn start_pcu_lanes(claim: &PcuLaneClaim) -> Result<(), PcuError> {
 /// Stops one claimed RP2350 PIO lane set.
 pub fn stop_pcu_lanes(claim: &PcuLaneClaim) -> Result<(), PcuError> {
     let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
-    let register = rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)? + RP2350_PIO_CTRL_OFFSET;
+    let register =
+        rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)? + RP2350_PIO_CTRL_OFFSET;
     rp2350_atomic_register_clear(register, u32::from(bits) & RP2350_PIO_CTRL_SM_ENABLE_MASK);
     Ok(())
 }
@@ -2684,12 +2691,12 @@ pub fn stop_pcu_lanes(claim: &PcuLaneClaim) -> Result<(), PcuError> {
 /// Restarts one claimed RP2350 PIO lane set.
 pub fn restart_pcu_lanes(claim: &PcuLaneClaim) -> Result<(), PcuError> {
     let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
-    let register = rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)? + RP2350_PIO_CTRL_OFFSET;
+    let register =
+        rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)? + RP2350_PIO_CTRL_OFFSET;
     let bits = u32::from(bits) & RP2350_PIO_CTRL_SM_ENABLE_MASK;
     rp2350_atomic_register_set(
         register,
-        (bits << RP2350_PIO_CTRL_SM_RESTART_SHIFT)
-            | (bits << RP2350_PIO_CTRL_CLKDIV_RESTART_SHIFT),
+        (bits << RP2350_PIO_CTRL_SM_RESTART_SHIFT) | (bits << RP2350_PIO_CTRL_CLKDIV_RESTART_SHIFT),
     );
     Ok(())
 }
@@ -2733,6 +2740,47 @@ pub fn read_pcu_rx_fifo(claim: &PcuLaneClaim, lane: PcuLaneId) -> Result<u32, Pc
         + (usize::from(lane.index) * core::mem::size_of::<u32>())) as *const u32;
     // SAFETY: RXF registers are RP2350 lane-local read-only FIFOs.
     Ok(unsafe { ptr::read_volatile(register) })
+}
+
+const fn rp2350_pio_sm_register(base: usize, lane_index: u8, offset: usize) -> usize {
+    base + offset + (lane_index as usize * RP2350_PIO_SM_STRIDE)
+}
+
+/// Applies one RP2350 PIO execution-state bundle to all lanes in the supplied claim.
+pub fn apply_pcu_execution_config(
+    claim: &PcuLaneClaim,
+    clkdiv: u32,
+    execctrl: u32,
+    shiftctrl: u32,
+    pinctrl: u32,
+) -> Result<(), PcuError> {
+    let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
+    let base = rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)?;
+
+    for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE as u8 {
+        if bits & (1u8 << lane_index) == 0 {
+            continue;
+        }
+        let clkdiv_register =
+            rp2350_pio_sm_register(base, lane_index, RP2350_PIO_SM0_CLKDIV_OFFSET) as *mut u32;
+        let execctrl_register =
+            rp2350_pio_sm_register(base, lane_index, RP2350_PIO_SM0_EXECCTRL_OFFSET) as *mut u32;
+        let shiftctrl_register =
+            rp2350_pio_sm_register(base, lane_index, RP2350_PIO_SM0_SHIFTCTRL_OFFSET) as *mut u32;
+        let pinctrl_register =
+            rp2350_pio_sm_register(base, lane_index, RP2350_PIO_SM0_PINCTRL_OFFSET) as *mut u32;
+
+        // SAFETY: the caller holds a truthful lane claim for these state machines. These are the
+        // RP2350 per-lane execution-control registers for the selected PIO engine.
+        unsafe {
+            ptr::write_volatile(clkdiv_register, clkdiv);
+            ptr::write_volatile(execctrl_register, execctrl);
+            ptr::write_volatile(shiftctrl_register, shiftctrl);
+            ptr::write_volatile(pinctrl_register, pinctrl);
+        }
+    }
+
+    Ok(())
 }
 
 /// Returns the compile-time selected Cortex-M SoC descriptor.

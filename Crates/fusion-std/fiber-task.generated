@@ -1,9 +1,0 @@
-# Generated explicit fiber-task metadata manifest
-#
-# Format:
-# full::type::path = stack_bytes[, priority]
-#
-# This is the initial checked-in bridge for build-generated stack metadata. The planned
-# post-codegen analyzer can overwrite or regenerate this file later.
-
-fusion_std::thread::fiber::GeneratedFiberTaskMetadataAnchorTask = 8192, 5

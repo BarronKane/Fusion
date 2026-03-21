@@ -136,13 +136,18 @@ fusion_std::declare_generated_fiber_task_contract!(
     FiberTaskPriority::new(9),
 );
 
-const EXTERNAL_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [FiberStackClassConfig {
-    class: match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
+const EXTERNAL_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [
+    match FiberStackClassConfig::new(
+        match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
+            Ok(class) => class,
+            Err(_) => panic!("valid class"),
+        },
+        2,
+    ) {
         Ok(class) => class,
-        Err(_) => panic!("valid class"),
+        Err(_) => panic!("valid class config"),
     },
-    slots_per_carrier: 2,
-}];
+];
 
 const EXTERNAL_GENERATED_CONFIG: GreenPoolConfig<'static> =
     match GreenPoolConfig::classed(&EXTERNAL_GENERATED_CLASSES) {
@@ -175,13 +180,18 @@ fusion_std::declare_generated_fiber_task_contract!(
 );
 
 #[cfg(feature = "critical-safe-generated-contracts")]
-const STRICT_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [FiberStackClassConfig {
-    class: match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
+const STRICT_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [
+    match FiberStackClassConfig::new(
+        match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
+            Ok(class) => class,
+            Err(_) => panic!("valid class"),
+        },
+        2,
+    ) {
         Ok(class) => class,
-        Err(_) => panic!("valid class"),
+        Err(_) => panic!("valid class config"),
     },
-    slots_per_carrier: 2,
-}];
+];
 
 #[cfg(feature = "critical-safe-generated-contracts")]
 const STRICT_GENERATED_CONFIG: GreenPoolConfig<'static> =
@@ -391,22 +401,20 @@ fn deterministic_runtime_accepts_priority_class_backed_green_pools() {
     let _guard = lock_fusion_std_tests();
 
     let priority_classes = [
-        FiberStackClassConfig {
-            class: FiberStackClass::MIN,
-            slots_per_carrier: 16,
-        },
-        FiberStackClassConfig {
-            class: FiberStackClass::new(
+        FiberStackClassConfig::new(FiberStackClass::MIN, 16).expect("valid class config"),
+        FiberStackClassConfig::new(
+            FiberStackClass::new(
                 NonZeroUsize::new(8 * 1024).expect("non-zero priority stack class"),
             )
             .expect("priority stack class should be valid"),
-            slots_per_carrier: 8,
-        },
+            8,
+        )
+        .expect("valid class config"),
     ];
-    let mut priority_green =
-        GreenPoolConfig::classed(&priority_classes).expect("classed green config should build");
-    priority_green.growth = GreenGrowth::Fixed;
-    priority_green.scheduling = GreenScheduling::Priority;
+    let priority_green = GreenPoolConfig::classed(&priority_classes)
+        .expect("classed green config should build")
+        .with_growth(GreenGrowth::Fixed)
+        .with_scheduling(GreenScheduling::Priority);
     let priority_runtime = Runtime::new(&RuntimeConfig {
         profile: RuntimeProfile::Deterministic,
         thread_pool: ThreadPoolConfig::new(),
@@ -437,17 +445,13 @@ fn explicit_fiber_task_uses_compile_time_stack_contract() {
 
     let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
     let classes = [
-        FiberStackClassConfig {
-            class: FiberStackClass::MIN,
-            slots_per_carrier: 8,
-        },
-        FiberStackClassConfig {
-            class: FiberStackClass::new(
-                NonZeroUsize::new(8 * 1024).expect("non-zero explicit class"),
-            )
-            .expect("explicit class should be valid"),
-            slots_per_carrier: 4,
-        },
+        FiberStackClassConfig::new(FiberStackClass::MIN, 8).expect("valid class config"),
+        FiberStackClassConfig::new(
+            FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero explicit class"))
+                .expect("explicit class should be valid"),
+            4,
+        )
+        .expect("valid class config"),
     ];
     let green = GreenPool::new(
         &GreenPoolConfig::classed(&classes).expect("classed green config should build"),
@@ -479,13 +483,11 @@ fn priority_green_pool_rejects_multi_carrier_topology_until_domain_semantics_exi
         ..ThreadPoolConfig::new()
     })
     .expect("two-carrier pool should build");
-    let priority_classes = [FiberStackClassConfig {
-        class: FiberStackClass::MIN,
-        slots_per_carrier: 4,
-    }];
-    let mut config =
-        GreenPoolConfig::classed(&priority_classes).expect("classed green config should build");
-    config.scheduling = GreenScheduling::Priority;
+    let priority_classes =
+        [FiberStackClassConfig::new(FiberStackClass::MIN, 4).expect("valid class config")];
+    let config = GreenPoolConfig::classed(&priority_classes)
+        .expect("classed green config should build")
+        .with_scheduling(GreenScheduling::Priority);
 
     let error = GreenPool::new(&config, &carriers)
         .expect_err("multi-carrier priority should stay unsupported until domains exist");
