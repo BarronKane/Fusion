@@ -1,10 +1,11 @@
 # Conservative fallback budgets for unknown external or toolchain-level call edges discovered by
 # the post-codegen stack analyzer. These are intentionally blunt until the analyzer grows richer
-# symbol provenance and per-target contracts.
+# symbol provenance and per-target contracts. `*` is supported only at one or both ends of the
+# symbol for simple prefix/suffix/contains matching.
 memset = 256
 memcpy = 256
 memmove = 256
 memcmp = 128
 bcmp = 128
-core::panicking::panic_cannot_unwind = 512
+core::panicking::panic_* = 512
 rust_begin_unwind = 1024

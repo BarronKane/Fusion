@@ -18,10 +18,13 @@ use crate::pal::hal::{
     HardwareTopologySummary,
     HardwareWriteSummary,
 };
+use crate::pal::mem::MemTopologyNodeId;
 use crate::pal::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
 use crate::pal::power::{PowerModeDepth, PowerModeDescriptor};
 use crate::pal::thread::{
     ThreadAuthoritySet,
+    ThreadClusterId,
+    ThreadCoreClassId,
     ThreadCoreId,
     ThreadError,
     ThreadExecutionLocation,
@@ -59,6 +62,7 @@ pub use super::board_contract::{
     CortexMDmaRequestClass,
     CortexMDmaRequestDescriptor,
     CortexMDmaTransferCaps,
+    CortexMExceptionStackObservation,
     CortexMFlashRegionDescriptor,
     CortexMIrqClass,
     CortexMIrqDescriptor,
@@ -82,10 +86,10 @@ pub const DESCRIPTOR: CortexMSocDescriptor = CortexMSocDescriptor {
     topology_summary: Some(HardwareTopologySummary {
         logical_cpu_count: Some(2),
         core_count: Some(2),
-        cluster_count: None,
-        package_count: None,
+        cluster_count: Some(1),
+        package_count: Some(1),
         numa_node_count: None,
-        core_class_count: None,
+        core_class_count: Some(1),
     }),
     topology_authorities: HardwareAuthoritySet::TOPOLOGY,
     chip_id_support: CortexMSocChipIdSupport::RegisterReadable,
@@ -116,7 +120,9 @@ const CORTEX_M_SCB_SCR: *mut u32 = 0xE000_ED10 as *mut u32;
 const CORTEX_M_SCB_SCR_SLEEPDEEP: u32 = 1 << 2;
 const CORTEX_M_NVIC_ISER: *mut u32 = 0xE000_E100 as *mut u32;
 const CORTEX_M_NVIC_ICER: *mut u32 = 0xE000_E180 as *mut u32;
+const CORTEX_M_NVIC_ISPR: *mut u32 = 0xE000_E200 as *mut u32;
 const CORTEX_M_NVIC_ICPR: *mut u32 = 0xE000_E280 as *mut u32;
+const CORTEX_M_NVIC_IPR: *mut u8 = 0xE000_E400 as *mut u8;
 const RP2350_TIMER0_BASE: usize = 0x400b_0000;
 const RP2350_TIMER1_BASE: usize = 0x400b_8000;
 const RP2350_IO_BANK0_BASE: usize = 0x4002_8000;
@@ -156,6 +162,7 @@ const RP2350_PIO_VALID_LANE_MASK: u8 = 0x0f;
 const RP2350_EVENT_TIMEOUT_TIMER_BASE: usize = RP2350_TIMER0_BASE;
 const RP2350_EVENT_TIMEOUT_ALARM_INDEX: u16 = 3;
 const RP2350_EVENT_TIMEOUT_IRQN: u16 = 3;
+const RP2350_INLINE_EXCEPTION_STACK_RESERVE_BYTES: usize = 128;
 const RP2350_IO_BANK0_INTR0_OFFSET: usize = 0x230;
 const RP2350_IO_QSPI_INTR_OFFSET: usize = 0x218;
 const RP2350_IO_IRQ_WORD_STRIDE: usize = 0x4;
@@ -164,6 +171,7 @@ const RP2350_GPIO_QSPI_SUMMARY_WORDS: usize = 1;
 const RP2350_GPIO_EDGE_EVENT_MASK: u32 = 0xCCCC_CCCC;
 const RP2350_TIMER_ALARM0_OFFSET: usize = 0x10;
 const RP2350_TIMER_ARMED_OFFSET: usize = 0x20;
+const RP2350_TIMER_TIMERAWH_OFFSET: usize = 0x24;
 const RP2350_TIMER_TIMERAWL_OFFSET: usize = 0x28;
 const RP2350_TIMER_INTR_OFFSET: usize = 0x3c;
 const RP2350_TIMER_INTE_OFFSET: usize = 0x40;
@@ -184,6 +192,7 @@ const RP2350_PIO_IRQ1_INTS_OFFSET: usize = 0x184;
 unsafe extern "C" {
     static __sheap: u8;
     static _stack_end: u8;
+    static _stack_start: u8;
 }
 
 const CLK_REF_MAIN_SOURCES: &[&str] = &[
@@ -1734,6 +1743,77 @@ fn rp2350_owned_sram_region() -> Option<CortexMMemoryRegionDescriptor> {
     rp2350_owned_sram_region_from_bounds(heap_start, stack_end)
 }
 
+fn rp2350_inline_current_exception_stack_allows(required_bytes: usize) -> bool {
+    if required_bytes == 0 {
+        return true;
+    }
+
+    let stack_floor = (&raw const _stack_end) as usize;
+    let current_msp = rp2350_current_msp();
+    rp2350_inline_current_exception_stack_allows_from_bounds(
+        stack_floor,
+        current_msp,
+        required_bytes,
+    )
+}
+
+const fn rp2350_inline_current_exception_stack_allows_from_bounds(
+    stack_floor: usize,
+    current_msp: usize,
+    required_bytes: usize,
+) -> bool {
+    if required_bytes == 0 {
+        return true;
+    }
+    if current_msp <= stack_floor {
+        return false;
+    }
+
+    (current_msp - stack_floor)
+        >= required_bytes.saturating_add(RP2350_INLINE_EXCEPTION_STACK_RESERVE_BYTES)
+}
+
+fn rp2350_exception_stack_observation() -> CortexMExceptionStackObservation {
+    let lower_bound = (&raw const _stack_end) as usize;
+    let upper_bound = (&raw const _stack_start) as usize;
+    let current_sp = rp2350_current_msp();
+    rp2350_exception_stack_observation_from_bounds(lower_bound, upper_bound, current_sp)
+}
+
+const fn rp2350_exception_stack_observation_from_bounds(
+    lower_bound: usize,
+    upper_bound: usize,
+    current_sp: usize,
+) -> CortexMExceptionStackObservation {
+    CortexMExceptionStackObservation {
+        lower_bound,
+        upper_bound,
+        configured_bytes: upper_bound.saturating_sub(lower_bound),
+        current_sp,
+        current_used_bytes: upper_bound.saturating_sub(current_sp),
+        current_headroom_bytes: current_sp.saturating_sub(lower_bound),
+        overflow_detected: current_sp < lower_bound,
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2350_current_msp() -> usize {
+    let msp: usize;
+    unsafe {
+        asm!(
+            "mrs {msp}, MSP",
+            msp = lateout(reg) msp,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    msp
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+const fn rp2350_current_msp() -> usize {
+    0
+}
+
 /// RP2350 SoC provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Rp2350Soc;
@@ -2197,6 +2277,35 @@ fn rp2350_irq_disable_line(irqn: u16) -> Result<(), HardwareError> {
     Ok(())
 }
 
+fn rp2350_irq_set_priority(irqn: u16, priority: u8) -> Result<(), HardwareError> {
+    if !rp2350_irq_is_known(irqn) {
+        return Err(HardwareError::invalid());
+    }
+
+    // SAFETY: NVIC IPR is the architected external-interrupt priority byte array. Each IRQ owns
+    // one byte. Writing it affects only the selected line's raw priority field.
+    unsafe { ptr::write_volatile(CORTEX_M_NVIC_IPR.add(usize::from(irqn)), priority) };
+    Ok(())
+}
+
+fn rp2350_irq_clear_pending_line(irqn: u16) -> Result<(), HardwareError> {
+    if !rp2350_irq_is_known(irqn) {
+        return Err(HardwareError::invalid());
+    }
+
+    rp2350_nvic_write(CORTEX_M_NVIC_ICPR, irqn);
+    Ok(())
+}
+
+fn rp2350_irq_set_pending_line(irqn: u16) -> Result<(), HardwareError> {
+    if !rp2350_irq_is_known(irqn) {
+        return Err(HardwareError::invalid());
+    }
+
+    rp2350_nvic_write(CORTEX_M_NVIC_ISPR, irqn);
+    Ok(())
+}
+
 fn rp2350_irq_acknowledge_line(irqn: u16) -> Result<(), HardwareError> {
     if let Some((timer_base, alarm_bit)) = rp2350_timer_base_and_alarm_bit(irqn) {
         let intr = (timer_base + RP2350_TIMER_INTR_OFFSET) as *mut u32;
@@ -2260,10 +2369,30 @@ fn rp2350_irq_acknowledge_line(irqn: u16) -> Result<(), HardwareError> {
 fn rp2350_event_timeout_deadline(timeout: Duration) -> u32 {
     let micros = timeout.as_micros();
     let delta = u32::try_from(micros).unwrap_or(u32::MAX);
-    let timerawl = (RP2350_EVENT_TIMEOUT_TIMER_BASE + RP2350_TIMER_TIMERAWL_OFFSET) as *const u32;
-    // SAFETY: TIMERAWL is a side-effect-free raw read of the RP2350 timer low word.
-    let now = unsafe { ptr::read_volatile(timerawl) };
+    let now = rp2350_monotonic_now_ticks() as u32;
     now.wrapping_add(delta.max(1))
+}
+
+fn rp2350_monotonic_now_ticks() -> u64 {
+    let timer_base = RP2350_EVENT_TIMEOUT_TIMER_BASE;
+    let timerawh = (timer_base + RP2350_TIMER_TIMERAWH_OFFSET) as *const u32;
+    let timerawl = (timer_base + RP2350_TIMER_TIMERAWL_OFFSET) as *const u32;
+
+    loop {
+        // SAFETY: TIMERAWH/TIMERAWL are side-effect-free raw reads of the RP2350 timer register
+        // pair. Reading high/low/high until the high word is stable yields one coherent 64-bit
+        // monotonic tick snapshot.
+        let high_before = unsafe { ptr::read_volatile(timerawh) };
+        let low = unsafe { ptr::read_volatile(timerawl) };
+        let high_after = unsafe { ptr::read_volatile(timerawh) };
+        if high_before == high_after {
+            return (u64::from(high_before) << 32) | u64::from(low);
+        }
+    }
+}
+
+fn rp2350_monotonic_now() -> Duration {
+    Duration::from_micros(rp2350_monotonic_now_ticks())
 }
 
 fn rp2350_arm_event_timeout(timeout: Duration) -> Result<(), HardwareError> {
@@ -2418,10 +2547,10 @@ impl CortexMSocBoard for Rp2350Soc {
             location: ThreadExecutionLocation {
                 logical_cpu: Some(logical_cpu),
                 core: Some(ThreadCoreId(current_core)),
-                cluster: None,
-                package: None,
+                cluster: Some(ThreadClusterId(0)),
+                package: Some(MemTopologyNodeId(0)),
                 numa_node: None,
-                core_class: None,
+                core_class: Some(ThreadCoreClassId(0)),
             },
             authorities: ThreadAuthoritySet::FIRMWARE | ThreadAuthoritySet::TOPOLOGY,
         })
@@ -2470,6 +2599,22 @@ impl CortexMSocBoard for Rp2350Soc {
         rp2350_irq_disable_line(irqn)
     }
 
+    fn irq_priority_supported(&self, irqn: u16) -> bool {
+        rp2350_irq_is_known(irqn)
+    }
+
+    fn irq_set_priority(&self, irqn: u16, priority: u8) -> Result<(), HardwareError> {
+        rp2350_irq_set_priority(irqn, priority)
+    }
+
+    fn irq_clear_pending(&self, irqn: u16) -> Result<(), HardwareError> {
+        rp2350_irq_clear_pending_line(irqn)
+    }
+
+    fn irq_set_pending(&self, irqn: u16) -> Result<(), HardwareError> {
+        rp2350_irq_set_pending_line(irqn)
+    }
+
     fn irq_acknowledge_supported(&self, irqn: u16) -> bool {
         rp2350_timer_base_and_alarm_bit(irqn).is_some()
             || rp2350_dma_irq_group(irqn).is_some()
@@ -2515,6 +2660,24 @@ impl CortexMSocBoard for Rp2350Soc {
 
     fn event_timeout_fired(&self) -> Result<bool, HardwareError> {
         Ok(rp2350_event_timeout_fired_now())
+    }
+
+    fn inline_current_exception_stack_allows(&self, required_bytes: usize) -> bool {
+        rp2350_inline_current_exception_stack_allows(required_bytes)
+    }
+
+    fn exception_stack_observation(
+        &self,
+    ) -> Result<CortexMExceptionStackObservation, HardwareError> {
+        Ok(rp2350_exception_stack_observation())
+    }
+
+    fn monotonic_now_supported(&self) -> bool {
+        true
+    }
+
+    fn monotonic_now(&self) -> Result<Duration, HardwareError> {
+        Ok(rp2350_monotonic_now())
     }
 
     fn pal_power_modes(&self) -> &'static [PowerModeDescriptor] {
@@ -2789,6 +2952,23 @@ pub fn selected_soc() -> CortexMSocDescriptor {
     board_contract::selected_soc(system_soc())
 }
 
+/// Returns whether the selected SoC currently has enough honest exception-stack headroom for one
+/// inline urgent handler body.
+#[must_use]
+pub fn inline_current_exception_stack_allows(required_bytes: usize) -> bool {
+    board_contract::inline_current_exception_stack_allows(system_soc(), required_bytes)
+}
+
+/// Returns one observation of the selected RP2350 board-owned main/exception stack window.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot surface the reserved stack window and current MSP
+/// honestly.
+pub fn exception_stack_observation() -> Result<CortexMExceptionStackObservation, HardwareError> {
+    board_contract::exception_stack_observation(system_soc())
+}
+
 /// Returns a coarse human-readable name for the selected SoC family.
 #[must_use]
 pub fn selected_soc_name() -> &'static str {
@@ -2861,6 +3041,39 @@ pub fn write_cores(output: &mut [ThreadCoreId]) -> Result<HardwareWriteSummary, 
     board_contract::write_cores(system_soc(), output)
 }
 
+/// Writes topology-defined cluster identifiers for the selected RP2350 SoC.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC does not expose cluster identities honestly.
+pub fn write_clusters(
+    output: &mut [ThreadClusterId],
+) -> Result<HardwareWriteSummary, HardwareError> {
+    board_contract::write_clusters(system_soc(), output)
+}
+
+/// Writes topology-defined package identifiers for the selected RP2350 SoC.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC does not expose package identities honestly.
+pub fn write_packages(
+    output: &mut [MemTopologyNodeId],
+) -> Result<HardwareWriteSummary, HardwareError> {
+    board_contract::write_packages(system_soc(), output)
+}
+
+/// Writes topology-defined core-class identifiers for the selected RP2350 SoC.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC does not expose core classes honestly.
+pub fn write_core_classes(
+    output: &mut [ThreadCoreClassId],
+) -> Result<HardwareWriteSummary, HardwareError> {
+    board_contract::write_core_classes(system_soc(), output)
+}
+
 /// Returns the current execution location when the selected SoC can surface it honestly.
 ///
 /// # Errors
@@ -2926,6 +3139,39 @@ pub fn irq_enable(irqn: u16) -> Result<(), HardwareError> {
 /// Returns an error if the requested IRQ line is unknown.
 pub fn irq_disable(irqn: u16) -> Result<(), HardwareError> {
     board_contract::irq_disable(system_soc(), irqn)
+}
+
+/// Returns whether one RP2350 IRQ line supports raw NVIC priority control.
+#[must_use]
+pub fn irq_priority_supported(irqn: u16) -> bool {
+    board_contract::irq_priority_supported(system_soc(), irqn)
+}
+
+/// Applies one raw NVIC priority byte to one RP2350 IRQ line.
+///
+/// # Errors
+///
+/// Returns an error if the requested IRQ line is unknown.
+pub fn irq_set_priority(irqn: u16, priority: u8) -> Result<(), HardwareError> {
+    board_contract::irq_set_priority(system_soc(), irqn, priority)
+}
+
+/// Clears the NVIC pending state for one RP2350 IRQ line.
+///
+/// # Errors
+///
+/// Returns an error if the requested IRQ line is unknown.
+pub fn irq_clear_pending(irqn: u16) -> Result<(), HardwareError> {
+    board_contract::irq_clear_pending(system_soc(), irqn)
+}
+
+/// Sets the NVIC pending state for one RP2350 IRQ line.
+///
+/// # Errors
+///
+/// Returns an error if the requested IRQ line is unknown.
+pub fn irq_set_pending(irqn: u16) -> Result<(), HardwareError> {
+    board_contract::irq_set_pending(system_soc(), irqn)
 }
 
 /// Returns whether one IRQ line can be acknowledged generically on the selected RP2350 board.
@@ -3052,6 +3298,21 @@ pub fn cancel_event_timeout() -> Result<(), HardwareError> {
 /// Returns an error if the selected board cannot surface finite event timeouts honestly.
 pub fn event_timeout_fired() -> Result<bool, HardwareError> {
     board_contract::event_timeout_fired(system_soc())
+}
+
+/// Returns whether the selected RP2350 board exposes one truthful monotonic timebase.
+#[must_use]
+pub fn monotonic_now_supported() -> bool {
+    board_contract::monotonic_now_supported(system_soc())
+}
+
+/// Returns the current monotonic timebase reading for the selected RP2350 board.
+///
+/// # Errors
+///
+/// Returns an error if the selected RP2350 board cannot surface one truthful monotonic timebase.
+pub fn monotonic_now() -> Result<Duration, HardwareError> {
+    board_contract::monotonic_now(system_soc())
 }
 
 /// Returns the selected RP2350 PAL-facing power descriptors.
@@ -3271,6 +3532,51 @@ mod tests {
     #[test]
     fn device_identity_surface_is_marked_otp_readable() {
         assert_eq!(DEVICE_ID_SUPPORT, CortexMSocDeviceIdSupport::OtpReadable);
+    }
+
+    #[test]
+    fn inline_current_exception_stack_budget_uses_conservative_reserve() {
+        assert!(rp2350_inline_current_exception_stack_allows_from_bounds(
+            0x2000_0000,
+            0x2000_0200,
+            0
+        ));
+        assert!(rp2350_inline_current_exception_stack_allows_from_bounds(
+            0x2000_0000,
+            0x2000_0200,
+            0x40
+        ));
+        assert!(!rp2350_inline_current_exception_stack_allows_from_bounds(
+            0x2000_0000,
+            0x2000_0080,
+            0x10
+        ));
+        assert!(!rp2350_inline_current_exception_stack_allows_from_bounds(
+            0x2000_0100,
+            0x2000_0100,
+            0x10
+        ));
+        assert!(!rp2350_inline_current_exception_stack_allows_from_bounds(
+            0x2000_1000,
+            0x2000_1010,
+            0x10
+        ));
+    }
+
+    #[test]
+    fn exception_stack_observation_reports_window_usage_and_overflow() {
+        let observation =
+            rp2350_exception_stack_observation_from_bounds(0x2000_0000, 0x2000_1000, 0x2000_0f00);
+        assert_eq!(observation.configured_bytes, 0x1000);
+        assert_eq!(observation.current_used_bytes, 0x100);
+        assert_eq!(observation.current_headroom_bytes, 0x0f00);
+        assert!(!observation.overflow_detected);
+
+        let overflow =
+            rp2350_exception_stack_observation_from_bounds(0x2000_0000, 0x2000_1000, 0x1fff_ffc0);
+        assert_eq!(overflow.current_headroom_bytes, 0);
+        assert!(overflow.current_used_bytes > overflow.configured_bytes);
+        assert!(overflow.overflow_detected);
     }
 
     #[test]

@@ -29,6 +29,7 @@ use crate::pal::thread::{ThreadClusterId, ThreadCoreClassId, ThreadCoreId, Threa
 pub use self::core::{CortexMCpuid, read_cpuid};
 #[allow(unused_imports)]
 pub use self::soc::board::{
+    CortexMExceptionStackObservation,
     CortexMIrqClass,
     CortexMIrqDescriptor,
     CortexMSocChipIdSupport,
@@ -38,10 +39,16 @@ pub use self::soc::board::{
     chip_identity as selected_soc_chip_identity,
     device_identity as selected_soc_device_identity,
     enter_power_mode as selected_soc_enter_power_mode,
+    exception_stack_observation as selected_soc_exception_stack_observation,
+    inline_current_exception_stack_allows as selected_soc_inline_current_exception_stack_allows,
     irq_acknowledge as selected_soc_irq_acknowledge,
     irq_acknowledge_supported as selected_soc_irq_acknowledge_supported,
+    irq_clear_pending as selected_soc_irq_clear_pending,
     irq_disable as selected_soc_irq_disable,
     irq_enable as selected_soc_irq_enable,
+    irq_priority_supported as selected_soc_irq_priority_supported,
+    irq_set_pending as selected_soc_irq_set_pending,
+    irq_set_priority as selected_soc_irq_set_priority,
     irqs as selected_soc_irqs,
     selected_soc_chip_id_support,
     selected_soc_device_id_support,
@@ -140,16 +147,14 @@ impl HardwareTopologyQuery for CortexMHardware {
         &self,
         output: &mut [ThreadClusterId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
-        let _ = output;
-        Err(HardwareError::unsupported())
+        soc::board::write_clusters(output)
     }
 
     fn write_packages(
         &self,
         output: &mut [HardwareTopologyNodeId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
-        let _ = output;
-        Err(HardwareError::unsupported())
+        soc::board::write_packages(output)
     }
 
     fn write_numa_nodes(
@@ -164,8 +169,7 @@ impl HardwareTopologyQuery for CortexMHardware {
         &self,
         output: &mut [ThreadCoreClassId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
-        let _ = output;
-        Err(HardwareError::unsupported())
+        soc::board::write_core_classes(output)
     }
 }
 

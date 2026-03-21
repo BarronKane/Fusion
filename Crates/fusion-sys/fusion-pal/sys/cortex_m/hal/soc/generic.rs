@@ -9,6 +9,10 @@ use crate::pal::hal::{
     HardwareWriteSummary,
 };
 use crate::pal::thread::{ThreadCoreId, ThreadError, ThreadId, ThreadLogicalCpuId};
+use crate::pal::{
+    hal::HardwareTopologyNodeId,
+    thread::{ThreadClusterId, ThreadCoreClassId},
+};
 use crate::pcu::{
     PcuEngineClaim,
     PcuEngineDescriptor,
@@ -31,6 +35,7 @@ pub use super::board_contract::{
     CortexMDmaControllerDescriptor,
     CortexMDmaRequestClass,
     CortexMDmaRequestDescriptor,
+    CortexMExceptionStackObservation,
     CortexMFlashRegionDescriptor,
     CortexMIrqClass,
     CortexMIrqDescriptor,
@@ -49,8 +54,15 @@ pub use super::board_contract::{
 
 const DESCRIPTOR: CortexMSocDescriptor = CortexMSocDescriptor {
     name: "generic-cortex-m",
-    topology_summary: None,
-    topology_authorities: HardwareAuthoritySet::empty(),
+    topology_summary: Some(HardwareTopologySummary {
+        logical_cpu_count: None,
+        core_count: None,
+        cluster_count: Some(1),
+        package_count: Some(1),
+        numa_node_count: None,
+        core_class_count: Some(1),
+    }),
+    topology_authorities: HardwareAuthoritySet::TOPOLOGY,
     chip_id_support: CortexMSocChipIdSupport::Unsupported,
 };
 
@@ -89,6 +101,23 @@ pub const fn system_soc() -> SocDevice {
 #[must_use]
 pub fn selected_soc() -> CortexMSocDescriptor {
     board_contract::selected_soc(system_soc())
+}
+
+/// Returns whether the selected SoC currently has enough honest exception-stack headroom for one
+/// inline urgent handler body.
+#[must_use]
+pub fn inline_current_exception_stack_allows(required_bytes: usize) -> bool {
+    board_contract::inline_current_exception_stack_allows(system_soc(), required_bytes)
+}
+
+/// Returns one observation of the selected SoC board's main/exception stack window.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot surface the reserved stack window and current MSP
+/// honestly.
+pub fn exception_stack_observation() -> Result<CortexMExceptionStackObservation, HardwareError> {
+    board_contract::exception_stack_observation(system_soc())
 }
 
 /// Returns a coarse human-readable name for the selected SoC family.
@@ -161,6 +190,39 @@ pub fn write_logical_cpus(
 /// Returns an error if the selected SoC does not expose a truthful core model.
 pub fn write_cores(output: &mut [ThreadCoreId]) -> Result<HardwareWriteSummary, HardwareError> {
     board_contract::write_cores(system_soc(), output)
+}
+
+/// Writes topology-defined cluster identifiers for the selected generic Cortex-M SoC.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC does not expose cluster identities honestly.
+pub fn write_clusters(
+    output: &mut [ThreadClusterId],
+) -> Result<HardwareWriteSummary, HardwareError> {
+    board_contract::write_clusters(system_soc(), output)
+}
+
+/// Writes topology-defined package identifiers for the selected generic Cortex-M SoC.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC does not expose package identities honestly.
+pub fn write_packages(
+    output: &mut [HardwareTopologyNodeId],
+) -> Result<HardwareWriteSummary, HardwareError> {
+    board_contract::write_packages(system_soc(), output)
+}
+
+/// Writes topology-defined core-class identifiers for the selected generic Cortex-M SoC.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC does not expose core classes honestly.
+pub fn write_core_classes(
+    output: &mut [ThreadCoreClassId],
+) -> Result<HardwareWriteSummary, HardwareError> {
+    board_contract::write_core_classes(system_soc(), output)
 }
 
 /// Returns the current execution location when the selected SoC can surface it honestly.

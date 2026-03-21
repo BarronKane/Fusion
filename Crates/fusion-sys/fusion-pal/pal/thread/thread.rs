@@ -284,6 +284,17 @@ pub trait ThreadSchedulerControl: ThreadBase {
     ///
     /// Returns an error if the backend cannot honestly perform the relative sleep.
     fn sleep_for(&self, duration: Duration) -> Result<(), ThreadError>;
+
+    /// Returns the current monotonic time observed by the backend scheduler surface.
+    ///
+    /// The returned duration is measured against a backend-defined monotonic origin. Callers may
+    /// compare values from the same running system for elapsed-time calculations, but must not
+    /// assign portable wall-clock meaning to the absolute origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot surface a truthful monotonic timestamp.
+    fn monotonic_now(&self) -> Result<Duration, ThreadError>;
 }
 
 /// Placement and locality control for a selected fusion-pal backend.

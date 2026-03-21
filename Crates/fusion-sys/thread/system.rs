@@ -180,6 +180,15 @@ impl ThreadSystem {
         fusion_pal::sys::thread::ThreadSchedulerControl::sleep_for(&self.inner, duration)
     }
 
+    /// Returns the current backend monotonic time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot surface a truthful monotonic timestamp.
+    pub fn monotonic_now(&self) -> Result<Duration, ThreadError> {
+        fusion_pal::sys::thread::ThreadSchedulerControl::monotonic_now(&self.inner)
+    }
+
     /// Applies placement policy to a thread handle.
     ///
     /// # Errors

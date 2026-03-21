@@ -17,6 +17,8 @@ default = []
 sys-cortex-m = ["fusion-pal/sys-cortex-m"]
 soc-rp2350 = ["fusion-pal/soc-rp2350"]
 sys-fusion-kn = ["fusion-pal/sys-fusion-kn"]
+cortex-m-vector-secure-world = ["fusion-pal/cortex-m-vector-secure-world"]
+cortex-m-vector-nonsecure-world = ["fusion-pal/cortex-m-vector-nonsecure-world"]
 
 [dependencies]
 fusion-pal = { workspace = true }

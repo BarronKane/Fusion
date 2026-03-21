@@ -25,6 +25,7 @@ use fusion_pal::sys::thread::{
 use super::{
     RawThreadEntry,
     ThreadConfig,
+    ThreadCoreClassId,
     ThreadError,
     ThreadLifecycleCaps,
     ThreadLogicalCpuId,
@@ -43,6 +44,12 @@ const ZERO_LOGICAL_CPU: ThreadLogicalCpuId = ThreadLogicalCpuId {
     group: fusion_pal::sys::thread::ThreadProcessorGroupId(0),
     index: 0,
 };
+
+#[derive(Clone, Copy)]
+enum WorkerPlacement<'a> {
+    LogicalCpus([ThreadLogicalCpuId; MAX_POOL_WORKERS]),
+    CoreClasses(&'a [ThreadCoreClassId]),
+}
 
 /// Pool worker identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -103,6 +110,8 @@ pub enum SystemPoolPlacement<'a> {
     Inherit,
     /// Attempt to place one carrier per logical CPU.
     PerCore,
+    /// Prefer carriers on the supplied heterogeneous core classes.
+    CoreClasses(&'a [ThreadCoreClassId]),
     /// Attempt to place one carrier per package or socket.
     PerPackage,
     /// Pin carriers to an explicit static set of logical CPUs.
@@ -529,6 +538,7 @@ fn validate_pool_config(
         SystemPoolPlacement::Inherit
             | SystemPoolPlacement::Static(_)
             | SystemPoolPlacement::PerCore
+            | SystemPoolPlacement::CoreClasses(_)
     ) {
         return Err(ThreadError::unsupported());
     }
@@ -540,13 +550,28 @@ fn validate_pool_config(
     {
         return Err(ThreadError::unsupported());
     }
-    if !matches!(config.placement, SystemPoolPlacement::Inherit)
-        && !support
-            .placement
-            .caps
-            .contains(fusion_pal::sys::thread::ThreadPlacementCaps::LOGICAL_CPU_AFFINITY)
-    {
-        return Err(ThreadError::unsupported());
+    match config.placement {
+        SystemPoolPlacement::Inherit => {}
+        SystemPoolPlacement::Static(_) | SystemPoolPlacement::PerCore => {
+            if !support
+                .placement
+                .caps
+                .contains(fusion_pal::sys::thread::ThreadPlacementCaps::LOGICAL_CPU_AFFINITY)
+            {
+                return Err(ThreadError::unsupported());
+            }
+        }
+        SystemPoolPlacement::CoreClasses(classes) => {
+            if classes.is_empty()
+                || support.placement.core_class_affinity
+                    == fusion_pal::sys::thread::ThreadGuarantee::Unsupported
+            {
+                return Err(ThreadError::unsupported());
+            }
+        }
+        SystemPoolPlacement::PerPackage | SystemPoolPlacement::Dynamic => {
+            return Err(ThreadError::unsupported());
+        }
     }
     Ok(())
 }
@@ -585,50 +610,77 @@ fn spawn_workers(
     config: &SystemThreadPoolConfig<'_>,
     worker_count: usize,
 ) -> Result<(), ThreadError> {
-    let worker_cpus = resolve_worker_cpus(config, worker_count)?;
+    let worker_placement = resolve_worker_placement(config, worker_count)?;
 
     for worker_index in 0..worker_count {
         let token = encode_worker_token(slot_index, worker_index);
-        let handle = if let Some(cpus) = worker_cpus.as_ref() {
-            let single = &cpus[worker_index..=worker_index];
-            let targets = [ThreadPlacementTarget::LogicalCpus(single)];
-            let placement = fusion_pal::sys::thread::ThreadPlacementRequest {
-                targets: &targets,
-                mode: ThreadConstraintMode::Require,
-                phase: ThreadPlacementPhase::PreStartPreferred,
-                migration: ThreadMigrationPolicy::Inherit,
-            };
-            let thread_config = ThreadConfig {
-                join_policy: fusion_pal::sys::thread::ThreadJoinPolicy::Joinable,
-                name: config.name_prefix,
-                start_mode: ThreadStartMode::PlacementCommitted,
-                placement,
-                scheduler: config.scheduler,
-                stack: config.stack,
-            };
-            unsafe {
-                system.spawn_raw(
-                    &thread_config,
-                    worker_thread_entry as RawThreadEntry,
-                    token.cast(),
-                )
-            }?
-        } else {
-            let thread_config = ThreadConfig {
-                join_policy: fusion_pal::sys::thread::ThreadJoinPolicy::Joinable,
-                name: config.name_prefix,
-                start_mode: ThreadStartMode::Immediate,
-                placement: fusion_pal::sys::thread::ThreadPlacementRequest::new(),
-                scheduler: config.scheduler,
-                stack: config.stack,
-            };
-            unsafe {
-                system.spawn_raw(
-                    &thread_config,
-                    worker_thread_entry as RawThreadEntry,
-                    token.cast(),
-                )
-            }?
+        let handle = match worker_placement.as_ref() {
+            Some(WorkerPlacement::LogicalCpus(cpus)) => {
+                let single = &cpus[worker_index..=worker_index];
+                let targets = [ThreadPlacementTarget::LogicalCpus(single)];
+                let placement = fusion_pal::sys::thread::ThreadPlacementRequest {
+                    targets: &targets,
+                    mode: ThreadConstraintMode::Require,
+                    phase: ThreadPlacementPhase::PreStartPreferred,
+                    migration: ThreadMigrationPolicy::Inherit,
+                };
+                let thread_config = ThreadConfig {
+                    join_policy: fusion_pal::sys::thread::ThreadJoinPolicy::Joinable,
+                    name: config.name_prefix,
+                    start_mode: ThreadStartMode::PlacementCommitted,
+                    placement,
+                    scheduler: config.scheduler,
+                    stack: config.stack,
+                };
+                unsafe {
+                    system.spawn_raw(
+                        &thread_config,
+                        worker_thread_entry as RawThreadEntry,
+                        token.cast(),
+                    )
+                }?
+            }
+            Some(WorkerPlacement::CoreClasses(classes)) => {
+                let targets = [ThreadPlacementTarget::CoreClasses(classes)];
+                let placement = fusion_pal::sys::thread::ThreadPlacementRequest {
+                    targets: &targets,
+                    mode: ThreadConstraintMode::Prefer,
+                    phase: ThreadPlacementPhase::PreStartPreferred,
+                    migration: ThreadMigrationPolicy::Inherit,
+                };
+                let thread_config = ThreadConfig {
+                    join_policy: fusion_pal::sys::thread::ThreadJoinPolicy::Joinable,
+                    name: config.name_prefix,
+                    start_mode: ThreadStartMode::PlacementCommitted,
+                    placement,
+                    scheduler: config.scheduler,
+                    stack: config.stack,
+                };
+                unsafe {
+                    system.spawn_raw(
+                        &thread_config,
+                        worker_thread_entry as RawThreadEntry,
+                        token.cast(),
+                    )
+                }?
+            }
+            None => {
+                let thread_config = ThreadConfig {
+                    join_policy: fusion_pal::sys::thread::ThreadJoinPolicy::Joinable,
+                    name: config.name_prefix,
+                    start_mode: ThreadStartMode::Immediate,
+                    placement: fusion_pal::sys::thread::ThreadPlacementRequest::new(),
+                    scheduler: config.scheduler,
+                    stack: config.stack,
+                };
+                unsafe {
+                    system.spawn_raw(
+                        &thread_config,
+                        worker_thread_entry as RawThreadEntry,
+                        token.cast(),
+                    )
+                }?
+            }
         };
 
         with_slot(slot_index, |slot| {
@@ -640,10 +692,10 @@ fn spawn_workers(
     Ok(())
 }
 
-fn resolve_worker_cpus(
-    config: &SystemThreadPoolConfig<'_>,
+fn resolve_worker_placement<'a>(
+    config: &'a SystemThreadPoolConfig<'a>,
     worker_count: usize,
-) -> Result<Option<[ThreadLogicalCpuId; MAX_POOL_WORKERS]>, ThreadError> {
+) -> Result<Option<WorkerPlacement<'a>>, ThreadError> {
     match config.placement {
         SystemPoolPlacement::Inherit => Ok(None),
         SystemPoolPlacement::Static(cpus) => {
@@ -652,7 +704,7 @@ fn resolve_worker_cpus(
             }
             let mut resolved = [ZERO_LOGICAL_CPU; MAX_POOL_WORKERS];
             resolved[..worker_count].copy_from_slice(&cpus[..worker_count]);
-            Ok(Some(resolved))
+            Ok(Some(WorkerPlacement::LogicalCpus(resolved)))
         }
         SystemPoolPlacement::PerCore => {
             let mut resolved = [ZERO_LOGICAL_CPU; MAX_POOL_WORKERS];
@@ -662,7 +714,10 @@ fn resolve_worker_cpus(
             if summary.total < worker_count {
                 return Err(ThreadError::resource_exhausted());
             }
-            Ok(Some(resolved))
+            Ok(Some(WorkerPlacement::LogicalCpus(resolved)))
+        }
+        SystemPoolPlacement::CoreClasses(classes) => {
+            Ok(Some(WorkerPlacement::CoreClasses(classes)))
         }
         SystemPoolPlacement::PerPackage | SystemPoolPlacement::Dynamic => {
             Err(ThreadError::unsupported())

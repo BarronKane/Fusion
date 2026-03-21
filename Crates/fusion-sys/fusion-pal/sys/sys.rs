@@ -108,3 +108,5 @@ pub mod power;
 pub mod sync;
 /// Public thread module re-exported from the selected private platform backend.
 pub mod thread;
+/// Public vector module re-exported from the selected private platform backend.
+pub mod vector;

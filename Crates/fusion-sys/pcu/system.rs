@@ -33,6 +33,7 @@ use super::{
 ))]
 use super::{
     PcuIrInSource,
+    PcuIrInstructionTiming,
     PcuIrIrqAction,
     PcuIrJumpCondition,
     PcuIrMovDestination,
@@ -363,8 +364,70 @@ const fn rp2350_encode_nop() -> u16 {
     test,
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
-const fn rp2350_encode_delay(cycles: u8) -> u16 {
-    ((cycles as u16) - 1) << 8
+fn rp2350_timing_field_bits(execution: &PcuIrExecutionConfig) -> u8 {
+    execution.pins.sideset_count.unwrap_or(0) + u8::from(execution.pins.sideset_optional)
+}
+
+#[cfg(any(
+    test,
+    all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
+))]
+fn rp2350_encode_instruction_timing(
+    execution: &PcuIrExecutionConfig,
+    instruction: PcuIrInstruction,
+    timing: PcuIrInstructionTiming,
+) -> Result<u16, PcuError> {
+    let timing_bits = rp2350_timing_field_bits(execution);
+    if timing_bits > 5 {
+        return Err(PcuError::invalid());
+    }
+
+    let available_delay_bits = 5 - timing_bits;
+    let max_stall_cycles = if available_delay_bits == 0 {
+        0
+    } else {
+        (1_u8 << available_delay_bits) - 1
+    };
+
+    let implied_stall_cycles = match instruction {
+        PcuIrInstruction::Delay { cycles } => {
+            if cycles == 0 || cycles > 32 {
+                return Err(PcuError::invalid());
+            }
+            cycles - 1
+        }
+        _ => 0,
+    };
+    let total_stall_cycles = implied_stall_cycles
+        .checked_add(timing.stall_cycles)
+        .ok_or_else(PcuError::resource_exhausted)?;
+    if total_stall_cycles > max_stall_cycles {
+        return Err(PcuError::invalid());
+    }
+
+    let mut encoded = u16::from(total_stall_cycles) << 8;
+    match (
+        execution.pins.sideset_optional,
+        execution.pins.sideset_count,
+        timing.sideset_bits,
+    ) {
+        (false, Some(bit_count), Some(value)) => {
+            if bit_count == 0 || bit_count > 5 || value >= (1_u8 << bit_count) {
+                return Err(PcuError::invalid());
+            }
+            encoded |= u16::from(value) << (13 - bit_count);
+        }
+        (false | true, Some(_) | None, None) => {}
+        (false | true, None, Some(_)) => return Err(PcuError::invalid()),
+        (true, Some(bit_count), Some(value)) => {
+            if bit_count > 4 || value >= (1_u8 << bit_count) {
+                return Err(PcuError::invalid());
+            }
+            encoded |= 0x1000 | (u16::from(value) << (12 - bit_count));
+        }
+    }
+
+    Ok(encoded)
 }
 
 #[cfg(any(
@@ -600,16 +663,15 @@ fn lower_rp2350_program<'a>(
     if storage.len() < program.instructions.len() {
         return Err(PcuError::resource_exhausted());
     }
+    if let Some(timing) = program.timing
+        && timing.len() != program.instructions.len()
+    {
+        return Err(PcuError::invalid());
+    }
 
     for (index, instruction) in program.instructions.iter().copied().enumerate() {
-        storage[index] = match instruction {
-            PcuIrInstruction::Nop => rp2350_encode_nop(),
-            PcuIrInstruction::Delay { cycles } => {
-                if cycles == 0 || cycles > 32 {
-                    return Err(PcuError::invalid());
-                }
-                rp2350_encode_nop() | rp2350_encode_delay(cycles)
-            }
+        let base = match instruction {
+            PcuIrInstruction::Nop | PcuIrInstruction::Delay { .. } => rp2350_encode_nop(),
             PcuIrInstruction::Wait(PcuIrWaitCondition::PinLow { pin }) => {
                 if pin > 31 {
                     return Err(PcuError::invalid());
@@ -677,6 +739,12 @@ fn lower_rp2350_program<'a>(
                 rp2350_encode_jmp_condition(condition, target)
             }
         };
+        let timing = program
+            .timing
+            .and_then(|timing| timing.get(index).copied())
+            .unwrap_or_default();
+        storage[index] =
+            base | rp2350_encode_instruction_timing(&program.execution, instruction, timing)?;
     }
 
     Ok(PcuProgramImage {
@@ -1298,6 +1366,54 @@ mod tests {
     }
 
     #[test]
+    fn rp2350_lowering_applies_per_instruction_sideset_and_stall_cycles() {
+        let timing = [
+            PcuIrInstructionTiming {
+                stall_cycles: 1,
+                sideset_bits: Some(0),
+            },
+            PcuIrInstructionTiming {
+                stall_cycles: 0,
+                sideset_bits: Some(1),
+            },
+        ];
+        let program = PcuIrProgram::new(
+            super::super::PcuProgramId(5),
+            &[
+                PcuIrInstruction::Pull {
+                    if_empty: false,
+                    blocking: true,
+                },
+                PcuIrInstruction::Out {
+                    destination: PcuIrOutDestination::Pins,
+                    bit_count: 8,
+                },
+            ],
+        )
+        .with_execution(PcuIrExecutionConfig {
+            pins: super::super::PcuIrPinConfig {
+                sideset_base: Some(12),
+                sideset_count: Some(1),
+                sideset_optional: false,
+                ..super::super::PcuIrPinConfig::default()
+            },
+            ..PcuIrExecutionConfig::default()
+        })
+        .with_timing(&timing);
+        let mut storage = [0_u16; 2];
+        let image = lower_rp2350_program(&program, &mut storage)
+            .expect("timed program should lower with side-set payloads");
+
+        assert_eq!(
+            image.words,
+            &[
+                rp2350_encode_pull(false, true) | (1 << 8),
+                rp2350_encode_out(PcuIrOutDestination::Pins, 8) | (1 << 12),
+            ]
+        );
+    }
+
+    #[test]
     fn rp2350_lowering_encodes_mov_and_conditional_jump_variants() {
         let program = PcuIrProgram::new(
             super::super::PcuProgramId(9),
@@ -1326,6 +1442,34 @@ mod tests {
                 ),
                 rp2350_encode_jmp_condition(PcuIrJumpCondition::PinHigh, 1),
             ]
+        );
+    }
+
+    #[test]
+    fn rp2350_lowering_supports_clocked_scanline_kernel_helper() {
+        let mut instructions = [PcuIrInstruction::Nop; 3];
+        let mut timing = [PcuIrInstructionTiming::default(); 3];
+        let program = super::super::clocked_parallel_scanline_tx(
+            super::super::PcuProgramId(13),
+            8,
+            2,
+            10,
+            &mut instructions,
+            &mut timing,
+        )
+        .expect("kernel helper should build");
+        let mut storage = [0_u16; 3];
+        let image = lower_rp2350_program(&program, &mut storage)
+            .expect("clocked scanline kernel should lower");
+
+        assert_eq!(image.words[0], rp2350_encode_pull(false, true));
+        assert_eq!(
+            image.words[1],
+            rp2350_encode_out(PcuIrOutDestination::Pins, 8) | (1 << 12)
+        );
+        assert_eq!(
+            image.words[2],
+            rp2350_encode_jmp_condition(PcuIrJumpCondition::Always, 0)
         );
     }
 

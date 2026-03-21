@@ -73,20 +73,22 @@ bitflags! {
         const YIELD                  = 1 << 0;
         /// Supports relative sleep.
         const SLEEP_FOR              = 1 << 1;
+        /// Supports observing the current monotonic scheduler-visible timebase.
+        const MONOTONIC_NOW          = 1 << 2;
         /// Supports explicit numeric or classed priority settings.
-        const PRIORITY               = 1 << 2;
+        const PRIORITY               = 1 << 3;
         /// Supports querying effective priority.
-        const QUERY_PRIORITY         = 1 << 3;
+        const QUERY_PRIORITY         = 1 << 4;
         /// Supports explicit scheduler classes.
-        const CLASS                  = 1 << 4;
+        const CLASS                  = 1 << 5;
         /// Supports querying effective scheduler class.
-        const QUERY_CLASS            = 1 << 5;
+        const QUERY_CLASS            = 1 << 6;
         /// Supports fixed-priority realtime scheduling.
-        const REALTIME_FIXED         = 1 << 6;
+        const REALTIME_FIXED         = 1 << 7;
         /// Supports round-robin realtime scheduling.
-        const REALTIME_ROUND_ROBIN   = 1 << 7;
+        const REALTIME_ROUND_ROBIN   = 1 << 8;
         /// Supports deadline-style scheduling.
-        const DEADLINE               = 1 << 8;
+        const DEADLINE               = 1 << 9;
     }
 }
 

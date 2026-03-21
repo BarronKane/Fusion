@@ -116,6 +116,10 @@ impl ThreadSchedulerControl for UnsupportedThread {
     fn sleep_for(&self, _duration: Duration) -> Result<(), ThreadError> {
         Err(ThreadError::unsupported())
     }
+
+    fn monotonic_now(&self) -> Result<Duration, ThreadError> {
+        Err(ThreadError::unsupported())
+    }
 }
 
 impl ThreadPlacementControl for UnsupportedThread {

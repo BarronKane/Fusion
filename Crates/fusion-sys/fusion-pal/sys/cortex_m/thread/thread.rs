@@ -204,6 +204,10 @@ impl ThreadSchedulerControl for CortexMThread {
             (Ok(()), Ok(())) => Ok(()),
         }
     }
+
+    fn monotonic_now(&self) -> Result<Duration, ThreadError> {
+        super::super::hal::soc::board::monotonic_now().map_err(map_hardware_error)
+    }
 }
 
 impl ThreadPlacementControl for CortexMThread {
@@ -259,6 +263,10 @@ fn scheduler_support() -> ThreadSchedulerSupport {
 
     if super::super::hal::soc::board::event_timeout_supported() {
         caps |= ThreadSchedulerCaps::SLEEP_FOR;
+        authorities |= ThreadAuthoritySet::FIRMWARE;
+    }
+    if super::super::hal::soc::board::monotonic_now_supported() {
+        caps |= ThreadSchedulerCaps::MONOTONIC_NOW;
         authorities |= ThreadAuthoritySet::FIRMWARE;
     }
 

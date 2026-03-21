@@ -1,6 +1,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use fusion_pal::sys::mem::{MemAdviceCaps, MemBase, system_mem};
+use fusion_std::sync::Mutex as FusionMutex;
 use fusion_std::thread::{
     DeterministicConstraints,
     EventInterest,
@@ -25,12 +26,19 @@ use fusion_std::thread::{
     GreenScheduling,
     HugePagePolicy,
     HugePageSize,
+    RedDispatchPolicy,
+    RedThread,
+    RedThreadConfig,
     Runtime,
     RuntimeConfig,
     RuntimeError,
     RuntimeProfile,
+    TaskPlacement,
     ThreadPool,
     ThreadPoolConfig,
+    TieredGreenPool,
+    TieredGreenPoolConfig,
+    TieredTaskAttributes,
     generated_explicit_task_contract_attributes,
     wait_for_readiness,
     yield_now as green_yield_now,
@@ -134,6 +142,22 @@ fusion_std::declare_generated_fiber_task_contract!(
     ExternalGeneratedContractTask,
     NonZeroUsize::new(8 * 1024).unwrap(),
     FiberTaskPriority::new(9),
+);
+
+struct ExternalGeneratedContractOnlyTask(u32);
+
+impl GeneratedExplicitFiberTask for ExternalGeneratedContractOnlyTask {
+    type Output = u32;
+
+    fn run(self) -> Self::Output {
+        self.0 + 4
+    }
+}
+
+fusion_std::declare_generated_fiber_task_contract!(
+    ExternalGeneratedContractOnlyTask,
+    NonZeroUsize::new(8 * 1024).unwrap(),
+    FiberTaskPriority::new(10),
 );
 
 const EXTERNAL_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [
@@ -259,6 +283,48 @@ fn downstream_generated_task_contracts_work_without_runtime_type_lookup() {
             .join()
             .expect("external generated task should complete"),
         7
+    );
+
+    green
+        .shutdown()
+        .expect("green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn downstream_generated_contract_first_spawn_works_without_runtime_metadata_override() {
+    let _guard = lock_fusion_std_tests();
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+    let classes = [
+        FiberStackClassConfig::new(FiberStackClass::MIN, 4).expect("valid class config"),
+        FiberStackClassConfig::new(
+            FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero generated class"))
+                .expect("generated class should be valid"),
+            2,
+        )
+        .expect("valid class config"),
+    ];
+    let green = GreenPool::new(
+        &GreenPoolConfig::classed(&classes).expect("classed green config should build"),
+        &carrier,
+    )
+    .expect("green pool should build");
+
+    green
+        .validate_generated_task_contract::<ExternalGeneratedContractOnlyTask>()
+        .expect("live pool should accept compile-time generated contracts");
+
+    let handle = green
+        .spawn_generated_contract(ExternalGeneratedContractOnlyTask(38))
+        .expect("contract-first generated task should spawn");
+    assert_eq!(
+        handle
+            .join()
+            .expect("contract-first generated task should complete"),
+        42
     );
 
     green
@@ -470,6 +536,95 @@ fn explicit_fiber_task_uses_compile_time_stack_contract() {
     carrier
         .shutdown()
         .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn tiered_green_pool_routes_auto_and_explicit_work_honestly() {
+    let _guard = lock_fusion_std_tests();
+
+    let tiered = TieredGreenPool::new(&TieredGreenPoolConfig::new())
+        .expect("tiered green scheduler should build");
+
+    let negative_priority =
+        TieredTaskAttributes::new(FiberTaskAttributes::new(FiberStackClass::MIN))
+            .with_placement(TaskPlacement::Auto);
+    let negative_priority = TieredTaskAttributes {
+        fiber: negative_priority
+            .fiber
+            .with_priority(FiberTaskPriority::new(-5)),
+        ..negative_priority
+    };
+    assert_eq!(
+        tiered.resolve_tier(negative_priority),
+        fusion_std::thread::CarrierTier::Efficiency
+    );
+    assert_eq!(
+        tiered.resolve_tier(negative_priority.with_placement(TaskPlacement::Tier(
+            fusion_std::thread::CarrierTier::Performance,
+        )),),
+        fusion_std::thread::CarrierTier::Performance
+    );
+
+    let started = Arc::new(AtomicU32::new(0));
+    let gate = Arc::new(AtomicU32::new(0));
+    let low_started = Arc::clone(&started);
+    let low_gate = Arc::clone(&gate);
+    let handle = tiered
+        .spawn_with_task(negative_priority, move || {
+            low_started.store(1, Ordering::Release);
+            while low_gate.load(Ordering::Acquire) == 0 {
+                green_yield_now().expect("tiered green task should yield cooperatively");
+            }
+            11_u32
+        })
+        .expect("tiered green scheduler should accept efficiency-tier work");
+    while started.load(Ordering::Acquire) == 0 {
+        thread::yield_now();
+    }
+
+    let stats = tiered
+        .stats()
+        .expect("tiered green stats should remain observable");
+    assert_eq!(stats.performance_green_threads, 0);
+    assert_eq!(stats.efficiency_green_threads, 1);
+
+    gate.store(1, Ordering::Release);
+    assert_eq!(
+        handle.join().expect("tiered green task should complete"),
+        11
+    );
+    tiered
+        .shutdown()
+        .expect("tiered green scheduler should shut down cleanly");
+}
+
+#[test]
+fn red_thread_executes_native_urgent_work() {
+    let _guard = lock_fusion_std_tests();
+
+    let red = RedThread::spawn(&RedThreadConfig::new(), || 23_u32)
+        .expect("red thread should spawn on hosted native threads");
+    let admission = red.admission();
+    assert_eq!(
+        admission.reservation,
+        fusion_sys::thread::ThreadGuarantee::Verified
+    );
+    assert_eq!(red.join().expect("red thread should join cleanly"), 23);
+}
+
+#[test]
+fn red_thread_rejects_unimplemented_queue_policy() {
+    let _guard = lock_fusion_std_tests();
+
+    let error = RedThread::spawn(
+        &RedThreadConfig::new().with_dispatch(RedDispatchPolicy::QueueIfBusy),
+        || 1_u32,
+    )
+    .expect_err("queued urgent dispatch should stay unsupported until real reservation exists");
+    assert_eq!(
+        error.kind(),
+        fusion_sys::thread::ThreadError::unsupported().kind()
+    );
 }
 
 #[test]
@@ -689,9 +844,24 @@ fn fiber_pool_stack_stats_follow_telemetry_policy() {
 
     gate.store(1, Ordering::Release);
     assert_eq!(handle.join().expect("fiber should complete"), 7);
-    let drained = enabled
-        .stack_stats()
-        .expect("telemetry-enabled pool should report stack stats");
+    let drained = {
+        let mut snapshot = None;
+        for _ in 0..100 {
+            let stats = enabled
+                .stack_stats()
+                .expect("telemetry-enabled pool should report stack stats");
+            if stats.peak_committed_pages == 0 && stats.committed_distribution.is_empty() {
+                snapshot = Some(stats);
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        snapshot.unwrap_or_else(|| {
+            enabled
+                .stack_stats()
+                .expect("telemetry-enabled pool should report stack stats")
+        })
+    };
     assert_eq!(drained.total_growth_events, 0);
     assert_eq!(drained.peak_committed_pages, 0);
     assert!(drained.committed_distribution.is_empty());
@@ -818,6 +988,45 @@ fn fibers_wait_on_pipe_readiness_and_resume_cleanly() {
         b'p'
     );
     client.join().expect("pipe writer thread should finish");
+
+    fibers
+        .shutdown()
+        .expect("green pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn fibers_reject_readiness_park_while_cooperative_mutex_is_held() {
+    let _guard = lock_fusion_std_tests();
+
+    let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
+    let fibers = GreenPool::new(&GreenPoolConfig::new(), &carrier)
+        .expect("green pool should build on the carrier pool");
+    let pipe = Arc::new(TestPipe::new());
+    let lock = Arc::new(FusionMutex::new(()));
+
+    let task = fibers
+        .spawn({
+            let pipe = Arc::clone(&pipe);
+            let lock = Arc::clone(&lock);
+            move || -> Result<(), FiberError> {
+                let _guard = lock.lock().expect("cooperative mutex should lock");
+                let error = wait_for_readiness(
+                    pipe.source(),
+                    EventInterest::READABLE | EventInterest::ERROR | EventInterest::HANGUP,
+                )
+                .expect_err("park should reject while a cooperative mutex is held");
+                assert_eq!(error.kind(), FiberError::state_conflict().kind());
+                Ok(())
+            }
+        })
+        .expect("pipe-waiting fiber should spawn");
+
+    task.join()
+        .expect("task should complete without runtime failure")
+        .expect("task should observe the expected readiness rejection");
 
     fibers
         .shutdown()

@@ -217,6 +217,34 @@ fn sleep_for_is_honest() {
 }
 
 #[test]
+fn monotonic_now_is_honest() {
+    let thread = system_thread();
+    let support = thread.support();
+
+    if support
+        .scheduler
+        .caps
+        .contains(fusion_sys::thread::ThreadSchedulerCaps::MONOTONIC_NOW)
+    {
+        let first = thread
+            .monotonic_now()
+            .expect("monotonic time should be readable");
+        let second = thread
+            .monotonic_now()
+            .expect("monotonic time should remain readable");
+        assert!(second >= first);
+    } else {
+        assert_eq!(
+            thread
+                .monotonic_now()
+                .expect_err("unsupported monotonic clock")
+                .kind(),
+            ThreadErrorKind::Unsupported
+        );
+    }
+}
+
+#[test]
 fn system_thread_pool_executes_submitted_work_and_drains_on_shutdown() {
     let pool = SystemThreadPool::new(ThreadSystem::new(), &SystemThreadPoolConfig::new())
         .expect("thread pool should build on supported backend");

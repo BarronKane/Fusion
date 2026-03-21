@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -15,6 +16,12 @@ fn main() {
 fn run() -> Result<(), String> {
     let config = AnalyzerConfig::parse()?;
     let outputs = generate_outputs(&config)?;
+    let red_inline_contracts = config
+        .red_inline_contracts_path
+        .as_ref()
+        .map(load_red_inline_contracts)
+        .transpose()?
+        .unwrap_or_default();
 
     if let Some(path) = config.report_path.as_ref() {
         write_unknown_symbol_report(path, &outputs.unknown_symbol_report)?;
@@ -22,6 +29,11 @@ fn run() -> Result<(), String> {
     if let Some(path) = config.rust_contracts_path.as_ref() {
         let rendered =
             render_rust_contracts(&outputs.generated_entries, config.crate_name.as_deref());
+        fs::write(path, rendered)
+            .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    }
+    if let Some(path) = config.red_inline_rust_path.as_ref() {
+        let rendered = render_red_inline_contracts(&red_inline_contracts);
         fs::write(path, rendered)
             .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
     }
@@ -39,6 +51,8 @@ struct AnalyzerConfig {
     contracts_path: Option<PathBuf>,
     report_path: Option<PathBuf>,
     rust_contracts_path: Option<PathBuf>,
+    red_inline_contracts_path: Option<PathBuf>,
+    red_inline_rust_path: Option<PathBuf>,
     crate_name: Option<String>,
 }
 
@@ -62,6 +76,8 @@ impl AnalyzerConfig {
         let mut contracts_path = None;
         let mut report_path = None;
         let mut rust_contracts_path = None;
+        let mut red_inline_contracts_path = None;
+        let mut red_inline_rust_path = None;
         let mut crate_name = None;
         while let Some(arg) = args.next() {
             match arg.to_string_lossy().as_ref() {
@@ -81,6 +97,18 @@ impl AnalyzerConfig {
                     rust_contracts_path =
                         Some(PathBuf::from(args.next().ok_or_else(|| {
                             usage("missing value for --rust-contracts")
+                        })?));
+                }
+                "--red-inline-contracts" => {
+                    red_inline_contracts_path =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            usage("missing value for --red-inline-contracts")
+                        })?));
+                }
+                "--red-inline-rust" => {
+                    red_inline_rust_path =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            usage("missing value for --red-inline-rust")
                         })?));
                 }
                 "--crate-name" => {
@@ -111,6 +139,8 @@ impl AnalyzerConfig {
             contracts_path,
             report_path,
             rust_contracts_path,
+            red_inline_contracts_path,
+            red_inline_rust_path,
             crate_name,
         })
     }
@@ -137,10 +167,34 @@ struct GeneratedRustContractEntry {
     priority: i8,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RedInlineContractEntry {
+    name: String,
+    spans: Vec<u16>,
+    fallback_lane: RedInlineFallbackLane,
+    fallback_cookie: u32,
+    current_exception_stack_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedInlineFallbackLane {
+    DeferredPrimary,
+    DeferredSecondary,
+}
+
 #[derive(Debug)]
 struct UnknownSymbolContract {
     symbol: String,
+    matcher: UnknownSymbolContractMatcher,
     stack_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnknownSymbolContractMatcher {
+    Exact,
+    Prefix,
+    Suffix,
+    Contains,
 }
 
 #[derive(Debug, Default)]
@@ -155,6 +209,8 @@ struct UnknownSymbolObservation {
     normalized_demangled: Option<String>,
     matched_contract_symbol: Option<String>,
     contract_stack_bytes: Option<usize>,
+    callers: Vec<String>,
+    roots: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -183,6 +239,7 @@ struct SymbolResolutionContext<'a> {
     contracts: &'a [UnknownSymbolContract],
     unknown_symbol_report: &'a mut UnknownSymbolReport,
     aggregated_stack_sizes: &'a mut BTreeMap<String, usize>,
+    root_type_name: &'a str,
 }
 
 fn generate_outputs(config: &AnalyzerConfig) -> Result<GeneratedOutputs, String> {
@@ -269,9 +326,10 @@ fn resolve_root_stack_bytes(
                 contracts,
                 unknown_symbol_report,
                 aggregated_stack_sizes,
+                root_type_name: &root.type_name,
             };
             context
-                .resolve_symbol_stack_bytes(&resolved_symbol, &mut Vec::new())
+                .resolve_symbol_stack_bytes(&resolved_symbol, None, &mut Vec::new())
                 .map_err(|error| {
                     format!(
                         "failed to resolve worst-case stack for `{}` (`{}`): {error}",
@@ -380,6 +438,8 @@ fn load_contracts_from_str(contents: &str) -> Result<Vec<UnknownSymbolContract>,
         if symbol.is_empty() {
             return Err(format!("contract line {} has empty symbol", line_no + 1));
         }
+        let (matcher, symbol) = parse_unknown_symbol_contract_matcher(symbol)
+            .ok_or_else(|| format!("contract line {} has invalid wildcard pattern", line_no + 1))?;
         let stack_bytes = raw_stack_bytes
             .trim()
             .parse::<usize>()
@@ -392,10 +452,30 @@ fn load_contracts_from_str(contents: &str) -> Result<Vec<UnknownSymbolContract>,
         }
         contracts.push(UnknownSymbolContract {
             symbol: symbol.to_owned(),
+            matcher,
             stack_bytes,
         });
     }
     Ok(contracts)
+}
+
+fn parse_unknown_symbol_contract_matcher(
+    raw_symbol: &str,
+) -> Option<(UnknownSymbolContractMatcher, &str)> {
+    let starts_with_wildcard = raw_symbol.starts_with('*');
+    let ends_with_wildcard = raw_symbol.ends_with('*');
+    let trimmed = raw_symbol.trim_matches('*');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let matcher = match (starts_with_wildcard, ends_with_wildcard) {
+        (false, false) => UnknownSymbolContractMatcher::Exact,
+        (false, true) => UnknownSymbolContractMatcher::Prefix,
+        (true, false) => UnknownSymbolContractMatcher::Suffix,
+        (true, true) => UnknownSymbolContractMatcher::Contains,
+    };
+    Some((matcher, trimmed))
 }
 
 fn load_call_graph(path: &PathBuf) -> Result<BTreeMap<String, Vec<String>>, String> {
@@ -577,10 +657,16 @@ fn parse_llvm_objdump_call_graph(contents: &str) -> BTreeMap<String, Vec<String>
     let mut call_graph = BTreeMap::<String, Vec<String>>::new();
     let mut current_function: Option<String> = None;
     let mut last_instruction_was_call = false;
+    let mut pending_direct_target: Option<String> = None;
 
     for raw_line in contents.lines() {
         let line = raw_line.trim_end();
         if let Some(function) = parse_objdump_function_header(line) {
+            flush_pending_direct_call(
+                &mut call_graph,
+                current_function.as_deref(),
+                pending_direct_target.take(),
+            );
             current_function = Some(function.to_owned());
             last_instruction_was_call = false;
             continue;
@@ -588,21 +674,64 @@ fn parse_llvm_objdump_call_graph(contents: &str) -> BTreeMap<String, Vec<String>
 
         if let Some(target) = parse_objdump_relocation_target(line) {
             if last_instruction_was_call && let Some(caller) = current_function.as_ref() {
-                let entry = call_graph.entry(caller.clone()).or_default();
-                if !entry.iter().any(|existing| existing == target) {
-                    entry.push(target.to_owned());
-                }
+                record_call_edge(&mut call_graph, caller, target);
             }
+            pending_direct_target = None;
             last_instruction_was_call = false;
             continue;
         }
 
         if let Some(mnemonic) = parse_objdump_instruction_mnemonic(line) {
-            last_instruction_was_call = instruction_maybe_calls(mnemonic);
+            flush_pending_direct_call(
+                &mut call_graph,
+                current_function.as_deref(),
+                pending_direct_target.take(),
+            );
+            if instruction_maybe_calls(mnemonic) {
+                pending_direct_target =
+                    parse_objdump_inline_call_target(line).map(ToOwned::to_owned);
+                last_instruction_was_call = true;
+            } else {
+                pending_direct_target = None;
+                last_instruction_was_call = false;
+            }
+            continue;
+        }
+
+        if line.trim().is_empty() {
+            flush_pending_direct_call(
+                &mut call_graph,
+                current_function.as_deref(),
+                pending_direct_target.take(),
+            );
+            last_instruction_was_call = false;
         }
     }
 
+    flush_pending_direct_call(
+        &mut call_graph,
+        current_function.as_deref(),
+        pending_direct_target,
+    );
+
     call_graph
+}
+
+fn record_call_edge(call_graph: &mut BTreeMap<String, Vec<String>>, caller: &str, target: &str) {
+    let entry = call_graph.entry(caller.to_owned()).or_default();
+    if !entry.iter().any(|existing| existing == target) {
+        entry.push(target.to_owned());
+    }
+}
+
+fn flush_pending_direct_call(
+    call_graph: &mut BTreeMap<String, Vec<String>>,
+    caller: Option<&str>,
+    target: Option<String>,
+) {
+    if let (Some(caller), Some(target)) = (caller, target) {
+        record_call_edge(call_graph, caller, &target);
+    }
 }
 
 fn parse_objdump_function_header(line: &str) -> Option<&str> {
@@ -639,6 +768,12 @@ fn parse_objdump_relocation_target(line: &str) -> Option<&str> {
         return None;
     }
     let target = trimmed.split_whitespace().last()?;
+    normalize_relocation_target(target)
+}
+
+fn parse_objdump_inline_call_target(line: &str) -> Option<&str> {
+    let (_, target) = line.rsplit_once('<')?;
+    let target = target.strip_suffix('>')?;
     normalize_relocation_target(target)
 }
 
@@ -769,8 +904,11 @@ impl UnknownSymbolReport {
         symbol_index: Option<&ArtifactSymbolIndex>,
         matched_contract_symbol: Option<&str>,
         contract_stack_bytes: Option<usize>,
+        caller: Option<&str>,
+        root: Option<&str>,
     ) {
         let metadata = symbol_index.and_then(|index| index.metadata_for_raw(symbol));
+        let caller_label = caller.map(|value| display_symbol_label(value, symbol_index));
         let entry = self
             .observations
             .entry(symbol.to_owned())
@@ -780,6 +918,8 @@ impl UnknownSymbolReport {
                 normalized_demangled: metadata.map(|entry| entry.normalized_demangled.clone()),
                 matched_contract_symbol: matched_contract_symbol.map(ToOwned::to_owned),
                 contract_stack_bytes,
+                callers: caller_label.clone().into_iter().collect(),
+                roots: root.map(ToOwned::to_owned).into_iter().collect(),
             });
         if entry.demangled.is_none() {
             entry.demangled = metadata.map(|meta| meta.demangled.clone());
@@ -793,7 +933,26 @@ impl UnknownSymbolReport {
         if entry.contract_stack_bytes.is_none() {
             entry.contract_stack_bytes = contract_stack_bytes;
         }
+        if let Some(caller) = caller_label
+            && !entry.callers.iter().any(|existing| existing == &caller)
+        {
+            entry.callers.push(caller);
+        }
+        if let Some(root) = root
+            && !entry.roots.iter().any(|existing| existing == root)
+        {
+            entry.roots.push(root.to_owned());
+        }
     }
+}
+
+fn display_symbol_label(symbol: &str, symbol_index: Option<&ArtifactSymbolIndex>) -> String {
+    symbol_index
+        .and_then(|index| index.metadata_for_raw(symbol))
+        .map_or_else(
+            || symbol.to_owned(),
+            |entry| entry.normalized_demangled.clone(),
+        )
 }
 
 fn unique_candidate(
@@ -817,6 +976,7 @@ impl SymbolResolutionContext<'_> {
     fn resolve_symbol_stack_bytes(
         &mut self,
         symbol: &str,
+        caller: Option<&str>,
         visiting: &mut Vec<String>,
     ) -> Result<usize, String> {
         if let Some(stack_bytes) = self.aggregated_stack_sizes.get(symbol).copied() {
@@ -830,14 +990,15 @@ impl SymbolResolutionContext<'_> {
         }
 
         let frame_stack = self
-            .resolve_symbol_frame_stack(symbol)
+            .resolve_symbol_frame_stack(symbol, caller)
             .ok_or_else(|| format!("missing stack-size entry for symbol `{symbol}`"))?;
         visiting.push(symbol.to_owned());
 
         let max_callee_stack = if let Some(callees) = self.call_graph.get(symbol) {
             let mut max_stack = 0usize;
             for callee in callees {
-                let callee_stack = self.resolve_symbol_stack_bytes(callee, visiting)?;
+                let callee_stack =
+                    self.resolve_symbol_stack_bytes(callee, Some(symbol), visiting)?;
                 max_stack = max_stack.max(callee_stack);
             }
             max_stack
@@ -854,7 +1015,7 @@ impl SymbolResolutionContext<'_> {
         Ok(total_stack)
     }
 
-    fn resolve_symbol_frame_stack(&mut self, symbol: &str) -> Option<usize> {
+    fn resolve_symbol_frame_stack(&mut self, symbol: &str, caller: Option<&str>) -> Option<usize> {
         if let Some(stack_bytes) = self.stack_sizes.get(symbol).copied() {
             return Some(stack_bytes);
         }
@@ -869,6 +1030,8 @@ impl SymbolResolutionContext<'_> {
             self.symbol_index,
             matched_contract_symbol,
             contract_stack_bytes,
+            caller,
+            Some(self.root_type_name),
         );
         contract_stack_bytes
     }
@@ -883,17 +1046,97 @@ fn resolve_unknown_symbol_contract(
     let demangled = metadata.map(|entry| entry.demangled.as_str());
     let normalized_demangled = metadata.map(|entry| entry.normalized_demangled.as_str());
 
-    contracts
-        .iter()
-        .find(|contract| {
-            contract.symbol == symbol
-                || demangled.is_some_and(|value| contract.symbol == value)
-                || normalized_demangled.is_some_and(|value| contract.symbol == value)
-                || demangled.is_some_and(|value| value.ends_with(&format!("::{}", contract.symbol)))
-                || normalized_demangled
-                    .is_some_and(|value| value.ends_with(&format!("::{}", contract.symbol)))
-        })
-        .map(|contract| (contract.symbol.clone(), contract.stack_bytes))
+    let mut best_match = None::<(&UnknownSymbolContract, usize)>;
+    for contract in contracts {
+        let Some(score) =
+            unknown_symbol_contract_score(contract, symbol, demangled, normalized_demangled)
+        else {
+            continue;
+        };
+        if best_match
+            .as_ref()
+            .is_none_or(|(_, best_score)| score > *best_score)
+        {
+            best_match = Some((contract, score));
+        }
+    }
+
+    best_match.map(|(contract, _)| (contract.rendered_symbol(), contract.stack_bytes))
+}
+
+impl UnknownSymbolContract {
+    fn rendered_symbol(&self) -> String {
+        match self.matcher {
+            UnknownSymbolContractMatcher::Exact => self.symbol.clone(),
+            UnknownSymbolContractMatcher::Prefix => format!("{}*", self.symbol),
+            UnknownSymbolContractMatcher::Suffix => format!("*{}", self.symbol),
+            UnknownSymbolContractMatcher::Contains => format!("*{}*", self.symbol),
+        }
+    }
+}
+
+fn unknown_symbol_contract_score(
+    contract: &UnknownSymbolContract,
+    raw_symbol: &str,
+    demangled: Option<&str>,
+    normalized_demangled: Option<&str>,
+) -> Option<usize> {
+    let candidates = [
+        raw_symbol,
+        demangled.unwrap_or(""),
+        normalized_demangled.unwrap_or(""),
+    ];
+    let mut best = None::<usize>;
+    for candidate in candidates {
+        if candidate.is_empty() {
+            continue;
+        }
+        if let Some(score) = contract_match_score(contract, candidate) {
+            best = Some(best.map_or(score, |current| current.max(score)));
+        }
+        if let Some(score) = namespace_suffix_contract_score(contract, candidate) {
+            best = Some(best.map_or(score, |current| current.max(score)));
+        }
+    }
+    best
+}
+
+fn contract_match_score(contract: &UnknownSymbolContract, candidate: &str) -> Option<usize> {
+    let literal_len = contract.symbol.len();
+    match contract.matcher {
+        UnknownSymbolContractMatcher::Exact if candidate == contract.symbol => {
+            Some(4_000 + literal_len)
+        }
+        UnknownSymbolContractMatcher::Prefix if candidate.starts_with(&contract.symbol) => {
+            Some(3_000 + literal_len)
+        }
+        UnknownSymbolContractMatcher::Suffix if candidate.ends_with(&contract.symbol) => {
+            Some(2_000 + literal_len)
+        }
+        UnknownSymbolContractMatcher::Contains if candidate.contains(&contract.symbol) => {
+            Some(1_000 + literal_len)
+        }
+        _ => None,
+    }
+}
+
+fn namespace_suffix_contract_score(
+    contract: &UnknownSymbolContract,
+    candidate: &str,
+) -> Option<usize> {
+    let suffix = format!("::{}", contract.symbol);
+    match contract.matcher {
+        UnknownSymbolContractMatcher::Exact if candidate.ends_with(&suffix) => {
+            Some(3_500 + contract.symbol.len())
+        }
+        UnknownSymbolContractMatcher::Prefix if candidate.contains(&suffix) => {
+            Some(2_500 + contract.symbol.len())
+        }
+        UnknownSymbolContractMatcher::Contains if candidate.contains(&suffix) => {
+            Some(1_500 + contract.symbol.len())
+        }
+        _ => None,
+    }
 }
 
 fn write_unknown_symbol_report(path: &Path, report: &UnknownSymbolReport) -> Result<(), String> {
@@ -915,6 +1158,16 @@ fn write_unknown_symbol_report(path: &Path, report: &UnknownSymbolReport) -> Res
         if let Some(normalized) = observation.normalized_demangled.as_ref() {
             rendered.push_str("# normalized: ");
             rendered.push_str(normalized);
+            rendered.push('\n');
+        }
+        if !observation.roots.is_empty() {
+            rendered.push_str("# roots: ");
+            rendered.push_str(&observation.roots.join(", "));
+            rendered.push('\n');
+        }
+        if !observation.callers.is_empty() {
+            rendered.push_str("# callers: ");
+            rendered.push_str(&observation.callers.join(", "));
             rendered.push('\n');
         }
         if let (Some(contract_symbol), Some(stack_bytes)) = (
@@ -982,6 +1235,270 @@ fn render_contract_type_path(type_name: &str, crate_name: Option<&str>) -> Strin
     }
 }
 
+fn load_red_inline_contracts(path: &PathBuf) -> Result<Vec<RedInlineContractEntry>, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    load_red_inline_contracts_from_str(&contents)
+}
+
+fn load_red_inline_contracts_from_str(
+    contents: &str,
+) -> Result<Vec<RedInlineContractEntry>, String> {
+    let mut entries = Vec::new();
+    for (line_no, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let (name, rest) = line
+            .split_once('=')
+            .ok_or_else(|| format!("red inline contract line {} is missing '='", line_no + 1))?;
+        let name = name.trim();
+        if !is_valid_rust_identifier(name) {
+            return Err(format!(
+                "red inline contract line {} has invalid Rust identifier `{name}`",
+                line_no + 1
+            ));
+        }
+
+        let parts: Vec<_> = rest.split(';').map(str::trim).collect();
+        if !(parts.len() == 3 || parts.len() == 4) {
+            return Err(format!(
+                "red inline contract line {} must use `<spans> ; <lane> ; <cookie> [; <stack_bytes>]`",
+                line_no + 1
+            ));
+        }
+
+        let mut spans = parse_red_inline_spans(parts[0], line_no + 1)?;
+        spans.sort_unstable();
+        spans.dedup();
+
+        let fallback_lane = parse_red_inline_fallback_lane(parts[1]).ok_or_else(|| {
+            format!(
+                "red inline contract line {} has unsupported fallback lane `{}`",
+                line_no + 1,
+                parts[1]
+            )
+        })?;
+        let fallback_cookie = parse_u32_value(parts[2]).map_err(|error| {
+            format!(
+                "red inline contract line {} fallback cookie parse failed: {error}",
+                line_no + 1
+            )
+        })?;
+        let current_exception_stack_bytes = if parts.len() == 4 {
+            parse_stack_size_value(parts[3]).map_err(|error| {
+                format!(
+                    "red inline contract line {} stack bytes parse failed: {error}",
+                    line_no + 1
+                )
+            })?
+        } else {
+            0
+        };
+
+        entries.push(RedInlineContractEntry {
+            name: name.to_owned(),
+            spans,
+            fallback_lane,
+            fallback_cookie,
+            current_exception_stack_bytes,
+        });
+    }
+    Ok(entries)
+}
+
+fn parse_red_inline_spans(raw: &str, line_no: usize) -> Result<Vec<u16>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("none") || raw == "-" {
+        return Ok(Vec::new());
+    }
+
+    let mut spans = Vec::new();
+    for piece in raw.split(',') {
+        let piece = piece.trim();
+        if piece.is_empty() {
+            return Err(format!(
+                "red inline contract line {line_no} contains an empty span identifier"
+            ));
+        }
+        let span = parse_stack_size_value(piece)
+            .map_err(|error| format!("span `{piece}` parse failed: {error}"))?;
+        if span == 0 || span > usize::from(u16::MAX) {
+            return Err(format!(
+                "red inline contract line {line_no} span `{piece}` is out of range"
+            ));
+        }
+        spans.push(u16::try_from(span).map_err(|_| {
+            format!("red inline contract line {line_no} span `{piece}` is out of range")
+        })?);
+    }
+    Ok(spans)
+}
+
+fn parse_red_inline_fallback_lane(raw: &str) -> Option<RedInlineFallbackLane> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "primary" | "deferredprimary" | "deferred-primary" => {
+            Some(RedInlineFallbackLane::DeferredPrimary)
+        }
+        "secondary" | "deferredsecondary" | "deferred-secondary" => {
+            Some(RedInlineFallbackLane::DeferredSecondary)
+        }
+        _ => None,
+    }
+}
+
+fn is_valid_rust_identifier(raw: &str) -> bool {
+    let mut chars = raw.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn render_red_inline_contracts(entries: &[RedInlineContractEntry]) -> String {
+    let mut rendered = String::from(
+        "// Generated by fusion_std_fiber_task_analyzer\n\
+         // Include this file from a consumer crate to declare red inline compatibility contracts.\n",
+    );
+    let mut sorted = entries.to_vec();
+    sorted.sort_by(|left, right| left.name.cmp(&right.name));
+    for entry in &sorted {
+        render_red_inline_contract(&mut rendered, entry);
+    }
+    rendered
+}
+
+fn render_red_inline_contract(rendered: &mut String, entry: &RedInlineContractEntry) {
+    let (leaf_words, summary_levels) = build_red_inline_summary_tree_words(&entry.spans);
+    let leaf_name = format!("{}_REQUIRED_CLEAR_LEAF", entry.name);
+    let levels_name = format!("{}_REQUIRED_CLEAR_LEVELS", entry.name);
+    let tree_name = format!("{}_REQUIRED_CLEAR_TREE", entry.name);
+
+    rendered.push_str("const ");
+    rendered.push_str(&leaf_name);
+    rendered.push_str(": [u32; ");
+    rendered.push_str(&leaf_words.len().to_string());
+    rendered.push_str("] = ");
+    rendered.push_str(&render_u32_array(&leaf_words));
+    rendered.push_str(";\n");
+
+    for (level_index, words) in summary_levels.iter().enumerate() {
+        rendered.push_str("const ");
+        let _ = write!(
+            rendered,
+            "{}_REQUIRED_CLEAR_LEVEL_{level_index}",
+            entry.name
+        );
+        rendered.push_str(": [u32; ");
+        rendered.push_str(&words.len().to_string());
+        rendered.push_str("] = ");
+        rendered.push_str(&render_u32_array(words));
+        rendered.push_str(";\n");
+    }
+
+    rendered.push_str("const ");
+    rendered.push_str(&levels_name);
+    rendered.push_str(": [&[u32]; ");
+    rendered.push_str(&summary_levels.len().to_string());
+    rendered.push_str("] = [");
+    for level_index in 0..summary_levels.len() {
+        if level_index != 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push('&');
+        let _ = write!(
+            rendered,
+            "{}_REQUIRED_CLEAR_LEVEL_{level_index}",
+            entry.name
+        );
+    }
+    rendered.push_str("];\n");
+
+    rendered.push_str("pub const ");
+    rendered.push_str(&tree_name);
+    rendered.push_str(
+        ": fusion_std::thread::CooperativeExclusionSummaryTree = \
+         fusion_std::thread::CooperativeExclusionSummaryTree::new(",
+    );
+    rendered.push('&');
+    rendered.push_str(&leaf_name);
+    rendered.push_str(", &");
+    rendered.push_str(&levels_name);
+    rendered.push_str(");\n");
+
+    rendered.push_str("pub const ");
+    rendered.push_str(&entry.name);
+    rendered.push_str(
+        ": fusion_std::thread::RedInlineCompatibility = \
+        fusion_std::thread::RedInlineCompatibility::from_summary_tree(&",
+    );
+    rendered.push_str(&tree_name);
+    rendered.push_str(", ");
+    rendered.push_str(match entry.fallback_lane {
+        RedInlineFallbackLane::DeferredPrimary => {
+            "fusion_sys::vector::VectorDispatchLane::DeferredPrimary"
+        }
+        RedInlineFallbackLane::DeferredSecondary => {
+            "fusion_sys::vector::VectorDispatchLane::DeferredSecondary"
+        }
+    });
+    rendered.push_str(", fusion_sys::vector::VectorDispatchCookie(");
+    rendered.push_str(&entry.fallback_cookie.to_string());
+    rendered.push_str(")).with_current_exception_stack_bytes(");
+    rendered.push_str(&entry.current_exception_stack_bytes.to_string());
+    rendered.push_str(");\n\n");
+}
+
+fn build_red_inline_summary_tree_words(spans: &[u16]) -> (Vec<u32>, Vec<Vec<u32>>) {
+    const WORD_BITS: usize = 32;
+
+    let max_span = spans.iter().copied().max().map_or(0, usize::from);
+    let mut leaf_words = vec![0_u32; max_span.div_ceil(WORD_BITS)];
+    for span in spans {
+        let span_index = usize::from(*span - 1);
+        leaf_words[span_index / WORD_BITS] |= 1_u32 << (span_index % WORD_BITS);
+    }
+
+    let mut summary_levels = Vec::new();
+    let mut current = leaf_words.clone();
+    while current.len() > 1 {
+        let mut parent = vec![0_u32; current.len().div_ceil(WORD_BITS)];
+        for (index, word) in current.iter().copied().enumerate() {
+            if word != 0 {
+                parent[index / WORD_BITS] |= 1_u32 << (index % WORD_BITS);
+            }
+        }
+        summary_levels.push(parent.clone());
+        current = parent;
+    }
+
+    (leaf_words, summary_levels)
+}
+
+fn render_u32_array(words: &[u32]) -> String {
+    if words.is_empty() {
+        return "[]".to_owned();
+    }
+
+    let mut rendered = String::from("[");
+    for (index, word) in words.iter().enumerate() {
+        if index != 0 {
+            rendered.push_str(", ");
+        }
+        let _ = write!(rendered, "0x{word:08x}");
+    }
+    rendered.push(']');
+    rendered
+}
+
+fn parse_u32_value(raw: &str) -> Result<u32, String> {
+    let value = parse_stack_size_value(raw)?;
+    u32::try_from(value).map_err(|_| "value exceeds u32 range".to_owned())
+}
+
 fn parse_stack_size_value(raw: &str) -> Result<usize, String> {
     raw.strip_prefix("0x").map_or_else(
         || raw.parse::<usize>().map_err(|error| error.to_string()),
@@ -991,7 +1508,7 @@ fn parse_stack_size_value(raw: &str) -> Result<usize, String> {
 
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage: cargo run -p fusion-std --bin fiber_task_analyzer -- <roots> <stack-sizes|artifact> <output> [call-graph|artifact] [--contracts <path>] [--report <path>] [--rust-contracts <path>] [--crate-name <name>]"
+        "{reason}\nusage: cargo run -p fusion-std --bin fiber_task_analyzer -- <roots> <stack-sizes|artifact> <output> [call-graph|artifact] [--contracts <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-contracts <path>] [--red-inline-rust <path>] [--crate-name <name>]"
     )
 }
 
@@ -999,8 +1516,10 @@ fn usage(reason: &str) -> String {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_stack_for_test(
         symbol: &str,
+        root_type_name: &str,
         stack_sizes: &BTreeMap<String, usize>,
         call_graph: &BTreeMap<String, Vec<String>>,
         symbol_index: Option<&ArtifactSymbolIndex>,
@@ -1015,8 +1534,9 @@ mod tests {
             contracts,
             unknown_symbol_report: report,
             aggregated_stack_sizes,
+            root_type_name,
         };
-        context.resolve_symbol_stack_bytes(symbol, &mut Vec::new())
+        context.resolve_symbol_stack_bytes(symbol, None, &mut Vec::new())
     }
 
     #[test]
@@ -1083,6 +1603,7 @@ mod tests {
         let mut aggregated_stack_sizes = BTreeMap::new();
         let resolved = resolve_stack_for_test(
             "root",
+            "test::RootTask",
             &stack_sizes,
             &call_graph,
             None,
@@ -1111,6 +1632,7 @@ mod tests {
 
         let error = resolve_stack_for_test(
             "root",
+            "test::RootTask",
             &stack_sizes,
             &call_graph,
             None,
@@ -1152,6 +1674,26 @@ Disassembly of section .text:\n\
             parsed.get("root"),
             Some(&vec!["mid".to_owned(), "leaf".to_owned()])
         );
+    }
+
+    #[test]
+    fn parses_llvm_objdump_direct_call_targets_without_relocations() {
+        let parsed = parse_call_graph(
+            "\
+/tmp/sample.o:\tfile format elf64-littlearm\n\
+\n\
+Disassembly of section .text:\n\
+\n\
+00000000 <leaf>:\n\
+       0:\tbx\tlr\n\
+\n\
+00000008 <root>:\n\
+       8:\tbl\t0x0 <leaf>\n\
+       c:\tbx\tlr\n",
+        )
+        .expect("objdump call graph should parse");
+
+        assert_eq!(parsed.get("root"), Some(&vec!["leaf".to_owned()]));
     }
 
     #[test]
@@ -1229,11 +1771,13 @@ Disassembly of section .text:\n\
     fn parses_unknown_symbol_contracts() {
         let parsed = load_contracts_from_str(
             "memset = 256\n\
-             core::panicking::panic_cannot_unwind = 1024\n",
+             core::panicking::panic_* = 1024\n",
         )
         .expect("contracts should parse");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].symbol, "memset");
+        assert_eq!(parsed[0].matcher, UnknownSymbolContractMatcher::Exact);
+        assert_eq!(parsed[1].matcher, UnknownSymbolContractMatcher::Prefix);
         assert_eq!(parsed[1].stack_bytes, 1024);
     }
 
@@ -1245,6 +1789,7 @@ Disassembly of section .text:\n\
 
         let resolved = resolve_stack_for_test(
             "root",
+            "test::ContractRootTask",
             &stack_sizes,
             &call_graph,
             None,
@@ -1264,15 +1809,48 @@ Disassembly of section .text:\n\
             "core::panicking::panic_cannot_unwind::h1234567890abcdef\n",
         )
         .expect("llvm-nm output should parse");
-        let contracts = load_contracts_from_str("core::panicking::panic_cannot_unwind = 512\n")
+        let contracts = load_contracts_from_str("core::panicking::panic_* = 512\n")
             .expect("contracts should parse");
+
+        let resolved = resolve_unknown_symbol_contract("_RNvCsdX_panic", Some(&index), &contracts);
+
+        assert_eq!(resolved, Some(("core::panicking::panic_*".to_owned(), 512)));
+    }
+
+    #[test]
+    fn exact_unknown_symbol_contracts_beat_broader_wildcards() {
+        let index = parse_llvm_nm_symbol_index(
+            "_RNvCsdX_panic\n",
+            "core::panicking::panic_cannot_unwind::h1234567890abcdef\n",
+        )
+        .expect("llvm-nm output should parse");
+        let contracts = load_contracts_from_str(
+            "core::panicking::panic_* = 512\n\
+             core::panicking::panic_cannot_unwind = 768\n",
+        )
+        .expect("contracts should parse");
 
         let resolved = resolve_unknown_symbol_contract("_RNvCsdX_panic", Some(&index), &contracts);
 
         assert_eq!(
             resolved,
-            Some(("core::panicking::panic_cannot_unwind".to_owned(), 512))
+            Some(("core::panicking::panic_cannot_unwind".to_owned(), 768))
         );
+    }
+
+    #[test]
+    fn suffix_unknown_symbol_contracts_match_demangled_namespace_tails() {
+        let index = parse_llvm_nm_symbol_index(
+            "_RNvCsdX_unwind\n",
+            "alloc::task::rust_begin_unwind::habcdef0123456789\n",
+        )
+        .expect("llvm-nm output should parse");
+        let contracts =
+            load_contracts_from_str("*rust_begin_unwind = 1024\n").expect("contracts should parse");
+
+        let resolved = resolve_unknown_symbol_contract("_RNvCsdX_unwind", Some(&index), &contracts);
+
+        assert_eq!(resolved, Some(("*rust_begin_unwind".to_owned(), 1024)));
     }
 
     #[test]
@@ -1284,6 +1862,7 @@ Disassembly of section .text:\n\
 
         let resolved = resolve_stack_for_test(
             "root",
+            "test::ContractRootTask",
             &stack_sizes,
             &call_graph,
             None,
@@ -1304,6 +1883,8 @@ Disassembly of section .text:\n\
             Some("memset")
         );
         assert_eq!(observation.contract_stack_bytes, Some(96));
+        assert_eq!(observation.roots, vec!["test::ContractRootTask".to_owned()]);
+        assert_eq!(observation.callers, vec!["root".to_owned()]);
     }
 
     #[test]
@@ -1314,7 +1895,14 @@ Disassembly of section .text:\n\
         )
         .expect("llvm-nm output should parse");
         let mut report = UnknownSymbolReport::default();
-        report.observe("_RNvCsdX_unknown", Some(&index), None, None);
+        report.observe(
+            "_RNvCsdX_unknown",
+            Some(&index),
+            None,
+            None,
+            Some("_RNvCsdX_root"),
+            Some("test::UnknownRootTask"),
+        );
 
         let rendered_path = std::env::temp_dir().join("fusion-std-fiber-task-report.txt");
         write_unknown_symbol_report(&rendered_path, &report).expect("report should write");
@@ -1322,6 +1910,63 @@ Disassembly of section .text:\n\
             fs::read_to_string(&rendered_path).expect("rendered report should be readable");
 
         assert!(rendered.contains("# TODO: core::mystery::opaque"));
+        assert!(rendered.contains("# roots: test::UnknownRootTask"));
+        assert!(rendered.contains("# callers: _RNvCsdX_root"));
+    }
+
+    #[test]
+    fn parses_red_inline_contracts() {
+        let parsed = load_red_inline_contracts_from_str(
+            "GPIO_FAST = 3, 4, 1025 ; deferred-primary ; 0x20 ; 256\n\
+             GPIO_SLOW = none ; secondary ; 7\n",
+        )
+        .expect("red inline contracts should parse");
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "GPIO_FAST");
+        assert_eq!(parsed[0].spans, vec![3, 4, 1025]);
+        assert_eq!(
+            parsed[0].fallback_lane,
+            RedInlineFallbackLane::DeferredPrimary
+        );
+        assert_eq!(parsed[0].fallback_cookie, 0x20);
+        assert_eq!(parsed[0].current_exception_stack_bytes, 256);
+        assert!(parsed[1].spans.is_empty());
+        assert_eq!(
+            parsed[1].fallback_lane,
+            RedInlineFallbackLane::DeferredSecondary
+        );
+    }
+
+    #[test]
+    fn renders_red_inline_contracts_with_summary_tree() {
+        let rendered = render_red_inline_contracts(&[RedInlineContractEntry {
+            name: "GPIO_FAST".to_owned(),
+            spans: vec![3, 4, 1025],
+            fallback_lane: RedInlineFallbackLane::DeferredPrimary,
+            fallback_cookie: 17,
+            current_exception_stack_bytes: 256,
+        }]);
+
+        assert!(rendered.contains("pub const GPIO_FAST_REQUIRED_CLEAR_TREE"));
+        assert!(
+            rendered.contains("pub const GPIO_FAST: fusion_std::thread::RedInlineCompatibility")
+        );
+        assert!(rendered.contains("VectorDispatchLane::DeferredPrimary"));
+        assert!(rendered.contains("VectorDispatchCookie(17)"));
+        assert!(rendered.contains("with_current_exception_stack_bytes(256)"));
+    }
+
+    #[test]
+    fn builds_red_inline_summary_tree_levels_for_sparse_spans() {
+        let (leaf, levels) = build_red_inline_summary_tree_words(&[3, 4, 1025]);
+
+        assert_eq!(leaf.len(), 33);
+        assert_eq!(leaf[0], 0b1100);
+        assert_eq!(leaf[32], 0b1);
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0], vec![0b1, 0b1]);
+        assert_eq!(levels[1], vec![0b11]);
     }
 
     #[test]

@@ -114,6 +114,7 @@ const LINUX_THREAD_SUPPORT: ThreadSupport = ThreadSupport {
     scheduler: ThreadSchedulerSupport {
         caps: ThreadSchedulerCaps::YIELD
             .union(ThreadSchedulerCaps::SLEEP_FOR)
+            .union(ThreadSchedulerCaps::MONOTONIC_NOW)
             .union(ThreadSchedulerCaps::PRIORITY)
             .union(ThreadSchedulerCaps::QUERY_PRIORITY)
             .union(ThreadSchedulerCaps::CLASS)
@@ -327,6 +328,16 @@ impl ThreadSchedulerControl for LinuxThread {
         } else {
             Err(map_errno(last_errno()))
         }
+    }
+
+    fn monotonic_now(&self) -> Result<Duration, ThreadError> {
+        let mut current = MaybeUninit::<libc::timespec>::uninit();
+        let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, current.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(map_errno(last_errno()));
+        }
+
+        timespec_to_duration(unsafe { current.assume_init() })
     }
 }
 
@@ -929,6 +940,16 @@ fn duration_to_timespec(duration: Duration) -> Result<libc::timespec, ThreadErro
         tv_sec: secs,
         tv_nsec: nanos,
     })
+}
+
+fn timespec_to_duration(timespec: libc::timespec) -> Result<Duration, ThreadError> {
+    if timespec.tv_sec < 0 || timespec.tv_nsec < 0 {
+        return Err(ThreadError::state_conflict());
+    }
+
+    let secs = u64::try_from(timespec.tv_sec).map_err(|_| ThreadError::state_conflict())?;
+    let nanos = u32::try_from(timespec.tv_nsec).map_err(|_| ThreadError::state_conflict())?;
+    Ok(Duration::new(secs, nanos))
 }
 
 const fn map_create_error(code: libc::c_int) -> ThreadError {

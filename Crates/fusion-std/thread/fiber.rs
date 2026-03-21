@@ -4,10 +4,11 @@ use core::any::{TypeId, type_name};
 use core::fmt;
 use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit, align_of, size_of};
+use core::num::NonZeroU16;
 use core::num::NonZeroUsize;
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull, addr_of_mut};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
 use core::time::Duration;
 
 use crate::sync::{
@@ -69,10 +70,13 @@ use fusion_sys::fiber::{
     current_context as system_fiber_context,
     yield_now as system_yield_now,
 };
+use fusion_sys::thread::{ThreadSchedulerCaps, ThreadSystem};
 
 use super::ThreadPool;
 #[cfg(feature = "std")]
 use super::{PoolPlacement, ThreadPoolConfig};
+#[cfg(feature = "std")]
+use core::sync::atomic::AtomicU64;
 #[cfg(feature = "std")]
 use fusion_pal::hal::{HardwareTopologyQuery as _, system_hardware};
 
@@ -82,6 +86,15 @@ const CARRIER_EVENT_BATCH: usize = 64;
 const FIBER_PRIORITY_LEVELS: usize = u8::MAX as usize + 1;
 const FIBER_PRIORITY_WORDS: usize = FIBER_PRIORITY_LEVELS / usize::BITS as usize;
 const EMPTY_QUEUE_SLOT: usize = usize::MAX;
+const MAX_COOPERATIVE_LOCK_NESTING: usize = 16;
+const COOPERATIVE_EXCLUSION_TREE_WORD_BITS: usize = u32::BITS as usize;
+const ACTIVE_COOPERATIVE_EXCLUSION_FAST_SPAN_CAPACITY: usize = 1024;
+const ACTIVE_COOPERATIVE_EXCLUSION_FAST_LEAF_WORDS: usize =
+    ACTIVE_COOPERATIVE_EXCLUSION_FAST_SPAN_CAPACITY / COOPERATIVE_EXCLUSION_TREE_WORD_BITS;
+const UNRANKED_COOPERATIVE_LOCK: u16 = 0;
+const NO_COOPERATIVE_EXCLUSION_SPAN: u16 = 0;
+#[cfg(feature = "std")]
+const FIBER_YIELD_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(1);
 #[cfg(target_pointer_width = "64")]
 const STEAL_SEED_MIX: usize = 0x9e37_79b9_7f4a_7c15;
 #[cfg(not(target_pointer_width = "64"))]
@@ -162,6 +175,36 @@ impl core::hash::Hash for CapacityPolicy {
     }
 }
 
+/// Response policy when one cooperative fiber exceeds its declared run-between-yield budget.
+#[derive(Debug, Clone, Copy)]
+pub enum FiberYieldBudgetPolicy {
+    /// Treat the overrun as one fatal fault and abort the current process.
+    Abort,
+    /// Invoke the callback when the watchdog or post-run check observes the overrun.
+    Notify(fn(FiberYieldBudgetEvent)),
+}
+
+impl PartialEq for FiberYieldBudgetPolicy {
+    fn eq(&self, other: &Self) -> bool {
+        match (*self, *other) {
+            (Self::Abort, Self::Abort) => true,
+            (Self::Notify(lhs), Self::Notify(rhs)) => core::ptr::fn_addr_eq(lhs, rhs),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for FiberYieldBudgetPolicy {}
+
+impl core::hash::Hash for FiberYieldBudgetPolicy {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Abort => core::hash::Hash::hash(&0_u8, state),
+            Self::Notify(_) => core::hash::Hash::hash(&1_u8, state),
+        }
+    }
+}
+
 /// Advisory event emitted when a fiber reaches stack capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FiberCapacityEvent {
@@ -173,6 +216,20 @@ pub struct FiberCapacityEvent {
     pub committed_pages: u32,
     /// Maximum usable pages allowed by the reservation.
     pub reservation_pages: u32,
+}
+
+/// Advisory event emitted when one cooperative fiber exceeds its declared run-between-yield
+/// budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FiberYieldBudgetEvent {
+    /// Stable fiber identifier.
+    pub fiber_id: u64,
+    /// Carrier worker that was executing the fiber when the overrun was observed.
+    pub carrier_id: usize,
+    /// Declared maximum run duration before the fiber must yield, park, or complete.
+    pub budget: Duration,
+    /// Observed run duration when the overrun was detected.
+    pub observed: Duration,
 }
 
 /// Approximate pool-level stack telemetry snapshot.
@@ -407,6 +464,107 @@ impl FiberTaskAge {
     }
 }
 
+/// Optional cap on how much virtual waiting age may promote one strict-priority task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FiberTaskAgeCap(u8);
+
+impl FiberTaskAgeCap {
+    /// Creates one explicit age cap.
+    #[must_use]
+    pub const fn new(age: u8) -> Self {
+        Self(age)
+    }
+
+    #[must_use]
+    const fn as_age(self) -> FiberTaskAge {
+        FiberTaskAge(self.0)
+    }
+}
+
+/// One named cooperative exclusion span tracked by the current running green context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CooperativeExclusionSpan(NonZeroU16);
+
+impl CooperativeExclusionSpan {
+    /// Creates one explicit exclusion span identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied identifier is zero.
+    pub const fn new(span: u16) -> Result<Self, SyncError> {
+        match NonZeroU16::new(span) {
+            Some(span) => Ok(Self(span)),
+            None => Err(SyncError::invalid()),
+        }
+    }
+
+    /// Returns the concrete numeric span identifier.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0.get()
+    }
+}
+
+/// One compile-time cooperative exclusion summary tree over named span bits.
+///
+/// `summary_levels` are ordered from the leaf parent upward to the root. Each bit in one summary
+/// word says “at least one child word below this index is non-zero”.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CooperativeExclusionSummaryTree {
+    /// Leaf words containing the actual exclusion bits.
+    pub leaf_words: &'static [u32],
+    /// Parent summary levels ordered from the leaf parent upward to the root.
+    pub summary_levels: &'static [&'static [u32]],
+}
+
+impl CooperativeExclusionSummaryTree {
+    /// Creates one summary tree from explicit leaf and parent levels.
+    #[must_use]
+    pub const fn new(
+        leaf_words: &'static [u32],
+        summary_levels: &'static [&'static [u32]],
+    ) -> Self {
+        Self {
+            leaf_words,
+            summary_levels,
+        }
+    }
+
+    /// Returns the total span-id capacity of the leaf layer.
+    #[must_use]
+    pub const fn span_capacity(self) -> usize {
+        self.leaf_words.len() * COOPERATIVE_EXCLUSION_TREE_WORD_BITS
+    }
+
+    #[must_use]
+    fn contains(self, span: CooperativeExclusionSpan) -> bool {
+        let span_index = usize::from(span.get() - 1);
+        let leaf_word_index = span_index / COOPERATIVE_EXCLUSION_TREE_WORD_BITS;
+        if leaf_word_index >= self.leaf_words.len() {
+            return false;
+        }
+
+        let mut child_word_index = leaf_word_index;
+        let mut level = 0;
+        while level < self.summary_levels.len() {
+            let words = self.summary_levels[level];
+            let summary_word_index = child_word_index / COOPERATIVE_EXCLUSION_TREE_WORD_BITS;
+            if summary_word_index >= words.len() {
+                return false;
+            }
+            let bit = 1_u32 << (child_word_index % COOPERATIVE_EXCLUSION_TREE_WORD_BITS);
+            if words[summary_word_index] & bit == 0 {
+                return false;
+            }
+            child_word_index = summary_word_index;
+            level += 1;
+        }
+
+        let bit = 1_u32 << (span_index % COOPERATIVE_EXCLUSION_TREE_WORD_BITS);
+        self.leaf_words[leaf_word_index] & bit != 0
+    }
+}
+
 impl FiberTaskPriority {
     #[must_use]
     const fn effective_with_age(self, age: FiberTaskAge) -> Self {
@@ -421,6 +579,8 @@ pub struct FiberTaskAttributes {
     pub stack_class: FiberStackClass,
     /// Strict-priority scheduling value for this task.
     pub priority: FiberTaskPriority,
+    /// Optional maximum cooperative run duration between explicit handoff points.
+    pub yield_budget: Option<Duration>,
 }
 
 impl FiberTaskAttributes {
@@ -430,6 +590,7 @@ impl FiberTaskAttributes {
         Self {
             stack_class,
             priority: FiberTaskPriority::DEFAULT,
+            yield_budget: None,
         }
     }
 
@@ -437,6 +598,20 @@ impl FiberTaskAttributes {
     #[must_use]
     pub const fn with_priority(mut self, priority: FiberTaskPriority) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// Returns one copy of these attributes with an explicit cooperative run-between-yield budget.
+    #[must_use]
+    pub const fn with_yield_budget(mut self, yield_budget: Duration) -> Self {
+        self.yield_budget = Some(yield_budget);
+        self
+    }
+
+    /// Returns one copy of these attributes with an explicit optional cooperative run budget.
+    #[must_use]
+    pub const fn with_optional_yield_budget(mut self, yield_budget: Option<Duration>) -> Self {
+        self.yield_budget = yield_budget;
         self
     }
 
@@ -471,6 +646,8 @@ pub trait ExplicitFiberTask: Send + 'static {
 
     /// Strict-priority value for this task.
     const PRIORITY: FiberTaskPriority = FiberTaskPriority::DEFAULT;
+    /// Optional maximum cooperative run duration between explicit yields or completion.
+    const YIELD_BUDGET: Option<Duration> = None;
 
     /// Compile-time task attributes derived from the explicit stack and priority contract.
     ///
@@ -479,7 +656,7 @@ pub trait ExplicitFiberTask: Send + 'static {
     /// politely waiting for runtime.
     const ATTRIBUTES: FiberTaskAttributes =
         match FiberTaskAttributes::from_stack_bytes(Self::STACK_BYTES, Self::PRIORITY) {
-            Ok(attributes) => attributes,
+            Ok(attributes) => attributes.with_optional_yield_budget(Self::YIELD_BUDGET),
             Err(_) => panic!("invalid explicit fiber task contract"),
         };
 
@@ -535,6 +712,18 @@ pub const fn generated_explicit_task_contract_attributes<T: GeneratedExplicitFib
     T::ATTRIBUTES
 }
 
+/// Includes one generated Rust contract sidecar emitted by the fiber-task analyzer pipeline.
+///
+/// Downstream crates can use this to pull generated
+/// `declare_generated_fiber_task_contract!(...)` entries into scope directly from a build-step
+/// output file instead of retyping them by hand.
+#[macro_export]
+macro_rules! include_generated_fiber_task_contracts {
+    ($path:expr $(,)?) => {
+        include!($path);
+    };
+}
+
 fn generated_explicit_task_attributes<T: 'static>() -> Result<FiberTaskAttributes, FiberError> {
     let type_name = type_name::<T>();
     let metadata = GENERATED_EXPLICIT_FIBER_TASKS
@@ -557,6 +746,9 @@ pub trait GeneratedExplicitFiberTask: Send + 'static {
     /// Result type produced by this task.
     type Output: 'static;
 
+    /// Optional maximum cooperative run duration between explicit yields or completion.
+    const YIELD_BUDGET: Option<Duration> = None;
+
     /// Runs the explicit task to completion.
     fn run(self) -> Self::Output;
 
@@ -570,7 +762,8 @@ pub trait GeneratedExplicitFiberTask: Send + 'static {
     where
         Self: Sized,
     {
-        generated_explicit_task_attributes::<Self>()
+        Ok(generated_explicit_task_attributes::<Self>()?
+            .with_optional_yield_budget(Self::YIELD_BUDGET))
     }
 }
 
@@ -690,12 +883,16 @@ pub struct FiberPoolConfig<'a> {
     pub max_fibers_per_carrier: usize,
     /// Scheduling policy across carriers.
     pub scheduling: GreenScheduling,
+    /// Optional cap on virtual waiting-age promotion for strict-priority scheduling.
+    pub priority_age_cap: Option<FiberTaskAgeCap>,
     /// Pool population growth policy.
     pub growth: GreenGrowth,
     /// Signal-path stack telemetry policy.
     pub telemetry: FiberTelemetry,
     /// Action to take when an elastic stack reaches capacity.
     pub capacity_policy: CapacityPolicy,
+    /// Action to take when one cooperative fiber exceeds its declared run-between-yield budget.
+    pub yield_budget_policy: FiberYieldBudgetPolicy,
     /// Huge-page preference for large reservations.
     pub huge_pages: HugePagePolicy,
 }
@@ -714,9 +911,11 @@ impl FiberPoolConfig<'static> {
             growth_chunk: 32,
             max_fibers_per_carrier: 64,
             scheduling: GreenScheduling::Fifo,
+            priority_age_cap: None,
             growth: GreenGrowth::OnDemand,
             telemetry: FiberTelemetry::Disabled,
             capacity_policy: CapacityPolicy::Abort,
+            yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             huge_pages: HugePagePolicy::Disabled,
         }
     }
@@ -731,9 +930,11 @@ impl FiberPoolConfig<'static> {
             growth_chunk: max_fibers_per_carrier,
             max_fibers_per_carrier,
             scheduling: GreenScheduling::Fifo,
+            priority_age_cap: None,
             growth: GreenGrowth::Fixed,
             telemetry: FiberTelemetry::Disabled,
             capacity_policy: CapacityPolicy::Abort,
+            yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             huge_pages: HugePagePolicy::Disabled,
         }
     }
@@ -800,9 +1001,11 @@ impl<'a> FiberPoolConfig<'a> {
             growth_chunk: total_capacity,
             max_fibers_per_carrier: total_capacity,
             scheduling: GreenScheduling::Fifo,
+            priority_age_cap: None,
             growth: GreenGrowth::Fixed,
             telemetry: FiberTelemetry::Disabled,
             capacity_policy: CapacityPolicy::Abort,
+            yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             huge_pages: HugePagePolicy::Disabled,
         })
     }
@@ -832,6 +1035,13 @@ impl<'a> FiberPoolConfig<'a> {
         self
     }
 
+    /// Returns one copy of this configuration with an explicit strict-priority virtual age cap.
+    #[must_use]
+    pub const fn with_priority_age_cap(mut self, priority_age_cap: FiberTaskAgeCap) -> Self {
+        self.priority_age_cap = Some(priority_age_cap);
+        self
+    }
+
     /// Returns one copy of this configuration with an explicit growth policy.
     #[must_use]
     pub const fn with_growth(mut self, growth: GreenGrowth) -> Self {
@@ -850,6 +1060,16 @@ impl<'a> FiberPoolConfig<'a> {
     #[must_use]
     pub const fn with_capacity_policy(mut self, capacity_policy: CapacityPolicy) -> Self {
         self.capacity_policy = capacity_policy;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit run-between-yield overrun policy.
+    #[must_use]
+    pub const fn with_yield_budget_policy(
+        mut self,
+        yield_budget_policy: FiberYieldBudgetPolicy,
+    ) -> Self {
+        self.yield_budget_policy = yield_budget_policy;
         self
     }
 
@@ -1033,6 +1253,22 @@ impl<'a> FiberPoolConfig<'a> {
     #[cfg(not(feature = "critical-safe-generated-contracts"))]
     pub fn validate_generated_task<T: GeneratedExplicitFiberTask>(&self) -> Result<(), FiberError> {
         self.validate_task_attributes(T::task_attributes()?)
+    }
+
+    /// Validates one build-generated explicit fiber task against this configuration using its
+    /// compile-time generated contract directly.
+    ///
+    /// This is the cross-crate contract-first path for ordinary builds that want compile-time
+    /// generated contracts without depending on runtime metadata lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated contract is not provisioned by this configuration.
+    pub const fn validate_generated_task_contract_path<T>(&self) -> Result<(), FiberError>
+    where
+        T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+    {
+        self.validate_generated_task_contract::<T>()
     }
 
     /// Validates one build-generated explicit fiber task against this configuration.
@@ -1633,6 +1869,7 @@ struct MetadataPriorityQueue {
     next: MetadataSlice<usize>,
     base_priorities: MetadataSlice<i8>,
     enqueue_epochs: MetadataSlice<u64>,
+    age_cap: Option<FiberTaskAgeCap>,
     len: usize,
     epoch: u64,
     non_empty: [usize; FIBER_PRIORITY_WORDS],
@@ -1644,6 +1881,7 @@ impl MetadataPriorityQueue {
         next: MetadataSlice<usize>,
         base_priorities: MetadataSlice<i8>,
         enqueue_epochs: MetadataSlice<u64>,
+        age_cap: Option<FiberTaskAgeCap>,
     ) -> Result<Self, FiberError> {
         if next.is_empty()
             || buckets.len() != FIBER_PRIORITY_LEVELS
@@ -1669,6 +1907,7 @@ impl MetadataPriorityQueue {
             next,
             base_priorities,
             enqueue_epochs,
+            age_cap,
             len: 0,
             epoch: 0,
             non_empty: [0; FIBER_PRIORITY_WORDS],
@@ -1748,7 +1987,12 @@ impl MetadataPriorityQueue {
     }
 
     fn waiting_age(&self, value: usize) -> FiberTaskAge {
-        FiberTaskAge::from_epoch_delta(self.epoch.saturating_sub(self.enqueue_epochs[value]))
+        let age =
+            FiberTaskAge::from_epoch_delta(self.epoch.saturating_sub(self.enqueue_epochs[value]));
+        match self.age_cap {
+            Some(cap) if age.get() > cap.as_age().get() => cap.as_age(),
+            _ => age,
+        }
     }
 
     fn pop_bucket_head(&mut self, bucket_index: usize) -> Option<usize> {
@@ -3125,9 +3369,11 @@ impl FiberStackClassPools {
                     growth_chunk: class.growth_chunk,
                     max_fibers_per_carrier: class.slots_per_carrier,
                     scheduling: config.scheduling,
+                    priority_age_cap: config.priority_age_cap,
                     growth: config.growth,
                     telemetry: FiberTelemetry::Disabled,
                     capacity_policy: CapacityPolicy::Abort,
+                    yield_budget_policy: FiberYieldBudgetPolicy::Abort,
                     huge_pages: config.huge_pages,
                 };
                 let slab = FiberStackSlab::new(&class_config, alignment, stack_direction)?;
@@ -3704,6 +3950,72 @@ struct CarrierPollResult {
     capacity_signaled: bool,
 }
 
+#[cfg(feature = "std")]
+#[derive(Debug)]
+struct CarrierYieldBudgetState {
+    slot_index: AtomicUsize,
+    task_id: AtomicU64,
+    budget_nanos: AtomicU64,
+    started_nanos: AtomicU64,
+    faulted: AtomicBool,
+    reported: AtomicBool,
+}
+
+#[cfg(feature = "std")]
+impl CarrierYieldBudgetState {
+    const IDLE_SLOT: usize = usize::MAX;
+
+    const fn new() -> Self {
+        Self {
+            slot_index: AtomicUsize::new(Self::IDLE_SLOT),
+            task_id: AtomicU64::new(0),
+            budget_nanos: AtomicU64::new(0),
+            started_nanos: AtomicU64::new(0),
+            faulted: AtomicBool::new(false),
+            reported: AtomicBool::new(false),
+        }
+    }
+
+    fn begin(&self, slot_index: usize, task_id: u64, start_nanos: u64, budget_nanos: u64) {
+        self.task_id.store(task_id, Ordering::Release);
+        self.started_nanos.store(start_nanos, Ordering::Release);
+        self.budget_nanos.store(budget_nanos, Ordering::Release);
+        self.faulted.store(false, Ordering::Release);
+        self.reported.store(false, Ordering::Release);
+        self.slot_index.store(slot_index, Ordering::Release);
+    }
+
+    fn clear(&self) {
+        self.slot_index.store(Self::IDLE_SLOT, Ordering::Release);
+        self.task_id.store(0, Ordering::Release);
+        self.budget_nanos.store(0, Ordering::Release);
+        self.started_nanos.store(0, Ordering::Release);
+        self.faulted.store(false, Ordering::Release);
+        self.reported.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug)]
+struct GreenYieldBudgetRuntime {
+    carriers: std::boxed::Box<[CarrierYieldBudgetState]>,
+}
+
+#[cfg(feature = "std")]
+impl GreenYieldBudgetRuntime {
+    fn new(carrier_count: usize) -> Self {
+        let carriers = std::iter::repeat_with(CarrierYieldBudgetState::new)
+            .take(carrier_count)
+            .collect::<std::vec::Vec<_>>()
+            .into_boxed_slice();
+        Self { carriers }
+    }
+
+    fn now_nanos() -> Result<u64, FiberError> {
+        current_monotonic_nanos()
+    }
+}
+
 impl CarrierReactorState {
     fn new(waiters: MetadataSlice<Option<CarrierWaiterRecord>>) -> Result<Self, FiberError> {
         for index in 0..waiters.len() {
@@ -3886,7 +4198,11 @@ enum CarrierReadyQueue {
 }
 
 impl CarrierReadyQueue {
-    fn new(scheduling: GreenScheduling, slices: CarrierQueueSlices) -> Result<Self, FiberError> {
+    fn new(
+        scheduling: GreenScheduling,
+        slices: CarrierQueueSlices,
+        priority_age_cap: Option<FiberTaskAgeCap>,
+    ) -> Result<Self, FiberError> {
         match scheduling {
             GreenScheduling::Fifo | GreenScheduling::WorkStealing => Ok(Self::Fifo(
                 MetadataIndexQueue::new(slices.queue_entries.ok_or_else(FiberError::invalid)?)?,
@@ -3898,6 +4214,7 @@ impl CarrierReadyQueue {
                 slices
                     .priority_enqueue_epochs
                     .ok_or_else(FiberError::invalid)?,
+                priority_age_cap,
             )?)),
         }
     }
@@ -3928,6 +4245,7 @@ impl CarrierQueue {
     fn new(
         scheduling: GreenScheduling,
         slices: CarrierQueueSlices,
+        priority_age_cap: Option<FiberTaskAgeCap>,
         seed: usize,
     ) -> Result<Self, FiberError> {
         let capacity = match scheduling {
@@ -3939,7 +4257,11 @@ impl CarrierQueue {
             }
         };
         Ok(Self {
-            queue: SyncMutex::new(CarrierReadyQueue::new(scheduling, slices)?),
+            queue: SyncMutex::new(CarrierReadyQueue::new(
+                scheduling,
+                slices,
+                priority_age_cap,
+            )?),
             ready: Semaphore::new(
                 0,
                 u32::try_from(capacity).map_err(|_| FiberError::resource_exhausted())?,
@@ -4001,6 +4323,7 @@ struct GreenTaskRecord {
     stack_slot: usize,
     stack_class: FiberStackClass,
     priority: FiberTaskPriority,
+    yield_budget: Option<Duration>,
     fiber: Option<Fiber>,
     job: InlineGreenJobStorage,
     result: InlineGreenResultStorage,
@@ -4017,6 +4340,7 @@ impl GreenTaskRecord {
             stack_slot: 0,
             stack_class: FiberStackClass::MIN,
             priority: FiberTaskPriority::DEFAULT,
+            yield_budget: None,
             fiber: None,
             job: InlineGreenJobStorage::empty(),
             result: InlineGreenResultStorage::empty(),
@@ -4029,6 +4353,12 @@ impl GreenTaskRecord {
 struct GreenTaskSlot {
     owner: AtomicUsize,
     slot_index: usize,
+    cooperative_lock_depth: AtomicUsize,
+    cooperative_lock_ranks: [AtomicU16; MAX_COOPERATIVE_LOCK_NESTING],
+    cooperative_exclusion_spans: [AtomicU16; MAX_COOPERATIVE_LOCK_NESTING],
+    cooperative_exclusion_summary_leaf: [AtomicU32; ACTIVE_COOPERATIVE_EXCLUSION_FAST_LEAF_WORDS],
+    cooperative_exclusion_summary_root: AtomicU32,
+    cooperative_exclusion_summary_overflow: AtomicBool,
     yield_action: SyncMutex<CurrentGreenYieldAction>,
     record: SyncMutex<GreenTaskRecord>,
     completed: Semaphore,
@@ -4040,6 +4370,15 @@ impl GreenTaskSlot {
         Ok(Self {
             owner: AtomicUsize::new(0),
             slot_index,
+            cooperative_lock_depth: AtomicUsize::new(0),
+            cooperative_lock_ranks: [const { AtomicU16::new(UNRANKED_COOPERATIVE_LOCK) };
+                MAX_COOPERATIVE_LOCK_NESTING],
+            cooperative_exclusion_spans: [const { AtomicU16::new(NO_COOPERATIVE_EXCLUSION_SPAN) };
+                MAX_COOPERATIVE_LOCK_NESTING],
+            cooperative_exclusion_summary_leaf: [const { AtomicU32::new(0) };
+                ACTIVE_COOPERATIVE_EXCLUSION_FAST_LEAF_WORDS],
+            cooperative_exclusion_summary_root: AtomicU32::new(0),
+            cooperative_exclusion_summary_overflow: AtomicBool::new(false),
             yield_action: SyncMutex::new(CurrentGreenYieldAction::Requeue),
             record: SyncMutex::new(GreenTaskRecord::empty()),
             completed: Semaphore::new(0, 1).map_err(fiber_error_from_sync)?,
@@ -4071,6 +4410,187 @@ impl GreenTaskSlot {
     fn set_yield_action(&self, action: CurrentGreenYieldAction) -> Result<(), FiberError> {
         *self.yield_action.lock().map_err(fiber_error_from_sync)? = action;
         Ok(())
+    }
+
+    fn enter_cooperative_lock(
+        &self,
+        rank: Option<u16>,
+        span: Option<CooperativeExclusionSpan>,
+    ) -> Result<CooperativeGreenLockToken, SyncError> {
+        let depth = self.cooperative_lock_depth.load(Ordering::Acquire);
+        if depth >= MAX_COOPERATIVE_LOCK_NESTING {
+            return Err(SyncError::overflow());
+        }
+
+        let rank_value = rank.unwrap_or(UNRANKED_COOPERATIVE_LOCK);
+        if depth != 0 {
+            let current_rank = self.cooperative_lock_ranks[depth - 1].load(Ordering::Acquire);
+            if current_rank != UNRANKED_COOPERATIVE_LOCK
+                && rank_value != UNRANKED_COOPERATIVE_LOCK
+                && rank_value <= current_rank
+            {
+                return Err(SyncError::invalid());
+            }
+        }
+
+        self.cooperative_lock_ranks[depth].store(rank_value, Ordering::Release);
+        self.cooperative_exclusion_spans[depth].store(
+            span.map_or(NO_COOPERATIVE_EXCLUSION_SPAN, CooperativeExclusionSpan::get),
+            Ordering::Release,
+        );
+        self.cooperative_lock_depth
+            .store(depth + 1, Ordering::Release);
+        self.rebuild_cooperative_exclusion_summary_tree(depth + 1);
+        Ok(CooperativeGreenLockToken {
+            slot: core::ptr::from_ref(self).cast(),
+            depth_index: depth,
+        })
+    }
+
+    fn exit_cooperative_lock(&self, depth_index: usize) {
+        let previous = self.cooperative_lock_depth.load(Ordering::Acquire);
+        debug_assert!(
+            previous > 0,
+            "cooperative green lock depth underflow indicates unbalanced guard bookkeeping"
+        );
+        debug_assert_eq!(
+            previous,
+            depth_index + 1,
+            "cooperative green locks should release in reverse acquisition order"
+        );
+        if previous == 0 {
+            return;
+        }
+        self.cooperative_lock_ranks[depth_index]
+            .store(UNRANKED_COOPERATIVE_LOCK, Ordering::Release);
+        self.cooperative_exclusion_spans[depth_index]
+            .store(NO_COOPERATIVE_EXCLUSION_SPAN, Ordering::Release);
+        self.cooperative_lock_depth
+            .store(depth_index, Ordering::Release);
+        self.rebuild_cooperative_exclusion_summary_tree(depth_index);
+    }
+
+    fn reset_cooperative_lock_depth(&self) {
+        self.cooperative_lock_depth.store(0, Ordering::Release);
+        for rank in &self.cooperative_lock_ranks {
+            rank.store(UNRANKED_COOPERATIVE_LOCK, Ordering::Release);
+        }
+        for span in &self.cooperative_exclusion_spans {
+            span.store(NO_COOPERATIVE_EXCLUSION_SPAN, Ordering::Release);
+        }
+        for word in &self.cooperative_exclusion_summary_leaf {
+            word.store(0, Ordering::Release);
+        }
+        self.cooperative_exclusion_summary_root
+            .store(0, Ordering::Release);
+        self.cooperative_exclusion_summary_overflow
+            .store(false, Ordering::Release);
+    }
+
+    fn cooperative_lock_depth(&self) -> usize {
+        self.cooperative_lock_depth.load(Ordering::Acquire)
+    }
+
+    fn copy_active_exclusion_spans(&self, output: &mut [CooperativeExclusionSpan]) -> usize {
+        let depth = self.cooperative_lock_depth();
+        let mut written = 0;
+        for index in 0..depth {
+            if written >= output.len() {
+                break;
+            }
+            let raw = self.cooperative_exclusion_spans[index].load(Ordering::Acquire);
+            let Some(span) = NonZeroU16::new(raw).map(CooperativeExclusionSpan) else {
+                continue;
+            };
+            output[written] = span;
+            written += 1;
+        }
+        written
+    }
+
+    fn rebuild_cooperative_exclusion_summary_tree(&self, depth: usize) {
+        let mut leaf = [0_u32; ACTIVE_COOPERATIVE_EXCLUSION_FAST_LEAF_WORDS];
+        let mut root = 0_u32;
+        let mut overflow = false;
+
+        for index in 0..depth {
+            let raw = self.cooperative_exclusion_spans[index].load(Ordering::Acquire);
+            let Some(span) = NonZeroU16::new(raw) else {
+                continue;
+            };
+            let span_index = usize::from(span.get() - 1);
+            if span_index >= ACTIVE_COOPERATIVE_EXCLUSION_FAST_SPAN_CAPACITY {
+                overflow = true;
+                continue;
+            }
+            let word_index = span_index / COOPERATIVE_EXCLUSION_TREE_WORD_BITS;
+            let bit = 1_u32 << (span_index % COOPERATIVE_EXCLUSION_TREE_WORD_BITS);
+            leaf[word_index] |= bit;
+            root |= 1_u32 << word_index;
+        }
+
+        for (index, word) in leaf.into_iter().enumerate() {
+            self.cooperative_exclusion_summary_leaf[index].store(word, Ordering::Release);
+        }
+        self.cooperative_exclusion_summary_root
+            .store(root, Ordering::Release);
+        self.cooperative_exclusion_summary_overflow
+            .store(overflow, Ordering::Release);
+    }
+
+    fn exclusion_summary_tree_allows(&self, tree: &CooperativeExclusionSummaryTree) -> bool {
+        if tree.leaf_words.is_empty() {
+            return true;
+        }
+
+        if !self
+            .cooperative_exclusion_summary_overflow
+            .load(Ordering::Acquire)
+            && tree.leaf_words.len() <= ACTIVE_COOPERATIVE_EXCLUSION_FAST_LEAF_WORDS
+        {
+            match tree.summary_levels {
+                [] if tree.leaf_words.len() == 1 => {
+                    return self.cooperative_exclusion_summary_leaf[0].load(Ordering::Acquire)
+                        & tree.leaf_words[0]
+                        == 0;
+                }
+                [root] if root.len() == 1 => {
+                    let overlap = self
+                        .cooperative_exclusion_summary_root
+                        .load(Ordering::Acquire)
+                        & root[0];
+                    if overlap == 0 {
+                        return true;
+                    }
+                    let mut bits = overlap;
+                    while bits != 0 {
+                        let leaf_index = bits.trailing_zeros() as usize;
+                        if self.cooperative_exclusion_summary_leaf[leaf_index]
+                            .load(Ordering::Acquire)
+                            & tree.leaf_words[leaf_index]
+                            != 0
+                        {
+                            return false;
+                        }
+                        bits &= bits - 1;
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        let depth = self.cooperative_lock_depth();
+        for index in 0..depth {
+            let raw = self.cooperative_exclusion_spans[index].load(Ordering::Acquire);
+            let Some(active) = NonZeroU16::new(raw).map(CooperativeExclusionSpan) else {
+                continue;
+            };
+            if tree.contains(active) {
+                return false;
+            }
+        }
+        true
     }
 
     fn take_yield_action(&self) -> Result<CurrentGreenYieldAction, FiberError> {
@@ -4113,9 +4633,11 @@ impl GreenTaskSlot {
         record.stack_slot = lease.slot_index;
         record.stack_class = lease.class;
         record.priority = task.priority;
+        record.yield_budget = task.yield_budget;
         record.fiber = None;
         record.state = GreenTaskState::Queued;
         self.handle_refs.store(1, Ordering::Release);
+        self.reset_cooperative_lock_depth();
         Ok(())
     }
 
@@ -4137,6 +4659,14 @@ impl GreenTaskSlot {
             return Err(FiberError::state_conflict());
         }
         Ok(record.priority)
+    }
+
+    fn yield_budget(&self) -> Result<Option<Duration>, FiberError> {
+        let record = self.record.lock().map_err(fiber_error_from_sync)?;
+        if !record.allocated {
+            return Err(FiberError::state_conflict());
+        }
+        Ok(record.yield_budget)
     }
 
     const fn matches_id(record: &GreenTaskRecord, id: u64) -> bool {
@@ -4300,8 +4830,10 @@ impl GreenTaskSlot {
         record.stack_slot = 0;
         record.stack_class = FiberStackClass::MIN;
         record.priority = FiberTaskPriority::DEFAULT;
+        record.yield_budget = None;
         record.state = GreenTaskState::Completed;
         self.handle_refs.store(0, Ordering::Release);
+        self.reset_cooperative_lock_depth();
         Ok(true)
     }
 
@@ -4323,7 +4855,9 @@ impl GreenTaskSlot {
         record.stack_slot = 0;
         record.stack_class = FiberStackClass::MIN;
         record.priority = FiberTaskPriority::DEFAULT;
+        record.yield_budget = None;
         record.state = GreenTaskState::Completed;
+        self.reset_cooperative_lock_depth();
         Ok(true)
     }
 }
@@ -4411,6 +4945,18 @@ impl GreenTaskRegistry {
 
     fn priority(&self, slot_index: usize) -> Result<FiberTaskPriority, FiberError> {
         self.slot(slot_index)?.priority()
+    }
+
+    fn yield_budget(&self, slot_index: usize, id: u64) -> Result<Option<Duration>, FiberError> {
+        self.slot(slot_index)?
+            .yield_budget()
+            .and_then(|yield_budget| {
+                if self.current_id(slot_index)? == id {
+                    Ok(yield_budget)
+                } else {
+                    Err(FiberError::state_conflict())
+                }
+            })
     }
 
     fn install_fiber(&self, slot_index: usize, id: u64, fiber: Fiber) -> Result<(), FiberError> {
@@ -4524,9 +5070,129 @@ fn current_green_context() -> Option<CurrentGreenContext> {
 }
 
 #[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct CooperativeGreenLockToken {
+    slot: *const (),
+    depth_index: usize,
+}
+
+impl CooperativeGreenLockToken {
+    const fn inactive() -> Self {
+        Self {
+            slot: core::ptr::null(),
+            depth_index: 0,
+        }
+    }
+}
+
+#[doc(hidden)]
 #[must_use]
 pub fn is_in_green_context() -> bool {
     current_green_context().is_some()
+}
+
+/// Enters one cooperative green lock scope for the current running fiber, if any.
+///
+/// # Errors
+///
+/// Returns an honest synchronization error when ranked acquisition would violate cooperative lock
+/// ordering or when the per-fiber lock nesting budget is exhausted.
+pub fn enter_current_green_cooperative_lock(
+    rank: Option<u16>,
+    span: Option<CooperativeExclusionSpan>,
+) -> Result<CooperativeGreenLockToken, SyncError> {
+    let Some(slot) = current_green_slot() else {
+        return Ok(CooperativeGreenLockToken::inactive());
+    };
+    slot.enter_cooperative_lock(rank, span)
+}
+
+pub fn exit_current_green_cooperative_lock(token: CooperativeGreenLockToken) {
+    if token.slot.is_null() {
+        return;
+    }
+    let slot = token.slot.cast::<GreenTaskSlot>();
+    unsafe { &*slot }.exit_cooperative_lock(token.depth_index);
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn current_green_cooperative_lock_depth() -> usize {
+    current_green_slot().map_or(0, GreenTaskSlot::cooperative_lock_depth)
+}
+
+/// Copies the currently active green exclusion spans into `output` and returns how many were
+/// copied.
+#[must_use]
+pub fn current_green_exclusion_spans(output: &mut [CooperativeExclusionSpan]) -> usize {
+    current_green_slot().map_or(0, |slot| slot.copy_active_exclusion_spans(output))
+}
+
+/// Returns whether all `required_clear_spans` are currently clear in the active green context.
+///
+/// This is the neutral eligibility predicate surface for urgent inline admission: callers may use
+/// it to decide whether an inline path can run now or should fall back to deferred dispatch.
+#[must_use]
+pub fn current_green_exclusion_allows(required_clear_spans: &[CooperativeExclusionSpan]) -> bool {
+    if required_clear_spans.is_empty() {
+        return true;
+    }
+    let Some(slot) = current_green_slot() else {
+        return true;
+    };
+
+    let depth = slot.cooperative_lock_depth();
+    for index in 0..depth {
+        let raw = slot.cooperative_exclusion_spans[index].load(Ordering::Acquire);
+        let Some(active) = NonZeroU16::new(raw).map(CooperativeExclusionSpan) else {
+            continue;
+        };
+        if required_clear_spans.contains(&active) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Returns whether all exclusion spans present in one required-clear summary tree are currently
+/// clear in the active green context.
+#[must_use]
+pub fn current_green_exclusion_allows_tree(tree: &CooperativeExclusionSummaryTree) -> bool {
+    let Some(slot) = current_green_slot() else {
+        return true;
+    };
+    slot.exclusion_summary_tree_allows(tree)
+}
+
+/// Enters one named cooperative exclusion span for the current running green context.
+///
+/// # Errors
+///
+/// Returns an honest synchronization error when the exclusion nesting budget is exhausted.
+pub fn enter_current_green_exclusion_span(
+    span: CooperativeExclusionSpan,
+) -> Result<CooperativeExclusionGuard, SyncError> {
+    enter_current_green_cooperative_lock(None, Some(span))
+        .map(|token| CooperativeExclusionGuard { token })
+}
+
+/// RAII guard for one current green exclusion span.
+#[must_use]
+pub struct CooperativeExclusionGuard {
+    token: CooperativeGreenLockToken,
+}
+
+impl Drop for CooperativeExclusionGuard {
+    fn drop(&mut self) {
+        exit_current_green_cooperative_lock(self.token);
+    }
+}
+
+fn ensure_current_green_handoff_unlocked() -> Result<(), FiberError> {
+    if current_green_cooperative_lock_depth() != 0 {
+        return Err(FiberError::state_conflict());
+    }
+    Ok(())
 }
 
 fn set_current_green_yield_action(action: CurrentGreenYieldAction) {
@@ -4565,6 +5231,7 @@ impl GreenPoolMetadata {
         carrier_count: usize,
         task_capacity: usize,
         scheduling: GreenScheduling,
+        priority_age_cap: Option<FiberTaskAgeCap>,
         reactor_enabled: bool,
     ) -> Result<(Self, GreenTaskRegistry, MetadataSlice<CarrierQueue>), FiberError> {
         if carrier_count == 0 || task_capacity == 0 {
@@ -4608,6 +5275,7 @@ impl GreenPoolMetadata {
             carrier_count,
             task_capacity,
             scheduling,
+            priority_age_cap,
             reactor_enabled,
         );
         match result {
@@ -4712,6 +5380,7 @@ impl GreenPoolMetadata {
         carrier_count: usize,
         task_capacity: usize,
         scheduling: GreenScheduling,
+        priority_age_cap: Option<FiberTaskAgeCap>,
         reactor_enabled: bool,
     ) -> Result<(GreenTaskRegistry, MetadataSlice<CarrierQueue>), FiberError> {
         let mut cursor = MetadataCursor::new(metadata.mapping);
@@ -4773,6 +5442,7 @@ impl GreenPoolMetadata {
                     priority_enqueue_epochs,
                     waiters,
                 },
+                priority_age_cap,
                 initial_steal_seed(carrier_index),
             )?;
             unsafe {
@@ -4928,6 +5598,9 @@ struct GreenPoolInner {
     support: FiberSupport,
     scheduling: GreenScheduling,
     capacity_policy: CapacityPolicy,
+    yield_budget_supported: bool,
+    #[cfg(feature = "std")]
+    yield_budget_policy: FiberYieldBudgetPolicy,
     shutdown: AtomicBool,
     client_refs: AtomicUsize,
     active: AtomicUsize,
@@ -4936,6 +5609,8 @@ struct GreenPoolInner {
     carriers: MetadataSlice<CarrierQueue>,
     tasks: GreenTaskRegistry,
     stacks: FiberStackStore,
+    #[cfg(feature = "std")]
+    yield_budget_runtime: GreenYieldBudgetRuntime,
 }
 
 impl GreenPoolInner {
@@ -4977,6 +5652,127 @@ impl GreenPoolInner {
 
         for carrier in &*self.carriers {
             carrier.signal()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    fn dispatch_yield_budget_event(&self, event: FiberYieldBudgetEvent) {
+        match self.yield_budget_policy {
+            FiberYieldBudgetPolicy::Abort => {
+                std::process::abort();
+            }
+            FiberYieldBudgetPolicy::Notify(callback) => {
+                run_yield_budget_callback_contained(callback, event);
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn begin_yield_budget_segment(
+        &self,
+        carrier_index: usize,
+        slot_index: usize,
+        task_id: u64,
+        budget: Option<Duration>,
+        start_nanos: u64,
+    ) {
+        let Some(budget) = budget else {
+            self.yield_budget_runtime.carriers[carrier_index].clear();
+            return;
+        };
+        let budget_nanos = saturating_duration_to_nanos_u64(budget);
+        self.yield_budget_runtime.carriers[carrier_index].begin(
+            slot_index,
+            task_id,
+            start_nanos,
+            budget_nanos,
+        );
+    }
+
+    #[cfg(feature = "std")]
+    fn finish_yield_budget_segment(
+        &self,
+        carrier_index: usize,
+        fiber_id: u64,
+        budget: Option<Duration>,
+        observed: Duration,
+    ) -> bool {
+        let state = &self.yield_budget_runtime.carriers[carrier_index];
+        let Some(budget) = budget else {
+            state.clear();
+            return false;
+        };
+
+        let already_reported = state.reported.swap(false, Ordering::AcqRel);
+        let faulted = state.faulted.swap(false, Ordering::AcqRel);
+        state.clear();
+
+        let exceeded = faulted || observed > budget;
+        if !exceeded {
+            return false;
+        }
+
+        if !already_reported {
+            self.dispatch_yield_budget_event(FiberYieldBudgetEvent {
+                fiber_id,
+                carrier_id: carrier_index,
+                budget,
+                observed,
+            });
+        }
+        true
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn finish_yield_budget_segment(
+        &self,
+        _carrier_index: usize,
+        _fiber_id: u64,
+        budget: Option<Duration>,
+        observed: Duration,
+    ) -> bool {
+        budget.is_some_and(|budget| observed > budget)
+    }
+
+    #[cfg(feature = "std")]
+    fn scan_yield_budget_overruns(&self) -> Result<(), FiberError> {
+        let now_nanos = GreenYieldBudgetRuntime::now_nanos()?;
+        for (carrier_id, state) in self.yield_budget_runtime.carriers.iter().enumerate() {
+            let slot_index = state.slot_index.load(Ordering::Acquire);
+            if slot_index == CarrierYieldBudgetState::IDLE_SLOT {
+                continue;
+            }
+
+            let task_id = state.task_id.load(Ordering::Acquire);
+            let budget_nanos = state.budget_nanos.load(Ordering::Acquire);
+            if budget_nanos == 0 {
+                continue;
+            }
+
+            let started_nanos = state.started_nanos.load(Ordering::Acquire);
+            let elapsed_nanos = now_nanos.saturating_sub(started_nanos);
+            if elapsed_nanos <= budget_nanos {
+                continue;
+            }
+
+            let Ok(current_id) = self.tasks.current_id(slot_index) else {
+                continue;
+            };
+            if current_id != task_id {
+                continue;
+            }
+
+            if state.reported.swap(true, Ordering::AcqRel) {
+                continue;
+            }
+            state.faulted.store(true, Ordering::Release);
+            self.dispatch_yield_budget_event(FiberYieldBudgetEvent {
+                fiber_id: task_id,
+                carrier_id,
+                budget: Duration::from_nanos(budget_nanos),
+                observed: Duration::from_nanos(elapsed_nanos),
+            });
         }
         Ok(())
     }
@@ -5172,6 +5968,7 @@ where
                 if is_terminal_task_state(state) {
                     break state;
                 }
+                ensure_current_green_handoff_unlocked()?;
                 system_yield_now()?;
             }
         } else {
@@ -5339,6 +6136,7 @@ impl GreenPool {
             carrier_workers,
             task_capacity,
             config.scheduling,
+            config.priority_age_cap,
             reactor_enabled,
         )?;
 
@@ -5347,6 +6145,9 @@ impl GreenPool {
                 support,
                 scheduling: config.scheduling,
                 capacity_policy: config.capacity_policy,
+                yield_budget_supported: yield_budget_enforcement_supported(),
+                #[cfg(feature = "std")]
+                yield_budget_policy: config.yield_budget_policy,
                 shutdown: AtomicBool::new(false),
                 client_refs: AtomicUsize::new(1),
                 active: AtomicUsize::new(0),
@@ -5355,6 +6156,8 @@ impl GreenPool {
                 carriers,
                 tasks,
                 stacks,
+                #[cfg(feature = "std")]
+                yield_budget_runtime: GreenYieldBudgetRuntime::new(carrier_workers),
             },
             pool_metadata,
         )?;
@@ -5372,6 +6175,18 @@ impl GreenPool {
             {
                 let _ = inner.request_shutdown();
                 return Err(error);
+            }
+        }
+
+        #[cfg(feature = "std")]
+        {
+            let watchdog_inner = inner.try_clone()?;
+            if let Err(_error) = std::thread::Builder::new()
+                .name("fusion-fiber-watchdog".into())
+                .spawn(move || run_yield_budget_watchdog(watchdog_inner))
+            {
+                let _ = inner.request_shutdown();
+                return Err(FiberError::state_conflict());
             }
         }
 
@@ -5402,6 +6217,9 @@ impl GreenPool {
     ///
     /// Returns an error when the requested task class is not provisioned by the current pool.
     pub fn validate_task_attributes(&self, task: FiberTaskAttributes) -> Result<(), FiberError> {
+        if task.yield_budget.is_some() && !self.inner.yield_budget_supported {
+            return Err(FiberError::unsupported());
+        }
         self.supports_task_class(task.stack_class)
             .then_some(())
             .ok_or_else(FiberError::unsupported)
@@ -5428,6 +6246,25 @@ impl GreenPool {
         self.validate_task_attributes(T::task_attributes()?)
     }
 
+    /// Validates one build-generated explicit fiber task against this live pool using its
+    /// compile-time generated contract directly.
+    ///
+    /// This is the cross-crate contract-first path for ordinary builds that want compile-time
+    /// generated contracts without depending on runtime metadata lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated contract is not provisioned by the current pool.
+    pub fn validate_generated_task_contract<T>(&self) -> Result<(), FiberError>
+    where
+        T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+    {
+        self.validate_task_attributes(
+            generated_explicit_task_contract_attributes::<T>()
+                .with_optional_yield_budget(T::YIELD_BUDGET),
+        )
+    }
+
     /// Validates one build-generated explicit fiber task against this live pool.
     ///
     /// In strict generated-contract builds, admission must come from a compile-time generated
@@ -5441,7 +6278,10 @@ impl GreenPool {
     where
         T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
     {
-        self.validate_task_attributes(generated_explicit_task_contract_attributes::<T>())
+        self.validate_task_attributes(
+            generated_explicit_task_contract_attributes::<T>()
+                .with_optional_yield_budget(T::YIELD_BUDGET),
+        )
     }
 
     /// Returns an approximate stack-telemetry snapshot for live fibers.
@@ -5454,6 +6294,9 @@ impl GreenPool {
         &self,
         task: FiberTaskAttributes,
     ) -> Result<SpawnReservation, FiberError> {
+        if task.yield_budget.is_some() && !self.inner.yield_budget_supported {
+            return Err(FiberError::unsupported());
+        }
         if !self.inner.stacks.supports_task_class(task.stack_class) {
             return Err(FiberError::unsupported());
         }
@@ -5593,7 +6436,27 @@ impl GreenPool {
     where
         T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
     {
-        let attributes = generated_explicit_task_contract_attributes::<T>();
+        let attributes = generated_explicit_task_contract_attributes::<T>()
+            .with_optional_yield_budget(T::YIELD_BUDGET);
+        self.validate_task_attributes(attributes)?;
+        self.spawn_with_attrs(attributes, move || task.run())
+    }
+
+    /// Spawns one explicit fiber task using a compile-time generated contract directly.
+    ///
+    /// This is the cross-crate contract-first path for ordinary builds that want compile-time
+    /// generated contracts without depending on runtime metadata lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated contract is not provisioned by the current pool, or
+    /// when ordinary green-task admission fails.
+    pub fn spawn_generated_contract<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
+    where
+        T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+    {
+        let attributes = generated_explicit_task_contract_attributes::<T>()
+            .with_optional_yield_budget(T::YIELD_BUDGET);
         self.validate_task_attributes(attributes)?;
         self.spawn_with_attrs(attributes, move || task.run())
     }
@@ -5813,6 +6676,26 @@ const fn xorshift64(mut state: usize) -> usize {
     if state == 0 { 1 } else { state }
 }
 
+fn saturating_duration_to_nanos_u64(duration: Duration) -> u64 {
+    let nanos = duration.as_nanos();
+    u64::try_from(nanos).unwrap_or(u64::MAX)
+}
+
+fn current_monotonic_nanos() -> Result<u64, FiberError> {
+    let now = ThreadSystem::new()
+        .monotonic_now()
+        .map_err(fiber_error_from_thread_pool)?;
+    Ok(saturating_duration_to_nanos_u64(now))
+}
+
+fn yield_budget_enforcement_supported() -> bool {
+    ThreadSystem::new()
+        .support()
+        .scheduler
+        .caps
+        .contains(ThreadSchedulerCaps::MONOTONIC_NOW)
+}
+
 unsafe fn green_task_entry(context: *mut ()) -> FiberReturn {
     let slot = unsafe { &*context.cast::<GreenTaskSlot>() };
     let Ok(id) = slot.current_id() else {
@@ -5948,6 +6831,7 @@ fn run_ready_task(
     slot_index: usize,
 ) -> Result<(), FiberError> {
     let task_id = inner.tasks.current_id(slot_index)?;
+    let yield_budget = inner.tasks.yield_budget(slot_index, task_id)?;
     inner
         .tasks
         .set_state(slot_index, task_id, GreenTaskState::Running)?;
@@ -5955,7 +6839,44 @@ fn run_ready_task(
         .tasks
         .slot(slot_index)?
         .set_yield_action(CurrentGreenYieldAction::Requeue)?;
+
+    let run_started = yield_budget
+        .map(|_| current_monotonic_nanos())
+        .transpose()?;
+    #[cfg(feature = "std")]
+    if let Some(start_nanos) = run_started {
+        inner.begin_yield_budget_segment(
+            carrier_index,
+            slot_index,
+            task_id,
+            yield_budget,
+            start_nanos,
+        );
+    }
     let resume = inner.tasks.resume(slot_index, task_id);
+    let observed_budget_runtime = match (yield_budget, run_started) {
+        (Some(_budget), Some(start_nanos)) => {
+            Duration::from_nanos(current_monotonic_nanos()?.saturating_sub(start_nanos))
+        }
+        _ => Duration::ZERO,
+    };
+    let budget_faulted = inner.finish_yield_budget_segment(
+        carrier_index,
+        task_id,
+        yield_budget,
+        observed_budget_runtime,
+    );
+
+    if budget_faulted {
+        inner.tasks.set_state(
+            slot_index,
+            task_id,
+            GreenTaskState::Failed(FiberError::deadline_exceeded()),
+        )?;
+        inner.dispatch_capacity_for_task(slot_index, task_id)?;
+        inner.finish_task(slot_index, task_id)?;
+        return Ok(());
+    }
 
     match resume {
         Ok(FiberYield::Yielded) => match take_current_green_yield_action(inner, slot_index)? {
@@ -6007,6 +6928,7 @@ fn run_ready_task(
 ///
 /// Returns an honest error when no active green fiber exists on the current carrier.
 pub fn yield_now() -> Result<(), FiberError> {
+    ensure_current_green_handoff_unlocked()?;
     set_current_green_yield_action(CurrentGreenYieldAction::Requeue);
     system_yield_now()
 }
@@ -6019,6 +6941,7 @@ pub fn wait_for_readiness(
     if current_green_context().is_none() {
         return Err(FiberError::state_conflict());
     }
+    ensure_current_green_handoff_unlocked()?;
     set_current_green_yield_action(CurrentGreenYieldAction::WaitReadiness { source, interest });
     if let Err(error) = system_yield_now() {
         set_current_green_yield_action(CurrentGreenYieldAction::Requeue);
@@ -6066,6 +6989,28 @@ fn run_capacity_callback_contained(callback: fn(FiberCapacityEvent), event: Fibe
 }
 
 #[cfg(feature = "std")]
+fn run_yield_budget_callback_contained(
+    callback: fn(FiberYieldBudgetEvent),
+    event: FiberYieldBudgetEvent,
+) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let _ = catch_unwind(AssertUnwindSafe(|| callback(event)));
+}
+
+#[cfg(feature = "std")]
+#[allow(clippy::needless_pass_by_value)]
+fn run_yield_budget_watchdog(inner: GreenPoolLease) {
+    while !inner.shutdown.load(Ordering::Acquire) {
+        if inner.scan_yield_budget_overruns().is_err() {
+            let _ = inner.request_shutdown();
+            break;
+        }
+        std::thread::sleep(FIBER_YIELD_WATCHDOG_POLL_INTERVAL);
+    }
+}
+
+#[cfg(feature = "std")]
 fn run_green_job_contained(runner: InlineGreenJobRunner) -> Result<(), ()> {
     #[cfg(feature = "std")]
     {
@@ -6088,6 +7033,7 @@ pub type FiberHandle<T = ()> = GreenHandle<T>;
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use crate::sync::Mutex as FusionMutex;
     use std::sync::{Arc, Mutex as StdMutex, OnceLock as StdOnceLock};
     use std::vec::Vec;
 
@@ -6172,6 +7118,11 @@ mod tests {
     static LAST_CAPACITY_CARRIER_ID: AtomicUsize = AtomicUsize::new(usize::MAX);
     static LAST_CAPACITY_COMMITTED: AtomicU32 = AtomicU32::new(0);
     static LAST_CAPACITY_RESERVATION: AtomicU32 = AtomicU32::new(0);
+    static YIELD_BUDGET_EVENT_CALLS: AtomicU32 = AtomicU32::new(0);
+    static LAST_YIELD_BUDGET_FIBER_ID: AtomicUsize = AtomicUsize::new(0);
+    static LAST_YIELD_BUDGET_CARRIER_ID: AtomicUsize = AtomicUsize::new(usize::MAX);
+    static LAST_YIELD_BUDGET_NANOS: AtomicU64 = AtomicU64::new(0);
+    static LAST_YIELD_OBSERVED_NANOS: AtomicU64 = AtomicU64::new(0);
     static ELASTIC_TEST_LOCK: StdOnceLock<StdMutex<()>> = StdOnceLock::new();
 
     fn lock_elastic_tests() -> std::sync::MutexGuard<'static, ()> {
@@ -6190,6 +7141,23 @@ mod tests {
         LAST_CAPACITY_CARRIER_ID.store(event.carrier_id, Ordering::Release);
         LAST_CAPACITY_COMMITTED.store(event.committed_pages, Ordering::Release);
         LAST_CAPACITY_RESERVATION.store(event.reservation_pages, Ordering::Release);
+    }
+
+    fn record_yield_budget_event(event: FiberYieldBudgetEvent) {
+        YIELD_BUDGET_EVENT_CALLS.fetch_add(1, Ordering::AcqRel);
+        LAST_YIELD_BUDGET_FIBER_ID.store(
+            usize::try_from(event.fiber_id).unwrap_or(usize::MAX),
+            Ordering::Release,
+        );
+        LAST_YIELD_BUDGET_CARRIER_ID.store(event.carrier_id, Ordering::Release);
+        LAST_YIELD_BUDGET_NANOS.store(
+            saturating_duration_to_nanos_u64(event.budget),
+            Ordering::Release,
+        );
+        LAST_YIELD_OBSERVED_NANOS.store(
+            saturating_duration_to_nanos_u64(event.observed),
+            Ordering::Release,
+        );
     }
 
     #[test]
@@ -6451,9 +7419,11 @@ mod tests {
             growth_chunk: 2,
             max_fibers_per_carrier: 5,
             scheduling: GreenScheduling::Fifo,
+            priority_age_cap: None,
             growth: GreenGrowth::OnDemand,
             telemetry: FiberTelemetry::Full,
             capacity_policy: CapacityPolicy::Abort,
+            yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             huge_pages: HugePagePolicy::Disabled,
         };
         let slab = FiberStackSlab::new(
@@ -6530,9 +7500,11 @@ mod tests {
             growth_chunk: 1,
             max_fibers_per_carrier: 1,
             scheduling: GreenScheduling::Fifo,
+            priority_age_cap: None,
             growth: GreenGrowth::OnDemand,
             telemetry: FiberTelemetry::Full,
             capacity_policy: CapacityPolicy::Abort,
+            yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             huge_pages: HugePagePolicy::Disabled,
         };
         let slab = FiberStackSlab::new(
@@ -6574,9 +7546,11 @@ mod tests {
             growth_chunk: 1,
             max_fibers_per_carrier: 1,
             scheduling: GreenScheduling::Fifo,
+            priority_age_cap: None,
             growth: GreenGrowth::OnDemand,
             telemetry: FiberTelemetry::Full,
             capacity_policy: CapacityPolicy::Abort,
+            yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             huge_pages: HugePagePolicy::Disabled,
         };
         let slab = FiberStackSlab::new(
@@ -6633,9 +7607,11 @@ mod tests {
             growth_chunk: 1,
             max_fibers_per_carrier: 1,
             scheduling: GreenScheduling::Fifo,
+            priority_age_cap: None,
             growth: GreenGrowth::OnDemand,
             telemetry: FiberTelemetry::Full,
             capacity_policy: CapacityPolicy::Notify(record_capacity_event),
+            yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             huge_pages: HugePagePolicy::Disabled,
         };
         let slab = FiberStackSlab::new(
@@ -6686,9 +7662,11 @@ mod tests {
             growth_chunk: 1,
             max_fibers_per_carrier: 1,
             scheduling: GreenScheduling::Fifo,
+            priority_age_cap: None,
             growth: GreenGrowth::OnDemand,
             telemetry: FiberTelemetry::Disabled,
             capacity_policy: CapacityPolicy::Abort,
+            yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             huge_pages: HugePagePolicy::Disabled,
         };
         let slab = FiberStackSlab::new(
@@ -6743,9 +7721,11 @@ mod tests {
             growth_chunk: 1,
             max_fibers_per_carrier: 1,
             scheduling: GreenScheduling::Fifo,
+            priority_age_cap: None,
             growth: GreenGrowth::OnDemand,
             telemetry: FiberTelemetry::Disabled,
             capacity_policy: CapacityPolicy::Abort,
+            yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             huge_pages: HugePagePolicy::Enabled {
                 size: HugePageSize::TwoMiB,
             },
@@ -6797,6 +7777,7 @@ mod tests {
             next_slice,
             priority_slice,
             enqueue_epoch_slice,
+            None,
         )
         .expect("priority queue builds");
 
@@ -6844,6 +7825,7 @@ mod tests {
             next_slice,
             priority_slice,
             enqueue_epoch_slice,
+            None,
         )
         .expect("priority queue builds");
 
@@ -6898,6 +7880,7 @@ mod tests {
             next_slice,
             priority_slice,
             enqueue_epoch_slice,
+            None,
         )
         .expect("priority queue builds");
 
@@ -6949,6 +7932,7 @@ mod tests {
             next_slice,
             priority_slice,
             enqueue_epoch_slice,
+            None,
         )
         .expect("priority queue builds");
 
@@ -6965,6 +7949,493 @@ mod tests {
         assert_eq!(queue.dequeue(), Some(1));
         assert_eq!(queue.dequeue(), Some(2));
         assert_eq!(queue.dequeue(), Some(3));
+    }
+
+    #[test]
+    fn priority_queue_age_cap_limits_virtual_promotion() {
+        let mut buckets = [PriorityBucket::empty(); FIBER_PRIORITY_LEVELS];
+        let mut next = [EMPTY_QUEUE_SLOT; 8];
+        let mut priorities = [FiberTaskPriority::DEFAULT.get(); 8];
+        let mut enqueue_epochs = [0u64; 8];
+        let bucket_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(buckets.as_mut_ptr()).expect("bucket slice pointer"),
+            len: buckets.len(),
+        };
+        let next_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(next.as_mut_ptr()).expect("next slice pointer"),
+            len: next.len(),
+        };
+        let priority_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(priorities.as_mut_ptr()).expect("priority slice pointer"),
+            len: priorities.len(),
+        };
+        let enqueue_epoch_slice = MetadataSlice {
+            ptr: core::ptr::NonNull::new(enqueue_epochs.as_mut_ptr())
+                .expect("enqueue epoch slice pointer"),
+            len: enqueue_epochs.len(),
+        };
+        let mut queue = MetadataPriorityQueue::new(
+            bucket_slice,
+            next_slice,
+            priority_slice,
+            enqueue_epoch_slice,
+            Some(FiberTaskAgeCap::new(1)),
+        )
+        .expect("priority queue builds");
+
+        queue
+            .enqueue(1, FiberTaskPriority::new(-4))
+            .expect("low-priority task should enqueue");
+        queue
+            .enqueue(2, FiberTaskPriority::new(1))
+            .expect("higher-priority task should enqueue");
+
+        assert_eq!(queue.dequeue(), Some(2));
+        assert_eq!(queue.waiting_age(1), FiberTaskAge(1));
+        assert_eq!(queue.effective_priority(1), FiberTaskPriority::new(-3));
+
+        queue
+            .enqueue(3, FiberTaskPriority::new(1))
+            .expect("second higher-priority task should enqueue");
+        assert_eq!(queue.dequeue(), Some(3));
+        assert_eq!(queue.waiting_age(1), FiberTaskAge(1));
+        assert_eq!(queue.dequeue(), Some(1));
+    }
+
+    #[test]
+    fn green_exclusion_span_guard_tracks_active_spans_and_blocks_yield() {
+        const REQUIRED_LEAF: [u32; 2] = [1_u32 << 6, 0];
+        const REQUIRED_ROOT: [u32; 1] = [1_u32 << 0];
+        const REQUIRED_LEVELS: [&[u32]; 1] = [&REQUIRED_ROOT];
+        const REQUIRED_TREE: CooperativeExclusionSummaryTree =
+            CooperativeExclusionSummaryTree::new(&REQUIRED_LEAF, &REQUIRED_LEVELS);
+
+        let carrier = ThreadPool::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            placement: PoolPlacement::Inherit,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("single-carrier pool should build");
+        let fibers =
+            GreenPool::new(&FiberPoolConfig::new(), &carrier).expect("green pool should build");
+
+        let task = fibers
+            .spawn(move || -> Result<(), FiberError> {
+                let span = CooperativeExclusionSpan::new(7).map_err(fiber_error_from_sync)?;
+                let _guard =
+                    enter_current_green_exclusion_span(span).map_err(fiber_error_from_sync)?;
+                let mut active = [span; 4];
+                let copied = current_green_exclusion_spans(&mut active);
+                assert_eq!(copied, 1);
+                assert_eq!(active[0], span);
+                assert!(current_green_exclusion_allows(&[]));
+                assert!(current_green_exclusion_allows(&[
+                    CooperativeExclusionSpan::new(9).map_err(fiber_error_from_sync)?
+                ]));
+                assert!(!current_green_exclusion_allows(&[span]));
+                assert!(!current_green_exclusion_allows_tree(&REQUIRED_TREE));
+                let error = yield_now().expect_err("yield should reject while exclusion span held");
+                assert_eq!(error.kind(), FiberError::state_conflict().kind());
+                Ok(())
+            })
+            .expect("task should spawn");
+
+        task.join()
+            .expect("task should complete without runtime failure")
+            .expect("task should observe the expected span behavior");
+        fibers
+            .shutdown()
+            .expect("green pool should shut down cleanly");
+        carrier
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
+    }
+
+    #[test]
+    fn cooperative_exclusion_summary_tree_matches_named_spans() {
+        const LEAF: [u32; 33] = {
+            let mut words = [0_u32; 33];
+            words[0] = 1_u32 << 2;
+            words[32] = 1_u32 << 0;
+            words
+        };
+        const LEVEL_ONE: [u32; 2] = [1_u32 << 0, 1_u32 << 0];
+        const ROOT: [u32; 1] = [(1_u32 << 0) | (1_u32 << 1)];
+        const LEVELS: [&[u32]; 2] = [&LEVEL_ONE, &ROOT];
+        const TREE: CooperativeExclusionSummaryTree =
+            CooperativeExclusionSummaryTree::new(&LEAF, &LEVELS);
+
+        assert_eq!(
+            TREE.span_capacity(),
+            33 * COOPERATIVE_EXCLUSION_TREE_WORD_BITS
+        );
+        assert!(TREE.contains(
+            CooperativeExclusionSpan::new(3).expect("span identifiers should be non-zero")
+        ));
+        assert!(TREE.contains(
+            CooperativeExclusionSpan::new(1025).expect("span identifiers should be non-zero")
+        ));
+        assert!(!TREE.contains(
+            CooperativeExclusionSpan::new(4).expect("span identifiers should be non-zero")
+        ));
+        assert!(!TREE.contains(
+            CooperativeExclusionSpan::new(2048).expect("span identifiers should be non-zero")
+        ));
+    }
+
+    #[test]
+    fn green_exclusion_summary_tree_falls_back_honestly_for_spans_beyond_fast_cache() {
+        const LEAF: [u32; 33] = {
+            let mut words = [0_u32; 33];
+            words[32] = 1_u32 << 0;
+            words
+        };
+        const LEVEL_ONE: [u32; 2] = [0, 1_u32 << 0];
+        const ROOT: [u32; 1] = [1_u32 << 1];
+        const LEVELS: [&[u32]; 2] = [&LEVEL_ONE, &ROOT];
+        const TREE: CooperativeExclusionSummaryTree =
+            CooperativeExclusionSummaryTree::new(&LEAF, &LEVELS);
+
+        let carrier = ThreadPool::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            placement: PoolPlacement::Inherit,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("single-carrier pool should build");
+        let fibers =
+            GreenPool::new(&FiberPoolConfig::new(), &carrier).expect("green pool should build");
+
+        let task = fibers
+            .spawn(move || -> Result<(), FiberError> {
+                let span = CooperativeExclusionSpan::new(1025).map_err(fiber_error_from_sync)?;
+                let _guard =
+                    enter_current_green_exclusion_span(span).map_err(fiber_error_from_sync)?;
+                assert!(!current_green_exclusion_allows_tree(&TREE));
+                Ok(())
+            })
+            .expect("task should spawn");
+
+        task.join()
+            .expect("task should complete without runtime failure")
+            .expect("task should observe the overflow fallback");
+        fibers
+            .shutdown()
+            .expect("green pool should shut down cleanly");
+        carrier
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
+    }
+
+    #[test]
+    fn green_yield_rejects_when_cooperative_mutex_is_held() {
+        let carrier = ThreadPool::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            placement: PoolPlacement::Inherit,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("single-carrier pool should build");
+        let fibers =
+            GreenPool::new(&FiberPoolConfig::new(), &carrier).expect("green pool should build");
+        let lock = Arc::new(FusionMutex::new(()));
+
+        let task = fibers
+            .spawn({
+                let lock = Arc::clone(&lock);
+                move || -> Result<(), FiberError> {
+                    let _guard = lock.lock().map_err(fiber_error_from_sync)?;
+                    let error =
+                        yield_now().expect_err("yield should reject while cooperative lock held");
+                    assert_eq!(error.kind(), FiberError::state_conflict().kind());
+                    Ok(())
+                }
+            })
+            .expect("task should spawn");
+
+        task.join()
+            .expect("task should complete without runtime failure")
+            .expect("task should observe the expected yield rejection");
+        fibers
+            .shutdown()
+            .expect("green pool should shut down cleanly");
+        carrier
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
+    }
+
+    #[test]
+    fn ranked_green_mutexes_reject_descending_acquisition_order() {
+        let carrier = ThreadPool::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            placement: PoolPlacement::Inherit,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("single-carrier pool should build");
+        let fibers =
+            GreenPool::new(&FiberPoolConfig::new(), &carrier).expect("green pool should build");
+        let low = Arc::new(FusionMutex::ranked(
+            (),
+            crate::sync::CooperativeLockRank::new(1).expect("rank one should be valid"),
+        ));
+        let high = Arc::new(FusionMutex::ranked(
+            (),
+            crate::sync::CooperativeLockRank::new(2).expect("rank two should be valid"),
+        ));
+
+        let task = fibers
+            .spawn({
+                let low = Arc::clone(&low);
+                let high = Arc::clone(&high);
+                move || -> Result<(), FiberError> {
+                    let _high_guard = high.lock().map_err(fiber_error_from_sync)?;
+                    let Err(error) = low.lock() else {
+                        panic!("descending ranked acquisition should be rejected");
+                    };
+                    assert_eq!(error.kind, SyncErrorKind::Invalid);
+                    Ok(())
+                }
+            })
+            .expect("task should spawn");
+
+        task.join()
+            .expect("task should complete without runtime failure")
+            .expect("task should observe the expected ranked-lock rejection");
+        fibers
+            .shutdown()
+            .expect("green pool should shut down cleanly");
+        carrier
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
+    }
+
+    #[test]
+    fn ranked_green_mutexes_allow_ascending_acquisition_order() {
+        let carrier = ThreadPool::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            placement: PoolPlacement::Inherit,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("single-carrier pool should build");
+        let fibers =
+            GreenPool::new(&FiberPoolConfig::new(), &carrier).expect("green pool should build");
+        let low = Arc::new(FusionMutex::ranked(
+            (),
+            crate::sync::CooperativeLockRank::new(1).expect("rank one should be valid"),
+        ));
+        let high = Arc::new(FusionMutex::ranked(
+            (),
+            crate::sync::CooperativeLockRank::new(2).expect("rank two should be valid"),
+        ));
+
+        let task = fibers
+            .spawn({
+                let low = Arc::clone(&low);
+                let high = Arc::clone(&high);
+                move || -> Result<(), FiberError> {
+                    let _low_guard = low.lock().map_err(fiber_error_from_sync)?;
+                    let _high_guard = high.lock().map_err(fiber_error_from_sync)?;
+                    assert_eq!(current_green_cooperative_lock_depth(), 2);
+                    Ok(())
+                }
+            })
+            .expect("task should spawn");
+
+        task.join()
+            .expect("task should complete without runtime failure")
+            .expect("ascending ranked acquisition should succeed");
+        fibers
+            .shutdown()
+            .expect("green pool should shut down cleanly");
+        carrier
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
+    }
+
+    #[test]
+    fn green_join_rejects_when_cooperative_mutex_is_held() {
+        let carrier = ThreadPool::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            placement: PoolPlacement::Inherit,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("single-carrier pool should build");
+        let fibers = GreenPool::new(
+            &FiberPoolConfig::new().with_scheduling(GreenScheduling::Priority),
+            &carrier,
+        )
+        .expect("priority green pool should build");
+        let lock = Arc::new(FusionMutex::new(()));
+        let child_ran = Arc::new(AtomicBool::new(false));
+        let pool_for_parent = fibers
+            .try_clone()
+            .expect("green pool handle should clone for in-fiber spawn");
+        let parent = fibers
+            .spawn_with_attrs(
+                FiberTaskAttributes::new(FiberStackClass::MIN)
+                    .with_priority(FiberTaskPriority::new(10)),
+                {
+                    let lock = Arc::clone(&lock);
+                    let child_ran = Arc::clone(&child_ran);
+                    move || -> Result<(), FiberError> {
+                        let child = pool_for_parent.spawn_with_attrs(
+                            FiberTaskAttributes::new(FiberStackClass::MIN)
+                                .with_priority(FiberTaskPriority::new(-10)),
+                            move || {
+                                child_ran.store(true, Ordering::Release);
+                            },
+                        )?;
+                        let _guard = lock.lock().map_err(fiber_error_from_sync)?;
+                        let error = child
+                            .join()
+                            .expect_err("join should reject while cooperative lock held");
+                        assert_eq!(error.kind(), FiberError::state_conflict().kind());
+                        Ok(())
+                    }
+                },
+            )
+            .expect("parent should spawn");
+
+        parent
+            .join()
+            .expect("parent should complete without runtime failure")
+            .expect("parent should observe the expected join rejection");
+        for _ in 0..1_000 {
+            if child_ran.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            child_ran.load(Ordering::Acquire),
+            "child should still run after the parent join attempt is rejected"
+        );
+
+        fibers
+            .shutdown()
+            .expect("green pool should shut down cleanly");
+        carrier
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
+    }
+
+    #[test]
+    fn green_task_yield_budget_faults_after_overrun_and_yield() {
+        YIELD_BUDGET_EVENT_CALLS.store(0, Ordering::Release);
+        LAST_YIELD_BUDGET_FIBER_ID.store(0, Ordering::Release);
+        LAST_YIELD_BUDGET_CARRIER_ID.store(usize::MAX, Ordering::Release);
+        LAST_YIELD_BUDGET_NANOS.store(0, Ordering::Release);
+        LAST_YIELD_OBSERVED_NANOS.store(0, Ordering::Release);
+
+        let carrier = ThreadPool::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            placement: PoolPlacement::Inherit,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("single-carrier pool should build");
+        let fibers = GreenPool::new(
+            &FiberPoolConfig::new().with_yield_budget_policy(FiberYieldBudgetPolicy::Notify(
+                record_yield_budget_event,
+            )),
+            &carrier,
+        )
+        .expect("green pool should build");
+
+        let task = fibers
+            .spawn_with_attrs(
+                FiberTaskAttributes::new(FiberStackClass::MIN)
+                    .with_yield_budget(Duration::from_millis(5)),
+                || {
+                    std::thread::sleep(Duration::from_millis(15));
+                    yield_now().expect("task should still be able to yield after long segment");
+                },
+            )
+            .expect("budgeted task should spawn");
+        let task_id = task.id();
+
+        let error = task
+            .join()
+            .expect_err("run-between-yield overrun should fault the task");
+        assert_eq!(error.kind(), FiberError::deadline_exceeded().kind());
+        assert_eq!(YIELD_BUDGET_EVENT_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(
+            LAST_YIELD_BUDGET_FIBER_ID.load(Ordering::Acquire),
+            usize::try_from(task_id).unwrap_or(usize::MAX)
+        );
+        assert_eq!(LAST_YIELD_BUDGET_CARRIER_ID.load(Ordering::Acquire), 0);
+        assert!(
+            LAST_YIELD_OBSERVED_NANOS.load(Ordering::Acquire)
+                >= LAST_YIELD_BUDGET_NANOS.load(Ordering::Acquire)
+        );
+
+        fibers
+            .shutdown()
+            .expect("green pool should shut down cleanly");
+        carrier
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
+    }
+
+    #[test]
+    fn watchdog_faults_non_yielding_green_budget_overrun() {
+        YIELD_BUDGET_EVENT_CALLS.store(0, Ordering::Release);
+        LAST_YIELD_BUDGET_FIBER_ID.store(0, Ordering::Release);
+        LAST_YIELD_BUDGET_CARRIER_ID.store(usize::MAX, Ordering::Release);
+        LAST_YIELD_BUDGET_NANOS.store(0, Ordering::Release);
+        LAST_YIELD_OBSERVED_NANOS.store(0, Ordering::Release);
+
+        let carrier = ThreadPool::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            placement: PoolPlacement::Inherit,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("single-carrier pool should build");
+        let fibers = GreenPool::new(
+            &FiberPoolConfig::new().with_yield_budget_policy(FiberYieldBudgetPolicy::Notify(
+                record_yield_budget_event,
+            )),
+            &carrier,
+        )
+        .expect("green pool should build");
+
+        let task = fibers
+            .spawn_with_attrs(
+                FiberTaskAttributes::new(FiberStackClass::MIN)
+                    .with_yield_budget(Duration::from_millis(5)),
+                || {
+                    std::thread::sleep(Duration::from_millis(25));
+                },
+            )
+            .expect("budgeted task should spawn");
+        let task_id = task.id();
+
+        let error = task
+            .join()
+            .expect_err("watchdog should fault one non-yielding overrun");
+        assert_eq!(error.kind(), FiberError::deadline_exceeded().kind());
+        assert_eq!(YIELD_BUDGET_EVENT_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(
+            LAST_YIELD_BUDGET_FIBER_ID.load(Ordering::Acquire),
+            usize::try_from(task_id).unwrap_or(usize::MAX)
+        );
+        assert_eq!(LAST_YIELD_BUDGET_CARRIER_ID.load(Ordering::Acquire), 0);
+        assert!(
+            LAST_YIELD_OBSERVED_NANOS.load(Ordering::Acquire)
+                >= LAST_YIELD_BUDGET_NANOS.load(Ordering::Acquire)
+        );
+
+        fibers
+            .shutdown()
+            .expect("green pool should shut down cleanly");
+        carrier
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
     }
 
     #[test]

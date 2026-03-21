@@ -19,6 +19,9 @@ pub mod pcu;
 #[path = "sys/sys.rs"]
 /// Selected platform backend and public syscall-facing exports.
 pub mod sys;
+#[path = "vector/vector.rs"]
+/// Backend-neutral interrupt-vector ownership vocabulary and low-level fusion-pal traits.
+pub mod vector;
 
 /// Enumeration of platforms currently modeled by the fusion-pal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

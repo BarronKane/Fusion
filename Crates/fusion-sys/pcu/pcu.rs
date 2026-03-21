@@ -5,10 +5,12 @@
 //! deterministic IO-kernel IR without pretending every programmable-IO engine shares one ISA.
 
 mod ir;
+mod kernels;
 mod plan;
 mod system;
 
 pub use ir::*;
+pub use kernels::*;
 pub use plan::*;
 pub use system::*;
 

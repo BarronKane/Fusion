@@ -36,6 +36,8 @@ sys-cortex-m = ["fusion-sys/sys-cortex-m"]
 soc-rp2350 = ["fusion-sys/soc-rp2350"]
 sys-fusion-kn = ["fusion-sys/sys-fusion-kn"]
 critical-safe-generated-contracts = []
+cortex-m-vector-secure-world = ["fusion-sys/cortex-m-vector-secure-world"]
+cortex-m-vector-nonsecure-world = ["fusion-sys/cortex-m-vector-nonsecure-world"]
 
 [dependencies]
 fusion-pal = { workspace = true }

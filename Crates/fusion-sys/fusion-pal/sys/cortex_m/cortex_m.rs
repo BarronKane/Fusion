@@ -25,3 +25,6 @@ pub mod sync;
 #[path = "thread/thread.rs"]
 /// Cortex-M bare-metal thread backend implementation.
 pub mod thread;
+#[path = "vector/vector.rs"]
+/// Cortex-M bare-metal vector-ownership backend implementation.
+pub mod vector;

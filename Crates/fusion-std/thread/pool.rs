@@ -15,6 +15,7 @@ use fusion_sys::thread::{
     SystemThreadPoolError,
     SystemThreadPoolStats,
     SystemWorkItem,
+    ThreadCoreClassId,
     ThreadLogicalCpuId,
     ThreadSchedulerRequest,
     ThreadStackRequest,
@@ -29,6 +30,8 @@ pub enum PoolPlacement<'a> {
     Inherit,
     /// Attempt to place one carrier per logical CPU.
     PerCore,
+    /// Prefer carriers on the supplied heterogeneous core classes.
+    CoreClasses(&'a [ThreadCoreClassId]),
     /// Attempt to place one carrier per package or socket.
     PerPackage,
     /// Pin carriers to an explicit static set of logical CPUs.
@@ -42,6 +45,7 @@ impl<'a> From<PoolPlacement<'a>> for SystemPoolPlacement<'a> {
         match value {
             PoolPlacement::Inherit => Self::Inherit,
             PoolPlacement::PerCore => Self::PerCore,
+            PoolPlacement::CoreClasses(classes) => Self::CoreClasses(classes),
             PoolPlacement::PerPackage => Self::PerPackage,
             PoolPlacement::Static(cpus) => Self::Static(cpus),
             PoolPlacement::Dynamic => Self::Dynamic,

@@ -25,3 +25,6 @@ pub mod sync;
 #[path = "thread/thread.rs"]
 /// Windows fusion-pal thread backend implementation.
 pub mod thread;
+#[path = "../unsupported/vector.rs"]
+/// Windows fusion-pal vector-ownership surface remains unsupported for now.
+pub mod vector;

@@ -1595,12 +1595,13 @@ impl<T> JoinSet<T> {
                     }
                 }
 
-                if let Some(index) = ready_index {
-                    state.len -= 1;
-                    state.entries[index].take()
-                } else {
-                    None
-                }
+                ready_index.map_or_else(
+                    || None,
+                    |index| {
+                        state.len -= 1;
+                        state.entries[index].take()
+                    },
+                )
             };
 
             if let Some(handle) = ready {
@@ -1917,9 +1918,10 @@ const fn executor_error_from_fiber(error: FiberError) -> ExecutorError {
     match error.kind() {
         FiberErrorKind::Unsupported => ExecutorError::Unsupported,
         FiberErrorKind::ResourceExhausted => ExecutorError::Sync(SyncErrorKind::Overflow),
-        FiberErrorKind::Invalid | FiberErrorKind::StateConflict | FiberErrorKind::Context(_) => {
-            ExecutorError::Sync(SyncErrorKind::Invalid)
-        }
+        FiberErrorKind::Invalid
+        | FiberErrorKind::DeadlineExceeded
+        | FiberErrorKind::StateConflict
+        | FiberErrorKind::Context(_) => ExecutorError::Sync(SyncErrorKind::Invalid),
     }
 }
 

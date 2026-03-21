@@ -74,6 +74,15 @@ pub struct PcuIrExecutionConfig {
     pub wrap_source: Option<u8>,
 }
 
+/// Per-instruction timing and side-set payload for one programmable-IO kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct PcuIrInstructionTiming {
+    /// Extra stall cycles applied after the instruction executes.
+    pub stall_cycles: u8,
+    /// Side-set payload driven alongside the instruction, when configured.
+    pub sideset_bits: Option<u8>,
+}
+
 /// WAIT-condition vocabulary portable across the current programmable-IO model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PcuIrWaitCondition {
@@ -248,6 +257,8 @@ pub struct PcuIrProgram<'a> {
     pub id: PcuProgramId,
     /// Portable instruction stream.
     pub instructions: &'a [PcuIrInstruction],
+    /// Optional per-instruction timing and side-set payloads.
+    pub timing: Option<&'a [PcuIrInstructionTiming]>,
     /// Execution-state bundle for this kernel.
     pub execution: PcuIrExecutionConfig,
 }
@@ -259,6 +270,7 @@ impl<'a> PcuIrProgram<'a> {
         Self {
             id,
             instructions,
+            timing: None,
             execution: PcuIrExecutionConfig {
                 clocking: PcuIrClockConfig {
                     divider_integer: None,
@@ -292,6 +304,13 @@ impl<'a> PcuIrProgram<'a> {
     #[must_use]
     pub const fn with_execution(mut self, execution: PcuIrExecutionConfig) -> Self {
         self.execution = execution;
+        self
+    }
+
+    /// Returns one copy of this kernel with explicit per-instruction timing metadata.
+    #[must_use]
+    pub const fn with_timing(mut self, timing: &'a [PcuIrInstructionTiming]) -> Self {
+        self.timing = Some(timing);
         self
     }
 

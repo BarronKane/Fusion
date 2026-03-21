@@ -7,13 +7,17 @@ use crate::pal::hal::{
     HardwareError,
     HardwareGuarantee,
     HardwareTopologyCaps,
+    HardwareTopologyNodeId,
     HardwareTopologySummary,
     HardwareTopologySupport,
     HardwareWriteSummary,
 };
+use crate::pal::mem::MemTopologyNodeId;
 use crate::pal::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
 use crate::pal::thread::{
     ThreadAuthoritySet,
+    ThreadClusterId,
+    ThreadCoreClassId,
     ThreadCoreId,
     ThreadError,
     ThreadExecutionLocation,
@@ -94,6 +98,25 @@ pub struct CortexMSocDescriptor {
 pub struct CortexMSocExecutionObservation {
     pub location: ThreadExecutionLocation,
     pub authorities: ThreadAuthoritySet,
+}
+
+/// Runtime observation of the board-owned main/exception stack window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CortexMExceptionStackObservation {
+    /// Lowest address reserved for the main/exception stack window.
+    pub lower_bound: usize,
+    /// Exclusive top-of-stack address for the main/exception stack window.
+    pub upper_bound: usize,
+    /// Configured stack-window size in bytes.
+    pub configured_bytes: usize,
+    /// Current MSP value observed by the board.
+    pub current_sp: usize,
+    /// Current stack consumption measured downward from `upper_bound`.
+    pub current_used_bytes: usize,
+    /// Remaining headroom above `lower_bound`.
+    pub current_headroom_bytes: usize,
+    /// Whether the current stack pointer has crossed below the reserved lower bound.
+    pub overflow_detected: bool,
 }
 
 /// Coarse kind of board-visible Cortex-M memory region.
@@ -339,10 +362,10 @@ impl CortexMSocDescriptor {
         let summary_guarantee = HardwareGuarantee::Verified;
         let mut logical_cpus = HardwareGuarantee::Unsupported;
         let mut cores = HardwareGuarantee::Unsupported;
-        let clusters = HardwareGuarantee::Unsupported;
-        let packages = HardwareGuarantee::Unsupported;
+        let mut clusters = HardwareGuarantee::Unsupported;
+        let mut packages = HardwareGuarantee::Unsupported;
         let numa_nodes = HardwareGuarantee::Unsupported;
-        let core_classes = HardwareGuarantee::Unsupported;
+        let mut core_classes = HardwareGuarantee::Unsupported;
 
         if summary.logical_cpu_count.is_some() {
             caps |= HardwareTopologyCaps::LOGICAL_CPUS;
@@ -352,6 +375,21 @@ impl CortexMSocDescriptor {
         if summary.core_count.is_some() {
             caps |= HardwareTopologyCaps::CORES;
             cores = HardwareGuarantee::Verified;
+        }
+
+        if summary.cluster_count.is_some() {
+            caps |= HardwareTopologyCaps::CLUSTERS;
+            clusters = HardwareGuarantee::Verified;
+        }
+
+        if summary.package_count.is_some() {
+            caps |= HardwareTopologyCaps::PACKAGES;
+            packages = HardwareGuarantee::Verified;
+        }
+
+        if summary.core_class_count.is_some() {
+            caps |= HardwareTopologyCaps::CORE_CLASSES;
+            core_classes = HardwareGuarantee::Verified;
         }
 
         HardwareTopologySupport {
@@ -429,6 +467,75 @@ pub trait CortexMSocBoard: Copy {
 
         for (index, slot) in output.iter_mut().take(written).enumerate() {
             *slot = ThreadCoreId(index as u32);
+        }
+
+        Ok(HardwareWriteSummary::new(total, written))
+    }
+
+    /// Writes topology-defined cluster identifiers for this SoC family.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this SoC family cannot surface cluster identities honestly.
+    #[allow(clippy::cast_possible_truncation)]
+    fn write_clusters(
+        &self,
+        output: &mut [ThreadClusterId],
+    ) -> Result<HardwareWriteSummary, HardwareError> {
+        let total = self
+            .topology_summary()?
+            .cluster_count
+            .ok_or_else(HardwareError::unsupported)?;
+        let written = output.len().min(total);
+
+        for (index, slot) in output.iter_mut().take(written).enumerate() {
+            *slot = ThreadClusterId(index as u32);
+        }
+
+        Ok(HardwareWriteSummary::new(total, written))
+    }
+
+    /// Writes topology-defined package identifiers for this SoC family.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this SoC family cannot surface package identities honestly.
+    #[allow(clippy::cast_possible_truncation)]
+    fn write_packages(
+        &self,
+        output: &mut [HardwareTopologyNodeId],
+    ) -> Result<HardwareWriteSummary, HardwareError> {
+        let total = self
+            .topology_summary()?
+            .package_count
+            .ok_or_else(HardwareError::unsupported)?;
+        let written = output.len().min(total);
+
+        for (index, slot) in output.iter_mut().take(written).enumerate() {
+            *slot = MemTopologyNodeId(index as u32);
+        }
+
+        Ok(HardwareWriteSummary::new(total, written))
+    }
+
+    /// Writes topology-defined core-class identifiers for this SoC family.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this SoC family cannot surface core classes honestly.
+    #[allow(clippy::cast_possible_truncation)]
+    fn write_core_classes(
+        &self,
+        output: &mut [ThreadCoreClassId],
+    ) -> Result<HardwareWriteSummary, HardwareError> {
+        let total = self
+            .topology_summary()?
+            .core_class_count
+            .ok_or_else(HardwareError::unsupported)?;
+        let written = output.len().min(total);
+
+        for (index, slot) in output.iter_mut().take(written).enumerate() {
+            *slot = ThreadCoreClassId(index as u16);
         }
 
         Ok(HardwareWriteSummary::new(total, written))
@@ -536,6 +643,48 @@ pub trait CortexMSocBoard: Copy {
         Err(HardwareError::unsupported())
     }
 
+    /// Returns whether one named external IRQ line supports raw NVIC priority control through
+    /// this board contract.
+    #[must_use]
+    fn irq_priority_supported(&self, _irqn: u16) -> bool {
+        false
+    }
+
+    /// Applies one raw board-defined IRQ priority value to an external IRQ line.
+    ///
+    /// The numeric value is intentionally board-defined rather than pretending every Cortex-M
+    /// priority field has the same implemented granularity. Callers that care about exact
+    /// scheduler ordering should treat this as a hardware-facing control byte, not a portable
+    /// realtime taxonomy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the IRQ line is unknown or this board cannot apply a raw IRQ priority
+    /// honestly.
+    fn irq_set_priority(&self, _irqn: u16, _priority: u8) -> Result<(), HardwareError> {
+        Err(HardwareError::unsupported())
+    }
+
+    /// Clears the NVIC pending state for one named external IRQ line.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the IRQ line is unknown or this board cannot clear its pending state
+    /// honestly.
+    fn irq_clear_pending(&self, _irqn: u16) -> Result<(), HardwareError> {
+        Err(HardwareError::unsupported())
+    }
+
+    /// Sets the NVIC pending state for one named external IRQ line.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the IRQ line is unknown or this board cannot software-pend it
+    /// honestly.
+    fn irq_set_pending(&self, _irqn: u16) -> Result<(), HardwareError> {
+        Err(HardwareError::unsupported())
+    }
+
     /// Returns whether one IRQ line can be acknowledged generically by this board contract.
     ///
     /// Generic acknowledgement is only appropriate when the board can clear the surfaced source
@@ -593,6 +742,46 @@ pub trait CortexMSocBoard: Copy {
     ///
     /// Returns an error if the board does not expose a truthful finite-timeout event source.
     fn event_timeout_fired(&self) -> Result<bool, HardwareError> {
+        Err(HardwareError::unsupported())
+    }
+
+    /// Returns whether the current exception stack has at least `required_bytes` of honest
+    /// remaining headroom for one inline urgent handler body.
+    ///
+    /// Boards should answer this conservatively. False negatives that defer work are acceptable;
+    /// false positives that authorize an inline overrun are not.
+    #[must_use]
+    fn inline_current_exception_stack_allows(&self, _required_bytes: usize) -> bool {
+        false
+    }
+
+    /// Returns one observation of the board-owned main/exception stack window.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the board cannot surface the reserved stack window and current MSP
+    /// honestly.
+    fn exception_stack_observation(
+        &self,
+    ) -> Result<CortexMExceptionStackObservation, HardwareError> {
+        Err(HardwareError::unsupported())
+    }
+
+    /// Returns whether this board exposes one truthful monotonic timebase.
+    #[must_use]
+    fn monotonic_now_supported(&self) -> bool {
+        false
+    }
+
+    /// Returns the current board-defined monotonic timebase reading.
+    ///
+    /// The returned duration is measured against one board-defined monotonic origin and is valid
+    /// only for elapsed-time comparisons within the same running system.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the board does not expose one truthful monotonic timebase.
+    fn monotonic_now(&self) -> Result<Duration, HardwareError> {
         Err(HardwareError::unsupported())
     }
 
@@ -729,6 +918,42 @@ pub fn write_cores<T: CortexMSocBoard>(
     soc.write_cores(output)
 }
 
+/// Writes topology-defined cluster identifiers for the selected SoC board.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC board does not expose cluster identities honestly.
+pub fn write_clusters<T: CortexMSocBoard>(
+    soc: T,
+    output: &mut [ThreadClusterId],
+) -> Result<HardwareWriteSummary, HardwareError> {
+    soc.write_clusters(output)
+}
+
+/// Writes topology-defined package identifiers for the selected SoC board.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC board does not expose package identities honestly.
+pub fn write_packages<T: CortexMSocBoard>(
+    soc: T,
+    output: &mut [HardwareTopologyNodeId],
+) -> Result<HardwareWriteSummary, HardwareError> {
+    soc.write_packages(output)
+}
+
+/// Writes topology-defined core-class identifiers for the selected SoC board.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC board does not expose core classes honestly.
+pub fn write_core_classes<T: CortexMSocBoard>(
+    soc: T,
+    output: &mut [ThreadCoreClassId],
+) -> Result<HardwareWriteSummary, HardwareError> {
+    soc.write_core_classes(output)
+}
+
 /// Returns the current execution location when the selected SoC can surface it honestly.
 ///
 /// # Errors
@@ -813,6 +1038,44 @@ pub fn irq_disable<T: CortexMSocBoard>(soc: T, irqn: u16) -> Result<(), Hardware
     soc.irq_disable(irqn)
 }
 
+/// Returns whether one IRQ line supports raw NVIC priority control on the selected SoC board.
+#[must_use]
+pub fn irq_priority_supported<T: CortexMSocBoard>(soc: T, irqn: u16) -> bool {
+    soc.irq_priority_supported(irqn)
+}
+
+/// Applies one raw board-defined IRQ priority value to an external IRQ line on the selected SoC
+/// board.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot apply the requested raw IRQ priority honestly.
+pub fn irq_set_priority<T: CortexMSocBoard>(
+    soc: T,
+    irqn: u16,
+    priority: u8,
+) -> Result<(), HardwareError> {
+    soc.irq_set_priority(irqn, priority)
+}
+
+/// Clears the NVIC pending state for one IRQ line on the selected SoC board.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot clear the requested pending state honestly.
+pub fn irq_clear_pending<T: CortexMSocBoard>(soc: T, irqn: u16) -> Result<(), HardwareError> {
+    soc.irq_clear_pending(irqn)
+}
+
+/// Sets the NVIC pending state for one IRQ line on the selected SoC board.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot software-pend the requested IRQ honestly.
+pub fn irq_set_pending<T: CortexMSocBoard>(soc: T, irqn: u16) -> Result<(), HardwareError> {
+    soc.irq_set_pending(irqn)
+}
+
 /// Returns whether one IRQ line can be acknowledged generically by the selected SoC board.
 #[must_use]
 pub fn irq_acknowledge_supported<T: CortexMSocBoard>(soc: T, irqn: u16) -> bool {
@@ -868,6 +1131,43 @@ pub fn cancel_event_timeout<T: CortexMSocBoard>(soc: T) -> Result<(), HardwareEr
 /// Returns an error if the selected board cannot surface finite event timeouts honestly.
 pub fn event_timeout_fired<T: CortexMSocBoard>(soc: T) -> Result<bool, HardwareError> {
     soc.event_timeout_fired()
+}
+
+/// Returns whether the selected SoC board currently has enough honest exception-stack headroom
+/// for one inline urgent handler body.
+#[must_use]
+pub fn inline_current_exception_stack_allows<T: CortexMSocBoard>(
+    soc: T,
+    required_bytes: usize,
+) -> bool {
+    soc.inline_current_exception_stack_allows(required_bytes)
+}
+
+/// Returns one observation of the selected SoC board's main/exception stack window.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot surface the reserved stack window and current MSP
+/// honestly.
+pub fn exception_stack_observation<T: CortexMSocBoard>(
+    soc: T,
+) -> Result<CortexMExceptionStackObservation, HardwareError> {
+    soc.exception_stack_observation()
+}
+
+/// Returns whether the selected SoC board exposes one truthful monotonic timebase.
+#[must_use]
+pub fn monotonic_now_supported<T: CortexMSocBoard>(soc: T) -> bool {
+    soc.monotonic_now_supported()
+}
+
+/// Returns the current monotonic timebase reading for the selected SoC board.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot surface one truthful monotonic timebase.
+pub fn monotonic_now<T: CortexMSocBoard>(soc: T) -> Result<Duration, HardwareError> {
+    soc.monotonic_now()
 }
 
 /// Returns the major clock descriptors for the selected SoC board.
@@ -926,6 +1226,9 @@ fn generic_single_core_observation(
         Some(HardwareTopologySummary {
             logical_cpu_count: Some(1),
             core_count,
+            cluster_count,
+            package_count,
+            core_class_count,
             ..
         }) if core_count.is_none_or(|count| count == 1) => Some(CortexMSocExecutionObservation {
             location: ThreadExecutionLocation {
@@ -934,25 +1237,28 @@ fn generic_single_core_observation(
                     index: 0,
                 }),
                 core: Some(ThreadCoreId(0)),
-                cluster: None,
-                package: None,
+                cluster: cluster_count.map(|_| ThreadClusterId(0)),
+                package: package_count.map(|_| MemTopologyNodeId(0)),
                 numa_node: None,
-                core_class: None,
+                core_class: core_class_count.map(|_| ThreadCoreClassId(0)),
             },
             authorities: ThreadAuthoritySet::TOPOLOGY,
         }),
         Some(HardwareTopologySummary {
             logical_cpu_count: None,
             core_count: Some(1),
+            cluster_count,
+            package_count,
+            core_class_count,
             ..
         }) => Some(CortexMSocExecutionObservation {
             location: ThreadExecutionLocation {
                 logical_cpu: None,
                 core: Some(ThreadCoreId(0)),
-                cluster: None,
-                package: None,
+                cluster: cluster_count.map(|_| ThreadClusterId(0)),
+                package: package_count.map(|_| MemTopologyNodeId(0)),
                 numa_node: None,
-                core_class: None,
+                core_class: core_class_count.map(|_| ThreadCoreClassId(0)),
             },
             authorities: ThreadAuthoritySet::TOPOLOGY,
         }),

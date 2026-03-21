@@ -9,6 +9,8 @@ const DEFAULT_GENERATED_ROOTS_NAME: &str = "fusion-std-fiber-task.roots";
 const DEFAULT_REPORT_NAME: &str = "fusion-std-fiber-task.report";
 const DEFAULT_RUST_CONTRACTS_NAME: &str = "fusion-std-fiber-task.contracts.rs";
 const DEFAULT_CONTRACTS_NAME: &str = "fiber-task.contracts";
+const DEFAULT_RED_INLINE_CONTRACTS_NAME: &str = "red-inline.contracts";
+const DEFAULT_RED_INLINE_RUST_NAME: &str = "fusion-std-red-inline.contracts.rs";
 
 fn main() {
     if let Err(error) = run() {
@@ -55,8 +57,10 @@ impl BuildProfile {
 struct PipelineConfig {
     roots_path: Option<PathBuf>,
     contracts_path: Option<PathBuf>,
+    red_inline_contracts_path: Option<PathBuf>,
     report_path: PathBuf,
     rust_contracts_path: PathBuf,
+    red_inline_rust_path: PathBuf,
     output_path: PathBuf,
     toolchain: String,
     crate_name: String,
@@ -80,10 +84,17 @@ impl PipelineConfig {
             .join(DEFAULT_CONTRACTS_NAME)
             .is_file()
             .then(|| manifest_dir.join(DEFAULT_CONTRACTS_NAME));
+        let mut red_inline_contracts_path = manifest_dir
+            .join(DEFAULT_RED_INLINE_CONTRACTS_NAME)
+            .is_file()
+            .then(|| manifest_dir.join(DEFAULT_RED_INLINE_CONTRACTS_NAME));
         let mut report_path = workspace_root.join("target").join(DEFAULT_REPORT_NAME);
         let mut rust_contracts_path = workspace_root
             .join("target")
             .join(DEFAULT_RUST_CONTRACTS_NAME);
+        let mut red_inline_rust_path = workspace_root
+            .join("target")
+            .join(DEFAULT_RED_INLINE_RUST_NAME);
         let mut output_path = workspace_root.join("target").join(DEFAULT_OUTPUT_NAME);
         let mut toolchain = load_workspace_toolchain(workspace_root)?;
         let mut crate_name = "fusion_std".to_owned();
@@ -99,8 +110,10 @@ impl PipelineConfig {
                 &arg.to_string_lossy(),
                 &mut roots_path,
                 &mut contracts_path,
+                &mut red_inline_contracts_path,
                 &mut report_path,
                 &mut rust_contracts_path,
+                &mut red_inline_rust_path,
                 &mut output_path,
                 &mut toolchain,
                 &mut crate_name,
@@ -114,8 +127,10 @@ impl PipelineConfig {
         Ok(Self {
             roots_path,
             contracts_path,
+            red_inline_contracts_path,
             report_path,
             rust_contracts_path,
+            red_inline_rust_path,
             output_path,
             toolchain,
             crate_name,
@@ -127,15 +142,17 @@ impl PipelineConfig {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn apply_cli_arg(
     current_dir: &Path,
     args: &mut impl Iterator<Item = std::ffi::OsString>,
     arg: &str,
     roots_path: &mut Option<PathBuf>,
     contracts_path: &mut Option<PathBuf>,
+    red_inline_contracts_path: &mut Option<PathBuf>,
     report_path: &mut PathBuf,
     rust_contracts_path: &mut PathBuf,
+    red_inline_rust_path: &mut PathBuf,
     output_path: &mut PathBuf,
     toolchain: &mut String,
     crate_name: &mut String,
@@ -172,6 +189,15 @@ fn apply_cli_arg(
                 ),
             ));
         }
+        "--red-inline-contracts" => {
+            *red_inline_contracts_path = Some(resolve_cli_path(
+                current_dir,
+                &PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| usage("missing value for --red-inline-contracts"))?,
+                ),
+            ));
+        }
         "--report" => {
             *report_path = resolve_cli_path(
                 current_dir,
@@ -187,6 +213,15 @@ fn apply_cli_arg(
                 &PathBuf::from(
                     args.next()
                         .ok_or_else(|| usage("missing value for --rust-contracts"))?,
+                ),
+            );
+        }
+        "--red-inline-rust" => {
+            *red_inline_rust_path = resolve_cli_path(
+                current_dir,
+                &PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| usage("missing value for --red-inline-rust"))?,
                 ),
             );
         }
@@ -416,10 +451,17 @@ fn run_analyzer(
         .arg(&config.report_path)
         .arg("--rust-contracts")
         .arg(&config.rust_contracts_path)
+        .arg("--red-inline-rust")
+        .arg(&config.red_inline_rust_path)
         .arg("--crate-name")
         .arg(&config.crate_name);
     if let Some(contracts_path) = config.contracts_path.as_ref() {
         command.arg("--contracts").arg(contracts_path);
+    }
+    if let Some(red_inline_contracts_path) = config.red_inline_contracts_path.as_ref() {
+        command
+            .arg("--red-inline-contracts")
+            .arg(red_inline_contracts_path);
     }
     run_command(command, "cargo run analyzer")
 }
@@ -448,6 +490,6 @@ fn run_command(mut command: Command, label: &str) -> Result<(), String> {
 
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage: cargo run -p fusion-std --bin fusion_std_fiber_task_pipeline -- [--roots <path>] [--contracts <path>] [--report <path>] [--rust-contracts <path>] [--output <path>] [--toolchain <channel>] [--crate-name <name>] [--profile <dev|release>] [--target <triple>] [--features <csv>] [--no-default-features]\n\nWhen --roots is omitted, the pipeline derives analyzer roots from fusion-std's hidden generated-task root registry."
+        "{reason}\nusage: cargo run -p fusion-std --bin fusion_std_fiber_task_pipeline -- [--roots <path>] [--contracts <path>] [--red-inline-contracts <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-rust <path>] [--output <path>] [--toolchain <channel>] [--crate-name <name>] [--profile <dev|release>] [--target <triple>] [--features <csv>] [--no-default-features]\n\nWhen --roots is omitted, the pipeline derives analyzer roots from fusion-std's hidden generated-task root registry."
     )
 }

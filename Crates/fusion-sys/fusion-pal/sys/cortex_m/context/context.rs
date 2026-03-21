@@ -198,11 +198,11 @@ fn validate_stack_layout(stack: ContextStackLayout) -> Result<usize, ContextErro
 
 #[cfg(target_abi = "eabihf")]
 fn capture_fpscr() -> u32 {
-    let mut fpscr = 0_u32;
+    let fpscr: u32;
     unsafe {
         core::arch::asm!(
             "vmrs {fpscr}, fpscr",
-            fpscr = out(reg) fpscr,
+            fpscr = lateout(reg) fpscr,
             options(nostack, preserves_flags),
         );
     }

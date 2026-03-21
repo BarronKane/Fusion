@@ -51,6 +51,8 @@ pub enum FiberErrorKind {
     Invalid,
     /// Resources such as stack backing were exhausted.
     ResourceExhausted,
+    /// The running fiber exceeded one declared execution budget.
+    DeadlineExceeded,
     /// The requested operation conflicted with fiber state.
     StateConflict,
     /// The fusion-pal context backend reported a lower-level context failure.
@@ -88,6 +90,14 @@ impl FiberError {
         }
     }
 
+    /// Creates one execution-budget overrun error.
+    #[must_use]
+    pub const fn deadline_exceeded() -> Self {
+        Self {
+            kind: FiberErrorKind::DeadlineExceeded,
+        }
+    }
+
     /// Creates a state-conflict error.
     #[must_use]
     pub const fn state_conflict() -> Self {
@@ -117,6 +127,7 @@ impl fmt::Display for FiberErrorKind {
             Self::Unsupported => f.write_str("fiber switching unsupported"),
             Self::Invalid => f.write_str("invalid fiber request"),
             Self::ResourceExhausted => f.write_str("fiber resources exhausted"),
+            Self::DeadlineExceeded => f.write_str("fiber execution budget exceeded"),
             Self::StateConflict => f.write_str("fiber state conflict"),
             Self::Context(kind) => write!(f, "context backend error: {kind}"),
         }

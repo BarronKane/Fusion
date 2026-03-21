@@ -5,9 +5,13 @@ use std::path::{Path, PathBuf};
 const AUTO_MANIFEST_NAME: &str = "fusion-std-fiber-task.generated";
 const AUTO_REPORT_NAME: &str = "fusion-std-fiber-task.report";
 const OUTPUT_NAME: &str = "fiber_task_generated.rs";
+const MEMORY_LAYOUT_OUTPUT_NAME: &str = "memory.x";
 const GENERATED_METADATA_ENV: &str = "FUSION_FIBER_TASK_METADATA";
 const GENERATED_REPORT_ENV: &str = "FUSION_FIBER_TASK_REPORT";
 const STRICT_CONTRACTS_FEATURE_ENV: &str = "CARGO_FEATURE_CRITICAL_SAFE_GENERATED_CONTRACTS";
+const SYS_CORTEX_M_FEATURE_ENV: &str = "CARGO_FEATURE_SYS_CORTEX_M";
+const SOC_RP2350_FEATURE_ENV: &str = "CARGO_FEATURE_SOC_RP2350";
+const MAIN_STACK_RESERVE_ENV: &str = "FUSION_CORTEX_M_MAIN_STACK_RESERVE";
 
 #[derive(Debug, Clone)]
 struct GeneratedFiberTaskEntry {
@@ -16,8 +20,19 @@ struct GeneratedFiberTaskEntry {
     priority: i8,
 }
 
+#[derive(Debug, Clone)]
+struct CortexMMemoryLayoutSpec {
+    board_name: String,
+    flash_origin: usize,
+    flash_length: usize,
+    ram_origin: usize,
+    ram_length: usize,
+    default_main_stack_reserve: usize,
+}
+
 fn main() {
     let (auto_manifest_candidates, auto_report_candidates) = setup_build_inputs();
+    emit_platform_memory_layout();
     let output_path =
         PathBuf::from(env::var("OUT_DIR").expect("Cargo should provide OUT_DIR")).join(OUTPUT_NAME);
     let generated =
@@ -35,6 +50,9 @@ fn setup_build_inputs() -> (Vec<PathBuf>, Vec<PathBuf>) {
     println!("cargo:rerun-if-env-changed={GENERATED_METADATA_ENV}");
     println!("cargo:rerun-if-env-changed={GENERATED_REPORT_ENV}");
     println!("cargo:rerun-if-env-changed={STRICT_CONTRACTS_FEATURE_ENV}");
+    println!("cargo:rerun-if-env-changed={SYS_CORTEX_M_FEATURE_ENV}");
+    println!("cargo:rerun-if-env-changed={SOC_RP2350_FEATURE_ENV}");
+    println!("cargo:rerun-if-env-changed={MAIN_STACK_RESERVE_ENV}");
 
     let manifest_dir = PathBuf::from(
         env::var("CARGO_MANIFEST_DIR").expect("Cargo should always provide CARGO_MANIFEST_DIR"),
@@ -64,6 +82,170 @@ fn setup_build_inputs() -> (Vec<PathBuf>, Vec<PathBuf>) {
         }
     }
     (auto_manifest_candidates, auto_report_candidates)
+}
+
+fn emit_platform_memory_layout() {
+    if env::var_os(SYS_CORTEX_M_FEATURE_ENV).is_none() {
+        return;
+    }
+
+    let Some(source_path) = selected_platform_memory_layout_spec_path() else {
+        return;
+    };
+
+    println!("cargo:rerun-if-changed={}", source_path.display());
+    let spec = load_platform_memory_layout_spec(&source_path).unwrap_or_else(|error| {
+        panic!(
+            "fusion-std: failed to load platform memory layout spec from {}: {error}",
+            source_path.display()
+        )
+    });
+    let main_stack_reserve = selected_main_stack_reserve(&spec)
+        .unwrap_or_else(|error| panic!("fusion-std: invalid {MAIN_STACK_RESERVE_ENV}: {error}"));
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("Cargo should provide OUT_DIR"));
+    let output_path = out_dir.join(MEMORY_LAYOUT_OUTPUT_NAME);
+    let rendered = render_platform_memory_layout(&spec, main_stack_reserve);
+    fs::write(&output_path, rendered).unwrap_or_else(|error| {
+        panic!(
+            "fusion-std: failed to write generated platform memory layout to {}: {error}",
+            output_path.display()
+        )
+    });
+    println!("cargo:rustc-link-search={}", out_dir.display());
+}
+
+fn selected_platform_memory_layout_spec_path() -> Option<PathBuf> {
+    if env::var_os(SOC_RP2350_FEATURE_ENV).is_some() {
+        return Some(
+            PathBuf::from(
+                env::var("CARGO_MANIFEST_DIR").expect("Cargo should provide CARGO_MANIFEST_DIR"),
+            )
+            .join(
+                "../fusion-sys/fusion-pal/sys/cortex_m/hal/soc/board/rp2350-pico2w.memory.layout",
+            ),
+        );
+    }
+    None
+}
+
+fn load_platform_memory_layout_spec(path: &Path) -> Result<CortexMMemoryLayoutSpec, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let mut board_name = None;
+    let mut flash_origin = None;
+    let mut flash_length = None;
+    let mut ram_origin = None;
+    let mut ram_length = None;
+    let mut default_main_stack_reserve = None;
+
+    for (line_no, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| format!("line {} is missing '='", line_no + 1))?;
+        let key = key.trim();
+        let value = value.trim();
+        match key {
+            "board_name" => board_name = Some(value.trim_matches('"').to_owned()),
+            "flash_origin" => flash_origin = Some(parse_linker_scalar(value)?),
+            "flash_length" => flash_length = Some(parse_linker_scalar(value)?),
+            "ram_origin" => ram_origin = Some(parse_linker_scalar(value)?),
+            "ram_length" => ram_length = Some(parse_linker_scalar(value)?),
+            "default_main_stack_reserve" => {
+                default_main_stack_reserve = Some(parse_linker_scalar(value)?);
+            }
+            other => {
+                return Err(format!(
+                    "unsupported memory layout key `{other}` at line {}",
+                    line_no + 1
+                ));
+            }
+        }
+    }
+
+    Ok(CortexMMemoryLayoutSpec {
+        board_name: board_name.ok_or_else(|| "missing board_name".to_owned())?,
+        flash_origin: flash_origin.ok_or_else(|| "missing flash_origin".to_owned())?,
+        flash_length: flash_length.ok_or_else(|| "missing flash_length".to_owned())?,
+        ram_origin: ram_origin.ok_or_else(|| "missing ram_origin".to_owned())?,
+        ram_length: ram_length.ok_or_else(|| "missing ram_length".to_owned())?,
+        default_main_stack_reserve: default_main_stack_reserve
+            .ok_or_else(|| "missing default_main_stack_reserve".to_owned())?,
+    })
+}
+
+fn selected_main_stack_reserve(spec: &CortexMMemoryLayoutSpec) -> Result<usize, String> {
+    let reserve = match env::var_os(MAIN_STACK_RESERVE_ENV) {
+        Some(value) => parse_linker_scalar(&value.to_string_lossy())?,
+        None => spec.default_main_stack_reserve,
+    };
+    if reserve == 0 {
+        return Err("main stack reserve must be non-zero".to_owned());
+    }
+    if reserve >= spec.ram_length {
+        return Err(format!(
+            "main stack reserve {reserve:#x} leaves no RAM below the stack boundary"
+        ));
+    }
+    Ok(reserve)
+}
+
+fn render_platform_memory_layout(
+    spec: &CortexMMemoryLayoutSpec,
+    main_stack_reserve: usize,
+) -> String {
+    format!(
+        "/* Generated by fusion-std build.rs from the owning Cortex-M board layout spec.\n\
+* Board: {board_name}\n\
+* Main/exception stack reserve: 0x{main_stack_reserve:x} bytes\n\
+*/\n\
+MEMORY\n\
+{{\n\
+    /* XIP flash -- program code executes in place */\n\
+    FLASH : ORIGIN = 0x{flash_origin:08x}, LENGTH = 0x{flash_length:x}\n\
+    /* SRAM -- all board-visible application RAM */\n\
+    RAM   : ORIGIN = 0x{ram_origin:08x}, LENGTH = 0x{ram_length:x}\n\
+}}\n\n\
+/* Reserve the configured main/exception stack window at the top of RAM.\n\
+ * The gap between `__sheap` (after .bss/.uninit) and `_stack_end`\n\
+ * becomes board-owned free SRAM for allocator and fiber backing.\n\
+ */\n\
+_stack_end = ORIGIN(RAM) + LENGTH(RAM) - 0x{main_stack_reserve:x};\n",
+        board_name = spec.board_name,
+        flash_origin = spec.flash_origin,
+        flash_length = spec.flash_length,
+        ram_origin = spec.ram_origin,
+        ram_length = spec.ram_length,
+        main_stack_reserve = main_stack_reserve,
+    )
+}
+
+fn parse_linker_scalar(raw: &str) -> Result<usize, String> {
+    let raw = raw.trim();
+    if let Some(hex) = raw.strip_prefix("0x") {
+        return usize::from_str_radix(hex, 16).map_err(|error| error.to_string());
+    }
+
+    let mut multiplier = 1_usize;
+    let digits = if let Some(value) = raw.strip_suffix(['K', 'k']) {
+        multiplier = 1024;
+        value
+    } else if let Some(value) = raw.strip_suffix(['M', 'm']) {
+        multiplier = 1024 * 1024;
+        value
+    } else if let Some(value) = raw.strip_suffix(['G', 'g']) {
+        multiplier = 1024 * 1024 * 1024;
+        value
+    } else {
+        raw
+    };
+
+    let base = digits.parse::<usize>().map_err(|error| error.to_string())?;
+    base.checked_mul(multiplier)
+        .ok_or_else(|| format!("value `{raw}` exceeds usize"))
 }
 
 fn generate_fiber_task_metadata(
