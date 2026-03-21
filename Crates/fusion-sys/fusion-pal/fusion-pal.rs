@@ -10,6 +10,9 @@
 #[path = "hal/hal.rs"]
 /// Selected hardware abstraction surface built from fusion-pal contracts and the current backend.
 pub mod hal;
+#[path = "pcu/pcu.rs"]
+/// Backend-neutral programmable-IO vocabulary and low-level fusion-pal traits.
+pub mod pcu;
 #[path = "pal/pal.rs"]
 /// Backend-neutral fusion-pal contracts.
 pub mod pal;

@@ -488,12 +488,8 @@ fn priority_green_pool_rejects_multi_carrier_topology_until_domain_semantics_exi
     config.scheduling = GreenScheduling::Priority;
 
     let error = GreenPool::new(&config, &carriers)
-        .expect_err("multi-carrier priority should remain unsupported until shared domains exist");
-    assert_eq!(
-        error.kind(),
-        FiberError::unsupported().kind(),
-        "multi-carrier priority should still reject honestly",
-    );
+        .expect_err("multi-carrier priority should stay unsupported until domains exist");
+    assert_eq!(error.kind(), FiberError::unsupported().kind());
 
     carriers
         .shutdown()

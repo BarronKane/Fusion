@@ -251,7 +251,7 @@ fn validate_runtime_config(config: &RuntimeConfig<'_>) -> Result<(), RuntimeErro
             if green.task_capacity_per_carrier().is_err() {
                 return Err(RuntimeError::Unsupported);
             }
-            if !green.uses_classes()
+            if green.uses_legacy_capacity_model()
                 && !matches!(green.stack_backing, FiberStackBacking::Fixed { .. })
             {
                 return Err(RuntimeError::Unsupported);

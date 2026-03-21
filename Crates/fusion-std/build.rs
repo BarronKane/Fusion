@@ -69,7 +69,11 @@ fn setup_build_inputs() -> (PathBuf, Vec<PathBuf>, Vec<PathBuf>) {
             println!("cargo:rerun-if-changed={}", path.display());
         }
     }
-    (manifest_path, auto_manifest_candidates, auto_report_candidates)
+    (
+        manifest_path,
+        auto_manifest_candidates,
+        auto_report_candidates,
+    )
 }
 
 fn generate_fiber_task_metadata(
@@ -112,19 +116,6 @@ fn generate_fiber_task_metadata(
             metadata_source.display()
         ),
     };
-    if !strict_generated_contracts
-        && metadata_source != manifest_path
-        && manifest_path.is_file()
-    {
-        let bridge_entries = match load_generated_entries(manifest_path) {
-            Ok(entries) => entries,
-            Err(error) => panic!(
-                "fusion-std: failed to load conservative bridge metadata from {}: {error}",
-                manifest_path.display()
-            ),
-        };
-        merge_entries_with_conservative_bridge(&mut entries, bridge_entries);
-    }
     if strict_generated_contracts {
         let Some(report_source) = report_source
             .or_else(|| first_existing_path(auto_report_candidates).map(PathBuf::as_path))
@@ -268,23 +259,9 @@ fn load_generated_entries(path: &Path) -> Result<Vec<GeneratedFiberTaskEntry>, S
     Ok(entries)
 }
 
-fn merge_entries_with_conservative_bridge(
-    entries: &mut Vec<GeneratedFiberTaskEntry>,
-    bridge_entries: Vec<GeneratedFiberTaskEntry>,
-) {
-    for bridge in bridge_entries {
-        if let Some(existing) = entries.iter_mut().find(|entry| entry.type_name == bridge.type_name)
-        {
-            existing.stack_bytes = existing.stack_bytes.max(bridge.stack_bytes);
-        } else {
-            entries.push(bridge);
-        }
-    }
-}
-
 fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
     let mut rendered = String::from(
-        "const GENERATED_EXPLICIT_FIBER_TASKS: &[GeneratedExplicitFiberTaskMetadata] = &[\n",
+        "#[allow(dead_code)]\nconst GENERATED_EXPLICIT_FIBER_TASKS: &[GeneratedExplicitFiberTaskMetadata] = &[\n",
     );
     for entry in entries {
         rendered.push_str("    GeneratedExplicitFiberTaskMetadata {\n");

@@ -9,6 +9,19 @@ use crate::pal::hal::{
     HardwareWriteSummary,
 };
 use crate::pal::thread::{ThreadCoreId, ThreadError, ThreadId, ThreadLogicalCpuId};
+use crate::pcu::{
+    PcuEngineClaim,
+    PcuEngineDescriptor,
+    PcuEngineId,
+    PcuError,
+    PcuLaneClaim,
+    PcuLaneDescriptor,
+    PcuLaneId,
+    PcuLaneMask,
+    PcuProgramImage,
+    PcuProgramLease,
+    PcuSupport,
+};
 use core::time::Duration;
 
 use super::board_contract::{self, CortexMSocBoard};
@@ -324,4 +337,90 @@ pub fn enter_power_mode(name: &str) -> Result<(), HardwareError> {
 #[must_use]
 pub fn flash_regions() -> &'static [CortexMFlashRegionDescriptor] {
     board_contract::flash_regions(system_soc())
+}
+
+/// Returns the selected generic Cortex-M programmable-IO support surface.
+#[must_use]
+pub const fn pcu_support() -> PcuSupport {
+    PcuSupport::unsupported()
+}
+
+/// Returns the selected generic Cortex-M programmable-IO engine descriptors.
+#[must_use]
+pub fn pcu_engines() -> &'static [PcuEngineDescriptor] {
+    &[]
+}
+
+/// Returns the selected generic Cortex-M programmable-IO lane descriptors for one engine.
+#[must_use]
+pub fn pcu_lanes(_engine: PcuEngineId) -> &'static [PcuLaneDescriptor] {
+    &[]
+}
+
+/// Claims one programmable-IO engine on the selected generic Cortex-M target.
+pub fn claim_pcu_engine(_engine: PcuEngineId) -> Result<PcuEngineClaim, PcuError> {
+    Err(PcuError::unsupported())
+}
+
+/// Releases one programmable-IO engine claim on the selected generic Cortex-M target.
+pub fn release_pcu_engine(_claim: PcuEngineClaim) -> Result<(), PcuError> {
+    Err(PcuError::unsupported())
+}
+
+/// Claims one programmable-IO lane set on the selected generic Cortex-M target.
+pub fn claim_pcu_lanes(
+    _engine: PcuEngineId,
+    _lanes: PcuLaneMask,
+) -> Result<PcuLaneClaim, PcuError> {
+    Err(PcuError::unsupported())
+}
+
+/// Releases one programmable-IO lane claim on the selected generic Cortex-M target.
+pub fn release_pcu_lanes(_claim: PcuLaneClaim) -> Result<(), PcuError> {
+    Err(PcuError::unsupported())
+}
+
+/// Loads one programmable-IO program image on the selected generic Cortex-M target.
+pub fn load_pcu_program(
+    _claim: &PcuEngineClaim,
+    _image: &PcuProgramImage<'_>,
+) -> Result<PcuProgramLease, PcuError> {
+    Err(PcuError::unsupported())
+}
+
+/// Unloads one programmable-IO program image on the selected generic Cortex-M target.
+pub fn unload_pcu_program(
+    _claim: &PcuEngineClaim,
+    _lease: PcuProgramLease,
+) -> Result<(), PcuError> {
+    Err(PcuError::unsupported())
+}
+
+/// Starts one programmable-IO lane set on the selected generic Cortex-M target.
+pub fn start_pcu_lanes(_claim: &PcuLaneClaim) -> Result<(), PcuError> {
+    Err(PcuError::unsupported())
+}
+
+/// Stops one programmable-IO lane set on the selected generic Cortex-M target.
+pub fn stop_pcu_lanes(_claim: &PcuLaneClaim) -> Result<(), PcuError> {
+    Err(PcuError::unsupported())
+}
+
+/// Restarts one programmable-IO lane set on the selected generic Cortex-M target.
+pub fn restart_pcu_lanes(_claim: &PcuLaneClaim) -> Result<(), PcuError> {
+    Err(PcuError::unsupported())
+}
+
+/// Writes one word to one programmable-IO TX FIFO on the selected generic Cortex-M target.
+pub fn write_pcu_tx_fifo(
+    _claim: &PcuLaneClaim,
+    _lane: PcuLaneId,
+    _word: u32,
+) -> Result<(), PcuError> {
+    Err(PcuError::unsupported())
+}
+
+/// Reads one word from one programmable-IO RX FIFO on the selected generic Cortex-M target.
+pub fn read_pcu_rx_fifo(_claim: &PcuLaneClaim, _lane: PcuLaneId) -> Result<u32, PcuError> {
+    Err(PcuError::unsupported())
 }

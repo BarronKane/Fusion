@@ -776,6 +776,13 @@ impl<'a> FiberPoolConfig<'a> {
         !self.classes.is_empty()
     }
 
+    /// Returns whether this configuration still relies on the legacy single-envelope capacity
+    /// model instead of explicit class provisioning.
+    #[must_use]
+    pub const fn uses_legacy_capacity_model(&self) -> bool {
+        self.classes.is_empty()
+    }
+
     /// Returns the effective per-carrier task capacity.
     ///
     /// # Errors
@@ -913,8 +920,25 @@ impl<'a> FiberPoolConfig<'a> {
     ///
     /// Returns an error when generated metadata is missing or invalid for the task, or when the
     /// resulting stack class is not provisioned by this configuration.
+    #[cfg(not(feature = "critical-safe-generated-contracts"))]
     pub fn validate_generated_task<T: GeneratedExplicitFiberTask>(&self) -> Result<(), FiberError> {
         self.validate_task_attributes(T::task_attributes()?)
+    }
+
+    /// Validates one build-generated explicit fiber task against this configuration.
+    ///
+    /// In strict generated-contract builds, admission must come from a compile-time generated
+    /// contract instead of the runtime metadata lookup table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated contract is not provisioned by this configuration.
+    #[cfg(feature = "critical-safe-generated-contracts")]
+    pub const fn validate_generated_task<T>(&self) -> Result<(), FiberError>
+    where
+        T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+    {
+        self.validate_generated_task_contract::<T>()
     }
 }
 
@@ -1493,16 +1517,6 @@ impl PriorityBucket {
     }
 }
 
-/// Strict-priority ready queue keyed by base-priority buckets with lazy epoch aging.
-///
-/// Invariants:
-/// - entries are physically linked into the bucket for their base `i8` priority
-/// - entries are never re-bucketed as they wait
-/// - waiting age is derived lazily from `epoch - enqueue_epoch`
-/// - within one bucket, the head is always the highest effective-priority entry because FIFO
-///   order preserves the oldest waiter first
-/// - dequeue therefore only needs to compare the heads of non-empty buckets instead of scanning
-///   every queued task
 #[derive(Debug)]
 struct MetadataPriorityQueue {
     buckets: MetadataSlice<PriorityBucket>,
@@ -1571,7 +1585,8 @@ impl MetadataPriorityQueue {
                 head: value,
                 tail: value,
             };
-            self.mark_bucket_non_empty(index);
+            self.non_empty[index / usize::BITS as usize] |=
+                1usize << (index % usize::BITS as usize);
         } else {
             self.next[bucket.tail] = value;
             self.buckets[index].tail = value;
@@ -1586,28 +1601,6 @@ impl MetadataPriorityQueue {
             return None;
         }
 
-        let bucket_index = self.select_bucket_for_dequeue()?;
-        let value = self.pop_bucket_head(bucket_index)?;
-        self.epoch = self.epoch.saturating_add(1);
-        self.enqueue_epochs[value] = self.epoch;
-        Some(value)
-    }
-
-    fn effective_priority(&self, value: usize) -> FiberTaskPriority {
-        FiberTaskPriority::new(self.base_priorities[value])
-            .effective_with_age(self.waiting_age(value))
-    }
-
-    fn waiting_age(&self, value: usize) -> FiberTaskAge {
-        FiberTaskAge::from_epoch_delta(self.epoch.saturating_sub(self.enqueue_epochs[value]))
-    }
-
-    fn head_effective_priority(&self, bucket_index: usize) -> Option<FiberTaskPriority> {
-        let candidate = self.buckets[bucket_index].head;
-        (candidate != EMPTY_QUEUE_SLOT).then(|| self.effective_priority(candidate))
-    }
-
-    fn select_bucket_for_dequeue(&self) -> Option<usize> {
         let mut selected = None::<(usize, FiberTaskPriority)>;
         let bits_per_word = usize::BITS as usize;
 
@@ -1616,7 +1609,9 @@ impl MetadataPriorityQueue {
             while word != 0 {
                 let highest_bit = usize::BITS as usize - 1 - word.leading_zeros() as usize;
                 let bucket_index = word_index * bits_per_word + highest_bit;
-                let effective = self.head_effective_priority(bucket_index)?;
+                let bucket = self.buckets[bucket_index];
+                let candidate = bucket.head;
+                let effective = self.effective_priority(candidate);
                 if selected
                     .as_ref()
                     .is_none_or(|(selected_bucket, selected_effective)| {
@@ -1630,7 +1625,20 @@ impl MetadataPriorityQueue {
             }
         }
 
-        selected.map(|(bucket_index, _)| bucket_index)
+        let (bucket_index, _) = selected?;
+        let value = self.pop_bucket_head(bucket_index)?;
+        self.epoch = self.epoch.saturating_add(1);
+        self.enqueue_epochs[value] = self.epoch;
+        Some(value)
+    }
+
+    fn effective_priority(&self, value: usize) -> FiberTaskPriority {
+        FiberTaskPriority::new(self.base_priorities[value])
+            .effective_with_age(self.waiting_age(value))
+    }
+
+    fn waiting_age(&self, value: usize) -> FiberTaskAge {
+        FiberTaskAge::from_epoch_delta(self.epoch.saturating_sub(self.enqueue_epochs[value]))
     }
 
     fn pop_bucket_head(&mut self, bucket_index: usize) -> Option<usize> {
@@ -1648,22 +1656,13 @@ impl MetadataPriorityQueue {
 
         if bucket.head == EMPTY_QUEUE_SLOT {
             bucket = PriorityBucket::empty();
-            self.clear_bucket_non_empty(bucket_index);
+            self.non_empty[bucket_index / usize::BITS as usize] &=
+                !(1usize << (bucket_index % usize::BITS as usize));
         }
 
         self.buckets[bucket_index] = bucket;
         self.len -= 1;
         Some(value)
-    }
-
-    const fn mark_bucket_non_empty(&mut self, bucket_index: usize) {
-        self.non_empty[bucket_index / usize::BITS as usize] |=
-            1usize << (bucket_index % usize::BITS as usize);
-    }
-
-    const fn clear_bucket_non_empty(&mut self, bucket_index: usize) {
-        self.non_empty[bucket_index / usize::BITS as usize] &=
-            !(1usize << (bucket_index % usize::BITS as usize));
     }
 }
 
@@ -5315,8 +5314,25 @@ impl GreenPool {
     ///
     /// Returns an error when generated metadata is missing or invalid for the task, or when the
     /// resulting stack class is not provisioned by the current pool.
+    #[cfg(not(feature = "critical-safe-generated-contracts"))]
     pub fn validate_generated_task<T: GeneratedExplicitFiberTask>(&self) -> Result<(), FiberError> {
         self.validate_task_attributes(T::task_attributes()?)
+    }
+
+    /// Validates one build-generated explicit fiber task against this live pool.
+    ///
+    /// In strict generated-contract builds, admission must come from a compile-time generated
+    /// contract instead of the runtime metadata lookup table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated contract is not provisioned by the current pool.
+    #[cfg(feature = "critical-safe-generated-contracts")]
+    pub fn validate_generated_task<T>(&self) -> Result<(), FiberError>
+    where
+        T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+    {
+        self.validate_task_attributes(generated_explicit_task_contract_attributes::<T>())
     }
 
     /// Returns an approximate stack-telemetry snapshot for live fibers.
@@ -5444,11 +5460,31 @@ impl GreenPool {
     ///
     /// Returns an error when generated metadata is missing or invalid for the task type, or when
     /// ordinary green-task admission fails.
+    #[cfg(not(feature = "critical-safe-generated-contracts"))]
     pub fn spawn_generated<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
     where
         T: GeneratedExplicitFiberTask,
     {
         let attributes = T::task_attributes()?;
+        self.validate_task_attributes(attributes)?;
+        self.spawn_with_attrs(attributes, move || task.run())
+    }
+
+    /// Spawns one explicit fiber task using a compile-time generated contract.
+    ///
+    /// In strict generated-contract builds, admission must come from a compile-time generated
+    /// contract instead of the runtime metadata lookup table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated contract is not provisioned by the current pool, or
+    /// when ordinary green-task admission fails.
+    #[cfg(feature = "critical-safe-generated-contracts")]
+    pub fn spawn_generated<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
+    where
+        T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+    {
+        let attributes = generated_explicit_task_contract_attributes::<T>();
         self.validate_task_attributes(attributes)?;
         self.spawn_with_attrs(attributes, move || task.run())
     }
@@ -5968,6 +6004,26 @@ mod tests {
         fn run(self) -> Self::Output {}
     }
 
+    struct SupportedGeneratedContractTask;
+
+    impl GeneratedExplicitFiberTask for SupportedGeneratedContractTask {
+        type Output = ();
+
+        fn run(self) -> Self::Output {}
+
+        fn task_attributes() -> Result<FiberTaskAttributes, FiberError>
+        where
+            Self: Sized,
+        {
+            Ok(generated_explicit_task_contract_attributes::<Self>())
+        }
+    }
+
+    declare_generated_fiber_task_contract!(
+        SupportedGeneratedContractTask,
+        NonZeroUsize::new(8 * 1024).expect("non-zero supported generated stack"),
+    );
+
     const COMPILE_TIME_EXPLICIT_CLASSES: [FiberStackClassConfig; 1] = [FiberStackClassConfig {
         class: match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
             Ok(class) => class,
@@ -5995,7 +6051,7 @@ mod tests {
     const _: () = COMPILE_TIME_EXPLICIT_CONFIG
         .assert_task_attributes_supported(COMPILE_TIME_EXPLICIT_ATTRIBUTES);
     const _: () = COMPILE_TIME_EXPLICIT_CONFIG
-        .assert_generated_task_supported::<GeneratedFiberTaskMetadataAnchorTask>();
+        .assert_generated_task_supported::<SupportedGeneratedContractTask>();
 
     static CAPACITY_EVENT_CALLS: AtomicU32 = AtomicU32::new(0);
     static LAST_CAPACITY_FIBER_ID: AtomicUsize = AtomicUsize::new(0);
@@ -6187,11 +6243,10 @@ mod tests {
     #[test]
     fn generated_task_contracts_work_in_const_context() {
         const VALIDATION: Result<(), FiberError> = COMPILE_TIME_EXPLICIT_CONFIG
-            .validate_generated_task_contract::<GeneratedFiberTaskMetadataAnchorTask>(
-        );
+            .validate_generated_task_contract::<SupportedGeneratedContractTask>();
 
         assert_eq!(
-            <GeneratedFiberTaskMetadataAnchorTask as GeneratedExplicitFiberTaskContract>::ATTRIBUTES
+            <SupportedGeneratedContractTask as GeneratedExplicitFiberTaskContract>::ATTRIBUTES
                 .stack_class
                 .size_bytes()
                 .get(),
@@ -6255,12 +6310,12 @@ mod tests {
         .expect("green pool should build");
 
         let error = green
-            .validate_generated_task::<GeneratedFiberTaskMetadataAnchorTask>()
+            .validate_generated_task::<SupportedGeneratedContractTask>()
             .expect_err("generated task should be rejected when class is missing");
         assert_eq!(error.kind(), FiberError::unsupported().kind());
 
         let error = green
-            .spawn_generated(GeneratedFiberTaskMetadataAnchorTask(41))
+            .spawn_generated(SupportedGeneratedContractTask)
             .expect_err("spawn should reject unsupported generated class");
         assert_eq!(error.kind(), FiberError::unsupported().kind());
 
@@ -6602,270 +6657,6 @@ mod tests {
         assert!(huge_region.len >= HugePageSize::TwoMiB.bytes());
         assert!(no_huge_region.len >= 3 * page);
         assert!(huge_region.base.addr().get() > no_huge_region.base.addr().get());
-    }
-
-    #[derive(Debug)]
-    struct BenchmarkPriorityQueueStorage {
-        buckets: Vec<PriorityBucket>,
-        next: Vec<usize>,
-        priorities: Vec<i8>,
-        enqueue_epochs: Vec<u64>,
-    }
-
-    impl BenchmarkPriorityQueueStorage {
-        fn new(capacity: usize) -> Self {
-            Self {
-                buckets: std::vec![PriorityBucket::empty(); FIBER_PRIORITY_LEVELS],
-                next: std::vec![EMPTY_QUEUE_SLOT; capacity],
-                priorities: std::vec![FiberTaskPriority::DEFAULT.get(); capacity],
-                enqueue_epochs: std::vec![0; capacity],
-            }
-        }
-
-        fn queue(&mut self) -> MetadataPriorityQueue {
-            MetadataPriorityQueue::new(
-                MetadataSlice {
-                    ptr: core::ptr::NonNull::new(self.buckets.as_mut_ptr())
-                        .expect("bucket slice pointer"),
-                    len: self.buckets.len(),
-                },
-                MetadataSlice {
-                    ptr: core::ptr::NonNull::new(self.next.as_mut_ptr())
-                        .expect("next slice pointer"),
-                    len: self.next.len(),
-                },
-                MetadataSlice {
-                    ptr: core::ptr::NonNull::new(self.priorities.as_mut_ptr())
-                        .expect("priority slice pointer"),
-                    len: self.priorities.len(),
-                },
-                MetadataSlice {
-                    ptr: core::ptr::NonNull::new(self.enqueue_epochs.as_mut_ptr())
-                        .expect("enqueue epoch slice pointer"),
-                    len: self.enqueue_epochs.len(),
-                },
-            )
-            .expect("priority queue builds")
-        }
-    }
-
-    #[derive(Debug)]
-    struct BenchmarkIndexQueueStorage {
-        entries: Vec<usize>,
-    }
-
-    impl BenchmarkIndexQueueStorage {
-        fn new(capacity: usize) -> Self {
-            Self {
-                entries: std::vec![0; capacity],
-            }
-        }
-
-        fn queue(&mut self) -> MetadataIndexQueue {
-            MetadataIndexQueue::new(MetadataSlice {
-                ptr: core::ptr::NonNull::new(self.entries.as_mut_ptr())
-                    .expect("index queue slice pointer"),
-                len: self.entries.len(),
-            })
-            .expect("index queue builds")
-        }
-    }
-
-    #[derive(Debug)]
-    struct FullScanPriorityQueueBenchmark {
-        buckets: Vec<PriorityBucket>,
-        next: Vec<usize>,
-        base_priorities: Vec<i8>,
-        enqueue_epochs: Vec<u64>,
-        len: usize,
-        epoch: u64,
-    }
-
-    impl FullScanPriorityQueueBenchmark {
-        fn new(capacity: usize) -> Self {
-            Self {
-                buckets: std::vec![PriorityBucket::empty(); FIBER_PRIORITY_LEVELS],
-                next: std::vec![EMPTY_QUEUE_SLOT; capacity],
-                base_priorities: std::vec![FiberTaskPriority::DEFAULT.get(); capacity],
-                enqueue_epochs: std::vec![0; capacity],
-                len: 0,
-                epoch: 0,
-            }
-        }
-
-        fn enqueue(&mut self, value: usize, priority: FiberTaskPriority) {
-            let index = priority.queue_index();
-            let bucket = self.buckets[index];
-            self.next[value] = EMPTY_QUEUE_SLOT;
-            self.base_priorities[value] = priority.get();
-            self.enqueue_epochs[value] = self.epoch;
-            if bucket.is_empty() {
-                self.buckets[index] = PriorityBucket {
-                    head: value,
-                    tail: value,
-                };
-            } else {
-                self.next[bucket.tail] = value;
-                self.buckets[index].tail = value;
-            }
-            self.len += 1;
-        }
-
-        fn dequeue(&mut self) -> Option<usize> {
-            let mut selected = None::<(usize, usize, FiberTaskPriority)>;
-            for bucket_index in (0..self.buckets.len()).rev() {
-                let mut current = self.buckets[bucket_index].head;
-                while current != EMPTY_QUEUE_SLOT {
-                    let effective = self.effective_priority(current);
-                    if selected
-                        .as_ref()
-                        .is_none_or(|(selected_bucket, _, selected_effective)| {
-                            effective > *selected_effective
-                                || (effective == *selected_effective
-                                    && bucket_index > *selected_bucket)
-                        })
-                    {
-                        selected = Some((bucket_index, current, effective));
-                    }
-                    current = self.next[current];
-                }
-            }
-
-            let (bucket_index, value, _) = selected?;
-            self.remove_value(bucket_index, value);
-            self.epoch = self.epoch.saturating_add(1);
-            self.enqueue_epochs[value] = self.epoch;
-            Some(value)
-        }
-
-        fn effective_priority(&self, value: usize) -> FiberTaskPriority {
-            FiberTaskPriority::new(self.base_priorities[value]).effective_with_age(
-                FiberTaskAge::from_epoch_delta(self.epoch.saturating_sub(self.enqueue_epochs[value])),
-            )
-        }
-
-        fn remove_value(&mut self, bucket_index: usize, value: usize) {
-            let mut bucket = self.buckets[bucket_index];
-            let mut previous = EMPTY_QUEUE_SLOT;
-            let mut current = bucket.head;
-            while current != EMPTY_QUEUE_SLOT && current != value {
-                previous = current;
-                current = self.next[current];
-            }
-            assert_eq!(
-                current, value,
-                "full-scan benchmark queue should find selected value"
-            );
-            let next = self.next[value];
-            if previous == EMPTY_QUEUE_SLOT {
-                bucket.head = next;
-            } else {
-                self.next[previous] = next;
-            }
-            if bucket.tail == value {
-                bucket.tail = if previous == EMPTY_QUEUE_SLOT {
-                    next
-                } else {
-                    previous
-                };
-            }
-            if bucket.head == EMPTY_QUEUE_SLOT {
-                bucket = PriorityBucket::empty();
-            }
-            self.next[value] = EMPTY_QUEUE_SLOT;
-            self.buckets[bucket_index] = bucket;
-            self.len -= 1;
-        }
-    }
-
-    const fn benchmark_priority_for(round: usize, value: usize) -> FiberTaskPriority {
-        let raw = round
-            .wrapping_mul(19)
-            .wrapping_add(value.wrapping_mul(37))
-            .to_le_bytes()[0];
-        FiberTaskPriority::new(i8::from_ne_bytes([raw]))
-    }
-
-    const fn benchmark_rounds(capacity: usize) -> usize {
-        match capacity {
-            0..=64 => 4096,
-            65..=256 => 2048,
-            _ => 1024,
-        }
-    }
-
-    fn nanos_per_op(duration: std::time::Duration, operations: usize) -> u128 {
-        duration.as_nanos() / operations.max(1) as u128
-    }
-
-    fn benchmark_fifo_queue(capacity: usize, rounds: usize) -> std::time::Duration {
-        let mut storage = BenchmarkIndexQueueStorage::new(capacity);
-        let mut queue = storage.queue();
-        let started = std::time::Instant::now();
-        for round in 0..rounds {
-            for value in 0..capacity {
-                queue
-                    .enqueue(round * capacity + value)
-                    .expect("fifo benchmark enqueue");
-            }
-            for _ in 0..capacity {
-                std::hint::black_box(queue.dequeue().expect("fifo benchmark dequeue"));
-            }
-        }
-        started.elapsed()
-    }
-
-    fn benchmark_priority_queue(capacity: usize, rounds: usize) -> std::time::Duration {
-        let mut storage = BenchmarkPriorityQueueStorage::new(capacity);
-        let mut queue = storage.queue();
-        let started = std::time::Instant::now();
-        for round in 0..rounds {
-            for value in 0..capacity {
-                queue
-                    .enqueue(value, benchmark_priority_for(round, value))
-                    .expect("priority benchmark enqueue");
-            }
-            for _ in 0..capacity {
-                std::hint::black_box(queue.dequeue().expect("priority benchmark dequeue"));
-            }
-        }
-        started.elapsed()
-    }
-
-    fn benchmark_full_scan_priority_queue(capacity: usize, rounds: usize) -> std::time::Duration {
-        let mut queue = FullScanPriorityQueueBenchmark::new(capacity);
-        let started = std::time::Instant::now();
-        for round in 0..rounds {
-            for value in 0..capacity {
-                queue.enqueue(value, benchmark_priority_for(round, value));
-            }
-            for _ in 0..capacity {
-                std::hint::black_box(
-                    queue
-                        .dequeue()
-                        .expect("full-scan priority benchmark dequeue"),
-                );
-            }
-        }
-        started.elapsed()
-    }
-
-    #[test]
-    #[ignore = "microbenchmark"]
-    fn benchmark_ready_queue_overheads() {
-        for capacity in [64usize, 256, 1024] {
-            let rounds = benchmark_rounds(capacity);
-            let operations = rounds * capacity * 2;
-            let fifo = benchmark_fifo_queue(capacity, rounds);
-            let strict = benchmark_priority_queue(capacity, rounds);
-            let full_scan = benchmark_full_scan_priority_queue(capacity, rounds);
-            std::eprintln!(
-                "capacity={capacity:>4} rounds={rounds:>4} ops={operations:>8} | fifo={} ns/op | strict={} ns/op | full-scan={} ns/op",
-                nanos_per_op(fifo, operations),
-                nanos_per_op(strict, operations),
-                nanos_per_op(full_scan, operations),
-            );
-        }
     }
 
     #[test]
