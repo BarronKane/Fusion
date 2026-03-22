@@ -1,211 +1,218 @@
 #![no_std]
 #![no_main]
 
+use core::cell::UnsafeCell;
 use core::panic::PanicInfo;
-use core::ptr;
+use core::ptr::{self, NonNull};
+
 use cortex_m_rt::entry;
+use fusion_sys::fiber::{Fiber, FiberReturn, FiberStack, FiberYield, yield_now};
 
-// ---- RP2350 Register Addresses ----
-
-// Resets (APB peripheral)
 const RESETS_BASE: usize = 0x4002_0000;
-// Atomic clear alias — writing bits here clears them in RESET register
 const RESETS_CLR: *mut u32 = (RESETS_BASE + 0x3000) as *mut u32;
 const RESET_DONE: *const u32 = (RESETS_BASE + 0x08) as *const u32;
 const RESET_IO_BANK0: u32 = 1 << 6;
 const RESET_PADS_BANK0: u32 = 1 << 9;
 
-// IO Bank 0 — function select for GPIO 0-47
 const IO_BANK0_BASE: usize = 0x4002_8000;
-
-// Pads Bank 0 — electrical pad configuration
 const PADS_BANK0_BASE: usize = 0x4003_8000;
+const PADS_GPIO_IE_BIT: u32 = 1 << 6;
+const PADS_GPIO_OD_BIT: u32 = 1 << 7;
+const PADS_GPIO_ISO_BIT: u32 = 1 << 8;
 
-// SIO — Single-cycle I/O (GPIO output/enable for bank 0, GPIO 0-31)
-// NOTE: RP2350 offsets differ from RP2040 due to 48-GPIO bank split
 const SIO_BASE: usize = 0xD000_0000;
 const SIO_GPIO_OUT_SET: *mut u32 = (SIO_BASE + 0x18) as *mut u32;
 const SIO_GPIO_OUT_CLR: *mut u32 = (SIO_BASE + 0x20) as *mut u32;
-const SIO_GPIO_OUT_XOR: *mut u32 = (SIO_BASE + 0x28) as *mut u32;
 const SIO_GPIO_OE_SET: *mut u32 = (SIO_BASE + 0x38) as *mut u32;
 
-// Target: GP15 (physical pin 20) -> 250Ω -> LED -> GND (pin 38)
-const LED_PIN: u32 = 15;
+const BLUE_LED_PIN: u32 = 28;
+const RED_LED_PIN: u32 = 27;
+const FIBER_STACK_BYTES: usize = 4096;
+const STEP_DELAY_CYCLES: u32 = 1_000_000;
 
-// ---- GPIO Primitives ----
+#[repr(align(16))]
+struct AlignedBytes<const N: usize>([u8; N]);
 
-/// Release IO_BANK0 and PADS_BANK0 from reset, configure `pin` as SIO output.
-///
-/// Performs direct MMIO register access. Call once during init.
+struct StaticFiberStack<const N: usize>(UnsafeCell<AlignedBytes<N>>);
+
+impl<const N: usize> StaticFiberStack<N> {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(AlignedBytes([0; N])))
+    }
+
+    fn fiber_stack(&self) -> FiberStack {
+        // SAFETY: the backing storage is static, aligned, and never moved after creation.
+        let bytes = unsafe { &mut (*self.0.get()).0 };
+        FiberStack::new(
+            // SAFETY: static storage is always non-null.
+            unsafe { NonNull::new_unchecked(bytes.as_mut_ptr()) },
+            bytes.len(),
+        )
+        .expect("static fiber stack should always be valid")
+    }
+}
+
+// SAFETY: the example is single-process and only hands these stacks to one fiber each.
+unsafe impl<const N: usize> Sync for StaticFiberStack<N> {}
+
+static FIBONACCI_STACK: StaticFiberStack<FIBER_STACK_BYTES> = StaticFiberStack::new();
+static DISPATCH_STACK: StaticFiberStack<FIBER_STACK_BYTES> = StaticFiberStack::new();
+
+#[derive(Clone, Copy)]
+struct LedCommand {
+    blue_on: bool,
+    red_on: bool,
+}
+
+struct SharedState {
+    current: u64,
+    next: u64,
+    command: LedCommand,
+    command_ready: bool,
+}
+
+impl SharedState {
+    const fn new() -> Self {
+        Self {
+            current: 0,
+            next: 1,
+            command: LedCommand {
+                blue_on: false,
+                red_on: false,
+            },
+            command_ready: false,
+        }
+    }
+}
+
+struct FiberContext {
+    shared: *mut SharedState,
+}
+
 fn gpio_init_output(pin: u32) {
-    // Release peripherals from reset via atomic clear alias
+    // SAFETY: these are RP2350 reset-controller MMIO registers.
     unsafe { ptr::write_volatile(RESETS_CLR, RESET_IO_BANK0 | RESET_PADS_BANK0) };
 
-    // Spin until both peripherals report reset complete
     while unsafe { ptr::read_volatile(RESET_DONE) } & (RESET_IO_BANK0 | RESET_PADS_BANK0)
         != (RESET_IO_BANK0 | RESET_PADS_BANK0)
     {}
 
-    // Pad config — clear OD (output disable, bit 7). Default pad state is fine otherwise.
     let pad = (PADS_BANK0_BASE + 0x04 + (pin as usize) * 4) as *mut u32;
-    let v = unsafe { ptr::read_volatile(pad) };
-    unsafe { ptr::write_volatile(pad, v & !(1 << 7)) };
+    // SAFETY: `pad` points at the selected RP2350 pad register.
+    let pad_value = unsafe { ptr::read_volatile(pad) };
+    // SAFETY: we are programming the selected pad for normal GPIO use.
+    unsafe {
+        ptr::write_volatile(
+            pad,
+            (pad_value | PADS_GPIO_IE_BIT) & !(PADS_GPIO_OD_BIT | PADS_GPIO_ISO_BIT),
+        )
+    };
 
-    // Function select — SIO is function 5
     let ctrl = (IO_BANK0_BASE + (pin as usize) * 8 + 4) as *mut u32;
+    // SAFETY: function 5 selects SIO for RP2350 GPIOs.
     unsafe { ptr::write_volatile(ctrl, 5) };
 
-    // Enable output, start low
+    // SAFETY: SIO output and OE registers are write-only MMIO for GPIO ownership.
     unsafe {
-        ptr::write_volatile(SIO_GPIO_OE_SET, 1 << pin);
         ptr::write_volatile(SIO_GPIO_OUT_CLR, 1 << pin);
+        ptr::write_volatile(SIO_GPIO_OE_SET, 1 << pin);
     }
 }
 
-#[inline(always)]
-fn led_on() {
-    unsafe { ptr::write_volatile(SIO_GPIO_OUT_SET, 1 << LED_PIN) };
-}
-
-#[inline(always)]
-fn led_off() {
-    unsafe { ptr::write_volatile(SIO_GPIO_OUT_CLR, 1 << LED_PIN) };
-}
-
-#[inline(always)]
-fn led_toggle() {
-    unsafe { ptr::write_volatile(SIO_GPIO_OUT_XOR, 1 << LED_PIN) };
-}
-
-// ---- Timing ----
-
-/// Busy-wait delay. At ring oscillator (~6.5 MHz, no PLL), each iteration
-/// takes ~7 cycles ≈ ~1µs. At 150 MHz (with PLL), ~46ns/iter.
-/// Tune by observation — this is pre-timer.
-fn delay(iterations: u32) {
-    for _ in 0..iterations {
-        cortex_m::asm::nop();
+fn gpio_write(pin: u32, high: bool) {
+    let mask = 1 << pin;
+    // SAFETY: these are write-only RP2350 SIO GPIO registers.
+    unsafe {
+        if high {
+            ptr::write_volatile(SIO_GPIO_OUT_SET, mask);
+        } else {
+            ptr::write_volatile(SIO_GPIO_OUT_CLR, mask);
+        }
     }
 }
 
-// ---- Blink Patterns ----
-// Each pattern is a function that runs one blink cycle.
-// Structured as standalone fns so they slot directly into fiber bodies later.
+unsafe fn fibonacci_fiber(context: *mut ()) -> FiberReturn {
+    // SAFETY: the caller passes a live `FiberContext` for the lifetime of the fiber.
+    let state = unsafe { &mut *(*(context.cast::<FiberContext>())).shared };
 
-/// Short rapid strobe — ~23ms on/off at ring osc
-fn pattern_strobe() {
-    led_on();
-    delay(500_000);
-    led_off();
-    delay(500_000);
+    loop {
+        let value = state.current;
+        let is_even = value & 1 == 0;
+        state.command = LedCommand {
+            blue_on: is_even,
+            red_on: !is_even,
+        };
+        state.command_ready = true;
+
+        let next = state.current.wrapping_add(state.next);
+        state.current = state.next;
+        state.next = next;
+
+        yield_now().expect("fibonacci fiber should yield back to the main scheduler");
+    }
 }
 
-/// Heartbeat — quick flash, pause, quick flash, long pause
-fn pattern_heartbeat() {
-    led_on();
-    delay(300_000);
-    led_off();
-    delay(300_000);
-    led_on();
-    delay(300_000);
-    led_off();
-    delay(2_000_000);
+unsafe fn dispatch_fiber(context: *mut ()) -> FiberReturn {
+    // SAFETY: the caller passes a live `FiberContext` for the lifetime of the fiber.
+    let state = unsafe { &mut *(*(context.cast::<FiberContext>())).shared };
+
+    loop {
+        if state.command_ready {
+            gpio_write(BLUE_LED_PIN, state.command.blue_on);
+            gpio_write(RED_LED_PIN, state.command.red_on);
+            state.command_ready = false;
+        }
+
+        yield_now().expect("dispatch fiber should yield back to the main scheduler");
+    }
 }
 
-/// Slow calm blink — ~230ms on/off at ring osc
-fn pattern_slow() {
-    led_on();
-    delay(5_000_000);
-    led_off();
-    delay(5_000_000);
+fn run_once(fiber: &mut Fiber) {
+    match fiber.resume().expect("fiber resume should succeed") {
+        FiberYield::Yielded => {}
+        FiberYield::Completed(_) => panic!("demo fibers are expected to run forever"),
+    }
 }
-
-/// Morse SOS — ... --- ...
-fn pattern_sos() {
-    let dot = 300_000_u32;
-    let dash = 900_000_u32;
-    let gap = 300_000_u32;
-    let letter_gap = 900_000_u32;
-
-    // S: ...
-    for _ in 0..3_u32 {
-        led_on();
-        delay(dot);
-        led_off();
-        delay(gap);
-    }
-    delay(letter_gap);
-
-    // O: ---
-    for _ in 0..3_u32 {
-        led_on();
-        delay(dash);
-        led_off();
-        delay(gap);
-    }
-    delay(letter_gap);
-
-    // S: ...
-    for _ in 0..3_u32 {
-        led_on();
-        delay(dot);
-        led_off();
-        delay(gap);
-    }
-    delay(letter_gap * 2);
-}
-
-const PATTERN_COUNT: u32 = 4;
-const PATTERNS: [fn(); 4] = [pattern_strobe, pattern_heartbeat, pattern_slow, pattern_sos];
-
-// ---- Fibonacci Selector ----
-
-/// Returns fib(n) % m. Pisano period guarantees a deterministic repeating
-/// cycle over the pattern table — visually verifiable.
-const fn fib_mod(n: u32, m: u32) -> u32 {
-    if m <= 1 {
-        return 0;
-    }
-    let mut a: u32 = 0;
-    let mut b: u32 = 1;
-    let mut i = 0;
-    while i < n {
-        let next = (a + b) % m;
-        a = b;
-        b = next;
-        i += 1;
-    }
-    a % m
-}
-
-// ---- Entry ----
 
 #[entry]
 fn main() -> ! {
-    gpio_init_output(LED_PIN);
+    gpio_init_output(BLUE_LED_PIN);
+    gpio_init_output(RED_LED_PIN);
+    gpio_write(BLUE_LED_PIN, false);
+    gpio_write(RED_LED_PIN, false);
 
-    // Quick sanity blink — 3 fast toggles to confirm GPIO is alive
-    for _ in 0..3_u32 {
-        led_toggle();
-        delay(1_000_000);
-    }
-    led_off();
-    delay(2_000_000);
+    let mut shared = SharedState::new();
+    let mut fibonacci_context = FiberContext {
+        shared: &mut shared,
+    };
+    let mut dispatch_context = FiberContext {
+        shared: &mut shared,
+    };
 
-    // Fibonacci-modulo pattern loop
-    // fib(n) mod 4 cycles through: 0,1,1,2,3,1,0,1,1,2,3,1,... (Pisano period 6)
-    // So the visual pattern repeats every 6 cycles:
-    //   strobe → heartbeat → heartbeat → slow → SOS → heartbeat → (repeat)
-    let mut cycle: u32 = 0;
+    let mut fibonacci = Fiber::new(
+        FIBONACCI_STACK.fiber_stack(),
+        fibonacci_fiber,
+        (&raw mut fibonacci_context).cast(),
+    )
+    .expect("RP2350 should support low-level fibers");
+    let mut dispatch = Fiber::new(
+        DISPATCH_STACK.fiber_stack(),
+        dispatch_fiber,
+        (&raw mut dispatch_context).cast(),
+    )
+    .expect("RP2350 should support low-level fibers");
+
     loop {
-        let idx = fib_mod(cycle, PATTERN_COUNT) as usize;
-        PATTERNS[idx]();
-        cycle = cycle.wrapping_add(1);
+        run_once(&mut fibonacci);
+        run_once(&mut dispatch);
+        cortex_m::asm::delay(STEP_DELAY_CYCLES);
     }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
+    gpio_write(BLUE_LED_PIN, false);
+    gpio_write(RED_LED_PIN, true);
     loop {
         cortex_m::asm::wfi();
     }
