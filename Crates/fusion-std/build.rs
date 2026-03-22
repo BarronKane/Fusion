@@ -326,7 +326,7 @@ fn rp2350_flash_boot_image_type_item() -> u32 {
     (image_type << 16) | (1 << 8) | RP2350_BOOT_ITEM_1BS_IMAGE_TYPE
 }
 
-fn rp2350_flash_boot_block_last_item() -> u32 {
+const fn rp2350_flash_boot_block_last_item() -> u32 {
     (1 << 8) | RP2350_BOOT_ITEM_2BS_LAST
 }
 
