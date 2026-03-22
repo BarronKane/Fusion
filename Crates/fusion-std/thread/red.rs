@@ -272,7 +272,7 @@ impl<'a> RedInterruptConfig<'a> {
 
 impl Default for RedInterruptConfig<'_> {
     fn default() -> Self {
-        Self::new(0)
+        Self::new(u16::MAX)
     }
 }
 
@@ -440,8 +440,13 @@ pub fn red_thread_support() -> RedThreadSupport {
     {
         if !cortex_m_board::irqs().is_empty() {
             support.interrupt_binding = ThreadGuarantee::Verified;
-            support.interrupt_priority_control = ThreadGuarantee::Verified;
             support.interrupt_prompt = ThreadGuarantee::Verified;
+        }
+        if cortex_m_board::irqs()
+            .iter()
+            .any(|descriptor| cortex_m_board::irq_priority_supported(descriptor.irqn))
+        {
+            support.interrupt_priority_control = ThreadGuarantee::Verified;
         }
     }
 
@@ -463,6 +468,13 @@ const fn map_cortex_m_hardware_error(error: fusion_pal::pal::hal::HardwareError)
 }
 
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+fn cortex_m_irq_exists(irqn: u16) -> bool {
+    cortex_m_board::irqs()
+        .iter()
+        .any(|descriptor| descriptor.irqn == irqn)
+}
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
 fn validate_red_interrupt_config(
     config: &RedInterruptConfig<'_>,
 ) -> Result<RedInterruptAdmission, ThreadError> {
@@ -470,8 +482,11 @@ fn validate_red_interrupt_config(
     if support.interrupt_binding == ThreadGuarantee::Unsupported {
         return Err(ThreadError::unsupported());
     }
-    if !cortex_m_board::irq_priority_supported(config.irqn) {
+    if !cortex_m_irq_exists(config.irqn) {
         return Err(ThreadError::invalid());
+    }
+    if config.priority.is_some() && !cortex_m_board::irq_priority_supported(config.irqn) {
+        return Err(ThreadError::unsupported());
     }
     if matches!(config.prompt, RedPromptPolicy::WakeEvent) {
         return Err(ThreadError::unsupported());
@@ -571,6 +586,13 @@ impl RedInterrupt {
         #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
         {
             let admission = validate_red_interrupt_config(config)?;
+            if let Some(contract) = config.inline_compatibility
+                && !builder
+                    .deferred_callback_registered(contract.fallback_cookie)
+                    .map_err(map_vector_error)?
+            {
+                return Err(ThreadError::state_conflict());
+            }
             let eligibility = config
                 .inline_compatibility
                 .map(|contract| VectorInlineEligibility {
@@ -902,5 +924,68 @@ impl<T> Drop for RedThread<T> {
         if let Some(handle) = self.handle.take() {
             let _ = ThreadSystem::new().detach(handle);
         }
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn red_thread_spawn_runs_job_and_joins_result() {
+        let thread = RedThread::spawn(&RedThreadConfig::new(), || 7_u8)
+            .expect("hosted red thread spawn should succeed");
+        assert_eq!(thread.join().expect("red thread join should succeed"), 7);
+    }
+
+    #[test]
+    fn red_interrupt_default_uses_invalid_irq_sentinel() {
+        assert_eq!(RedInterruptConfig::default().irqn, u16::MAX);
+    }
+
+    #[test]
+    fn red_inline_compatibility_constructors_preserve_contract() {
+        const SPAN: CooperativeExclusionSpan = match CooperativeExclusionSpan::new(3) {
+            Ok(span) => span,
+            Err(_) => panic!("test span should be valid"),
+        };
+        const SPANS: &[CooperativeExclusionSpan] = &[SPAN];
+        const TREE_LEAF: [u32; 1] = [1_u32 << 2];
+        const TREE_ROOT: [u32; 1] = [1_u32 << 0];
+        const TREE_LEVELS: [&[u32]; 1] = [&TREE_ROOT];
+        const TREE: CooperativeExclusionSummaryTree =
+            CooperativeExclusionSummaryTree::new(&TREE_LEAF, &TREE_LEVELS);
+
+        let from_spans = RedInlineCompatibility::from_spans(
+            SPANS,
+            VectorDispatchLane::DeferredPrimary,
+            VectorDispatchCookie(11),
+        )
+        .with_current_exception_stack_bytes(64);
+        assert!(matches!(
+            from_spans.required_clear,
+            RedInlineClearRequirement::Spans(required) if required == SPANS
+        ));
+        assert_eq!(from_spans.required_current_exception_stack_bytes, 64);
+        assert_eq!(
+            from_spans.fallback_lane,
+            VectorDispatchLane::DeferredPrimary
+        );
+        assert_eq!(from_spans.fallback_cookie, VectorDispatchCookie(11));
+
+        let from_tree = RedInlineCompatibility::from_summary_tree(
+            &TREE,
+            VectorDispatchLane::DeferredSecondary,
+            VectorDispatchCookie(19),
+        );
+        assert!(matches!(
+            from_tree.required_clear,
+            RedInlineClearRequirement::SummaryTree(required) if core::ptr::eq(required, &TREE)
+        ));
+        assert_eq!(
+            from_tree.fallback_lane,
+            VectorDispatchLane::DeferredSecondary
+        );
+        assert_eq!(from_tree.fallback_cookie, VectorDispatchCookie(19));
     }
 }

@@ -11,7 +11,19 @@ const GENERATED_REPORT_ENV: &str = "FUSION_FIBER_TASK_REPORT";
 const STRICT_CONTRACTS_FEATURE_ENV: &str = "CARGO_FEATURE_CRITICAL_SAFE_GENERATED_CONTRACTS";
 const SYS_CORTEX_M_FEATURE_ENV: &str = "CARGO_FEATURE_SYS_CORTEX_M";
 const SOC_RP2350_FEATURE_ENV: &str = "CARGO_FEATURE_SOC_RP2350";
+const CORTEX_M_VECTOR_NONSECURE_WORLD_FEATURE_ENV: &str =
+    "CARGO_FEATURE_CORTEX_M_VECTOR_NONSECURE_WORLD";
 const MAIN_STACK_RESERVE_ENV: &str = "FUSION_CORTEX_M_MAIN_STACK_RESERVE";
+const RP2350_FLASH_BOOT_METADATA_KIND: &str = "rp2350-image-def";
+const RP2350_FLASH_BOOT_MIN_WINDOW_BYTES: usize = 4 * 1024;
+const RP2350_BOOT_BLOCK_MARKER_START: u32 = 0xffff_ded3;
+const RP2350_BOOT_BLOCK_MARKER_END: u32 = 0xab12_3579;
+const RP2350_BOOT_ITEM_1BS_IMAGE_TYPE: u32 = 0x42;
+const RP2350_BOOT_ITEM_2BS_LAST: u32 = 0xff;
+const RP2350_BOOT_IMAGE_TYPE_EXE: u32 = 0x0001;
+const RP2350_BOOT_IMAGE_TYPE_SECURITY_NS: u32 = 0x0010;
+const RP2350_BOOT_IMAGE_TYPE_SECURITY_S: u32 = 0x0020;
+const RP2350_BOOT_IMAGE_TYPE_CHIP_RP2350: u32 = 0x1000;
 
 #[derive(Debug, Clone)]
 struct GeneratedFiberTaskEntry {
@@ -25,9 +37,16 @@ struct CortexMMemoryLayoutSpec {
     board_name: String,
     flash_origin: usize,
     flash_length: usize,
+    flash_boot_metadata: CortexMFlashBootMetadata,
     ram_origin: usize,
     ram_length: usize,
     default_main_stack_reserve: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CortexMFlashBootMetadata {
+    None,
+    Rp2350ImageDef { window_bytes: usize },
 }
 
 fn main() {
@@ -134,6 +153,8 @@ fn load_platform_memory_layout_spec(path: &Path) -> Result<CortexMMemoryLayoutSp
     let mut board_name = None;
     let mut flash_origin = None;
     let mut flash_length = None;
+    let mut flash_boot_metadata_kind = None;
+    let mut flash_boot_window = None;
     let mut ram_origin = None;
     let mut ram_length = None;
     let mut default_main_stack_reserve = None;
@@ -152,6 +173,10 @@ fn load_platform_memory_layout_spec(path: &Path) -> Result<CortexMMemoryLayoutSp
             "board_name" => board_name = Some(value.trim_matches('"').to_owned()),
             "flash_origin" => flash_origin = Some(parse_linker_scalar(value)?),
             "flash_length" => flash_length = Some(parse_linker_scalar(value)?),
+            "flash_boot_metadata_kind" => {
+                flash_boot_metadata_kind = Some(value.trim_matches('"').to_owned());
+            }
+            "flash_boot_window" => flash_boot_window = Some(parse_linker_scalar(value)?),
             "ram_origin" => ram_origin = Some(parse_linker_scalar(value)?),
             "ram_length" => ram_length = Some(parse_linker_scalar(value)?),
             "default_main_stack_reserve" => {
@@ -166,10 +191,41 @@ fn load_platform_memory_layout_spec(path: &Path) -> Result<CortexMMemoryLayoutSp
         }
     }
 
+    let flash_length = flash_length.ok_or_else(|| "missing flash_length".to_owned())?;
+    let flash_boot_metadata = match flash_boot_metadata_kind.as_deref() {
+        None => CortexMFlashBootMetadata::None,
+        Some(RP2350_FLASH_BOOT_METADATA_KIND) => {
+            let window_bytes =
+                flash_boot_window.ok_or_else(|| "missing flash_boot_window".to_owned())?;
+            if window_bytes < RP2350_FLASH_BOOT_MIN_WINDOW_BYTES {
+                return Err(format!(
+                    "flash_boot_window {window_bytes:#x} is smaller than the RP2350 first-4-KiB boot requirement"
+                ));
+            }
+            if window_bytes >= flash_length {
+                return Err(format!(
+                    "flash_boot_window {window_bytes:#x} leaves no flash space beyond the reserved boot window"
+                ));
+            }
+            CortexMFlashBootMetadata::Rp2350ImageDef { window_bytes }
+        }
+        Some(other) => {
+            return Err(format!("unsupported flash boot metadata kind `{other}`"));
+        }
+    };
+    if matches!(flash_boot_metadata, CortexMFlashBootMetadata::None) && flash_boot_window.is_some()
+    {
+        return Err(
+            "flash_boot_window is only valid when flash_boot_metadata_kind is configured"
+                .to_owned(),
+        );
+    }
+
     Ok(CortexMMemoryLayoutSpec {
         board_name: board_name.ok_or_else(|| "missing board_name".to_owned())?,
         flash_origin: flash_origin.ok_or_else(|| "missing flash_origin".to_owned())?,
-        flash_length: flash_length.ok_or_else(|| "missing flash_length".to_owned())?,
+        flash_length,
+        flash_boot_metadata,
         ram_origin: ram_origin.ok_or_else(|| "missing ram_origin".to_owned())?,
         ram_length: ram_length.ok_or_else(|| "missing ram_length".to_owned())?,
         default_main_stack_reserve: default_main_stack_reserve
@@ -197,6 +253,7 @@ fn render_platform_memory_layout(
     spec: &CortexMMemoryLayoutSpec,
     main_stack_reserve: usize,
 ) -> String {
+    let flash_boot_metadata = render_flash_boot_metadata(spec);
     format!(
         "/* Generated by fusion-std build.rs from the owning Cortex-M board layout spec.\n\
 * Board: {board_name}\n\
@@ -209,6 +266,7 @@ MEMORY\n\
     /* SRAM -- all board-visible application RAM */\n\
     RAM   : ORIGIN = 0x{ram_origin:08x}, LENGTH = 0x{ram_length:x}\n\
 }}\n\n\
+{flash_boot_metadata}\
 /* Reserve the configured main/exception stack window at the top of RAM.\n\
  * The gap between `__sheap` (after .bss/.uninit) and `_stack_end`\n\
  * becomes board-owned free SRAM for allocator and fiber backing.\n\
@@ -217,10 +275,59 @@ _stack_end = ORIGIN(RAM) + LENGTH(RAM) - 0x{main_stack_reserve:x};\n",
         board_name = spec.board_name,
         flash_origin = spec.flash_origin,
         flash_length = spec.flash_length,
+        flash_boot_metadata = flash_boot_metadata,
         ram_origin = spec.ram_origin,
         ram_length = spec.ram_length,
         main_stack_reserve = main_stack_reserve,
     )
+}
+
+fn render_flash_boot_metadata(spec: &CortexMMemoryLayoutSpec) -> String {
+    match spec.flash_boot_metadata {
+        CortexMFlashBootMetadata::None => String::new(),
+        CortexMFlashBootMetadata::Rp2350ImageDef { window_bytes } => format!(
+            "/* RP2350 flash boot metadata.\n\
+* Keep the Arm vector table at flash base, reserve the rest of the first boot window for boot\n\
+* metadata, and emit one board-owned IMAGE_DEF block directly into `.start_block` so the ROM gets\n\
+* facts instead of our feelings.\n\
+*/\n\
+_stext = ORIGIN(FLASH) + 0x{window_bytes:x};\n\
+SECTIONS\n\
+{{\n\
+    .start_block : ALIGN(4)\n\
+    {{\n\
+        LONG(0x{marker_start:08x})\n\
+        LONG(0x{image_type_item:08x})\n\
+        LONG(0x{block_last:08x})\n\
+        LONG(0x00000000)\n\
+        LONG(0x{marker_end:08x})\n\
+    }} > FLASH\n\
+}}\n\
+INSERT AFTER .vector_table;\n\
+ASSERT(ADDR(.start_block) + SIZEOF(.start_block) <= ORIGIN(FLASH) + 0x{window_bytes:x},\n\
+       \"RP2350 boot metadata must fit inside the configured first-flash boot window\");\n\n",
+            marker_start = RP2350_BOOT_BLOCK_MARKER_START,
+            image_type_item = rp2350_flash_boot_image_type_item(),
+            block_last = rp2350_flash_boot_block_last_item(),
+            marker_end = RP2350_BOOT_BLOCK_MARKER_END,
+            window_bytes = window_bytes,
+        ),
+    }
+}
+
+fn rp2350_flash_boot_image_type_item() -> u32 {
+    let security_bits = if env::var_os(CORTEX_M_VECTOR_NONSECURE_WORLD_FEATURE_ENV).is_some() {
+        RP2350_BOOT_IMAGE_TYPE_SECURITY_NS
+    } else {
+        RP2350_BOOT_IMAGE_TYPE_SECURITY_S
+    };
+    let image_type =
+        RP2350_BOOT_IMAGE_TYPE_EXE | RP2350_BOOT_IMAGE_TYPE_CHIP_RP2350 | security_bits;
+    (image_type << 16) | (1 << 8) | RP2350_BOOT_ITEM_1BS_IMAGE_TYPE
+}
+
+fn rp2350_flash_boot_block_last_item() -> u32 {
+    (1 << 8) | RP2350_BOOT_ITEM_2BS_LAST
 }
 
 fn parse_linker_scalar(raw: &str) -> Result<usize, String> {

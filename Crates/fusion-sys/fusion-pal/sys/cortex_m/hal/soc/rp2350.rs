@@ -2265,15 +2265,12 @@ fn rp2350_irq_enable_line(irqn: u16) -> Result<(), HardwareError> {
     Ok(())
 }
 
-/// TODO: clears both ICER and ICPR - disabling clears pending. Reasonable default,
-/// TODO: but can't 'disable but remember pending'.
 fn rp2350_irq_disable_line(irqn: u16) -> Result<(), HardwareError> {
     if !rp2350_irq_is_known(irqn) {
         return Err(HardwareError::invalid());
     }
 
     rp2350_nvic_write(CORTEX_M_NVIC_ICER, irqn);
-    rp2350_nvic_write(CORTEX_M_NVIC_ICPR, irqn);
     Ok(())
 }
 
@@ -2400,7 +2397,7 @@ fn rp2350_arm_event_timeout(timeout: Duration) -> Result<(), HardwareError> {
     let alarm_bit = 1_u32 << u32::from(RP2350_EVENT_TIMEOUT_ALARM_INDEX);
     let timer_base = RP2350_EVENT_TIMEOUT_TIMER_BASE;
     let interrupt_clear = (timer_base + RP2350_TIMER_INTR_OFFSET) as *mut u32;
-    let interrupt_enable = (timer_base + RP2350_TIMER_INTE_OFFSET) as *mut u32;
+    let interrupt_enable = timer_base + RP2350_TIMER_INTE_OFFSET;
     let alarm = (timer_base
         + RP2350_TIMER_ALARM0_OFFSET
         + (usize::from(RP2350_EVENT_TIMEOUT_ALARM_INDEX) * 4)) as *mut u32;
@@ -2411,10 +2408,9 @@ fn rp2350_arm_event_timeout(timeout: Duration) -> Result<(), HardwareError> {
     // for the reserved backend timeout alarm.
     unsafe {
         ptr::write_volatile(interrupt_clear, alarm_bit);
-        let current_enable = ptr::read_volatile(interrupt_enable);
-        ptr::write_volatile(interrupt_enable, current_enable | alarm_bit);
         ptr::write_volatile(alarm, deadline);
     }
+    rp2350_atomic_register_set(interrupt_enable, alarm_bit);
     rp2350_nvic_write(CORTEX_M_NVIC_ICPR, RP2350_EVENT_TIMEOUT_IRQN);
     Ok(())
 }
@@ -2424,16 +2420,15 @@ fn rp2350_cancel_event_timeout_alarm() -> Result<(), HardwareError> {
     let timer_base = RP2350_EVENT_TIMEOUT_TIMER_BASE;
     let armed = (timer_base + RP2350_TIMER_ARMED_OFFSET) as *mut u32;
     let interrupt_clear = (timer_base + RP2350_TIMER_INTR_OFFSET) as *mut u32;
-    let interrupt_enable = (timer_base + RP2350_TIMER_INTE_OFFSET) as *mut u32;
+    let interrupt_enable = timer_base + RP2350_TIMER_INTE_OFFSET;
 
     // SAFETY: these are the RP2350 timer armed, interrupt-clear, and interrupt-enable registers
     // for the reserved backend timeout alarm.
     unsafe {
-        let current_enable = ptr::read_volatile(interrupt_enable);
-        ptr::write_volatile(interrupt_enable, current_enable & !alarm_bit);
         ptr::write_volatile(armed, alarm_bit);
         ptr::write_volatile(interrupt_clear, alarm_bit);
     }
+    rp2350_atomic_register_clear(interrupt_enable, alarm_bit);
     rp2350_irq_disable_line(RP2350_EVENT_TIMEOUT_IRQN)?;
     Ok(())
 }
@@ -2601,6 +2596,10 @@ impl CortexMSocBoard for Rp2350Soc {
 
     fn irq_priority_supported(&self, irqn: u16) -> bool {
         rp2350_irq_is_known(irqn)
+    }
+
+    fn irq_implemented_priority_bits(&self) -> u8 {
+        4
     }
 
     fn irq_set_priority(&self, irqn: u16, priority: u8) -> Result<(), HardwareError> {
@@ -3145,6 +3144,12 @@ pub fn irq_disable(irqn: u16) -> Result<(), HardwareError> {
 #[must_use]
 pub fn irq_priority_supported(irqn: u16) -> bool {
     board_contract::irq_priority_supported(system_soc(), irqn)
+}
+
+/// Returns the number of implemented raw NVIC priority bits on RP2350.
+#[must_use]
+pub fn irq_implemented_priority_bits() -> u8 {
+    board_contract::irq_implemented_priority_bits(system_soc())
 }
 
 /// Applies one raw NVIC priority byte to one RP2350 IRQ line.

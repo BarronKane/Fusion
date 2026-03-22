@@ -46,6 +46,7 @@ pub use self::soc::board::{
     irq_clear_pending as selected_soc_irq_clear_pending,
     irq_disable as selected_soc_irq_disable,
     irq_enable as selected_soc_irq_enable,
+    irq_implemented_priority_bits as selected_soc_irq_implemented_priority_bits,
     irq_priority_supported as selected_soc_irq_priority_supported,
     irq_set_pending as selected_soc_irq_set_pending,
     irq_set_priority as selected_soc_irq_set_priority,

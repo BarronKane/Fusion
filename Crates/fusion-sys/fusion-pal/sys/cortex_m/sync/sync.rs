@@ -90,9 +90,7 @@ const CORTEX_M_LOCAL_CRITICAL_SECTION_SYNC_SAFE: bool =
     super::super::hal::soc::board::LOCAL_CRITICAL_SECTION_SYNC_SAFE;
 
 const CORTEX_M_MUTEX_SUPPORT_ATOMIC: MutexSupport = MutexSupport {
-    caps: MutexCaps::TRY_LOCK
-        .union(MutexCaps::BLOCKING)
-        .union(MutexCaps::STATIC_INIT),
+    caps: MutexCaps::TRY_LOCK.union(MutexCaps::STATIC_INIT),
     timeout: TimeoutCaps::empty(),
     priority_inheritance: PriorityInheritanceSupport::None,
     recursion: RecursionSupport::None,
@@ -103,9 +101,7 @@ const CORTEX_M_MUTEX_SUPPORT_ATOMIC: MutexSupport = MutexSupport {
 };
 
 const CORTEX_M_MUTEX_SUPPORT_CRITICAL: MutexSupport = MutexSupport {
-    caps: MutexCaps::TRY_LOCK
-        .union(MutexCaps::BLOCKING)
-        .union(MutexCaps::STATIC_INIT),
+    caps: MutexCaps::TRY_LOCK.union(MutexCaps::STATIC_INIT),
     timeout: TimeoutCaps::empty(),
     priority_inheritance: PriorityInheritanceSupport::None,
     recursion: RecursionSupport::None,
@@ -116,27 +112,21 @@ const CORTEX_M_MUTEX_SUPPORT_CRITICAL: MutexSupport = MutexSupport {
 };
 
 const CORTEX_M_ONCE_SUPPORT_ATOMIC: OnceSupport = OnceSupport {
-    caps: OnceCaps::WAITING
-        .union(OnceCaps::STATIC_INIT)
-        .union(OnceCaps::RESET_ON_FAILURE),
+    caps: OnceCaps::STATIC_INIT.union(OnceCaps::RESET_ON_FAILURE),
     process_scope: ProcessScopeSupport::LocalOnly,
     implementation: SyncImplementationKind::Emulated,
     fallback: SyncFallbackKind::SpinOnly,
 };
 
 const CORTEX_M_ONCE_SUPPORT_CRITICAL: OnceSupport = OnceSupport {
-    caps: OnceCaps::WAITING
-        .union(OnceCaps::STATIC_INIT)
-        .union(OnceCaps::RESET_ON_FAILURE),
+    caps: OnceCaps::STATIC_INIT.union(OnceCaps::RESET_ON_FAILURE),
     process_scope: ProcessScopeSupport::LocalOnly,
     implementation: SyncImplementationKind::Emulated,
     fallback: SyncFallbackKind::CriticalSection,
 };
 
 const CORTEX_M_SEMAPHORE_SUPPORT_ATOMIC: SemaphoreSupport = SemaphoreSupport {
-    caps: SemaphoreCaps::TRY_ACQUIRE
-        .union(SemaphoreCaps::BLOCKING)
-        .union(SemaphoreCaps::RELEASE_MANY),
+    caps: SemaphoreCaps::TRY_ACQUIRE.union(SemaphoreCaps::RELEASE_MANY),
     timeout: TimeoutCaps::empty(),
     process_scope: ProcessScopeSupport::LocalOnly,
     implementation: SyncImplementationKind::Emulated,
@@ -144,9 +134,7 @@ const CORTEX_M_SEMAPHORE_SUPPORT_ATOMIC: SemaphoreSupport = SemaphoreSupport {
 };
 
 const CORTEX_M_SEMAPHORE_SUPPORT_CRITICAL: SemaphoreSupport = SemaphoreSupport {
-    caps: SemaphoreCaps::TRY_ACQUIRE
-        .union(SemaphoreCaps::BLOCKING)
-        .union(SemaphoreCaps::RELEASE_MANY),
+    caps: SemaphoreCaps::TRY_ACQUIRE.union(SemaphoreCaps::RELEASE_MANY),
     timeout: TimeoutCaps::empty(),
     process_scope: ProcessScopeSupport::LocalOnly,
     implementation: SyncImplementationKind::Emulated,
@@ -156,8 +144,6 @@ const CORTEX_M_SEMAPHORE_SUPPORT_CRITICAL: SemaphoreSupport = SemaphoreSupport {
 const CORTEX_M_RWLOCK_SUPPORT_ATOMIC: RwLockSupport = RwLockSupport {
     caps: RwLockCaps::TRY_READ
         .union(RwLockCaps::TRY_WRITE)
-        .union(RwLockCaps::BLOCKING_READ)
-        .union(RwLockCaps::BLOCKING_WRITE)
         .union(RwLockCaps::STATIC_INIT),
     timeout: TimeoutCaps::empty(),
     fairness: RwLockFairnessSupport::None,
@@ -169,8 +155,6 @@ const CORTEX_M_RWLOCK_SUPPORT_ATOMIC: RwLockSupport = RwLockSupport {
 const CORTEX_M_RWLOCK_SUPPORT_CRITICAL: RwLockSupport = RwLockSupport {
     caps: RwLockCaps::TRY_READ
         .union(RwLockCaps::TRY_WRITE)
-        .union(RwLockCaps::BLOCKING_READ)
-        .union(RwLockCaps::BLOCKING_WRITE)
         .union(RwLockCaps::STATIC_INIT),
     timeout: TimeoutCaps::empty(),
     fairness: RwLockFairnessSupport::None,

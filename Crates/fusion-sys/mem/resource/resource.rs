@@ -1336,6 +1336,9 @@ fn align_up(value: usize, align: usize) -> Option<usize> {
     if align == 0 {
         return Some(value);
     }
+    if !align.is_power_of_two() {
+        return None;
+    }
 
     let mask = align.checked_sub(1)?;
     value.checked_add(mask).map(|rounded| rounded & !mask)
@@ -1849,5 +1852,11 @@ mod tests {
         assert_send_sync::<VirtualMemoryResource>();
         assert_send_sync::<AddressReservation>();
         assert_send_sync::<BoundMemoryResource>();
+    }
+
+    #[test]
+    fn normalize_len_rejects_non_power_of_two_granule() {
+        let error = normalize_len(4096, 24).expect_err("non-power-of-two granule should reject");
+        assert_eq!(error.kind, ResourceErrorKind::InvalidRequest);
     }
 }

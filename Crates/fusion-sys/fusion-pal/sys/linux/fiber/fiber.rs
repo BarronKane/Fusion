@@ -247,6 +247,10 @@ impl LinuxFiberHost {
 
     /// Signals one wake token from a fault or scheduler path.
     ///
+    /// On Linux this bottoms out in one nonblocking `write(2)` to the wake pipe, which keeps the
+    /// path async-signal-safe enough for the elastic-stack fault handler instead of routing that
+    /// handler through some more emotionally expressive synchronization primitive.
+    ///
     /// # Errors
     ///
     /// Returns an honest write failure when Linux rejects the wake signal.

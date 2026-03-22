@@ -650,6 +650,15 @@ pub trait CortexMSocBoard: Copy {
         false
     }
 
+    /// Returns the number of implemented raw NVIC priority bits surfaced by this board.
+    ///
+    /// Boards should report the architecturally implemented high bits in the external IRQ
+    /// priority field rather than the storage width of the underlying register.
+    #[must_use]
+    fn irq_implemented_priority_bits(&self) -> u8 {
+        0
+    }
+
     /// Applies one raw board-defined IRQ priority value to an external IRQ line.
     ///
     /// The numeric value is intentionally board-defined rather than pretending every Cortex-M
@@ -1042,6 +1051,12 @@ pub fn irq_disable<T: CortexMSocBoard>(soc: T, irqn: u16) -> Result<(), Hardware
 #[must_use]
 pub fn irq_priority_supported<T: CortexMSocBoard>(soc: T, irqn: u16) -> bool {
     soc.irq_priority_supported(irqn)
+}
+
+/// Returns the number of implemented raw NVIC priority bits on the selected SoC board.
+#[must_use]
+pub fn irq_implemented_priority_bits<T: CortexMSocBoard>(soc: T) -> u8 {
+    soc.irq_implemented_priority_bits()
 }
 
 /// Applies one raw board-defined IRQ priority value to an external IRQ line on the selected SoC

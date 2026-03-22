@@ -120,10 +120,22 @@ pub struct VectorInlineReservedStack {
 }
 
 impl VectorInlineReservedStack {
+    /// Returns the exclusive top-of-stack address for this reserved window when it fits in one
+    /// machine address.
+    #[must_use]
+    pub fn checked_top(self) -> Option<usize> {
+        (self.base.as_ptr() as usize).checked_add(self.size_bytes.get())
+    }
+
     /// Returns the exclusive top-of-stack address for this reserved window.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the reserved stack window would overflow the active machine address width.
     #[must_use]
     pub fn top(self) -> usize {
-        self.base.as_ptr() as usize + self.size_bytes.get()
+        self.checked_top()
+            .expect("reserved inline stack top should fit in the active address width")
     }
 }
 

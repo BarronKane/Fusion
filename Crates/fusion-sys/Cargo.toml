@@ -15,7 +15,7 @@ path = "fusion-sys.rs"
 [features]
 default = []
 sys-cortex-m = ["fusion-pal/sys-cortex-m"]
-soc-rp2350 = ["fusion-pal/soc-rp2350"]
+soc-rp2350 = ["sys-cortex-m", "fusion-pal/soc-rp2350"]
 sys-fusion-kn = ["fusion-pal/sys-fusion-kn"]
 cortex-m-vector-secure-world = ["fusion-pal/cortex-m-vector-secure-world"]
 cortex-m-vector-nonsecure-world = ["fusion-pal/cortex-m-vector-nonsecure-world"]

@@ -9,12 +9,14 @@ compile_error!(
 );
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-use core::arch::global_asm;
+use core::arch::{asm, global_asm};
+use core::cell::UnsafeCell;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering, compiler_fence};
 
 use crate::pal::thread::ThreadCoreId;
 use crate::sys::cortex_m::hal::selected_soc_inline_current_exception_stack_allows;
+use crate::sys::cortex_m::hal::selected_soc_irq_implemented_priority_bits;
 use crate::vector::{
     IrqSlot,
     SlotState,
@@ -56,6 +58,7 @@ const CORTEX_M_SCB_ICSR: *mut u32 = 0xE000_ED04 as *mut u32;
 const CORTEX_M_SCB_SHPR: *mut u8 = 0xE000_ED18 as *mut u8;
 const CORTEX_M_NVIC_ISPR: *const u32 = 0xE000_E200 as *const u32;
 const CORTEX_M_ICSR_PENDSVSET: u32 = 1_u32 << 28;
+const CORTEX_M_PENDSV_INDEX: usize = 14;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 global_asm!(include_str!("cortex_m_vector_reserved_stack.S"));
@@ -68,6 +71,21 @@ const TOPOLOGY_PER_CORE: u8 = 1;
 
 #[repr(C, align(512))]
 struct CortexMOwnedVectorTable([usize; MAX_VECTOR_ENTRIES]);
+
+#[repr(transparent)]
+struct ScopeStorageCell<T>(UnsafeCell<T>);
+
+unsafe impl<T> Sync for ScopeStorageCell<T> {}
+
+impl<T> ScopeStorageCell<T> {
+    const fn new(value: T) -> Self {
+        Self(UnsafeCell::new(value))
+    }
+
+    fn get(&self) -> *mut T {
+        self.0.get()
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct SlotMeta {
@@ -138,25 +156,31 @@ const fn mode_from(topology: VectorTableTopology, ownership: u8) -> VectorTableM
     }
 }
 
-static VECTOR_BUILDER_ACTIVE: AtomicBool = AtomicBool::new(false);
+static VECTOR_BUILDER_ACTIVE: [AtomicBool; VECTOR_SCOPE_COUNT] =
+    [const { AtomicBool::new(false) }; VECTOR_SCOPE_COUNT];
 static ACTIVE_TOPOLOGY: AtomicU8 = AtomicU8::new(TOPOLOGY_SHARED);
 static SCOPE_OWNERSHIP: [AtomicU8; VECTOR_SCOPE_COUNT] =
     [const { AtomicU8::new(OWNERSHIP_UNOWNED) }; VECTOR_SCOPE_COUNT];
 static SCOPE_SEALED: [AtomicBool; VECTOR_SCOPE_COUNT] =
     [const { AtomicBool::new(false) }; VECTOR_SCOPE_COUNT];
+static ORIGINAL_VTOR: [AtomicUsize; VECTOR_SCOPE_COUNT] =
+    [const { AtomicUsize::new(0) }; VECTOR_SCOPE_COUNT];
 static PRIMARY_PENDING: [[AtomicU32; VECTOR_PENDING_WORDS]; VECTOR_SCOPE_COUNT] =
     [const { [const { AtomicU32::new(0) }; VECTOR_PENDING_WORDS] }; VECTOR_SCOPE_COUNT];
 static SECONDARY_PENDING: [[AtomicU32; VECTOR_PENDING_WORDS]; VECTOR_SCOPE_COUNT] =
     [const { [const { AtomicU32::new(0) }; VECTOR_PENDING_WORDS] }; VECTOR_SCOPE_COUNT];
 
-static mut OWNED_VECTOR_TABLES: [CortexMOwnedVectorTable; VECTOR_SCOPE_COUNT] =
-    [const { CortexMOwnedVectorTable([0; MAX_VECTOR_ENTRIES]) }; VECTOR_SCOPE_COUNT];
-static mut ORIGINAL_VECTOR_TABLES: [CortexMOwnedVectorTable; VECTOR_SCOPE_COUNT] =
-    [const { CortexMOwnedVectorTable([0; MAX_VECTOR_ENTRIES]) }; VECTOR_SCOPE_COUNT];
-static mut SLOT_META: [[SlotMeta; MAX_IRQ_SLOTS]; VECTOR_SCOPE_COUNT] =
-    [const { [SlotMeta::FOREIGN; MAX_IRQ_SLOTS] }; VECTOR_SCOPE_COUNT];
-static mut SYSTEM_EXCEPTION_BOUND: [[bool; SYSTEM_VECTOR_ENTRY_COUNT]; VECTOR_SCOPE_COUNT] =
-    [[false; SYSTEM_VECTOR_ENTRY_COUNT]; VECTOR_SCOPE_COUNT];
+static OWNED_VECTOR_TABLES: [ScopeStorageCell<CortexMOwnedVectorTable>; VECTOR_SCOPE_COUNT] =
+    [const { ScopeStorageCell::new(CortexMOwnedVectorTable([0; MAX_VECTOR_ENTRIES])) };
+        VECTOR_SCOPE_COUNT];
+static ORIGINAL_VECTOR_TABLES: [ScopeStorageCell<CortexMOwnedVectorTable>; VECTOR_SCOPE_COUNT] =
+    [const { ScopeStorageCell::new(CortexMOwnedVectorTable([0; MAX_VECTOR_ENTRIES])) };
+        VECTOR_SCOPE_COUNT];
+static SLOT_META: [ScopeStorageCell<[SlotMeta; MAX_IRQ_SLOTS]>; VECTOR_SCOPE_COUNT] =
+    [const { ScopeStorageCell::new([SlotMeta::FOREIGN; MAX_IRQ_SLOTS]) }; VECTOR_SCOPE_COUNT];
+static SYSTEM_EXCEPTION_BOUND: [ScopeStorageCell<[bool; SYSTEM_VECTOR_ENTRY_COUNT]>;
+    VECTOR_SCOPE_COUNT] =
+    [const { ScopeStorageCell::new([false; SYSTEM_VECTOR_ENTRY_COUNT]) }; VECTOR_SCOPE_COUNT];
 
 /// Cortex-M vector provider type.
 #[derive(Debug, Clone, Copy, Default)]
@@ -169,6 +193,7 @@ pub struct CortexMVectorBuilder {
     slot_count: u16,
     scope_index: usize,
     core: Option<ThreadCoreId>,
+    armed: bool,
 }
 
 /// Immutable sealed Cortex-M vector-table handle.
@@ -230,7 +255,7 @@ impl VectorBase for CortexMVector {
             caps,
             implementation: crate::pal::caps::ImplementationKind::Native,
             slot_count,
-            implemented_priority_bits: 4,
+            implemented_priority_bits: selected_soc_irq_implemented_priority_bits(),
         }
     }
 
@@ -282,35 +307,47 @@ impl VectorOwnershipControl for CortexMVector {
         {
             return Err(VectorError::unsupported());
         }
-        if VECTOR_BUILDER_ACTIVE
+
+        let scope = match mode.topology {
+            VectorTableTopology::SharedTable => (SHARED_SCOPE_INDEX, None),
+            VectorTableTopology::PerCoreTables => {
+                let core = match current_core_id() {
+                    Ok(core) => core,
+                    Err(error) => {
+                        return Err(error);
+                    }
+                };
+                let scope_index = match scope_index_for_core(core) {
+                    Ok(scope_index) => scope_index,
+                    Err(error) => {
+                        return Err(error);
+                    }
+                };
+                (scope_index, Some(core))
+            }
+        };
+
+        if VECTOR_BUILDER_ACTIVE[scope.0]
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
             return Err(VectorError::state_conflict());
         }
 
-        let scope = match mode.topology {
-            VectorTableTopology::SharedTable => (SHARED_SCOPE_INDEX, None),
-            VectorTableTopology::PerCoreTables => {
-                let core = current_core_id()?;
-                (scope_index_for_core(core)?, Some(core))
-            }
-        };
-
         if let Err(error) = validate_topology_request(mode.topology) {
-            VECTOR_BUILDER_ACTIVE.store(false, Ordering::Release);
+            VECTOR_BUILDER_ACTIVE[scope.0].store(false, Ordering::Release);
             return Err(error);
         }
         if SCOPE_SEALED[scope.0].load(Ordering::Acquire)
             || SCOPE_OWNERSHIP[scope.0].load(Ordering::Acquire) == OWNERSHIP_ADOPTED
         {
-            VECTOR_BUILDER_ACTIVE.store(false, Ordering::Release);
+            VECTOR_BUILDER_ACTIVE[scope.0].store(false, Ordering::Release);
             return Err(VectorError::state_conflict());
         }
 
         let slot_count = support.slot_count;
         if let Err(error) = adopt_scope(scope.0, slot_count) {
-            VECTOR_BUILDER_ACTIVE.store(false, Ordering::Release);
+            VECTOR_BUILDER_ACTIVE[scope.0].store(false, Ordering::Release);
             return Err(error);
         }
 
@@ -322,6 +359,7 @@ impl VectorOwnershipControl for CortexMVector {
             slot_count,
             scope_index: scope.0,
             core: scope.1,
+            armed: true,
         })
     }
 
@@ -347,10 +385,10 @@ impl VectorTableBuilderControl for CortexMVectorBuilder {
         let slot_index = usize::from(binding.slot.0);
         let core = resolve_binding_core(binding.core, self.mode.topology, self.core)?;
 
-        validate_inline_stack_policy(binding.target)?;
+        validate_inline_stack_policy(self.scope_index, binding.target)?;
 
         if !matches!(
-            unsafe { SLOT_META[self.scope_index][slot_index].state },
+            read_slot_meta(self.scope_index, slot_index).state,
             SlotState::Foreign | SlotState::Unbound
         ) {
             return Err(VectorError::already_bound());
@@ -361,7 +399,7 @@ impl VectorTableBuilderControl for CortexMVectorBuilder {
                 .map_err(map_hardware_error)?;
         }
 
-        let state = match binding.target {
+        match binding.target {
             VectorSlotTarget::Inline {
                 handler,
                 stack,
@@ -372,37 +410,35 @@ impl VectorTableBuilderControl for CortexMVectorBuilder {
                 }) {
                     return Err(VectorError::invalid());
                 }
-                unsafe {
-                    SLOT_META[self.scope_index][slot_index].inline = Some(handler);
-                    SLOT_META[self.scope_index][slot_index].inline_stack = stack;
-                    SLOT_META[self.scope_index][slot_index].inline_eligibility = eligibility;
-                }
-                SlotState::Inline {
+                let mut meta = read_slot_meta(self.scope_index, slot_index);
+                meta.inline = Some(handler);
+                meta.inline_stack = stack;
+                meta.inline_eligibility = eligibility;
+                meta.state = SlotState::Inline {
                     priority: binding.priority,
                     core,
                     stack: stack.kind(),
-                }
+                };
+                write_slot_meta(self.scope_index, slot_index, meta);
             }
             VectorSlotTarget::Deferred { lane, cookie } => {
                 if lane == VectorDispatchLane::Inline {
                     return Err(VectorError::invalid());
                 }
-                unsafe {
-                    SLOT_META[self.scope_index][slot_index].inline = None;
-                    SLOT_META[self.scope_index][slot_index].inline_stack =
-                        VectorInlineStackPolicy::CurrentExceptionStack;
-                    SLOT_META[self.scope_index][slot_index].inline_eligibility = None;
-                }
-                SlotState::Deferred {
+                let mut meta = read_slot_meta(self.scope_index, slot_index);
+                meta.inline = None;
+                meta.inline_stack = VectorInlineStackPolicy::CurrentExceptionStack;
+                meta.inline_eligibility = None;
+                meta.state = SlotState::Deferred {
                     lane,
                     cookie,
                     priority: binding.priority,
                     core,
-                }
+                };
+                write_slot_meta(self.scope_index, slot_index, meta);
             }
-        };
+        }
 
-        unsafe { SLOT_META[self.scope_index][slot_index].state = state };
         write_slot_vector_entry(
             self.scope_index,
             binding.slot,
@@ -422,7 +458,7 @@ impl VectorTableBuilderControl for CortexMVectorBuilder {
         }
 
         let index = system_exception_index(binding.exception).ok_or_else(VectorError::reserved)?;
-        if unsafe { SYSTEM_EXCEPTION_BOUND[self.scope_index][index] } {
+        if read_system_exception_bound(self.scope_index, index) {
             return Err(VectorError::already_bound());
         }
 
@@ -430,10 +466,8 @@ impl VectorTableBuilderControl for CortexMVectorBuilder {
             set_system_exception_priority(binding.exception, priority)?;
         }
 
-        unsafe {
-            OWNED_VECTOR_TABLES[self.scope_index].0[index] = binding.handler as usize;
-            SYSTEM_EXCEPTION_BOUND[self.scope_index][index] = true;
-        }
+        write_owned_vector_entry(self.scope_index, index, binding.handler as usize);
+        write_system_exception_bound(self.scope_index, index, true);
         Ok(())
     }
 
@@ -442,31 +476,44 @@ impl VectorTableBuilderControl for CortexMVectorBuilder {
         validate_slot_domain(slot, self.mode.domain)?;
         let slot_index = usize::from(slot.0);
         if matches!(
-            unsafe { SLOT_META[self.scope_index][slot_index].state },
+            read_slot_meta(self.scope_index, slot_index).state,
             SlotState::Foreign | SlotState::Unbound
         ) {
             return Err(VectorError::not_bound());
         }
 
-        unsafe {
-            SLOT_META[self.scope_index][slot_index] = SlotMeta::UNBOUND;
-            let entry_index = SYSTEM_VECTOR_ENTRY_COUNT + slot_index;
-            OWNED_VECTOR_TABLES[self.scope_index].0[entry_index] =
-                ORIGINAL_VECTOR_TABLES[self.scope_index].0[entry_index];
-        }
+        write_slot_meta(self.scope_index, slot_index, SlotMeta::UNBOUND);
+        let entry_index = SYSTEM_VECTOR_ENTRY_COUNT + slot_index;
+        write_owned_vector_entry(
+            self.scope_index,
+            entry_index,
+            read_original_vector_entry(self.scope_index, entry_index),
+        );
         clear_slot_pending(self.scope_index, slot_index);
         Ok(())
     }
 
-    fn seal(self) -> Result<Self::Sealed, VectorError> {
-        VECTOR_BUILDER_ACTIVE.store(false, Ordering::Release);
+    fn seal(mut self) -> Result<Self::Sealed, VectorError> {
+        VECTOR_BUILDER_ACTIVE[self.scope_index].store(false, Ordering::Release);
         SCOPE_SEALED[self.scope_index].store(true, Ordering::Release);
-        Ok(CortexMSealedVectorTable {
+        let sealed = CortexMSealedVectorTable {
             mode: self.mode,
             slot_count: self.slot_count,
             scope_index: self.scope_index,
             core: self.core,
-        })
+        };
+        self.armed = false;
+        Ok(sealed)
+    }
+}
+
+impl Drop for CortexMVectorBuilder {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        rollback_scope(self.scope_index, self.slot_count);
+        VECTOR_BUILDER_ACTIVE[self.scope_index].store(false, Ordering::Release);
     }
 }
 
@@ -495,7 +542,7 @@ impl VectorSealedQuery for CortexMSealedVectorTable {
         }
 
         let slot_index = usize::from(slot.0);
-        match unsafe { SLOT_META[self.scope_index][slot_index].state } {
+        match read_slot_meta(self.scope_index, slot_index).state {
             SlotState::Deferred { lane, .. } => Ok(match lane {
                 VectorDispatchLane::DeferredPrimary => {
                     pending_word(&PRIMARY_PENDING[self.scope_index], slot_index)
@@ -506,19 +553,19 @@ impl VectorSealedQuery for CortexMSealedVectorTable {
                 VectorDispatchLane::Inline => false,
             }),
             SlotState::Inline { .. } => {
-                let deferred =
-                    match unsafe { SLOT_META[self.scope_index][slot_index].inline_eligibility } {
-                        Some(eligibility) => match eligibility.fallback_lane {
-                            VectorDispatchLane::DeferredPrimary => {
-                                pending_word(&PRIMARY_PENDING[self.scope_index], slot_index)
-                            }
-                            VectorDispatchLane::DeferredSecondary => {
-                                pending_word(&SECONDARY_PENDING[self.scope_index], slot_index)
-                            }
-                            VectorDispatchLane::Inline => false,
-                        },
-                        None => false,
-                    };
+                let deferred = match read_slot_meta(self.scope_index, slot_index).inline_eligibility
+                {
+                    Some(eligibility) => match eligibility.fallback_lane {
+                        VectorDispatchLane::DeferredPrimary => {
+                            pending_word(&PRIMARY_PENDING[self.scope_index], slot_index)
+                        }
+                        VectorDispatchLane::DeferredSecondary => {
+                            pending_word(&SECONDARY_PENDING[self.scope_index], slot_index)
+                        }
+                        VectorDispatchLane::Inline => false,
+                    },
+                    None => false,
+                };
                 Ok(irq_pending(slot.0) || deferred)
             }
             SlotState::Foreign | SlotState::Unbound => Ok(false),
@@ -566,18 +613,16 @@ pub fn bind_reserved_pendsv_dispatch(
         set_system_exception_priority(SystemException::PendSv, priority)?;
     }
 
-    let installed = unsafe { OWNED_VECTOR_TABLES[builder.scope_index].0[index] };
-    if unsafe { SYSTEM_EXCEPTION_BOUND[builder.scope_index][index] } {
+    let installed = read_owned_vector_entry(builder.scope_index, index);
+    if read_system_exception_bound(builder.scope_index, index) {
         if installed == handler as usize {
             return Ok(());
         }
         return Err(VectorError::state_conflict());
     }
 
-    unsafe {
-        OWNED_VECTOR_TABLES[builder.scope_index].0[index] = handler as usize;
-        SYSTEM_EXCEPTION_BOUND[builder.scope_index][index] = true;
-    }
+    write_owned_vector_entry(builder.scope_index, index, handler as usize);
+    write_system_exception_bound(builder.scope_index, index, true);
     Ok(())
 }
 
@@ -700,33 +745,75 @@ fn active_scope_index_for_topology(topology: VectorTableTopology) -> Option<usiz
     }
 }
 
+fn read_slot_meta(scope_index: usize, slot_index: usize) -> SlotMeta {
+    unsafe { (*SLOT_META[scope_index].get())[slot_index] }
+}
+
+fn write_slot_meta(scope_index: usize, slot_index: usize, value: SlotMeta) {
+    unsafe {
+        (*SLOT_META[scope_index].get())[slot_index] = value;
+    }
+}
+
+fn read_system_exception_bound(scope_index: usize, index: usize) -> bool {
+    unsafe { (*SYSTEM_EXCEPTION_BOUND[scope_index].get())[index] }
+}
+
+fn write_system_exception_bound(scope_index: usize, index: usize, value: bool) {
+    unsafe {
+        (*SYSTEM_EXCEPTION_BOUND[scope_index].get())[index] = value;
+    }
+}
+
+fn read_owned_vector_entry(scope_index: usize, entry_index: usize) -> usize {
+    unsafe { (*OWNED_VECTOR_TABLES[scope_index].get()).0[entry_index] }
+}
+
+fn write_owned_vector_entry(scope_index: usize, entry_index: usize, value: usize) {
+    unsafe {
+        (*OWNED_VECTOR_TABLES[scope_index].get()).0[entry_index] = value;
+    }
+}
+
+fn write_original_vector_entry(scope_index: usize, entry_index: usize, value: usize) {
+    unsafe {
+        (*ORIGINAL_VECTOR_TABLES[scope_index].get()).0[entry_index] = value;
+    }
+}
+
+fn read_original_vector_entry(scope_index: usize, entry_index: usize) -> usize {
+    unsafe { (*ORIGINAL_VECTOR_TABLES[scope_index].get()).0[entry_index] }
+}
+
 fn adopt_scope(scope_index: usize, slot_count: u16) -> Result<(), VectorError> {
+    let _guard = CortexMInterruptMaskGuard::enter();
     let entry_count = SYSTEM_VECTOR_ENTRY_COUNT + usize::from(slot_count);
     // SAFETY: VTOR is the architected vector-table base register for the active execution domain.
     let current_vtor = unsafe { ptr::read_volatile(CORTEX_M_SCB_VTOR) };
+    ORIGINAL_VTOR[scope_index].store(current_vtor, Ordering::Release);
     let current_table = current_vtor as *const usize;
     for index in 0..entry_count {
         // SAFETY: the active vector table is one contiguous array of word-sized entries.
         let entry = unsafe { ptr::read_volatile(current_table.add(index)) };
-        unsafe {
-            OWNED_VECTOR_TABLES[scope_index].0[index] = entry;
-            ORIGINAL_VECTOR_TABLES[scope_index].0[index] = entry;
-        }
+        write_owned_vector_entry(scope_index, index, entry);
+        write_original_vector_entry(scope_index, index, entry);
     }
     for slot in 0..usize::from(slot_count) {
-        unsafe { SLOT_META[scope_index][slot] = SlotMeta::FOREIGN };
+        write_slot_meta(scope_index, slot, SlotMeta::FOREIGN);
     }
     for index in 0..SYSTEM_VECTOR_ENTRY_COUNT {
-        unsafe { SYSTEM_EXCEPTION_BOUND[scope_index][index] = false };
+        write_system_exception_bound(scope_index, index, false);
     }
     clear_pending_words(scope_index);
     // SAFETY: the owned table is one statically allocated RAM image sized for this backend.
     unsafe {
         ptr::write_volatile(
             CORTEX_M_SCB_VTOR,
-            core::ptr::addr_of!(OWNED_VECTOR_TABLES[scope_index].0) as usize,
+            core::ptr::addr_of!((*OWNED_VECTOR_TABLES[scope_index].get()).0) as usize,
         )
     };
+    cortex_m_data_sync_barrier();
+    cortex_m_instruction_sync_barrier();
     Ok(())
 }
 
@@ -798,7 +885,7 @@ fn slot_state_for(
     if !slot_matches_domain(slot, active_vector_domain())? {
         return Ok(SlotState::Foreign);
     }
-    Ok(unsafe { SLOT_META[scope_index][usize::from(slot.0)].state })
+    Ok(read_slot_meta(scope_index, usize::from(slot.0)).state)
 }
 
 fn system_exception_index(exception: SystemException) -> Option<usize> {
@@ -833,10 +920,13 @@ fn set_system_exception_priority(
 
 fn write_slot_vector_entry(scope_index: usize, slot: IrqSlot, trampoline: VectorInlineHandler) {
     let slot_index = usize::from(slot.0);
-    unsafe {
-        OWNED_VECTOR_TABLES[scope_index].0[SYSTEM_VECTOR_ENTRY_COUNT + slot_index] =
-            trampoline as usize
-    };
+    compiler_fence(Ordering::Release);
+    cortex_m_data_memory_barrier();
+    write_owned_vector_entry(
+        scope_index,
+        SYSTEM_VECTOR_ENTRY_COUNT + slot_index,
+        trampoline as usize,
+    );
 }
 
 fn clear_pending_words(scope_index: usize) {
@@ -879,7 +969,8 @@ fn take_pending_cookies(
         if (previous & mask) == 0 {
             continue;
         }
-        match unsafe { SLOT_META[scope_index][slot].state } {
+        let meta = read_slot_meta(scope_index, slot);
+        match meta.state {
             SlotState::Deferred {
                 cookie,
                 lane: slot_lane,
@@ -889,8 +980,7 @@ fn take_pending_cookies(
                 written += 1;
             }
             SlotState::Inline { .. } => {
-                if let Some(eligibility) =
-                    unsafe { SLOT_META[scope_index][slot].inline_eligibility }
+                if let Some(eligibility) = meta.inline_eligibility
                     && eligibility.fallback_lane == lane
                 {
                     output[written] = eligibility.fallback_cookie;
@@ -916,13 +1006,12 @@ fn dispatch_irq_slot(slot_index: usize) {
     let Some(scope_index) = active_scope_index_for_topology(active_topology()) else {
         return;
     };
-    match unsafe { SLOT_META[scope_index][slot_index].state } {
+    let meta = read_slot_meta(scope_index, slot_index);
+    match meta.state {
         SlotState::Inline { .. } => {
-            if let Some(handler) = unsafe { SLOT_META[scope_index][slot_index].inline } {
-                let stack = unsafe { SLOT_META[scope_index][slot_index].inline_stack };
-                if let Some(eligibility) =
-                    unsafe { SLOT_META[scope_index][slot_index].inline_eligibility }
-                {
+            if let Some(handler) = meta.inline {
+                let stack = meta.inline_stack;
+                if let Some(eligibility) = meta.inline_eligibility {
                     if !inline_stack_allows(
                         stack,
                         eligibility.required_current_exception_stack_bytes,
@@ -963,19 +1052,28 @@ fn inline_stack_allows(
     }
 }
 
-fn validate_inline_stack_policy(target: VectorSlotTarget) -> Result<(), VectorError> {
+fn validate_inline_stack_policy(
+    scope_index: usize,
+    target: VectorSlotTarget,
+) -> Result<(), VectorError> {
     let stack = match target {
         VectorSlotTarget::Inline { stack, .. } => stack,
         VectorSlotTarget::Deferred { .. } => return Ok(()),
     };
     match stack {
         VectorInlineStackPolicy::CurrentExceptionStack => Ok(()),
-        VectorInlineStackPolicy::DedicatedReserved(reserved)
-            if reserved.top() % CORTEX_M_INLINE_STACK_ALIGNMENT_BYTES == 0 =>
-        {
+        VectorInlineStackPolicy::DedicatedReserved(reserved) => {
+            let Some(top) = reserved.checked_top() else {
+                return Err(VectorError::invalid());
+            };
+            if top % CORTEX_M_INLINE_STACK_ALIGNMENT_BYTES != 0 {
+                return Err(VectorError::invalid());
+            }
+            if reserved_stack_in_use(scope_index, reserved) {
+                return Err(VectorError::state_conflict());
+            }
             Ok(())
         }
-        VectorInlineStackPolicy::DedicatedReserved(_) => Err(VectorError::invalid()),
     }
 }
 
@@ -987,10 +1085,7 @@ fn mark_slot_pending(scope_index: usize, slot_index: usize, lane: VectorDispatch
     };
     let word = &words[slot_index / 32];
     word.fetch_or(1_u32 << (slot_index % 32), Ordering::AcqRel);
-    if unsafe {
-        SYSTEM_EXCEPTION_BOUND[scope_index]
-            [system_exception_index(SystemException::PendSv).expect("PendSV index exists")]
-    } {
+    if read_system_exception_bound(scope_index, CORTEX_M_PENDSV_INDEX) {
         pend_pendsv();
     }
 }
@@ -1001,11 +1096,174 @@ fn pend_pendsv() {
     unsafe { ptr::write_volatile(CORTEX_M_SCB_ICSR, CORTEX_M_ICSR_PENDSVSET) };
 }
 
+fn rollback_scope(scope_index: usize, slot_count: u16) {
+    let _guard = CortexMInterruptMaskGuard::enter();
+    let entry_count = SYSTEM_VECTOR_ENTRY_COUNT + usize::from(slot_count);
+    let original_vtor = ORIGINAL_VTOR[scope_index].load(Ordering::Acquire);
+
+    for slot in 0..usize::from(slot_count) {
+        write_slot_meta(scope_index, slot, SlotMeta::FOREIGN);
+    }
+    for index in 0..SYSTEM_VECTOR_ENTRY_COUNT {
+        write_system_exception_bound(scope_index, index, false);
+    }
+    for index in 0..entry_count {
+        write_owned_vector_entry(
+            scope_index,
+            index,
+            read_original_vector_entry(scope_index, index),
+        );
+    }
+    clear_pending_words(scope_index);
+    SCOPE_OWNERSHIP[scope_index].store(OWNERSHIP_UNOWNED, Ordering::Release);
+    SCOPE_SEALED[scope_index].store(false, Ordering::Release);
+
+    if original_vtor != 0 {
+        // SAFETY: VTOR is the architected vector-table base register for the active execution
+        // domain. Restoring the captured pre-adoption value undoes one unsealed adopt-and-clone.
+        unsafe { ptr::write_volatile(CORTEX_M_SCB_VTOR, original_vtor) };
+        cortex_m_data_sync_barrier();
+        cortex_m_instruction_sync_barrier();
+    }
+    if !any_scope_active() {
+        ACTIVE_TOPOLOGY.store(TOPOLOGY_SHARED, Ordering::Release);
+    }
+}
+
+fn any_scope_active() -> bool {
+    for scope_index in 0..VECTOR_SCOPE_COUNT {
+        if SCOPE_OWNERSHIP[scope_index].load(Ordering::Acquire) == OWNERSHIP_ADOPTED
+            || SCOPE_SEALED[scope_index].load(Ordering::Acquire)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn reserved_stack_in_use(
+    _scope_index: usize,
+    reserved: crate::vector::VectorInlineReservedStack,
+) -> bool {
+    for candidate_scope in 0..VECTOR_SCOPE_COUNT {
+        for slot_index in 0..MAX_IRQ_SLOTS {
+            if matches!(
+                read_slot_meta(candidate_scope, slot_index).state,
+                SlotState::Foreign | SlotState::Unbound
+            ) {
+                continue;
+            }
+            let VectorInlineStackPolicy::DedicatedReserved(bound) =
+                read_slot_meta(candidate_scope, slot_index).inline_stack
+            else {
+                continue;
+            };
+            if reserved_stacks_overlap(bound, reserved) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn reserved_stacks_overlap(
+    left: crate::vector::VectorInlineReservedStack,
+    right: crate::vector::VectorInlineReservedStack,
+) -> bool {
+    let left_base = left.base.as_ptr() as usize;
+    let right_base = right.base.as_ptr() as usize;
+    let Some(left_top) = left.checked_top() else {
+        return true;
+    };
+    let Some(right_top) = right.checked_top() else {
+        return true;
+    };
+    left_base < right_top && right_base < left_top
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+struct CortexMInterruptMaskGuard {
+    primask: u32,
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+impl CortexMInterruptMaskGuard {
+    #[inline]
+    fn enter() -> Self {
+        let primask: u32;
+        unsafe {
+            asm!("mrs {0}, PRIMASK", out(reg) primask, options(nomem, nostack, preserves_flags));
+            asm!("cpsid i", options(nomem, nostack, preserves_flags));
+        }
+        compiler_fence(Ordering::SeqCst);
+        Self { primask }
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+impl Drop for CortexMInterruptMaskGuard {
+    fn drop(&mut self) {
+        compiler_fence(Ordering::SeqCst);
+        unsafe {
+            asm!(
+                "msr PRIMASK, {0}",
+                in(reg) self.primask,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+struct CortexMInterruptMaskGuard;
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+impl CortexMInterruptMaskGuard {
+    #[inline]
+    const fn enter() -> Self {
+        Self
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[inline]
+fn cortex_m_data_sync_barrier() {
+    unsafe { asm!("dsb", options(nomem, nostack, preserves_flags)) };
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+#[inline]
+const fn cortex_m_data_sync_barrier() {}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[inline]
+fn cortex_m_instruction_sync_barrier() {
+    unsafe { asm!("isb", options(nomem, nostack, preserves_flags)) };
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+#[inline]
+const fn cortex_m_instruction_sync_barrier() {}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[inline]
+fn cortex_m_data_memory_barrier() {
+    unsafe { asm!("dmb", options(nomem, nostack, preserves_flags)) };
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+#[inline]
+const fn cortex_m_data_memory_barrier() {}
+
 unsafe fn call_inline_handler(handler: VectorInlineHandler, stack: VectorInlineStackPolicy) {
     match stack {
         VectorInlineStackPolicy::CurrentExceptionStack => unsafe { handler() },
         VectorInlineStackPolicy::DedicatedReserved(reserved) => unsafe {
-            call_inline_handler_on_reserved_stack(handler, reserved.top())
+            if let Some(stack_top) = reserved.checked_top() {
+                call_inline_handler_on_reserved_stack(handler, stack_top);
+            } else {
+                handler();
+            }
         },
     }
 }
@@ -1071,7 +1329,9 @@ mod tests {
     }
 
     fn reset_vector_test_state() {
-        VECTOR_BUILDER_ACTIVE.store(false, Ordering::Release);
+        for active in &VECTOR_BUILDER_ACTIVE {
+            active.store(false, Ordering::Release);
+        }
         ACTIVE_TOPOLOGY.store(TOPOLOGY_SHARED, Ordering::Release);
         INLINE_HANDLER_HITS.store(0, Ordering::Release);
         ELIGIBILITY_ALLOW.store(true, Ordering::Release);
@@ -1084,9 +1344,7 @@ mod tests {
         for scope in 0..VECTOR_SCOPE_COUNT {
             clear_pending_words(scope);
             for slot in 0..MAX_IRQ_SLOTS {
-                unsafe {
-                    SLOT_META[scope][slot] = SlotMeta::FOREIGN;
-                }
+                write_slot_meta(scope, slot, SlotMeta::FOREIGN);
             }
         }
     }
@@ -1102,6 +1360,7 @@ mod tests {
                 .expect("test board slot count should fit in u16"),
             scope_index: SHARED_SCOPE_INDEX,
             core: None,
+            armed: false,
         }
     }
 
@@ -1130,20 +1389,22 @@ mod tests {
 
         SCOPE_OWNERSHIP[SHARED_SCOPE_INDEX].store(OWNERSHIP_ADOPTED, Ordering::Release);
         SCOPE_OWNERSHIP[CORE_SCOPE_BASE].store(OWNERSHIP_ADOPTED, Ordering::Release);
-        unsafe {
-            SLOT_META[SHARED_SCOPE_INDEX][3].state = SlotState::Deferred {
-                lane: VectorDispatchLane::DeferredPrimary,
-                cookie: VectorDispatchCookie(11),
-                priority: None,
-                core: None,
-            };
-            SLOT_META[CORE_SCOPE_BASE][3].state = SlotState::Deferred {
-                lane: VectorDispatchLane::DeferredPrimary,
-                cookie: VectorDispatchCookie(29),
-                priority: None,
-                core: Some(ThreadCoreId(0)),
-            };
-        }
+        let mut shared_meta = read_slot_meta(SHARED_SCOPE_INDEX, 3);
+        shared_meta.state = SlotState::Deferred {
+            lane: VectorDispatchLane::DeferredPrimary,
+            cookie: VectorDispatchCookie(11),
+            priority: None,
+            core: None,
+        };
+        write_slot_meta(SHARED_SCOPE_INDEX, 3, shared_meta);
+        let mut core_meta = read_slot_meta(CORE_SCOPE_BASE, 3);
+        core_meta.state = SlotState::Deferred {
+            lane: VectorDispatchLane::DeferredPrimary,
+            cookie: VectorDispatchCookie(29),
+            priority: None,
+            core: Some(ThreadCoreId(0)),
+        };
+        write_slot_meta(CORE_SCOPE_BASE, 3, core_meta);
         PRIMARY_PENDING[SHARED_SCOPE_INDEX][0].store(1_u32 << 3, Ordering::Release);
         PRIMARY_PENDING[CORE_SCOPE_BASE][0].store(1_u32 << 3, Ordering::Release);
 
@@ -1245,11 +1506,60 @@ mod tests {
             .expect("aligned dedicated reserved stack should bind cleanly");
 
         assert!(matches!(
-            unsafe { SLOT_META[SHARED_SCOPE_INDEX][5].state },
+            read_slot_meta(SHARED_SCOPE_INDEX, 5).state,
             SlotState::Inline {
                 stack: VectorInlineStackKind::DedicatedReserved,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn bind_rejects_duplicate_dedicated_reserved_stack_window() {
+        let _guard = VECTOR_TEST_LOCK
+            .lock()
+            .expect("vector test lock should acquire");
+        reset_vector_test_state();
+        SCOPE_OWNERSHIP[SHARED_SCOPE_INDEX].store(OWNERSHIP_ADOPTED, Ordering::Release);
+
+        let mut builder = test_builder();
+        let stack = unsafe {
+            VectorInlineReservedStack {
+                base: NonNull::new_unchecked(
+                    core::ptr::addr_of_mut!(ALIGNED_RESERVED_STACK).cast::<u8>(),
+                ),
+                size_bytes: NonZeroUsize::new(core::mem::size_of::<[u64; 8]>())
+                    .expect("test stack size should be non-zero"),
+            }
+        };
+
+        builder
+            .bind(VectorSlotBinding {
+                slot: IrqSlot(5),
+                core: None,
+                priority: None,
+                target: VectorSlotTarget::Inline {
+                    handler: test_inline_handler,
+                    stack: VectorInlineStackPolicy::DedicatedReserved(stack),
+                    eligibility: None,
+                },
+            })
+            .expect("first dedicated reserved stack bind should succeed");
+
+        let result = builder.bind(VectorSlotBinding {
+            slot: IrqSlot(6),
+            core: None,
+            priority: None,
+            target: VectorSlotTarget::Inline {
+                handler: test_inline_handler,
+                stack: VectorInlineStackPolicy::DedicatedReserved(stack),
+                eligibility: None,
+            },
+        });
+
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == VectorError::state_conflict().kind()
         ));
     }
 
@@ -1261,23 +1571,22 @@ mod tests {
         reset_vector_test_state();
 
         SCOPE_OWNERSHIP[SHARED_SCOPE_INDEX].store(OWNERSHIP_ADOPTED, Ordering::Release);
-        unsafe {
-            SLOT_META[SHARED_SCOPE_INDEX][5].state = SlotState::Inline {
-                priority: None,
-                core: None,
-                stack: VectorInlineStackKind::CurrentExceptionStack,
-            };
-            SLOT_META[SHARED_SCOPE_INDEX][5].inline = Some(test_inline_handler);
-            SLOT_META[SHARED_SCOPE_INDEX][5].inline_stack =
-                VectorInlineStackPolicy::CurrentExceptionStack;
-            SLOT_META[SHARED_SCOPE_INDEX][5].inline_eligibility = Some(VectorInlineEligibility {
-                context: ptr::null(),
-                allow_now: test_inline_eligibility,
-                required_current_exception_stack_bytes: 0,
-                fallback_lane: VectorDispatchLane::DeferredPrimary,
-                fallback_cookie: VectorDispatchCookie(7),
-            });
-        }
+        let mut meta = read_slot_meta(SHARED_SCOPE_INDEX, 5);
+        meta.state = SlotState::Inline {
+            priority: None,
+            core: None,
+            stack: VectorInlineStackKind::CurrentExceptionStack,
+        };
+        meta.inline = Some(test_inline_handler);
+        meta.inline_stack = VectorInlineStackPolicy::CurrentExceptionStack;
+        meta.inline_eligibility = Some(VectorInlineEligibility {
+            context: ptr::null(),
+            allow_now: test_inline_eligibility,
+            required_current_exception_stack_bytes: 0,
+            fallback_lane: VectorDispatchLane::DeferredPrimary,
+            fallback_cookie: VectorDispatchCookie(7),
+        });
+        write_slot_meta(SHARED_SCOPE_INDEX, 5, meta);
 
         ELIGIBILITY_ALLOW.store(true, Ordering::Release);
         dispatch_irq_slot(5);
@@ -1294,23 +1603,22 @@ mod tests {
         reset_vector_test_state();
 
         SCOPE_OWNERSHIP[SHARED_SCOPE_INDEX].store(OWNERSHIP_ADOPTED, Ordering::Release);
-        unsafe {
-            SLOT_META[SHARED_SCOPE_INDEX][5].state = SlotState::Inline {
-                priority: None,
-                core: None,
-                stack: VectorInlineStackKind::CurrentExceptionStack,
-            };
-            SLOT_META[SHARED_SCOPE_INDEX][5].inline = Some(test_inline_handler);
-            SLOT_META[SHARED_SCOPE_INDEX][5].inline_stack =
-                VectorInlineStackPolicy::CurrentExceptionStack;
-            SLOT_META[SHARED_SCOPE_INDEX][5].inline_eligibility = Some(VectorInlineEligibility {
-                context: ptr::null(),
-                allow_now: test_inline_eligibility,
-                required_current_exception_stack_bytes: 0,
-                fallback_lane: VectorDispatchLane::DeferredPrimary,
-                fallback_cookie: VectorDispatchCookie(41),
-            });
-        }
+        let mut meta = read_slot_meta(SHARED_SCOPE_INDEX, 5);
+        meta.state = SlotState::Inline {
+            priority: None,
+            core: None,
+            stack: VectorInlineStackKind::CurrentExceptionStack,
+        };
+        meta.inline = Some(test_inline_handler);
+        meta.inline_stack = VectorInlineStackPolicy::CurrentExceptionStack;
+        meta.inline_eligibility = Some(VectorInlineEligibility {
+            context: ptr::null(),
+            allow_now: test_inline_eligibility,
+            required_current_exception_stack_bytes: 0,
+            fallback_lane: VectorDispatchLane::DeferredPrimary,
+            fallback_cookie: VectorDispatchCookie(41),
+        });
+        write_slot_meta(SHARED_SCOPE_INDEX, 5, meta);
 
         ELIGIBILITY_ALLOW.store(false, Ordering::Release);
         dispatch_irq_slot(5);

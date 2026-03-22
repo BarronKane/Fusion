@@ -4449,18 +4449,15 @@ impl GreenTaskSlot {
 
     fn exit_cooperative_lock(&self, depth_index: usize) {
         let previous = self.cooperative_lock_depth.load(Ordering::Acquire);
-        debug_assert!(
+        assert!(
             previous > 0,
             "cooperative green lock depth underflow indicates unbalanced guard bookkeeping"
         );
-        debug_assert_eq!(
+        assert_eq!(
             previous,
             depth_index + 1,
             "cooperative green locks should release in reverse acquisition order"
         );
-        if previous == 0 {
-            return;
-        }
         self.cooperative_lock_ranks[depth_index]
             .store(UNRANKED_COOPERATIVE_LOCK, Ordering::Release);
         self.cooperative_exclusion_spans[depth_index]
@@ -5023,11 +5020,12 @@ impl GreenTaskRegistry {
 
     fn release_handle(&self, slot_index: usize, id: u64) -> Result<(), FiberError> {
         let slot = self.slot(slot_index)?;
-        let previous = slot.handle_refs.fetch_sub(1, Ordering::AcqRel);
-        if previous == 0 {
-            slot.handle_refs.store(0, Ordering::Release);
-            return Err(FiberError::state_conflict());
-        }
+        let previous = slot
+            .handle_refs
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current: usize| {
+                current.checked_sub(1)
+            })
+            .map_err(|_| FiberError::state_conflict())?;
         if previous == 1 && slot.try_recycle(id)? {
             self.recycle_slot(slot_index)?;
         }
@@ -6669,11 +6667,33 @@ const fn initial_steal_seed(carrier_index: usize) -> usize {
     if seed == 0 { 1 } else { seed }
 }
 
-const fn xorshift64(mut state: usize) -> usize {
-    state ^= state << 13;
-    state ^= state >> 7;
-    state ^= state << 17;
+const fn xorshift_word(mut state: usize) -> usize {
+    #[cfg(target_pointer_width = "64")]
+    {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+    }
+
+    #[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))]
+    {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+    }
+
     if state == 0 { 1 } else { state }
+}
+
+const fn xorshift64(state: usize) -> usize {
+    xorshift_word(state)
 }
 
 fn saturating_duration_to_nanos_u64(duration: Duration) -> u64 {

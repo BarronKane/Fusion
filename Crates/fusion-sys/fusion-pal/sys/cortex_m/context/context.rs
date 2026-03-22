@@ -35,8 +35,7 @@ const CORTEX_M_CONTEXT_SUPPORT: ContextSupport = ContextSupport {
     caps: ContextCaps::MAKE
         .union(ContextCaps::SWAP)
         .union(ContextCaps::STACK_DIRECTION)
-        .union(ContextCaps::TLS_ISOLATION)
-        .union(ContextCaps::CROSS_CARRIER_RESUME),
+        .union(ContextCaps::TLS_ISOLATION),
     guarantee: ContextGuarantee::Enforced,
     min_stack_alignment: STACK_ALIGNMENT,
     red_zone_bytes: RED_ZONE_BYTES,

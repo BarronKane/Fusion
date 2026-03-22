@@ -35,6 +35,7 @@ use core::hint::spin_loop;
 use core::marker::PhantomData;
 use core::mem::{MaybeUninit, align_of, size_of};
 use core::pin::Pin;
+use core::ptr::NonNull;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use core::time::Duration;
 
@@ -1121,6 +1122,26 @@ enum SchedulerBinding {
     Unsupported,
 }
 
+#[derive(Clone, Copy)]
+struct ScheduledExecutorCorePtr(NonNull<ExecutorCore>);
+
+impl ScheduledExecutorCorePtr {
+    fn from_ref(core: &ExecutorCore) -> Self {
+        Self(NonNull::from(core))
+    }
+
+    fn run_slot(self, slot_index: usize, generation: u64) {
+        // SAFETY: scheduler jobs only capture this handle from a live `ExecutorCore` and use it
+        // immediately to route back into the same executor's slot table.
+        unsafe { self.0.as_ref().run_slot_by_ref(slot_index, generation) };
+    }
+}
+
+// SAFETY: scheduled jobs move this wrapper between carriers, but only to call back into the
+// originating executor core. The explicit wrapper is safer than laundering the pointer through
+// `usize`, while lifetime validity remains the surrounding executor's invariant.
+unsafe impl Send for ScheduledExecutorCorePtr {}
+
 impl SchedulerBinding {
     fn schedule_slot(
         &self,
@@ -1133,12 +1154,12 @@ impl SchedulerBinding {
                 .current_queue
                 .schedule_slot(core, slot_index, generation),
             Self::ThreadPool(pool) => {
-                let core = core::ptr::from_ref(core) as usize;
+                let core = ScheduledExecutorCorePtr::from_ref(core);
                 pool.submit(move || run_scheduled_slot_ptr(core, slot_index, generation))
                     .map_err(|_| ExecutorError::Stopped)
             }
             Self::GreenPool(pool) => {
-                let core = core::ptr::from_ref(core) as usize;
+                let core = ScheduledExecutorCorePtr::from_ref(core);
                 pool.spawn(move || run_scheduled_slot_ptr(core, slot_index, generation))
                     .map(|_| ())
                     .map_err(|_| ExecutorError::Stopped)
@@ -1842,9 +1863,8 @@ unsafe fn run_current_slot(core: usize, slot_index: usize, generation: u64) {
     core.run_slot_by_ref(slot_index, generation);
 }
 
-fn run_scheduled_slot_ptr(core: usize, slot_index: usize, generation: u64) {
-    let core = unsafe { &*(core as *const ExecutorCore) };
-    core.run_slot_by_ref(slot_index, generation);
+fn run_scheduled_slot_ptr(core: ScheduledExecutorCorePtr, slot_index: usize, generation: u64) {
+    core.run_slot(slot_index, generation);
 }
 
 #[cfg(feature = "std")]

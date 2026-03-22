@@ -1,10 +1,14 @@
 # Board-owned Cortex-M linker-memory layout input for the RP2350 / Pico 2 W target.
 # `fusion-std` build.rs renders the final `memory.x` from this declarative spec so stack reserve
 # policy can be tuned without moving board ownership back into target crates.
+# RP2350 flash boot also expects a valid IMAGE_DEF block loop within the first 4 KiB of flash, so
+# that boot window is board-owned too instead of being reinvented by every target crate.
 
 board_name = "RP2350 / Pico 2 W"
 flash_origin = 0x10000000
 flash_length = 4M
+flash_boot_metadata_kind = "rp2350-image-def"
+flash_boot_window = 4K
 ram_origin = 0x20000000
 ram_length = 520K
 default_main_stack_reserve = 64K

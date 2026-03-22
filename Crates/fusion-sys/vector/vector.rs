@@ -224,21 +224,50 @@ impl VectorTableBuilder {
         callback: VectorDeferredCallback,
     ) -> Result<VectorDispatchCookie, VectorError> {
         let cookie = NEXT_VECTOR_COOKIE.fetch_add(1, Ordering::AcqRel);
-        if cookie == 0 {
-            return Err(VectorError::resource_exhausted());
-        }
-        let index = usize::try_from(cookie - 1).map_err(|_| VectorError::resource_exhausted())?;
-        if index >= VECTOR_DEFERRED_REGISTRY_CAPACITY {
-            return Err(VectorError::resource_exhausted());
-        }
-        let callback_ptr = callback as usize;
-        if VECTOR_CALLBACK_REGISTRY[index]
-            .compare_exchange(0, callback_ptr, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(VectorError::state_conflict());
-        }
-        Ok(VectorDispatchCookie(cookie))
+        let cookie = VectorDispatchCookie(cookie);
+        register_deferred_callback_cookie(cookie, callback)?;
+        Ok(cookie)
+    }
+
+    /// Registers one deferred callback at one explicit cookie value.
+    ///
+    /// This is the static-contract path used by generated red inline-fallback bindings: the
+    /// analyzer emits a fixed cookie, and the runtime must be able to bind the matching callback
+    /// without hoping the monotonic allocator lands on the same number by coincidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied cookie is invalid, exhausted, or already registered.
+    pub fn register_deferred_callback_with_cookie(
+        &mut self,
+        cookie: VectorDispatchCookie,
+        callback: VectorDeferredCallback,
+    ) -> Result<(), VectorError> {
+        register_deferred_callback_cookie(cookie, callback)
+    }
+
+    /// Reports whether one deferred callback cookie is currently registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied cookie does not fit the bridge registry.
+    pub fn deferred_callback_registered(
+        &self,
+        cookie: VectorDispatchCookie,
+    ) -> Result<bool, VectorError> {
+        deferred_callback_registered(cookie)
+    }
+
+    /// Unregisters one previously registered deferred callback cookie from the bridge registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cookie is invalid or currently unbound.
+    pub fn unregister_deferred_callback(
+        &mut self,
+        cookie: VectorDispatchCookie,
+    ) -> Result<(), VectorError> {
+        unregister_deferred_callback_cookie(cookie)
     }
 
     /// Binds one slot to one deferred dispatch lane and opaque cookie.
@@ -278,6 +307,15 @@ impl VectorTableBuilder {
                 target: VectorSlotTarget::Deferred { lane, cookie },
             },
         )
+    }
+
+    /// Unbinds one peripheral IRQ slot from the owned vector table.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend slot-unbind failure.
+    pub fn unbind(&mut self, slot: IrqSlot) -> Result<(), VectorError> {
+        VectorTableBuilderControl::unbind(&mut self.inner, slot)
     }
 
     /// Binds one system exception inline.
@@ -415,20 +453,71 @@ unsafe extern "C" fn reserved_pendsv_dispatch_handler() {
 }
 
 fn dispatch_cookie(cookie: VectorDispatchCookie) -> Result<(), VectorError> {
-    if cookie.0 == 0 {
-        return Err(VectorError::invalid());
-    }
-    let index = usize::try_from(cookie.0 - 1).map_err(|_| VectorError::invalid())?;
-    let callback_ptr = VECTOR_CALLBACK_REGISTRY
-        .get(index)
-        .ok_or_else(VectorError::invalid)?
-        .load(Ordering::Acquire);
+    let index = vector_cookie_index(cookie)?;
+    let callback_ptr = VECTOR_CALLBACK_REGISTRY[index].load(Ordering::Acquire);
     if callback_ptr == 0 {
         return Err(VectorError::not_bound());
     }
     let callback: VectorDeferredCallback = unsafe { core::mem::transmute(callback_ptr) };
     callback(cookie);
     Ok(())
+}
+
+fn deferred_callback_registered(cookie: VectorDispatchCookie) -> Result<bool, VectorError> {
+    let index = vector_cookie_index(cookie)?;
+    Ok(VECTOR_CALLBACK_REGISTRY[index].load(Ordering::Acquire) != 0)
+}
+
+fn register_deferred_callback_cookie(
+    cookie: VectorDispatchCookie,
+    callback: VectorDeferredCallback,
+) -> Result<(), VectorError> {
+    let index = vector_cookie_index(cookie)?;
+    let callback_ptr = callback as usize;
+    if VECTOR_CALLBACK_REGISTRY[index]
+        .compare_exchange(0, callback_ptr, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(VectorError::state_conflict());
+    }
+    reserve_vector_cookie(cookie);
+    Ok(())
+}
+
+fn unregister_deferred_callback_cookie(cookie: VectorDispatchCookie) -> Result<(), VectorError> {
+    let index = vector_cookie_index(cookie)?;
+    let previous = VECTOR_CALLBACK_REGISTRY[index].swap(0, Ordering::AcqRel);
+    if previous == 0 {
+        return Err(VectorError::not_bound());
+    }
+    Ok(())
+}
+
+fn vector_cookie_index(cookie: VectorDispatchCookie) -> Result<usize, VectorError> {
+    if cookie.0 == 0 {
+        return Err(VectorError::invalid());
+    }
+    let index = usize::try_from(cookie.0 - 1).map_err(|_| VectorError::invalid())?;
+    if index >= VECTOR_DEFERRED_REGISTRY_CAPACITY {
+        return Err(VectorError::resource_exhausted());
+    }
+    Ok(index)
+}
+
+fn reserve_vector_cookie(cookie: VectorDispatchCookie) {
+    let required_next = cookie.0.saturating_add(1);
+    let mut observed = NEXT_VECTOR_COOKIE.load(Ordering::Acquire);
+    while observed < required_next {
+        match NEXT_VECTOR_COOKIE.compare_exchange(
+            observed,
+            required_next,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(next_observed) => observed = next_observed,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -475,6 +564,56 @@ mod tests {
         assert_eq!(TEST_CALLBACK_HITS.load(Ordering::Acquire), 1);
 
         slot.store(0, Ordering::Release);
+    }
+
+    #[test]
+    fn unregister_deferred_callback_clears_registered_cookie() {
+        let cookie_raw = NEXT_VECTOR_COOKIE.fetch_add(1, Ordering::AcqRel);
+        assert!(cookie_raw > 0);
+        let index = usize::try_from(cookie_raw - 1).expect("cookie index should fit in usize");
+        assert!(index < VECTOR_DEFERRED_REGISTRY_CAPACITY);
+
+        let slot = &VECTOR_CALLBACK_REGISTRY[index];
+        assert!(
+            slot.compare_exchange(
+                0,
+                test_callback as usize,
+                Ordering::AcqRel,
+                Ordering::Acquire
+            )
+            .is_ok(),
+            "test callback slot should be empty"
+        );
+
+        unregister_deferred_callback_cookie(VectorDispatchCookie(cookie_raw))
+            .expect("registered callback should unregister");
+        assert_eq!(slot.load(Ordering::Acquire), 0);
+        assert!(matches!(
+            dispatch_cookie(VectorDispatchCookie(cookie_raw)),
+            Err(error) if error.kind() == VectorErrorKind::NotBound
+        ));
+    }
+
+    #[test]
+    fn explicit_cookie_registration_dispatches_and_advances_allocator_floor() {
+        TEST_CALLBACK_HITS.store(0, Ordering::Release);
+
+        let cookie = VectorDispatchCookie(27);
+        register_deferred_callback_cookie(cookie, test_callback)
+            .expect("explicit cookie registration should succeed");
+        assert!(
+            deferred_callback_registered(cookie).expect("cookie should validate"),
+            "explicit cookie should report as registered"
+        );
+
+        dispatch_cookie(cookie).expect("explicit cookie should dispatch");
+        assert_eq!(TEST_CALLBACK_HITS.load(Ordering::Acquire), 1);
+        assert!(
+            NEXT_VECTOR_COOKIE.load(Ordering::Acquire) >= 28,
+            "allocator floor should advance beyond explicit cookie"
+        );
+        unregister_deferred_callback_cookie(cookie)
+            .expect("explicit cookie should unregister cleanly");
     }
 
     #[cfg(not(target_os = "none"))]

@@ -295,6 +295,50 @@ pub fn irq_disable(irqn: u16) -> Result<(), HardwareError> {
     board_contract::irq_disable(system_soc(), irqn)
 }
 
+/// Returns whether one IRQ line supports raw NVIC priority control on the selected generic
+/// Cortex-M board.
+#[must_use]
+pub fn irq_priority_supported(irqn: u16) -> bool {
+    board_contract::irq_priority_supported(system_soc(), irqn)
+}
+
+/// Returns the number of implemented raw NVIC priority bits on the selected generic Cortex-M
+/// board.
+#[must_use]
+pub fn irq_implemented_priority_bits() -> u8 {
+    board_contract::irq_implemented_priority_bits(system_soc())
+}
+
+/// Applies one raw NVIC priority byte to one IRQ line on the selected generic Cortex-M board.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot apply board-specific IRQ priorities
+/// honestly.
+pub fn irq_set_priority(irqn: u16, priority: u8) -> Result<(), HardwareError> {
+    board_contract::irq_set_priority(system_soc(), irqn, priority)
+}
+
+/// Clears the NVIC pending state for one IRQ line on the selected generic Cortex-M board.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot clear board-specific pending state
+/// honestly.
+pub fn irq_clear_pending(irqn: u16) -> Result<(), HardwareError> {
+    board_contract::irq_clear_pending(system_soc(), irqn)
+}
+
+/// Sets the NVIC pending state for one IRQ line on the selected generic Cortex-M board.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot software-pend board-specific IRQ lines
+/// honestly.
+pub fn irq_set_pending(irqn: u16) -> Result<(), HardwareError> {
+    board_contract::irq_set_pending(system_soc(), irqn)
+}
+
 /// Returns whether one IRQ line can be acknowledged generically on the selected generic
 /// Cortex-M board.
 #[must_use]

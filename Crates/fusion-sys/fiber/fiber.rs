@@ -648,12 +648,11 @@ fn with_active_slots<R>(
 
 fn install_active_fiber(slot: ActiveFiberSlot) -> Result<(), FiberError> {
     with_active_slots(|slots| {
-        if let Some(existing) = slots
-            .iter_mut()
-            .find(|existing| existing.active && existing.thread_id == slot.thread_id)
+        if slots
+            .iter()
+            .any(|existing| existing.active && existing.thread_id == slot.thread_id)
         {
-            *existing = slot;
-            return Ok(());
+            return Err(FiberError::state_conflict());
         }
 
         let empty = slots
@@ -717,5 +716,41 @@ const fn fiber_error_from_thread(error: crate::thread::ThreadError) -> FiberErro
         ThreadErrorKind::Busy | ThreadErrorKind::Timeout | ThreadErrorKind::StateConflict => {
             FiberError::state_conflict()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reset_active_slots() {
+        with_active_slots(|slots| {
+            *slots = [ActiveFiberSlot::empty(); MAX_ACTIVE_FIBERS];
+            Ok(())
+        })
+        .expect("active slot reset should succeed");
+    }
+
+    #[test]
+    fn install_active_fiber_rejects_duplicate_thread_slot() {
+        reset_active_slots();
+
+        let thread_id = current_thread_id().expect("thread id should be available");
+        let slot = ActiveFiberSlot {
+            active: true,
+            thread_id,
+            arg: core::ptr::null_mut(),
+            caller_context: core::ptr::null_mut(),
+            fiber_context: core::ptr::null_mut(),
+            outcome: core::ptr::null_mut(),
+        };
+
+        install_active_fiber(slot).expect("first active install should succeed");
+        assert!(matches!(
+            install_active_fiber(slot),
+            Err(error) if error.kind() == FiberErrorKind::StateConflict
+        ));
+
+        clear_active_fiber().expect("active slot should clear");
     }
 }

@@ -549,6 +549,19 @@ const fn validate_extent_request(request: &MemoryPoolExtentRequest) -> Result<()
 }
 
 fn align_up(value: usize, align: usize) -> Option<usize> {
+    if align == 0 || !align.is_power_of_two() {
+        return None;
+    }
     let mask = align.checked_sub(1)?;
     value.checked_add(mask).map(|value| value & !mask)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::align_up;
+
+    #[test]
+    fn align_up_rejects_non_power_of_two_alignment() {
+        assert_eq!(align_up(17, 24), None);
+    }
 }

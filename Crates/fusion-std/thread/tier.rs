@@ -580,21 +580,82 @@ impl TieredGreenPool {
         task: TieredTaskAttributes,
         job: fn(),
     ) -> Result<VectorDispatchCookie, TieredGreenPoolError> {
+        let cookie = builder.register_deferred_callback(tiered_vector_dispatch_callback)?;
+        self.bind_vector_task_registered_cookie(builder, slot, priority, cookie, task, job)?;
+        Ok(cookie)
+    }
+
+    /// Binds one vector slot to one deferred green/blue runtime task target using one explicit
+    /// preselected deferred cookie.
+    ///
+    /// This is the static-contract path for generated red fallback cookies and other cases where
+    /// the callback identity must be chosen before runtime monotonic allocation gets a vote.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest vector-binding, registry, or lower-tier scheduling failure.
+    pub fn bind_vector_task_with_cookie(
+        &self,
+        builder: &mut VectorTableBuilder,
+        slot: IrqSlot,
+        priority: Option<VectorPriority>,
+        cookie: VectorDispatchCookie,
+        task: TieredTaskAttributes,
+        job: fn(),
+    ) -> Result<(), TieredGreenPoolError> {
+        if let Err(error) =
+            builder.register_deferred_callback_with_cookie(cookie, tiered_vector_dispatch_callback)
+        {
+            return Err(error.into());
+        }
+        self.bind_vector_task_registered_cookie(builder, slot, priority, cookie, task, job)
+    }
+
+    fn bind_vector_task_registered_cookie(
+        &self,
+        builder: &mut VectorTableBuilder,
+        slot: IrqSlot,
+        priority: Option<VectorPriority>,
+        cookie: VectorDispatchCookie,
+        task: TieredTaskAttributes,
+        job: fn(),
+    ) -> Result<(), TieredGreenPoolError> {
         builder.bind_reserved_pendsv_dispatch(Some(VectorPriority(u8::MAX)))?;
         let tier = self.resolve_tier(task);
         let lane = Self::vector_lane_for_tier(tier);
-        let cookie = builder.register_deferred_callback(tiered_vector_dispatch_callback)?;
         if let Err(error) =
             register_tiered_vector_target(cookie, TieredVectorDispatchTarget { task, job })
         {
+            let _ = builder.unregister_deferred_callback(cookie);
             clear_tiered_vector_target(cookie);
             return Err(error);
         }
         if let Err(error) = builder.bind_deferred(slot, lane, priority, cookie) {
+            let _ = builder.unregister_deferred_callback(cookie);
             clear_tiered_vector_target(cookie);
             return Err(error.into());
         }
-        Ok(cookie)
+        Ok(())
+    }
+
+    /// Unbinds one previously registered tiered vector task target and releases its callback slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest vector unbind or registry-release failure.
+    pub fn unbind_vector_task(
+        &self,
+        builder: &mut VectorTableBuilder,
+        slot: IrqSlot,
+        cookie: VectorDispatchCookie,
+    ) -> Result<(), TieredGreenPoolError> {
+        builder.unbind(slot)?;
+        if let Err(error) = builder.unregister_deferred_callback(cookie) {
+            clear_tiered_vector_target(cookie);
+            return Err(error.into());
+        }
+        clear_tiered_vector_target(cookie);
+        Ok(())
     }
 
     /// Drains deferred vector callbacks already surfaced through the sealed table and routes the
@@ -698,12 +759,54 @@ impl TieredGreenPool {
     ///
     /// # Errors
     ///
-    /// Returns the first honest failure encountered while draining the tiered schedulers.
+    /// Returns the first honest failure encountered while draining the tiered schedulers, after
+    /// attempting teardown across both tiers.
     pub fn shutdown(&self) -> Result<(), TieredGreenPoolError> {
-        self.performance_green.shutdown()?;
-        self.efficiency_green.shutdown()?;
-        self.performance_carrier.try_clone()?.shutdown()?;
-        self.efficiency_carrier.try_clone()?.shutdown()?;
+        let mut first_error = None;
+
+        if let Err(error) = self.performance_green.shutdown() {
+            first_error = Some(error.into());
+        }
+        let efficiency_green_shutdown = self.efficiency_green.shutdown();
+        if let Err(error) = efficiency_green_shutdown
+            && first_error.is_none()
+        {
+            first_error = Some(error.into());
+        }
+        match self.performance_carrier.try_clone() {
+            Ok(carrier) => {
+                let carrier_shutdown = carrier.shutdown();
+                if let Err(error) = carrier_shutdown
+                    && first_error.is_none()
+                {
+                    first_error = Some(error.into());
+                }
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error.into());
+                }
+            }
+        }
+        match self.efficiency_carrier.try_clone() {
+            Ok(carrier) => {
+                let carrier_shutdown = carrier.shutdown();
+                if let Err(error) = carrier_shutdown
+                    && first_error.is_none()
+                {
+                    first_error = Some(error.into());
+                }
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error.into());
+                }
+            }
+        }
+
+        if let Some(error) = first_error {
+            return Err(error);
+        }
         Ok(())
     }
 }
@@ -913,5 +1016,37 @@ mod tests {
 
         clear_tiered_vector_target(performance_cookie);
         clear_tiered_vector_target(efficiency_cookie);
+    }
+
+    #[test]
+    fn clear_tiered_vector_target_removes_registered_target_and_pending_count() {
+        let performance = TieredTaskAttributes::new(
+            FiberTaskAttributes::new(FiberStackClass::MIN)
+                .with_priority(FiberTaskPriority::DEFAULT),
+        );
+        let cookie = VectorDispatchCookie(5);
+        register_tiered_vector_target(
+            cookie,
+            TieredVectorDispatchTarget {
+                task: performance,
+                job: performance_job,
+            },
+        )
+        .expect("target should register");
+        tiered_vector_dispatch_callback(cookie);
+        tiered_vector_dispatch_callback(cookie);
+
+        clear_tiered_vector_target(cookie);
+
+        let index = tiered_vector_cookie_index(cookie).expect("cookie should map into registry");
+        let targets = TIERED_VECTOR_TARGETS
+            .lock()
+            .expect("registry lock should succeed");
+        assert!(targets[index].is_none());
+        drop(targets);
+        assert_eq!(
+            TIERED_VECTOR_DISPATCH_COUNTS[index].load(Ordering::Acquire),
+            0
+        );
     }
 }
