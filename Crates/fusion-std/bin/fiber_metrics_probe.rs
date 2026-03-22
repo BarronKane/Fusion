@@ -11,6 +11,7 @@ use fusion_std::thread::{
     GreenPool,
     ThreadPool,
     ThreadPoolConfig,
+    generated_fiber_task_admitted_stack_bytes_by_type_name,
     generated_fiber_task_metadata_by_type_name,
 };
 use fusion_sys::fiber::Fiber;
@@ -29,22 +30,22 @@ fn main() {
 
 fn run() -> Result<(), String> {
     print_memory_report()?;
-    let mut underpredictions = 0usize;
-    underpredictions += usize::from(print_stack_accuracy_report(
+    let mut admission_underpredictions = 0usize;
+    admission_underpredictions += usize::from(print_stack_accuracy_report(
         "closure_small",
         small_probe_closure,
     )?);
-    underpredictions += usize::from(print_stack_accuracy_report(
+    admission_underpredictions += usize::from(print_stack_accuracy_report(
         "closure_medium",
         medium_probe_closure,
     )?);
-    underpredictions += usize::from(print_stack_accuracy_report(
+    admission_underpredictions += usize::from(print_stack_accuracy_report(
         "closure_large",
         large_probe_closure,
     )?);
-    if underpredictions != 0 {
+    if admission_underpredictions != 0 {
         return Err(format!(
-            "{underpredictions} closure probes exceeded the raw generated stack prediction"
+            "{admission_underpredictions} closure probes exceeded the admission-adjusted generated stack prediction"
         ));
     }
     Ok(())
@@ -109,26 +110,37 @@ where
             "missing generated metadata for `{type_name}`; run `cargo run -p fusion-std --bin fusion_std_fiber_task_pipeline -- --bin fusion_std_fiber_metrics_probe` first"
         )
     })?;
+    let admitted_stack_bytes =
+        generated_fiber_task_admitted_stack_bytes_by_type_name(type_name).map_err(|_| {
+            format!("missing admission-adjusted generated metadata for `{type_name}`")
+        })?;
     let actual_peak_used_bytes = measure_runtime_watermark(make_job)?;
-    let underpredicted = actual_peak_used_bytes > metadata.stack_bytes;
-    let slack = if underpredicted {
+    let raw_underpredicted = actual_peak_used_bytes > metadata.stack_bytes;
+    let admission_underpredicted = actual_peak_used_bytes > admitted_stack_bytes;
+    let slack = if admission_underpredicted {
         0
     } else {
-        metadata.stack_bytes - actual_peak_used_bytes
+        admitted_stack_bytes - actual_peak_used_bytes
     };
 
     println!(
-        "stack_accuracy {label}: type_name=\"{type_name}\" predicted_stack_bytes={} actual_peak_used_bytes={} slack_bytes={} status={}",
+        "stack_accuracy {label}: type_name=\"{type_name}\" predicted_stack_bytes={} admitted_stack_bytes={} actual_peak_used_bytes={} slack_bytes={} raw_status={} admission_status={}",
         metadata.stack_bytes,
+        admitted_stack_bytes,
         actual_peak_used_bytes,
         slack,
-        if underpredicted {
+        if raw_underpredicted {
+            "UNDERPREDICTED"
+        } else {
+            "ok"
+        },
+        if admission_underpredicted {
             "UNDERPREDICTED"
         } else {
             "ok"
         },
     );
-    Ok(underpredicted)
+    Ok(admission_underpredicted)
 }
 
 fn measure_runtime_watermark<F, T>(job: fn() -> F) -> Result<usize, String>

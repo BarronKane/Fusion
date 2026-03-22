@@ -1,6 +1,7 @@
 //! Domain 2: public green-thread and fiber orchestration surface.
 
 use core::any::{TypeId, type_name};
+use core::cell::UnsafeCell;
 use core::fmt;
 use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit, align_of, size_of};
@@ -781,12 +782,67 @@ macro_rules! include_generated_fiber_task_contracts {
     };
 }
 
+const CLOSURE_METADATA_MISS_CACHE_SIZE: usize = 32;
+const HOSTED_LINUX_GENERATED_STACK_FLOOR_BYTES: usize = 3304;
+const HOSTED_LINUX_GENERATED_STACK_OVERHEAD_BYTES: usize = 352;
+
+#[derive(Debug)]
+struct ClosureMetadataMissCacheEntry {
+    ptr: AtomicUsize,
+    len: AtomicUsize,
+}
+
+static GENERATED_CLOSURE_METADATA_MISS_CACHE: [ClosureMetadataMissCacheEntry;
+    CLOSURE_METADATA_MISS_CACHE_SIZE] = [const {
+    ClosureMetadataMissCacheEntry {
+        ptr: AtomicUsize::new(0),
+        len: AtomicUsize::new(0),
+    }
+}; CLOSURE_METADATA_MISS_CACHE_SIZE];
+static GENERATED_CLOSURE_METADATA_MISS_NEXT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(all(feature = "std", target_os = "linux"))]
+const fn adjust_generated_stack_bytes_for_runtime(stack_bytes: usize) -> usize {
+    let adjusted = stack_bytes.saturating_add(HOSTED_LINUX_GENERATED_STACK_OVERHEAD_BYTES);
+    if adjusted < HOSTED_LINUX_GENERATED_STACK_FLOOR_BYTES {
+        HOSTED_LINUX_GENERATED_STACK_FLOOR_BYTES
+    } else {
+        adjusted
+    }
+}
+
+#[cfg(not(all(feature = "std", target_os = "linux")))]
+const fn adjust_generated_stack_bytes_for_runtime(stack_bytes: usize) -> usize {
+    stack_bytes
+}
+
+fn generated_closure_metadata_miss_cached(type_name: &'static str) -> bool {
+    let ptr = type_name.as_ptr() as usize;
+    let len = type_name.len();
+    GENERATED_CLOSURE_METADATA_MISS_CACHE.iter().any(|entry| {
+        entry.ptr.load(Ordering::Acquire) == ptr && entry.len.load(Ordering::Acquire) == len
+    })
+}
+
+fn remember_generated_closure_metadata_miss(type_name: &'static str) {
+    let index = GENERATED_CLOSURE_METADATA_MISS_NEXT.fetch_add(1, Ordering::AcqRel)
+        % CLOSURE_METADATA_MISS_CACHE_SIZE;
+    GENERATED_CLOSURE_METADATA_MISS_CACHE[index]
+        .len
+        .store(type_name.len(), Ordering::Release);
+    GENERATED_CLOSURE_METADATA_MISS_CACHE[index]
+        .ptr
+        .store(type_name.as_ptr() as usize, Ordering::Release);
+}
+
 fn generated_task_attributes_by_type_name(
     type_name: &str,
 ) -> Result<FiberTaskAttributes, FiberError> {
     let metadata = generated_task_metadata_by_type_name(type_name)?;
-    let stack_bytes =
-        NonZeroUsize::new(metadata.stack_bytes).ok_or_else(FiberError::unsupported)?;
+    let stack_bytes = NonZeroUsize::new(adjust_generated_stack_bytes_for_runtime(
+        metadata.stack_bytes,
+    ))
+    .ok_or_else(FiberError::unsupported)?;
     Ok(
         FiberTaskAttributes::new(FiberStackClass::from_stack_bytes(stack_bytes)?)
             .with_priority(FiberTaskPriority::new(metadata.priority)),
@@ -822,6 +878,19 @@ pub fn generated_fiber_task_metadata_by_type_name(
     generated_task_metadata_by_type_name(type_name)
 }
 
+/// Returns the admission-adjusted generated stack bytes for one runtime task type when it exists.
+///
+/// This is the runtime-facing view used for class selection after platform wrapper overhead is
+/// accounted for.
+#[doc(hidden)]
+pub fn generated_fiber_task_admitted_stack_bytes_by_type_name(
+    type_name: &str,
+) -> Result<usize, FiberError> {
+    Ok(adjust_generated_stack_bytes_for_runtime(
+        generated_task_metadata_by_type_name(type_name)?.stack_bytes,
+    ))
+}
+
 fn generated_task_attributes<T: 'static>() -> Result<FiberTaskAttributes, FiberError> {
     generated_task_attributes_by_type_name(type_name::<T>())
 }
@@ -829,7 +898,14 @@ fn generated_task_attributes<T: 'static>() -> Result<FiberTaskAttributes, FiberE
 fn closure_spawn_task_attributes<F: 'static>(
     default_class: FiberStackClass,
 ) -> FiberTaskAttributes {
-    generated_task_attributes::<F>().unwrap_or_else(|_| FiberTaskAttributes::new(default_class))
+    let type_name = type_name::<F>();
+    if generated_closure_metadata_miss_cached(type_name) {
+        return FiberTaskAttributes::new(default_class);
+    }
+    generated_task_attributes_by_type_name(type_name).unwrap_or_else(|_| {
+        remember_generated_closure_metadata_miss(type_name);
+        FiberTaskAttributes::new(default_class)
+    })
 }
 
 /// Explicit fiber-task contract resolved through build-generated metadata.
@@ -1412,6 +1488,7 @@ enum GreenTaskState {
     Running,
     Yielded,
     Waiting,
+    Finishing,
     Completed,
     Failed(FiberError),
 }
@@ -1889,6 +1966,53 @@ impl MetadataIndexStack {
             }
         }
         self.len = write;
+    }
+}
+
+struct RuntimeCell<T> {
+    fast: bool,
+    value: UnsafeCell<T>,
+    lock: SyncMutex<()>,
+}
+
+unsafe impl<T: Send> Send for RuntimeCell<T> {}
+unsafe impl<T: Send> Sync for RuntimeCell<T> {}
+
+impl<T: fmt::Debug> fmt::Debug for RuntimeCell<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RuntimeCell")
+            .field("fast", &self.fast)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> RuntimeCell<T> {
+    const fn new(fast: bool, value: T) -> Self {
+        Self {
+            fast,
+            value: UnsafeCell::new(value),
+            lock: SyncMutex::new(()),
+        }
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> Result<R, FiberError> {
+        if self.fast {
+            // SAFETY: fast-mode cells are only used by the thread-affine current-thread runtime.
+            return Ok(unsafe { f(&mut *self.value.get()) });
+        }
+        let _guard = self.lock.lock().map_err(fiber_error_from_sync)?;
+        // SAFETY: the lock serializes mutable access in the shared runtime.
+        Ok(unsafe { f(&mut *self.value.get()) })
+    }
+
+    fn with_ref<R>(&self, f: impl FnOnce(&T) -> R) -> Result<R, FiberError> {
+        if self.fast {
+            // SAFETY: fast-mode cells are only used by the thread-affine current-thread runtime.
+            return Ok(unsafe { f(&*self.value.get()) });
+        }
+        let _guard = self.lock.lock().map_err(fiber_error_from_sync)?;
+        // SAFETY: the lock serializes shared access in the shared runtime.
+        Ok(unsafe { f(&*self.value.get()) })
     }
 }
 
@@ -4387,7 +4511,7 @@ impl CarrierReactorState {
 
 #[derive(Debug)]
 struct CarrierQueue {
-    queue: SyncMutex<CarrierReadyQueue>,
+    queue: RuntimeCell<CarrierReadyQueue>,
     ready: Semaphore,
     reactor: Option<CarrierReactorState>,
     steal_state: AtomicUsize,
@@ -4459,6 +4583,7 @@ impl CarrierQueue {
         slices: CarrierQueueSlices,
         priority_age_cap: Option<FiberTaskAgeCap>,
         seed: usize,
+        fast: bool,
     ) -> Result<Self, FiberError> {
         let capacity = match scheduling {
             GreenScheduling::Fifo | GreenScheduling::WorkStealing => {
@@ -4469,11 +4594,10 @@ impl CarrierQueue {
             }
         };
         Ok(Self {
-            queue: SyncMutex::new(CarrierReadyQueue::new(
-                scheduling,
-                slices,
-                priority_age_cap,
-            )?),
+            queue: RuntimeCell::new(
+                fast,
+                CarrierReadyQueue::new(scheduling, slices, priority_age_cap)?,
+            ),
             ready: Semaphore::new(
                 0,
                 u32::try_from(capacity).map_err(|_| FiberError::resource_exhausted())?,
@@ -4491,7 +4615,11 @@ impl CarrierQueue {
         if let Some(reactor) = &self.reactor {
             return reactor.signal();
         }
-        self.ready.release(1).map_err(fiber_error_from_sync)
+        match self.ready.release(1).map_err(fiber_error_from_sync) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == FiberError::state_conflict().kind() => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     fn capacity_token(&self) -> PlatformWakeToken {
@@ -4571,14 +4699,15 @@ struct GreenTaskSlot {
     cooperative_exclusion_summary_leaf: [AtomicU32; ACTIVE_COOPERATIVE_EXCLUSION_FAST_LEAF_WORDS],
     cooperative_exclusion_summary_root: AtomicU32,
     cooperative_exclusion_summary_overflow: AtomicBool,
-    yield_action: SyncMutex<CurrentGreenYieldAction>,
-    record: SyncMutex<GreenTaskRecord>,
+    completion_published: AtomicBool,
+    yield_action: RuntimeCell<CurrentGreenYieldAction>,
+    record: RuntimeCell<GreenTaskRecord>,
     completed: Semaphore,
     handle_refs: AtomicUsize,
 }
 
 impl GreenTaskSlot {
-    fn new(slot_index: usize) -> Result<Self, FiberError> {
+    fn new(slot_index: usize, fast: bool) -> Result<Self, FiberError> {
         Ok(Self {
             owner: AtomicUsize::new(0),
             slot_index,
@@ -4591,8 +4720,9 @@ impl GreenTaskSlot {
                 ACTIVE_COOPERATIVE_EXCLUSION_FAST_LEAF_WORDS],
             cooperative_exclusion_summary_root: AtomicU32::new(0),
             cooperative_exclusion_summary_overflow: AtomicBool::new(false),
-            yield_action: SyncMutex::new(CurrentGreenYieldAction::Requeue),
-            record: SyncMutex::new(GreenTaskRecord::empty()),
+            completion_published: AtomicBool::new(false),
+            yield_action: RuntimeCell::new(fast, CurrentGreenYieldAction::Requeue),
+            record: RuntimeCell::new(fast, GreenTaskRecord::empty()),
             completed: Semaphore::new(0, 1).map_err(fiber_error_from_sync)?,
             handle_refs: AtomicUsize::new(0),
         })
@@ -4620,7 +4750,7 @@ impl GreenTaskSlot {
     }
 
     fn set_yield_action(&self, action: CurrentGreenYieldAction) -> Result<(), FiberError> {
-        *self.yield_action.lock().map_err(fiber_error_from_sync)? = action;
+        self.yield_action.with(|yield_action| *yield_action = action)?;
         Ok(())
     }
 
@@ -4803,11 +4933,11 @@ impl GreenTaskSlot {
     }
 
     fn take_yield_action(&self) -> Result<CurrentGreenYieldAction, FiberError> {
-        let mut guard = self.yield_action.lock().map_err(fiber_error_from_sync)?;
-        Ok(core::mem::replace(
-            &mut *guard,
+        self.yield_action.with(|yield_action| {
+            core::mem::replace(
+            yield_action,
             CurrentGreenYieldAction::Requeue,
-        ))
+        )})
     }
 
     fn assign<F>(
@@ -4827,24 +4957,27 @@ impl GreenTaskSlot {
             .map_err(fiber_error_from_sync)?
         {}
 
-        let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if record.allocated {
-            return Err(FiberError::state_conflict());
-        }
+        self.record.with(|record| {
+            if record.allocated {
+                return Err(FiberError::state_conflict());
+            }
 
-        record.job.clear();
-        record.result.clear();
-        record.job.store(job)?;
-        record.allocated = true;
-        record.id = id;
-        record.carrier = carrier;
-        record.stack_pool_index = lease.pool_index;
-        record.stack_slot = lease.slot_index;
-        record.stack_class = lease.class;
-        record.priority = task.priority;
-        record.yield_budget = task.yield_budget;
-        record.fiber = None;
-        record.state = GreenTaskState::Queued;
+            record.job.clear();
+            record.result.clear();
+            record.job.store(job)?;
+            record.allocated = true;
+            record.id = id;
+            record.carrier = carrier;
+            record.stack_pool_index = lease.pool_index;
+            record.stack_slot = lease.slot_index;
+            record.stack_class = lease.class;
+            record.priority = task.priority;
+            record.yield_budget = task.yield_budget;
+            record.fiber = None;
+            record.state = GreenTaskState::Queued;
+            Ok(())
+        })??;
+        self.completion_published.store(false, Ordering::Release);
         self.handle_refs.store(1, Ordering::Release);
         self.reset_cooperative_lock_depth();
         Ok(())
@@ -4855,27 +4988,21 @@ impl GreenTaskSlot {
     }
 
     fn current_id(&self) -> Result<u64, FiberError> {
-        let record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !record.allocated {
-            return Err(FiberError::state_conflict());
-        }
-        Ok(record.id)
+        self.record.with_ref(|record| {
+            if !record.allocated {
+                return Err(FiberError::state_conflict());
+            }
+            Ok(record.id)
+        })?
     }
 
     fn priority(&self) -> Result<FiberTaskPriority, FiberError> {
-        let record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !record.allocated {
-            return Err(FiberError::state_conflict());
-        }
-        Ok(record.priority)
-    }
-
-    fn yield_budget(&self) -> Result<Option<Duration>, FiberError> {
-        let record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !record.allocated {
-            return Err(FiberError::state_conflict());
-        }
-        Ok(record.yield_budget)
+        self.record.with_ref(|record| {
+            if !record.allocated {
+                return Err(FiberError::state_conflict());
+            }
+            Ok(record.priority)
+        })?
     }
 
     const fn matches_id(record: &GreenTaskRecord, id: u64) -> bool {
@@ -4883,64 +5010,74 @@ impl GreenTaskSlot {
     }
 
     fn install_fiber(&self, id: u64, fiber: Fiber) -> Result<(), FiberError> {
-        let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !Self::matches_id(&record, id) {
-            return Err(FiberError::state_conflict());
-        }
-        record.fiber = Some(fiber);
+        self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            record.fiber = Some(fiber);
+            Ok(())
+        })??;
         Ok(())
     }
 
     fn clear_fiber(&self, id: u64) -> Result<(), FiberError> {
-        let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !Self::matches_id(&record, id) {
-            return Err(FiberError::state_conflict());
-        }
-        record.fiber = None;
+        self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            record.fiber = None;
+            Ok(())
+        })??;
         Ok(())
     }
 
     fn stack_location(&self, id: u64) -> Result<(usize, usize), FiberError> {
-        let record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !Self::matches_id(&record, id) {
-            return Err(FiberError::state_conflict());
-        }
-        Ok((record.stack_pool_index, record.stack_slot))
+        self.record.with_ref(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            Ok((record.stack_pool_index, record.stack_slot))
+        })?
     }
 
     fn assignment(&self) -> Result<Option<(u64, usize)>, FiberError> {
-        let record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !record.allocated {
-            return Ok(None);
-        }
-        Ok(Some((record.id, record.carrier)))
+        self.record.with_ref(|record| {
+            if !record.allocated {
+                return Ok(None);
+            }
+            Ok(Some((record.id, record.carrier)))
+        })?
     }
 
     fn reassign_carrier(&self, id: u64, carrier: usize) -> Result<(), FiberError> {
-        let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !Self::matches_id(&record, id) {
-            return Err(FiberError::state_conflict());
-        }
+        self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
         if matches!(
             record.state,
-            GreenTaskState::Running | GreenTaskState::Waiting
+            GreenTaskState::Running | GreenTaskState::Waiting | GreenTaskState::Finishing
         ) {
             return Err(FiberError::state_conflict());
         }
-        record.carrier = carrier;
+            record.carrier = carrier;
+            Ok(())
+        })??;
         Ok(())
     }
 
     fn state(&self, id: u64) -> Result<GreenTaskState, FiberError> {
-        let record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !Self::matches_id(&record, id) {
-            return Err(FiberError::state_conflict());
-        }
-        Ok(record.state)
+        self.record.with_ref(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            Ok(record.state)
+        })?
     }
 
     fn is_finished(&self, id: u64) -> Result<bool, FiberError> {
-        Ok(is_terminal_task_state(self.state(id)?))
+        Ok(is_terminal_task_state(self.state(id)?)
+            && self.completion_published.load(Ordering::Acquire))
     }
 
     fn wait_until_terminal(&self, id: u64) -> Result<GreenTaskState, FiberError> {
@@ -4959,40 +5096,61 @@ impl GreenTaskSlot {
     }
 
     fn set_state(&self, id: u64, state: GreenTaskState) -> Result<(), FiberError> {
-        let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !Self::matches_id(&record, id) {
-            return Err(FiberError::state_conflict());
-        }
-        record.state = state;
+        self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            record.state = state;
+            Ok(())
+        })??;
         Ok(())
     }
 
     fn signal_completed(&self, id: u64) -> Result<(), FiberError> {
-        {
-            let record = self.record.lock().map_err(fiber_error_from_sync)?;
-            if !Self::matches_id(&record, id) || !is_terminal_task_state(record.state) {
+        self.record.with_ref(|record| {
+            if !Self::matches_id(record, id) || !is_terminal_task_state(record.state) {
+                #[cfg(feature = "std")]
+                if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_some() {
+                    std::eprintln!(
+                        "fusion-std signal_completed mismatch: slot_index={} expected_id={} actual_id={} allocated={} state={:?}",
+                        self.slot_index,
+                        id,
+                        record.id,
+                        record.allocated,
+                        record.state,
+                    );
+                }
                 return Err(FiberError::state_conflict());
             }
+            Ok(())
+        })??;
+        self.completion_published.store(true, Ordering::Release);
+        match self.completed.release(1).map_err(fiber_error_from_sync) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == FiberError::state_conflict().kind() => Ok(()),
+            Err(error) => Err(error),
         }
-        self.completed.release(1).map_err(fiber_error_from_sync)
     }
 
     fn resume(&self, id: u64) -> Result<FiberYield, FiberError> {
         let mut fiber = {
-            let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-            if !Self::matches_id(&record, id) {
-                return Err(FiberError::state_conflict());
-            }
-            record.fiber.take().ok_or_else(FiberError::state_conflict)?
+            self.record.with(|record| {
+                if !Self::matches_id(record, id) {
+                    return Err(FiberError::state_conflict());
+                }
+                record.fiber.take().ok_or_else(FiberError::state_conflict)
+            })??
         };
 
         match fiber.resume() {
             Ok(FiberYield::Yielded) => {
-                let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-                if !Self::matches_id(&record, id) {
-                    return Err(FiberError::state_conflict());
-                }
-                record.fiber = Some(fiber);
+                self.record.with(|record| {
+                    if !Self::matches_id(record, id) {
+                        return Err(FiberError::state_conflict());
+                    }
+                    record.fiber = Some(fiber);
+                    Ok(())
+                })??;
                 Ok(FiberYield::Yielded)
             }
             Ok(FiberYield::Completed(result)) => Ok(FiberYield::Completed(result)),
@@ -5001,86 +5159,161 @@ impl GreenTaskSlot {
     }
 
     fn take_job_runner(&self, id: u64) -> Result<InlineGreenJobRunner, FiberError> {
-        let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !Self::matches_id(&record, id) {
-            return Err(FiberError::state_conflict());
-        }
-        record.job.take_runner()
+        self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            record.job.take_runner()
+        })?
     }
 
     fn store_output<T: 'static>(&self, id: u64, value: T) -> Result<(), FiberError> {
-        let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !Self::matches_id(&record, id) {
-            return Err(FiberError::state_conflict());
-        }
-        record.result.store(value)
+        self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            record.result.store(value)
+        })?
     }
 
     fn take_output<T: 'static>(&self, id: u64) -> Result<T, FiberError> {
-        let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !Self::matches_id(&record, id) {
-            return Err(FiberError::state_conflict());
-        }
-        record.result.take::<T>()
+        self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            record.result.take::<T>()
+        })?
     }
 
     fn force_recycle(&self, id: u64) -> Result<bool, FiberError> {
-        let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !Self::matches_id(&record, id) {
-            return Ok(false);
+        let recycled = self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Ok::<bool, FiberError>(false);
+            }
+            record.job.clear();
+            record.result.clear();
+            record.fiber = None;
+            record.allocated = false;
+            record.id = 0;
+            record.carrier = 0;
+            record.stack_pool_index = 0;
+            record.stack_slot = 0;
+            record.stack_class = FiberStackClass::MIN;
+            record.priority = FiberTaskPriority::DEFAULT;
+            record.yield_budget = None;
+            record.state = GreenTaskState::Completed;
+            Ok::<bool, FiberError>(true)
+        })??;
+        if recycled {
+            #[cfg(feature = "std")]
+            if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_some() {
+                std::eprintln!(
+                    "fusion-std force_recycle: slot_index={} id={}",
+                    self.slot_index, id
+                );
+            }
+            self.completion_published.store(false, Ordering::Release);
+            self.handle_refs.store(0, Ordering::Release);
+            self.reset_cooperative_lock_depth();
         }
-        record.job.clear();
-        record.result.clear();
-        record.fiber = None;
-        record.allocated = false;
-        record.id = 0;
-        record.carrier = 0;
-        record.stack_pool_index = 0;
-        record.stack_slot = 0;
-        record.stack_class = FiberStackClass::MIN;
-        record.priority = FiberTaskPriority::DEFAULT;
-        record.yield_budget = None;
-        record.state = GreenTaskState::Completed;
-        self.handle_refs.store(0, Ordering::Release);
-        self.reset_cooperative_lock_depth();
-        Ok(true)
+        Ok(recycled)
     }
 
     fn try_recycle(&self, id: u64) -> Result<bool, FiberError> {
-        let mut record = self.record.lock().map_err(fiber_error_from_sync)?;
-        if !Self::matches_id(&record, id) {
-            return Ok(false);
+        let recycled = self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Ok::<bool, FiberError>(false);
+            }
+            if !is_terminal_task_state(record.state)
+                || !self.completion_published.load(Ordering::Acquire)
+                || self.handle_refs.load(Ordering::Acquire) != 0
+            {
+                return Ok::<bool, FiberError>(false);
+            }
+            record.job.clear();
+            record.result.clear();
+            record.fiber = None;
+            record.allocated = false;
+            record.id = 0;
+            record.carrier = 0;
+            record.stack_pool_index = 0;
+            record.stack_slot = 0;
+            record.stack_class = FiberStackClass::MIN;
+            record.priority = FiberTaskPriority::DEFAULT;
+            record.yield_budget = None;
+            record.state = GreenTaskState::Completed;
+            Ok::<bool, FiberError>(true)
+        })??;
+        if recycled {
+            #[cfg(feature = "std")]
+            if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_some() {
+                std::eprintln!(
+                    "fusion-std try_recycle: slot_index={} id={}",
+                    self.slot_index, id
+                );
+            }
+            self.completion_published.store(false, Ordering::Release);
+            self.reset_cooperative_lock_depth();
         }
-        if !is_terminal_task_state(record.state) || self.handle_refs.load(Ordering::Acquire) != 0 {
-            return Ok(false);
-        }
-        record.job.clear();
-        record.result.clear();
-        record.fiber = None;
-        record.allocated = false;
-        record.id = 0;
-        record.carrier = 0;
-        record.stack_pool_index = 0;
-        record.stack_slot = 0;
-        record.stack_class = FiberStackClass::MIN;
-        record.priority = FiberTaskPriority::DEFAULT;
-        record.yield_budget = None;
-        record.state = GreenTaskState::Completed;
-        self.reset_cooperative_lock_depth();
-        Ok(true)
+        Ok(recycled)
+    }
+
+    fn begin_run(&self) -> Result<(u64, Option<Duration>), FiberError> {
+        self.record.with(|record| {
+            if !record.allocated {
+                return Err(FiberError::state_conflict());
+            }
+            let task_id = record.id;
+            let yield_budget = record.yield_budget;
+            record.state = GreenTaskState::Running;
+            Ok((task_id, yield_budget))
+        })?
+    }
+
+    fn settle_terminal_state(
+        &self,
+        id: u64,
+        terminal: GreenTaskState,
+    ) -> Result<(), FiberError> {
+        self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            if !matches!(record.state, GreenTaskState::Failed(_)) {
+                record.state = terminal;
+            }
+            Ok(())
+        })??;
+        Ok(())
+    }
+
+    fn begin_finish(&self, id: u64, terminal: GreenTaskState) -> Result<GreenTaskState, FiberError> {
+        self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            let resolved = if let GreenTaskState::Failed(error) = record.state {
+                GreenTaskState::Failed(error)
+            } else {
+                terminal
+            };
+            record.state = GreenTaskState::Finishing;
+            Ok(resolved)
+        })?
     }
 }
 
 #[derive(Debug)]
 struct GreenTaskRegistry {
     slots: MetadataSlice<GreenTaskSlot>,
-    free: SyncMutex<MetadataIndexStack>,
+    free: RuntimeCell<MetadataIndexStack>,
 }
 
 impl GreenTaskRegistry {
     fn new(
         slots: MetadataSlice<GreenTaskSlot>,
         free_entries: MetadataSlice<usize>,
+        fast: bool,
     ) -> Result<Self, FiberError> {
         if slots.is_empty() || slots.len() != free_entries.len() {
             return Err(FiberError::invalid());
@@ -5088,22 +5321,19 @@ impl GreenTaskRegistry {
 
         for slot_index in 0..slots.len() {
             unsafe {
-                slots.write(slot_index, GreenTaskSlot::new(slot_index)?)?;
+                slots.write(slot_index, GreenTaskSlot::new(slot_index, fast)?)?;
             }
         }
 
         Ok(Self {
-            free: SyncMutex::new(MetadataIndexStack::with_prefix(free_entries, slots.len())?),
+            free: RuntimeCell::new(fast, MetadataIndexStack::with_prefix(free_entries, slots.len())?),
             slots,
         })
     }
 
     fn reserve_slot(&self) -> Result<usize, FiberError> {
         self.free
-            .lock()
-            .map_err(fiber_error_from_sync)?
-            .pop()
-            .ok_or_else(FiberError::resource_exhausted)
+            .with(|free| free.pop().ok_or_else(FiberError::resource_exhausted))?
     }
 
     fn initialize_owner(&self, inner: *const GreenPoolInner) {
@@ -5129,10 +5359,7 @@ impl GreenTaskRegistry {
     }
 
     fn recycle_slot(&self, slot_index: usize) -> Result<(), FiberError> {
-        self.free
-            .lock()
-            .map_err(fiber_error_from_sync)?
-            .push(slot_index)
+        self.free.with(|free| free.push(slot_index))?
     }
 
     fn slot(&self, slot_index: usize) -> Result<&GreenTaskSlot, FiberError> {
@@ -5154,18 +5381,6 @@ impl GreenTaskRegistry {
 
     fn priority(&self, slot_index: usize) -> Result<FiberTaskPriority, FiberError> {
         self.slot(slot_index)?.priority()
-    }
-
-    fn yield_budget(&self, slot_index: usize, id: u64) -> Result<Option<Duration>, FiberError> {
-        self.slot(slot_index)?
-            .yield_budget()
-            .and_then(|yield_budget| {
-                if self.current_id(slot_index)? == id {
-                    Ok(yield_budget)
-                } else {
-                    Err(FiberError::state_conflict())
-                }
-            })
     }
 
     fn install_fiber(&self, slot_index: usize, id: u64, fiber: Fiber) -> Result<(), FiberError> {
@@ -5238,6 +5453,12 @@ impl GreenTaskRegistry {
                 current.checked_sub(1)
             })
             .map_err(|_| FiberError::state_conflict())?;
+        #[cfg(feature = "std")]
+        if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_some() {
+            std::eprintln!(
+                "fusion-std release_handle: slot_index={slot_index} id={id} previous_refs={previous}"
+            );
+        }
         if previous == 1 && slot.try_recycle(id)? {
             self.recycle_slot(slot_index)?;
         }
@@ -5443,6 +5664,7 @@ impl GreenPoolMetadata {
         scheduling: GreenScheduling,
         priority_age_cap: Option<FiberTaskAgeCap>,
         reactor_enabled: bool,
+        fast: bool,
     ) -> Result<(Self, GreenTaskRegistry, MetadataSlice<CarrierQueue>), FiberError> {
         if carrier_count == 0 || task_capacity == 0 {
             return Err(FiberError::invalid());
@@ -5487,6 +5709,7 @@ impl GreenPoolMetadata {
             scheduling,
             priority_age_cap,
             reactor_enabled,
+            fast,
         );
         match result {
             Ok((tasks, carriers)) => Ok((metadata, tasks, carriers)),
@@ -5592,6 +5815,7 @@ impl GreenPoolMetadata {
         scheduling: GreenScheduling,
         priority_age_cap: Option<FiberTaskAgeCap>,
         reactor_enabled: bool,
+        fast: bool,
     ) -> Result<(GreenTaskRegistry, MetadataSlice<CarrierQueue>), FiberError> {
         let mut cursor = MetadataCursor::new(metadata.mapping);
         let header_slice = cursor.reserve_slice::<GreenPoolMetadataHeader>(1)?;
@@ -5611,7 +5835,7 @@ impl GreenPoolMetadata {
             header_slice.write(0, header)?;
         }
 
-        let tasks = GreenTaskRegistry::new(task_slots, free_entries)?;
+        let tasks = GreenTaskRegistry::new(task_slots, free_entries, fast)?;
         metadata.initialized_tasks = task_slots.len();
 
         for carrier_index in 0..carrier_count {
@@ -5654,6 +5878,7 @@ impl GreenPoolMetadata {
                 },
                 priority_age_cap,
                 initial_steal_seed(carrier_index),
+                fast,
             )?;
             unsafe {
                 carriers.write(carrier_index, queue)?;
@@ -5846,10 +6071,24 @@ impl GreenPoolInner {
         }
 
         let queue = self.carriers.get(carrier).ok_or_else(FiberError::invalid)?;
-        let priority = self.tasks.priority(slot_index)?;
-        let mut guard = queue.queue.lock().map_err(fiber_error_from_sync)?;
-        guard.enqueue(slot_index, priority)?;
-        drop(guard);
+        let priority = match self.tasks.priority(slot_index) {
+            Ok(priority) => priority,
+            Err(error) => {
+                trace_spawn_failure("enqueue_with_signal.priority", Some(slot_index), &error);
+                return Err(error);
+            }
+        };
+        match queue.queue.with(|ready| ready.enqueue(slot_index, priority)) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                trace_spawn_failure("enqueue_with_signal.queue", Some(slot_index), &error);
+                return Err(error);
+            }
+            Err(error) => {
+                trace_spawn_failure("enqueue_with_signal.queue_lock", Some(slot_index), &error);
+                return Err(error);
+            }
+        }
         if !signal {
             return Ok(());
         }
@@ -6020,10 +6259,7 @@ impl GreenPoolInner {
         for step in 0..(self.carriers.len() - 1) {
             let source = (carrier + start + step) % self.carriers.len();
             let source_queue = self.carriers.get(source).ok_or_else(FiberError::invalid)?;
-            let stolen = {
-                let mut guard = source_queue.queue.lock().map_err(fiber_error_from_sync)?;
-                guard.steal()
-            };
+            let stolen = source_queue.queue.with(CarrierReadyQueue::steal)?;
 
             let Some(slot_index) = stolen else {
                 continue;
@@ -6094,12 +6330,25 @@ impl GreenPoolInner {
         Ok(())
     }
 
-    fn finish_task(&self, slot_index: usize, id: u64) -> Result<(), FiberError> {
+    fn finish_task(
+        &self,
+        slot_index: usize,
+        id: u64,
+        terminal_state: GreenTaskState,
+    ) -> Result<(), FiberError> {
         let mut first_error = None;
+        let terminal_state = match self.tasks.slot(slot_index)?.begin_finish(id, terminal_state) {
+            Ok(terminal_state) => terminal_state,
+            Err(error) => {
+                trace_carrier_failure("finish_task.begin_finish", usize::MAX, &error);
+                return Err(error);
+            }
+        };
 
         let stack_location = match self.tasks.stack_location(slot_index, id) {
             Ok(stack_location) => Some(stack_location),
             Err(error) => {
+                trace_carrier_failure("finish_task.stack_location", usize::MAX, &error);
                 first_error = Some(error);
                 None
             }
@@ -6108,6 +6357,7 @@ impl GreenPoolInner {
         if let Err(error) = self.tasks.clear_fiber(slot_index, id)
             && first_error.is_none()
         {
+            trace_carrier_failure("finish_task.clear_fiber", usize::MAX, &error);
             first_error = Some(error);
         }
 
@@ -6115,20 +6365,30 @@ impl GreenPoolInner {
             && let Err(error) = self.stacks.release(pool_index, stack_slot)
             && first_error.is_none()
         {
+            trace_carrier_failure("finish_task.release_stack", usize::MAX, &error);
             first_error = Some(error);
         }
 
         self.active.fetch_sub(1, Ordering::AcqRel);
 
+        if let Err(error) = self.tasks.slot(slot_index)?.settle_terminal_state(id, terminal_state)
+            && first_error.is_none()
+        {
+            trace_carrier_failure("finish_task.settle_terminal_state", usize::MAX, &error);
+            first_error = Some(error);
+        }
+
         if let Err(error) = self.tasks.signal_completed(slot_index, id)
             && first_error.is_none()
         {
+            trace_carrier_failure("finish_task.signal_completed", usize::MAX, &error);
             first_error = Some(error);
         }
 
         if let Err(error) = self.tasks.try_reclaim(slot_index, id)
             && first_error.is_none()
         {
+            trace_carrier_failure("finish_task.try_reclaim", usize::MAX, &error);
             first_error = Some(error);
         }
 
@@ -6231,6 +6491,7 @@ where
             GreenTaskState::Queued
             | GreenTaskState::Running
             | GreenTaskState::Yielded
+            | GreenTaskState::Finishing
             | GreenTaskState::Waiting => Err(FiberError::state_conflict()),
         }
     }
@@ -6261,6 +6522,56 @@ impl<T> Drop for GreenHandle<T> {
     }
 }
 
+/// Thread-affine current-thread fiber handle.
+#[derive(Debug)]
+pub struct CurrentFiberHandle<T = ()> {
+    inner: GreenHandle<T>,
+    _not_send_sync: PhantomData<*mut ()>,
+}
+
+impl<T> CurrentFiberHandle<T>
+where
+    T: 'static,
+{
+    /// Returns the stable current-thread fiber identifier.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.inner.id()
+    }
+
+    /// Returns whether the fiber has completed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the current-thread pool state cannot be observed honestly.
+    pub fn is_finished(&self) -> Result<bool, FiberError> {
+        self.inner.is_finished()
+    }
+
+    /// Waits for the fiber to complete by manually driving the current-thread pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns the fiber failure that stopped execution, if any.
+    pub fn join(self) -> Result<T, FiberError> {
+        self.inner.join()
+    }
+}
+
+impl CurrentFiberHandle<()> {
+    /// Attempts to clone one unit-result current-thread fiber handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying current-thread pool root cannot be retained honestly.
+    pub fn try_clone(&self) -> Result<Self, FiberError> {
+        Ok(Self {
+            inner: self.inner.try_clone()?,
+            _not_send_sync: PhantomData,
+        })
+    }
+}
+
 /// Public green-thread pool wrapper.
 #[derive(Debug)]
 pub struct GreenPool {
@@ -6275,6 +6586,38 @@ struct SpawnReservation {
     slot_index: usize,
     context: *mut (),
 }
+
+#[cfg(feature = "std")]
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn trace_spawn_failure(stage: &str, slot_index: Option<usize>, error: &FiberError) {
+    if std::env::var_os("FUSION_TRACE_SPAWN_FAILURES").is_none() {
+        return;
+    }
+    std::eprintln!(
+        "fusion-std spawn failure: stage={stage} slot_index={slot_index:?} kind={:?}",
+        error.kind()
+    );
+}
+
+#[cfg(not(feature = "std"))]
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn trace_spawn_failure(_stage: &str, _slot_index: Option<usize>, _error: &FiberError) {}
+
+#[cfg(feature = "std")]
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn trace_carrier_failure(stage: &str, carrier_index: usize, error: &FiberError) {
+    if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_none() {
+        return;
+    }
+    std::eprintln!(
+        "fusion-std carrier failure: stage={stage} carrier_index={carrier_index} kind={:?}",
+        error.kind()
+    );
+}
+
+#[cfg(not(feature = "std"))]
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn trace_carrier_failure(_stage: &str, _carrier_index: usize, _error: &FiberError) {}
 
 fn task_attributes_from_stack_bytes<const STACK_BYTES: usize>()
 -> Result<FiberTaskAttributes, FiberError> {
@@ -6309,6 +6652,7 @@ fn reserve_spawn_slot_for(
     let lease = match inner.stacks.acquire(task) {
         Ok(lease) => lease,
         Err(error) => {
+            trace_spawn_failure("stacks.acquire", None, &error);
             inner.active.fetch_sub(1, Ordering::AcqRel);
             return Err(error);
         }
@@ -6319,6 +6663,7 @@ fn reserve_spawn_slot_for(
     let slot_index = match inner.tasks.reserve_slot() {
         Ok(slot_index) => slot_index,
         Err(error) => {
+            trace_spawn_failure("tasks.reserve_slot", None, &error);
             let _ = inner.stacks.release(lease.pool_index, lease.slot_index);
             inner.active.fetch_sub(1, Ordering::AcqRel);
             return Err(error);
@@ -6328,6 +6673,7 @@ fn reserve_spawn_slot_for(
     let context = match inner.tasks.slot_context(slot_index) {
         Ok(context) => context,
         Err(error) => {
+            trace_spawn_failure("tasks.slot_context", Some(slot_index), &error);
             let _ = inner.tasks.abandon(slot_index, id);
             let _ = inner.stacks.release(lease.pool_index, lease.slot_index);
             inner.active.fetch_sub(1, Ordering::AcqRel);
@@ -6387,6 +6733,7 @@ where
         task,
         wrapped,
     ) {
+        trace_spawn_failure("tasks.assign_job", Some(reservation.slot_index), &error);
         cleanup_failed_spawn_for(inner, &reservation);
         return Err(error);
     }
@@ -6398,6 +6745,7 @@ where
         reservation.carrier,
         inner.carriers[reservation.carrier].capacity_token(),
     ) {
+        trace_spawn_failure("stacks.attach_slot_identity", Some(reservation.slot_index), &error);
         cleanup_failed_spawn_for(inner, &reservation);
         return Err(error);
     }
@@ -6409,6 +6757,7 @@ where
     ) {
         Ok(fiber) => fiber,
         Err(error) => {
+            trace_spawn_failure("Fiber::new", Some(reservation.slot_index), &error);
             cleanup_failed_spawn_for(inner, &reservation);
             return Err(error);
         }
@@ -6418,6 +6767,7 @@ where
         .tasks
         .install_fiber(reservation.slot_index, reservation.id, fiber)
     {
+        trace_spawn_failure("tasks.install_fiber", Some(reservation.slot_index), &error);
         cleanup_failed_spawn_for(inner, &reservation);
         return Err(error);
     }
@@ -6425,6 +6775,7 @@ where
     if let Err(error) =
         inner.enqueue_with_signal(reservation.carrier, reservation.slot_index, signal)
     {
+        trace_spawn_failure("enqueue_with_signal", Some(reservation.slot_index), &error);
         cleanup_failed_spawn_for(inner, &reservation);
         return Err(error);
     }
@@ -6450,6 +6801,7 @@ fn drive_current_pool_once(inner: &GreenPoolLease) -> Result<bool, FiberError> {
 #[derive(Debug)]
 pub struct CurrentFiberPool {
     inner: GreenPoolLease,
+    _not_send_sync: PhantomData<*mut ()>,
 }
 
 impl CurrentFiberPool {
@@ -6495,6 +6847,7 @@ impl CurrentFiberPool {
             config.scheduling,
             config.priority_age_cap,
             false,
+            true,
         )?;
 
         let inner = GreenPoolLease::new(
@@ -6519,7 +6872,10 @@ impl CurrentFiberPool {
             pool_metadata,
         )?;
         inner.tasks.initialize_owner(inner.as_ptr());
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            _not_send_sync: PhantomData,
+        })
     }
 
     /// Attempts to clone one current-thread pool handle.
@@ -6530,7 +6886,10 @@ impl CurrentFiberPool {
     pub fn try_clone(&self) -> Result<Self, FiberError> {
         let inner = self.inner.try_clone()?;
         inner.client_refs.fetch_add(1, Ordering::AcqRel);
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            _not_send_sync: PhantomData,
+        })
     }
 
     /// Returns the number of active fibers currently admitted.
@@ -6615,7 +6974,7 @@ impl CurrentFiberPool {
     /// # Errors
     ///
     /// Returns an error when the submitted closure cannot be admitted honestly.
-    pub fn spawn<F, T>(&self, job: F) -> Result<GreenHandle<T>, FiberError>
+    pub fn spawn<F, T>(&self, job: F) -> Result<CurrentFiberHandle<T>, FiberError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
@@ -6632,7 +6991,7 @@ impl CurrentFiberPool {
     pub fn spawn_with_stack<const STACK_BYTES: usize, F, T>(
         &self,
         job: F,
-    ) -> Result<GreenHandle<T>, FiberError>
+    ) -> Result<CurrentFiberHandle<T>, FiberError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
@@ -6649,18 +7008,22 @@ impl CurrentFiberPool {
         &self,
         task: FiberTaskAttributes,
         job: F,
-    ) -> Result<GreenHandle<T>, FiberError>
+    ) -> Result<CurrentFiberHandle<T>, FiberError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
     {
-        spawn_on_lease(
+        let handle = spawn_on_lease(
             &self.inner,
             task,
             job,
             false,
             GreenHandleDriveMode::CurrentThread,
-        )
+        )?;
+        Ok(CurrentFiberHandle {
+            inner: handle,
+            _not_send_sync: PhantomData,
+        })
     }
 
     /// Spawns one explicit fiber task carrying compile-time stack metadata.
@@ -6668,7 +7031,7 @@ impl CurrentFiberPool {
     /// # Errors
     ///
     /// Returns an error when the task contract cannot be mapped or admitted honestly.
-    pub fn spawn_explicit<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
+    pub fn spawn_explicit<T>(&self, task: T) -> Result<CurrentFiberHandle<T::Output>, FiberError>
     where
         T: ExplicitFiberTask,
     {
@@ -6683,7 +7046,7 @@ impl CurrentFiberPool {
     ///
     /// Returns an error when generated metadata is missing or the task cannot be admitted.
     #[cfg(not(feature = "critical-safe-generated-contracts"))]
-    pub fn spawn_generated<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
+    pub fn spawn_generated<T>(&self, task: T) -> Result<CurrentFiberHandle<T::Output>, FiberError>
     where
         T: GeneratedExplicitFiberTask,
     {
@@ -6698,7 +7061,7 @@ impl CurrentFiberPool {
     ///
     /// Returns an error when the generated contract is not provisioned by the current pool.
     #[cfg(feature = "critical-safe-generated-contracts")]
-    pub fn spawn_generated<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
+    pub fn spawn_generated<T>(&self, task: T) -> Result<CurrentFiberHandle<T::Output>, FiberError>
     where
         T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
     {
@@ -6713,7 +7076,7 @@ impl CurrentFiberPool {
     /// # Errors
     ///
     /// Returns an error when the generated contract is not provisioned by the current pool.
-    pub fn spawn_generated_contract<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
+    pub fn spawn_generated_contract<T>(&self, task: T) -> Result<CurrentFiberHandle<T::Output>, FiberError>
     where
         T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
     {
@@ -6825,6 +7188,7 @@ impl GreenPool {
     /// Returns an honest error when the selected fiber backend cannot support the requested
     /// scheduling and migration contract, or the configured slab-backed stack pool cannot be
     /// realized.
+    #[allow(clippy::too_many_lines)]
     pub fn new(config: &FiberPoolConfig<'_>, carrier: &ThreadPool) -> Result<Self, FiberError> {
         let support = Self::support();
         if !support.context.caps.contains(ContextCaps::MAKE)
@@ -6875,6 +7239,7 @@ impl GreenPool {
             config.scheduling,
             config.priority_age_cap,
             reactor_enabled,
+            false,
         )?;
 
         let inner = GreenPoolLease::new(
@@ -6904,7 +7269,14 @@ impl GreenPool {
             let carrier_inner = inner.try_clone()?;
             if let Err(error) = carrier
                 .submit(move || {
-                    if run_carrier_loop(&carrier_inner, carrier_index).is_err() {
+                    if let Err(error) = run_carrier_loop(&carrier_inner, carrier_index) {
+                        #[cfg(feature = "std")]
+                        if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_some() {
+                            std::eprintln!(
+                                "fusion-std carrier loop error: carrier_index={carrier_index} kind={:?}",
+                                error.kind()
+                            );
+                        }
                         let _ = carrier_inner.request_shutdown();
                     }
                 })
@@ -7366,17 +7738,30 @@ fn run_carrier_loop(inner: &GreenPoolInner, carrier_index: usize) -> Result<(), 
     };
     loop {
         while let Some(slot_index) = dequeue_ready(inner, carrier_index)? {
-            run_ready_task(inner, carrier_index, slot_index)?;
+            if let Err(error) = run_ready_task(inner, carrier_index, slot_index) {
+                trace_carrier_failure("run_carrier_loop.run_ready_task", carrier_index, &error);
+                return Err(error);
+            }
         }
         if let Some(slot_index) = inner.try_steal_ready(carrier_index)? {
-            run_ready_task(inner, carrier_index, slot_index)?;
+            if let Err(error) = run_ready_task(inner, carrier_index, slot_index) {
+                trace_carrier_failure(
+                    "run_carrier_loop.run_stolen_task",
+                    carrier_index,
+                    &error,
+                );
+                return Err(error);
+            }
             continue;
         }
         if inner.shutdown.load(Ordering::Acquire) {
             break;
         }
         let carrier = &inner.carriers[carrier_index];
-        carrier.ready.acquire().map_err(fiber_error_from_sync)?;
+        if let Err(error) = carrier.ready.acquire().map_err(fiber_error_from_sync) {
+            trace_carrier_failure("run_carrier_loop.ready.acquire", carrier_index, &error);
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -7397,21 +7782,34 @@ fn run_reactor_carrier_loop(
 
     loop {
         while let Some(slot_index) = dequeue_ready(inner, carrier_index)? {
-            run_ready_task(inner, carrier_index, slot_index)?;
+            if let Err(error) = run_ready_task(inner, carrier_index, slot_index) {
+                trace_carrier_failure(
+                    "run_reactor_carrier_loop.run_ready_task",
+                    carrier_index,
+                    &error,
+                );
+                return Err(error);
+            }
         }
         if let Some(slot_index) = inner.try_steal_ready(carrier_index)? {
-            run_ready_task(inner, carrier_index, slot_index)?;
+            if let Err(error) = run_ready_task(inner, carrier_index, slot_index) {
+                trace_carrier_failure(
+                    "run_reactor_carrier_loop.run_stolen_task",
+                    carrier_index,
+                    &error,
+                );
+                return Err(error);
+            }
             continue;
         }
 
         if inner.shutdown.load(Ordering::Acquire) {
             while let Some(waiter) = reactor.cancel_one_waiter()? {
-                inner.tasks.set_state(
+                inner.finish_task(
                     waiter.slot_index,
                     waiter.task_id,
                     GreenTaskState::Failed(FiberError::state_conflict()),
                 )?;
-                inner.finish_task(waiter.slot_index, waiter.task_id)?;
             }
             if reactor.waiter_count()? == 0 {
                 break;
@@ -7420,7 +7818,13 @@ fn run_reactor_carrier_loop(
         }
 
         let mut ready = [None; CARRIER_EVENT_BATCH];
-        let poll_result = reactor.poll_ready(None, &mut ready)?;
+        let poll_result = match reactor.poll_ready(None, &mut ready) {
+            Ok(poll_result) => poll_result,
+            Err(error) => {
+                trace_carrier_failure("run_reactor_carrier_loop.poll_ready", carrier_index, &error);
+                return Err(error);
+            }
+        };
         if poll_result.capacity_signaled {
             inner.dispatch_capacity_for_carrier(carrier_index)?;
         }
@@ -7449,11 +7853,7 @@ fn dequeue_ready(
         .carriers
         .get(carrier_index)
         .ok_or_else(FiberError::invalid)?;
-    let slot_index = carrier
-        .queue
-        .lock()
-        .map_err(fiber_error_from_sync)?
-        .dequeue();
+    let slot_index = carrier.queue.with(CarrierReadyQueue::dequeue)?;
     Ok(slot_index)
 }
 
@@ -7462,15 +7862,18 @@ fn run_ready_task(
     carrier_index: usize,
     slot_index: usize,
 ) -> Result<(), FiberError> {
-    let task_id = inner.tasks.current_id(slot_index)?;
-    let yield_budget = inner.tasks.yield_budget(slot_index, task_id)?;
-    inner
-        .tasks
-        .set_state(slot_index, task_id, GreenTaskState::Running)?;
-    inner
-        .tasks
-        .slot(slot_index)?
-        .set_yield_action(CurrentGreenYieldAction::Requeue)?;
+    let slot = inner.tasks.slot(slot_index)?;
+    let (task_id, yield_budget) = match slot.begin_run() {
+        Ok(values) => values,
+        Err(error) => {
+            trace_carrier_failure("run_ready_task.begin_run", carrier_index, &error);
+            return Err(error);
+        }
+    };
+    if let Err(error) = slot.set_yield_action(CurrentGreenYieldAction::Requeue) {
+        trace_carrier_failure("run_ready_task.set_yield_action", carrier_index, &error);
+        return Err(error);
+    }
 
     let run_started = yield_budget
         .map(|_| current_monotonic_nanos())
@@ -7485,7 +7888,13 @@ fn run_ready_task(
             start_nanos,
         );
     }
-    let resume = inner.tasks.resume(slot_index, task_id);
+    let resume = match inner.tasks.resume(slot_index, task_id) {
+        Ok(resume) => Ok(resume),
+        Err(error) => {
+            trace_carrier_failure("run_ready_task.resume", carrier_index, &error);
+            Err(error)
+        }
+    };
     let observed_budget_runtime = match (yield_budget, run_started) {
         (Some(_budget), Some(start_nanos)) => {
             Duration::from_nanos(current_monotonic_nanos()?.saturating_sub(start_nanos))
@@ -7500,18 +7909,24 @@ fn run_ready_task(
     );
 
     if budget_faulted {
-        inner.tasks.set_state(
+        inner.dispatch_capacity_for_task(slot_index, task_id)?;
+        inner.finish_task(
             slot_index,
             task_id,
             GreenTaskState::Failed(FiberError::deadline_exceeded()),
         )?;
-        inner.dispatch_capacity_for_task(slot_index, task_id)?;
-        inner.finish_task(slot_index, task_id)?;
         return Ok(());
     }
 
     match resume {
-        Ok(FiberYield::Yielded) => match take_current_green_yield_action(inner, slot_index)? {
+        Ok(FiberYield::Yielded) => match take_current_green_yield_action(inner, slot_index)
+            .inspect_err(|error| {
+                trace_carrier_failure(
+                    "run_ready_task.take_current_green_yield_action",
+                    carrier_index,
+                    error,
+                );
+            })? {
             CurrentGreenYieldAction::Requeue => {
                 inner
                     .tasks
@@ -7524,31 +7939,17 @@ fn run_ready_task(
                 if let Err(error) =
                     inner.park_on_readiness(carrier_index, slot_index, task_id, source, interest)
                 {
-                    inner
-                        .tasks
-                        .set_state(slot_index, task_id, GreenTaskState::Failed(error))?;
-                    inner.finish_task(slot_index, task_id)?;
+                    inner.finish_task(slot_index, task_id, GreenTaskState::Failed(error))?;
                 }
             }
         },
         Ok(FiberYield::Completed(_)) => {
-            if !matches!(
-                inner.tasks.state(slot_index, task_id)?,
-                GreenTaskState::Failed(_)
-            ) {
-                inner
-                    .tasks
-                    .set_state(slot_index, task_id, GreenTaskState::Completed)?;
-            }
             inner.dispatch_capacity_for_task(slot_index, task_id)?;
-            inner.finish_task(slot_index, task_id)?;
+            inner.finish_task(slot_index, task_id, GreenTaskState::Completed)?;
         }
         Err(error) => {
-            inner
-                .tasks
-                .set_state(slot_index, task_id, GreenTaskState::Failed(error))?;
             inner.dispatch_capacity_for_task(slot_index, task_id)?;
-            inner.finish_task(slot_index, task_id)?;
+            inner.finish_task(slot_index, task_id, GreenTaskState::Failed(error))?;
         }
     }
     Ok(())

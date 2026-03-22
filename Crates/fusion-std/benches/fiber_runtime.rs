@@ -27,6 +27,7 @@ const BENCH_POOL_STACK_BYTES: usize = 64 * 1024;
 const BENCH_POOL_CAPACITY: usize = 64;
 const OVERRIDE_STACK_BYTES: usize = 512;
 const THROUGHPUT_BATCH_SIZE: usize = 16;
+const MULTI_YIELD_COUNT: usize = 10;
 
 struct LowLevelYieldingFiber {
     _stack_words: Box<[u128]>,
@@ -206,7 +207,6 @@ fn current_fiber_pool_spawn_join_yield_once(b: &mut Bencher) {
 }
 
 #[bench]
-#[ignore = "carrier-backed GreenPool rapid-reuse benchmarking still faults under tight bench pressure"]
 fn green_pool_spawn_join_noop(b: &mut Bencher) {
     let (_carriers, fibers) = green_pool();
     let (): () = fibers
@@ -226,7 +226,6 @@ fn green_pool_spawn_join_noop(b: &mut Bencher) {
 }
 
 #[bench]
-#[ignore = "carrier-backed GreenPool rapid-reuse benchmarking still faults under tight bench pressure"]
 fn green_pool_spawn_with_stack_join_noop(b: &mut Bencher) {
     let (_carriers, fibers) = green_pool();
     let (): () = fibers
@@ -248,7 +247,6 @@ fn green_pool_spawn_with_stack_join_noop(b: &mut Bencher) {
 }
 
 #[bench]
-#[ignore = "carrier-backed GreenPool rapid-reuse benchmarking still faults under tight bench pressure"]
 fn green_pool_spawn_join_yield_once(b: &mut Bencher) {
     let (_carriers, fibers) = green_pool();
     let (): () = fibers
@@ -271,32 +269,62 @@ fn green_pool_spawn_join_yield_once(b: &mut Bencher) {
 
 #[bench]
 fn green_pool_throughput_noop_carriers_1(b: &mut Bencher) {
-    bench_green_pool_throughput(b, 1, noop_job);
+    bench_green_pool_steady_state_throughput(b, 1, noop_job);
 }
 
 #[bench]
 fn green_pool_throughput_noop_carriers_2(b: &mut Bencher) {
-    bench_green_pool_throughput(b, 2, noop_job);
+    bench_green_pool_steady_state_throughput(b, 2, noop_job);
 }
 
 #[bench]
 fn green_pool_throughput_noop_carriers_4(b: &mut Bencher) {
-    bench_green_pool_throughput(b, 4, noop_job);
+    bench_green_pool_steady_state_throughput(b, 4, noop_job);
 }
 
 #[bench]
 fn green_pool_throughput_yield_once_carriers_1(b: &mut Bencher) {
-    bench_green_pool_throughput(b, 1, yield_once_job);
+    bench_green_pool_steady_state_throughput(b, 1, yield_once_job);
 }
 
 #[bench]
 fn green_pool_throughput_yield_once_carriers_2(b: &mut Bencher) {
-    bench_green_pool_throughput(b, 2, yield_once_job);
+    bench_green_pool_steady_state_throughput(b, 2, yield_once_job);
 }
 
 #[bench]
 fn green_pool_throughput_yield_once_carriers_4(b: &mut Bencher) {
-    bench_green_pool_throughput(b, 4, yield_once_job);
+    bench_green_pool_steady_state_throughput(b, 4, yield_once_job);
+}
+
+#[bench]
+fn green_pool_lifecycle_noop_carriers_1(b: &mut Bencher) {
+    bench_green_pool_lifecycle_throughput(b, 1, noop_job);
+}
+
+#[bench]
+fn green_pool_lifecycle_noop_carriers_2(b: &mut Bencher) {
+    bench_green_pool_lifecycle_throughput(b, 2, noop_job);
+}
+
+#[bench]
+fn green_pool_lifecycle_noop_carriers_4(b: &mut Bencher) {
+    bench_green_pool_lifecycle_throughput(b, 4, noop_job);
+}
+
+#[bench]
+fn green_pool_lifecycle_yield_once_carriers_1(b: &mut Bencher) {
+    bench_green_pool_lifecycle_throughput(b, 1, yield_once_job);
+}
+
+#[bench]
+fn green_pool_lifecycle_yield_once_carriers_2(b: &mut Bencher) {
+    bench_green_pool_lifecycle_throughput(b, 2, yield_once_job);
+}
+
+#[bench]
+fn green_pool_lifecycle_yield_once_carriers_4(b: &mut Bencher) {
+    bench_green_pool_lifecycle_throughput(b, 4, yield_once_job);
 }
 
 #[bench]
@@ -343,16 +371,100 @@ fn tokio_current_thread_spawn_join_yield_once(b: &mut Bencher) {
     });
 }
 
+#[bench]
+fn current_fiber_pool_spawn_join_yield_ten_local_state(b: &mut Bencher) {
+    let fibers = current_pool();
+    let (): () = fibers
+        .spawn(yield_ten_local_state_job)
+        .expect("warmup task should spawn")
+        .join()
+        .expect("warmup task should join");
+    black_box(());
+
+    b.iter(|| {
+        let handle = fibers
+            .spawn(yield_ten_local_state_job)
+            .expect("benchmark task should spawn");
+        let (): () = handle.join().expect("benchmark task should join");
+        black_box(());
+    });
+
+    fibers.shutdown().expect("benchmark pool should shut down");
+}
+
+#[bench]
+fn current_fiber_pool_spawn_join_recursive_stack(b: &mut Bencher) {
+    let fibers = current_pool();
+    let _: usize = fibers
+        .spawn(recursive_stack_job)
+        .expect("warmup task should spawn")
+        .join()
+        .expect("warmup task should join");
+
+    b.iter(|| {
+        let handle = fibers
+            .spawn(recursive_stack_job)
+            .expect("benchmark task should spawn");
+        let depth = handle.join().expect("benchmark task should join");
+        black_box(depth);
+    });
+
+    fibers.shutdown().expect("benchmark pool should shut down");
+}
+
 const fn noop_job() {}
 
 fn yield_once_job() {
     green_yield_now().expect("benchmark task should yield cleanly");
 }
 
-fn bench_green_pool_throughput(b: &mut Bencher, carrier_count: usize, job: fn()) {
+fn yield_ten_local_state_job() {
+    let mut local = [0_u64; 128];
+    let mut round = 0usize;
+    while round < MULTI_YIELD_COUNT {
+        let mut index = 0usize;
+        while index < local.len() {
+            local[index] = local[index]
+                .wrapping_add((round as u64).wrapping_mul(17))
+                .wrapping_add(index as u64);
+            index += 1;
+        }
+        black_box(local[round % local.len()]);
+        green_yield_now().expect("benchmark task should yield cleanly");
+        round += 1;
+    }
+}
+
+fn recursive_stack_job() -> usize {
+    fn recurse(depth: usize) -> usize {
+        let local = [u8::try_from(depth).expect("benchmark recursion depth should fit in u8"); 96];
+        black_box(local[0]);
+        if depth == 0 {
+            0
+        } else {
+            recurse(depth - 1).saturating_add(1)
+        }
+    }
+
+    recurse(32)
+}
+
+fn bench_green_pool_steady_state_throughput(b: &mut Bencher, carrier_count: usize, job: fn()) {
+    let (carriers, fibers) = green_pool_with_carriers(carrier_count);
+    let mut handles = Vec::with_capacity(THROUGHPUT_BATCH_SIZE);
+    for _ in 0..THROUGHPUT_BATCH_SIZE {
+        handles.push(
+            fibers
+                .spawn(job)
+                .expect("warmup throughput task should spawn successfully"),
+        );
+    }
+    while let Some(handle) = handles.pop() {
+        let (): () = handle.join().expect("warmup throughput task should join cleanly");
+    }
+    black_box(());
+
     b.iter(|| {
-        let (carriers, fibers) = green_pool_with_carriers(carrier_count);
-        let mut handles = Vec::with_capacity(THROUGHPUT_BATCH_SIZE);
         handles.clear();
         for _ in 0..THROUGHPUT_BATCH_SIZE {
             handles.push(
@@ -363,6 +475,31 @@ fn bench_green_pool_throughput(b: &mut Bencher, carrier_count: usize, job: fn())
         }
         while let Some(handle) = handles.pop() {
             let (): () = handle.join().expect("throughput task should join cleanly");
+            black_box(());
+        }
+        black_box(());
+    });
+
+    fibers.shutdown().expect("benchmark pool should shut down");
+    carriers.shutdown().expect("carrier pool should shut down");
+}
+
+fn bench_green_pool_lifecycle_throughput(b: &mut Bencher, carrier_count: usize, job: fn()) {
+    b.iter(|| {
+        let (carriers, fibers) = green_pool_with_carriers(carrier_count);
+        let mut handles = Vec::with_capacity(THROUGHPUT_BATCH_SIZE);
+        handles.clear();
+        for _ in 0..THROUGHPUT_BATCH_SIZE {
+            handles.push(
+                fibers
+                    .spawn(job)
+                    .expect("lifecycle throughput task should spawn successfully"),
+            );
+        }
+        while let Some(handle) = handles.pop() {
+            let (): () = handle
+                .join()
+                .expect("lifecycle throughput task should join cleanly");
             black_box(());
         }
         fibers.shutdown().expect("benchmark pool should shut down");
