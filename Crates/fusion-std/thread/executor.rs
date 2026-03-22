@@ -72,6 +72,8 @@ pub use fusion_sys::event::{
 use fusion_sys::fiber::{FiberError, FiberErrorKind};
 use fusion_sys::thread::system_thread;
 
+#[cfg(feature = "std")]
+use super::HostedFiberRuntime;
 use super::{GreenPool, ThreadPool};
 
 /// Public executor operating mode.
@@ -85,6 +87,62 @@ pub enum ExecutorMode {
     GreenPool,
     /// Drive futures across a hybrid thread-pool and green-thread arrangement.
     Hybrid,
+}
+
+/// Truthful admission snapshot for one spawned async task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AsyncTaskAdmission {
+    /// Carrier realization the task was admitted onto.
+    pub carrier: ExecutorMode,
+    /// Concrete future frame size in bytes.
+    pub future_bytes: usize,
+    /// Concrete future frame alignment in bytes.
+    pub future_align: usize,
+    /// Concrete output storage size in bytes.
+    pub output_bytes: usize,
+    /// Concrete output storage alignment in bytes.
+    pub output_align: usize,
+}
+
+impl AsyncTaskAdmission {
+    const fn for_future<F>(carrier: ExecutorMode) -> Self
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        Self {
+            carrier,
+            future_bytes: size_of::<F>(),
+            future_align: align_of::<F>(),
+            output_bytes: size_of::<F::Output>(),
+            output_align: align_of::<F::Output>(),
+        }
+    }
+}
+
+/// Cooperative async yield future for the Fusion executor.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AsyncYieldNow {
+    yielded: bool,
+}
+
+impl Future for AsyncYieldNow {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.yielded {
+            return Poll::Ready(());
+        }
+        self.yielded = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+/// Returns one future that cooperatively yields back into the Fusion executor once.
+#[must_use]
+pub const fn async_yield_now() -> AsyncYieldNow {
+    AsyncYieldNow { yielded: false }
 }
 
 /// Public reactor configuration.
@@ -125,6 +183,31 @@ impl ExecutorConfig {
             mode: ExecutorMode::CurrentThread,
             reactor: ReactorConfig::new(),
         }
+    }
+
+    /// Returns one thread-pool executor configuration.
+    #[must_use]
+    pub const fn thread_pool() -> Self {
+        Self {
+            mode: ExecutorMode::ThreadPool,
+            reactor: ReactorConfig::new(),
+        }
+    }
+
+    /// Returns one fiber-carrier executor configuration.
+    #[must_use]
+    pub const fn green_pool() -> Self {
+        Self {
+            mode: ExecutorMode::GreenPool,
+            reactor: ReactorConfig::new(),
+        }
+    }
+
+    /// Returns one copy of this configuration with an explicit execution mode.
+    #[must_use]
+    pub const fn with_mode(mut self, mode: ExecutorMode) -> Self {
+        self.mode = mode;
+        self
     }
 }
 
@@ -1425,6 +1508,7 @@ static NOOP_ASYNC_TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 /// Public spawned-task handle.
 pub struct TaskHandle<T> {
     id: TaskId,
+    admission: AsyncTaskAdmission,
     core: ControlLease<ExecutorCore>,
     slot_index: usize,
     generation: u64,
@@ -1436,6 +1520,7 @@ impl<T> fmt::Debug for TaskHandle<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TaskHandle")
             .field("id", &self.id)
+            .field("admission", &self.admission)
             .field("slot_index", &self.slot_index)
             .field("generation", &self.generation)
             .field("active", &self.active)
@@ -1448,6 +1533,12 @@ impl<T> TaskHandle<T> {
     #[must_use]
     pub const fn id(&self) -> TaskId {
         self.id
+    }
+
+    /// Returns the truthful admission snapshot for this task.
+    #[must_use]
+    pub const fn admission(&self) -> AsyncTaskAdmission {
+        self.admission
     }
 
     /// Returns whether the task has completed.
@@ -1653,6 +1744,195 @@ pub struct Executor {
     inner: ExecutorInner,
 }
 
+/// Current-thread async runtime using ordinary Rust futures as the front door.
+#[derive(Debug)]
+pub struct CurrentAsyncRuntime {
+    executor: Executor,
+    _not_send_sync: PhantomData<*mut ()>,
+}
+
+impl Default for CurrentAsyncRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CurrentAsyncRuntime {
+    /// Creates one current-thread async runtime.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            executor: Executor::new(ExecutorConfig::new()),
+            _not_send_sync: PhantomData,
+        }
+    }
+
+    /// Returns the underlying executor.
+    #[must_use]
+    pub const fn executor(&self) -> &Executor {
+        &self.executor
+    }
+
+    /// Spawns one ordinary Rust future onto the current-thread runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn<F>(&self, future: F) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.executor.spawn(future)
+    }
+
+    /// Drives one ready async task.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor failure.
+    pub fn drive_once(&self) -> Result<bool, ExecutorError> {
+        self.executor.drive_once()
+    }
+
+    /// Drains the current-thread async queue until idle.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor failure.
+    pub fn run_until_idle(&self) -> Result<usize, ExecutorError> {
+        self.executor.run_until_idle()
+    }
+
+    /// Drives one future to completion on the current thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor failure.
+    pub fn block_on<F>(&self, future: F) -> Result<F::Output, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.executor.block_on(future)
+    }
+}
+
+/// Hosted async runtime backed by system-thread carriers.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub struct ThreadAsyncRuntime {
+    carriers: ThreadPool,
+    executor: Executor,
+}
+
+#[cfg(feature = "std")]
+impl ThreadAsyncRuntime {
+    /// Creates one async runtime on top of an owned thread pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest carrier-pool or executor binding failure.
+    pub fn new(config: &super::ThreadPoolConfig<'_>) -> Result<Self, ExecutorError> {
+        let carriers = ThreadPool::new(config).map_err(executor_error_from_thread_pool)?;
+        let executor = Executor::new(ExecutorConfig::thread_pool()).on_pool(&carriers)?;
+        Ok(Self { carriers, executor })
+    }
+
+    /// Returns the owned carrier thread pool.
+    #[must_use]
+    pub const fn carriers(&self) -> &ThreadPool {
+        &self.carriers
+    }
+
+    /// Returns the underlying executor.
+    #[must_use]
+    pub const fn executor(&self) -> &Executor {
+        &self.executor
+    }
+
+    /// Spawns one ordinary Rust future onto the thread-backed runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn<F>(&self, future: F) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.executor.spawn(future)
+    }
+
+    /// Releases the owned carrier pool and executor back to the caller.
+    #[must_use]
+    pub fn into_parts(self) -> (ThreadPool, Executor) {
+        (self.carriers, self.executor)
+    }
+}
+
+/// Hosted async runtime backed by a hosted fiber carrier runtime.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub struct FiberAsyncRuntime {
+    fibers: HostedFiberRuntime,
+    executor: Executor,
+}
+
+#[cfg(feature = "std")]
+impl FiberAsyncRuntime {
+    /// Creates one async runtime from an owned hosted fiber runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor binding failure.
+    pub fn from_hosted_fibers(fibers: HostedFiberRuntime) -> Result<Self, ExecutorError> {
+        let executor = Executor::new(ExecutorConfig::green_pool()).on_hosted_fibers(&fibers)?;
+        Ok(Self { fibers, executor })
+    }
+
+    /// Builds one fixed-capacity hosted fiber async runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest hosted-fiber bootstrap or executor binding failure.
+    pub fn fixed(total_fibers: usize) -> Result<Self, ExecutorError> {
+        let fibers = HostedFiberRuntime::fixed(total_fibers).map_err(executor_error_from_fiber)?;
+        Self::from_hosted_fibers(fibers)
+    }
+
+    /// Returns the owned hosted fiber runtime.
+    #[must_use]
+    pub const fn fibers(&self) -> &HostedFiberRuntime {
+        &self.fibers
+    }
+
+    /// Returns the underlying executor.
+    #[must_use]
+    pub const fn executor(&self) -> &Executor {
+        &self.executor
+    }
+
+    /// Spawns one ordinary Rust future onto the fiber-backed runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn<F>(&self, future: F) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.executor.spawn(future)
+    }
+
+    /// Releases the owned hosted fiber runtime and executor back to the caller.
+    #[must_use]
+    pub fn into_parts(self) -> (HostedFiberRuntime, Executor) {
+        (self.fibers, self.executor)
+    }
+}
+
 #[derive(Debug)]
 enum ExecutorInner {
     Ready(ControlLease<ExecutorCore>),
@@ -1741,6 +2021,7 @@ impl Executor {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        let admission = AsyncTaskAdmission::for_future::<F>(self.mode());
         let core = self.core()?;
         let handle_core = self
             .core_lease()?
@@ -1772,6 +2053,7 @@ impl Executor {
 
         Ok(TaskHandle {
             id,
+            admission,
             core: handle_core,
             slot_index,
             generation,
@@ -1810,11 +2092,37 @@ impl Executor {
 
         let handle = self.spawn(future)?;
         while !handle.is_finished()? {
-            if !core.current_queue.run_next()? && system_thread().yield_now().is_err() {
+            if !self.drive_once()? && system_thread().yield_now().is_err() {
                 spin_loop();
             }
         }
         handle.join()
+    }
+
+    /// Drives one ready task on the current-thread executor.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unsupported` when this executor is not current-thread driven.
+    pub fn drive_once(&self) -> Result<bool, ExecutorError> {
+        let core = self.core()?;
+        let SchedulerBinding::Current = &core.scheduler else {
+            return Err(ExecutorError::Unsupported);
+        };
+        core.drive_current_once()
+    }
+
+    /// Drains the current-thread ready queue until no task remains runnable.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unsupported` when this executor is not current-thread driven.
+    pub fn run_until_idle(&self) -> Result<usize, ExecutorError> {
+        let mut ran = 0_usize;
+        while self.drive_once()? {
+            ran = ran.saturating_add(1);
+        }
+        Ok(ran)
     }
 
     /// Attaches the executor to a carrier thread pool.
@@ -1849,6 +2157,16 @@ impl Executor {
             self.config,
             SchedulerBinding::GreenPool(green.try_clone().map_err(executor_error_from_fiber)?),
         ))
+    }
+
+    /// Attaches the executor to one hosted fiber runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unsupported` when the current executor mode is not green-backed.
+    #[cfg(feature = "std")]
+    pub fn on_hosted_fibers(self, runtime: &HostedFiberRuntime) -> Result<Self, ExecutorError> {
+        self.on_green(runtime.fibers())
     }
 }
 
@@ -1968,6 +2286,9 @@ fn executor_registry_capacity(capacity: usize) -> Result<usize, ExecutorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::thread::ThreadPoolConfig;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn registry_reuses_slots_with_new_generations() {
@@ -2004,6 +2325,66 @@ mod tests {
         let second = join_set.join_next().expect("second task should complete");
         assert!(matches!((first, second), (3, 5) | (5, 3)));
         assert!(matches!(join_set.join_next(), Err(ExecutorError::Stopped)));
+    }
+
+    #[test]
+    fn async_yield_now_reschedules_current_thread_task() {
+        let executor = Executor::new(ExecutorConfig::new());
+        let polls = Arc::new(AtomicUsize::new(0));
+        let task_polls = Arc::clone(&polls);
+
+        let handle = executor
+            .spawn(async move {
+                task_polls.fetch_add(1, Ordering::AcqRel);
+                async_yield_now().await;
+                task_polls.fetch_add(1, Ordering::AcqRel);
+                7_u8
+            })
+            .expect("task should spawn");
+
+        assert!(executor.drive_once().expect("drive should succeed"));
+        assert_eq!(polls.load(Ordering::Acquire), 1);
+        assert!(!handle.is_finished().expect("task state should read"));
+
+        assert!(executor.drive_once().expect("drive should succeed"));
+        assert_eq!(polls.load(Ordering::Acquire), 2);
+        assert_eq!(handle.join().expect("task should complete"), 7);
+    }
+
+    #[test]
+    fn task_handle_reports_concrete_admission_layout() {
+        let executor =
+            Executor::new(ExecutorConfig::thread_pool().with_mode(ExecutorMode::CurrentThread));
+        let sample = async { [1_u16, 2, 3, 4] };
+        let handle = executor
+            .spawn(async { [1_u16, 2, 3, 4] })
+            .expect("task should spawn");
+        let admission = handle.admission();
+        assert_eq!(admission.carrier, ExecutorMode::CurrentThread);
+        assert_eq!(admission.future_bytes, size_of_val(&sample));
+        assert_eq!(admission.future_align, core::mem::align_of_val(&sample));
+        assert_eq!(admission.output_bytes, size_of::<[u16; 4]>());
+        assert_eq!(admission.output_align, align_of::<[u16; 4]>());
+        assert_eq!(
+            handle.join().expect("task should complete"),
+            [1_u16, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn run_until_idle_drains_ready_current_thread_tasks() {
+        let executor = Executor::new(ExecutorConfig::new());
+        let handle = executor
+            .spawn(async {
+                async_yield_now().await;
+                async_yield_now().await;
+                11_u8
+            })
+            .expect("task should spawn");
+
+        assert_eq!(executor.run_until_idle().expect("drain should succeed"), 3);
+        assert!(handle.is_finished().expect("task state should read"));
+        assert_eq!(handle.join().expect("task should complete"), 11);
     }
 
     #[test]
@@ -2047,5 +2428,81 @@ mod tests {
         assert!(slot.waker.core_ptr().is_null());
         assert!(matches!(handle.join(), Err(ExecutorError::Stopped)));
         assert_eq!(slot.generation(), generation);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn executor_binds_to_hosted_fiber_runtime() {
+        let runtime = HostedFiberRuntime::fixed(2).expect("hosted fiber runtime should build");
+        let executor = Executor::new(ExecutorConfig::green_pool())
+            .on_hosted_fibers(&runtime)
+            .expect("executor should bind to hosted fibers");
+        assert_eq!(executor.mode(), ExecutorMode::GreenPool);
+        core::mem::forget(executor);
+        core::mem::forget(runtime);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn executor_runs_on_thread_pool_carriers() {
+        let pool = ThreadPool::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("thread pool should build");
+        let executor = Executor::new(ExecutorConfig::thread_pool())
+            .on_pool(&pool)
+            .expect("executor should bind to thread pool");
+
+        let handle = executor
+            .spawn(async {
+                async_yield_now().await;
+                21_u8
+            })
+            .expect("task should spawn");
+
+        assert_eq!(handle.join().expect("task should complete"), 21);
+    }
+
+    #[test]
+    fn current_async_runtime_drives_async_fn_to_completion() {
+        async fn value() -> u8 {
+            async_yield_now().await;
+            34
+        }
+
+        let runtime = CurrentAsyncRuntime::new();
+        let handle = runtime.spawn(value()).expect("task should spawn");
+        assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 2);
+        assert_eq!(handle.join().expect("task should complete"), 34);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn thread_async_runtime_runs_async_fn() {
+        async fn value() -> u8 {
+            async_yield_now().await;
+            55
+        }
+
+        let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("thread async runtime should build");
+        let handle = runtime.spawn(value()).expect("task should spawn");
+        assert_eq!(handle.join().expect("task should complete"), 55);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn fiber_async_runtime_binds_owned_hosted_fibers() {
+        let hosted = HostedFiberRuntime::fixed(2).expect("hosted fiber runtime should build");
+        let runtime =
+            FiberAsyncRuntime::from_hosted_fibers(hosted).expect("fiber async runtime should bind");
+        assert_eq!(runtime.executor().mode(), ExecutorMode::GreenPool);
+        core::mem::forget(runtime);
     }
 }

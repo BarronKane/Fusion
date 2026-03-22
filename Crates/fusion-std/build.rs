@@ -30,6 +30,36 @@ struct GeneratedFiberTaskEntry {
     type_name: String,
     stack_bytes: usize,
     priority: i8,
+    execution: GeneratedFiberTaskExecution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedFiberTaskExecution {
+    Fiber,
+    InlineNoYield,
+}
+
+impl GeneratedFiberTaskExecution {
+    const fn render(self) -> &'static str {
+        match self {
+            Self::Fiber => "FiberTaskExecution::Fiber",
+            Self::InlineNoYield => "FiberTaskExecution::InlineNoYield",
+        }
+    }
+}
+
+fn parse_generated_execution(
+    raw: &str,
+    line_no: usize,
+) -> Result<GeneratedFiberTaskExecution, String> {
+    match raw {
+        "" | "fiber" => Ok(GeneratedFiberTaskExecution::Fiber),
+        "inline-no-yield" => Ok(GeneratedFiberTaskExecution::InlineNoYield),
+        other => Err(format!(
+            "line {} has unsupported execution kind `{other}`",
+            line_no + 1
+        )),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -478,12 +508,25 @@ fn load_generated_entries(path: &Path) -> Result<Vec<GeneratedFiberTaskEntry>, S
             .map_err(|error| format!("line {} stack bytes parse failed: {error}", line_no + 1))?
             .max(1);
 
-        let priority = match parts.next() {
-            Some(raw) if !raw.is_empty() => raw
-                .parse::<i8>()
-                .map_err(|error| format!("line {} priority parse failed: {error}", line_no + 1))?,
-            _ => 0,
-        };
+        let mut priority = 0;
+        let mut execution = GeneratedFiberTaskExecution::Fiber;
+        match parts.next() {
+            Some("") | None => {}
+            Some(raw) => match raw.parse::<i8>() {
+                Ok(parsed) => priority = parsed,
+                Err(_) => execution = parse_generated_execution(raw, line_no)?,
+            },
+        }
+        if priority != 0 || execution == GeneratedFiberTaskExecution::Fiber {
+            if let Some(raw) = parts.next() {
+                execution = parse_generated_execution(raw, line_no)?;
+            }
+        } else if let Some(raw) = parts.next() {
+            return Err(format!(
+                "line {} has too many comma-separated fields after execution `{raw}`",
+                line_no + 1
+            ));
+        }
         if parts.next().is_some() {
             return Err(format!(
                 "line {} has too many comma-separated fields",
@@ -495,6 +538,7 @@ fn load_generated_entries(path: &Path) -> Result<Vec<GeneratedFiberTaskEntry>, S
             type_name: type_name.to_owned(),
             stack_bytes,
             priority,
+            execution,
         });
     }
 
@@ -516,6 +560,10 @@ fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
         rendered.push_str("        priority: ");
         rendered.push_str(&entry.priority.to_string());
         rendered.push_str(",\n");
+        rendered.push_str("        execution: ");
+        rendered.push_str("crate::thread::");
+        rendered.push_str(entry.execution.render());
+        rendered.push_str(",\n");
         rendered.push_str("    },\n");
     }
     rendered.push_str("];\n\n");
@@ -535,7 +583,9 @@ fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
         rendered.push_str(&entry.priority.to_string());
         rendered.push_str("),\n");
         rendered.push_str("    ) {\n");
-        rendered.push_str("        Ok(attributes) => attributes,\n");
+        rendered.push_str("        Ok(attributes) => attributes.with_execution(crate::thread::");
+        rendered.push_str(entry.execution.render());
+        rendered.push_str("),\n");
         rendered.push_str(
             "        Err(_) => panic!(\"invalid generated explicit fiber task contract\"),\n",
         );

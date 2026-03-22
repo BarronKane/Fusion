@@ -11,11 +11,13 @@ use std::hint::black_box;
 use std::vec;
 
 use fusion_std::thread::{
+    CurrentAsyncRuntime,
     CurrentFiberPool,
     FiberPoolConfig,
     GreenPool,
     ThreadPool,
     ThreadPoolConfig,
+    async_yield_now,
     yield_now as green_yield_now,
 };
 use fusion_sys::fiber::{Fiber, FiberReturn, FiberStack, FiberYield, yield_now as fiber_yield_now};
@@ -207,6 +209,44 @@ fn current_fiber_pool_spawn_join_yield_once(b: &mut Bencher) {
 }
 
 #[bench]
+fn current_async_runtime_spawn_join_noop(b: &mut Bencher) {
+    let runtime = CurrentAsyncRuntime::new();
+    let (): () = runtime
+        .spawn(async_noop_job())
+        .expect("warmup task should spawn")
+        .join()
+        .expect("warmup task should join");
+    black_box(());
+
+    b.iter(|| {
+        let handle = runtime
+            .spawn(async_noop_job())
+            .expect("benchmark task should spawn");
+        let (): () = handle.join().expect("benchmark task should join");
+        black_box(());
+    });
+}
+
+#[bench]
+fn current_async_runtime_spawn_join_yield_once(b: &mut Bencher) {
+    let runtime = CurrentAsyncRuntime::new();
+    let (): () = runtime
+        .spawn(async_yield_once_job())
+        .expect("warmup task should spawn")
+        .join()
+        .expect("warmup task should join");
+    black_box(());
+
+    b.iter(|| {
+        let handle = runtime
+            .spawn(async_yield_once_job())
+            .expect("benchmark task should spawn");
+        let (): () = handle.join().expect("benchmark task should join");
+        black_box(());
+    });
+}
+
+#[bench]
 fn green_pool_spawn_join_noop(b: &mut Bencher) {
     let (_carriers, fibers) = green_pool();
     let (): () = fibers
@@ -334,13 +374,13 @@ fn tokio_current_thread_spawn_join_noop(b: &mut Bencher) {
         .expect("tokio current-thread runtime should build for benches");
 
     runtime.block_on(async {
-        let handle = tokio::spawn(async {});
+        let handle = tokio::spawn(tokio_async_noop_job());
         handle.await.expect("warmup task should join");
     });
 
     b.iter(|| {
         runtime.block_on(async {
-            let handle = tokio::spawn(async {});
+            let handle = tokio::spawn(tokio_async_noop_job());
             handle.await.expect("benchmark task should join");
             black_box(());
         });
@@ -354,17 +394,13 @@ fn tokio_current_thread_spawn_join_yield_once(b: &mut Bencher) {
         .expect("tokio current-thread runtime should build for benches");
 
     runtime.block_on(async {
-        let handle = tokio::spawn(async {
-            tokio::task::yield_now().await;
-        });
+        let handle = tokio::spawn(tokio_async_yield_once_job());
         handle.await.expect("warmup task should join");
     });
 
     b.iter(|| {
         runtime.block_on(async {
-            let handle = tokio::spawn(async {
-                tokio::task::yield_now().await;
-            });
+            let handle = tokio::spawn(tokio_async_yield_once_job());
             handle.await.expect("benchmark task should join");
             black_box(());
         });
@@ -414,8 +450,24 @@ fn current_fiber_pool_spawn_join_recursive_stack(b: &mut Bencher) {
 
 const fn noop_job() {}
 
+async fn async_noop_job() {
+    core::future::ready(()).await;
+}
+
+async fn tokio_async_noop_job() {
+    core::future::ready(()).await;
+}
+
 fn yield_once_job() {
     green_yield_now().expect("benchmark task should yield cleanly");
+}
+
+async fn async_yield_once_job() {
+    async_yield_now().await;
+}
+
+async fn tokio_async_yield_once_job() {
+    tokio::task::yield_now().await;
 }
 
 fn yield_ten_local_state_job() {
@@ -460,7 +512,9 @@ fn bench_green_pool_steady_state_throughput(b: &mut Bencher, carrier_count: usiz
         );
     }
     while let Some(handle) = handles.pop() {
-        let (): () = handle.join().expect("warmup throughput task should join cleanly");
+        let (): () = handle
+            .join()
+            .expect("warmup throughput task should join cleanly");
     }
     black_box(());
 

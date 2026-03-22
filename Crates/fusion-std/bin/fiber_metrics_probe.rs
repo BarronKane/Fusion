@@ -110,10 +110,8 @@ where
             "missing generated metadata for `{type_name}`; run `cargo run -p fusion-std --bin fusion_std_fiber_task_pipeline -- --bin fusion_std_fiber_metrics_probe` first"
         )
     })?;
-    let admitted_stack_bytes =
-        generated_fiber_task_admitted_stack_bytes_by_type_name(type_name).map_err(|_| {
-            format!("missing admission-adjusted generated metadata for `{type_name}`")
-        })?;
+    let admitted_stack_bytes = generated_fiber_task_admitted_stack_bytes_by_type_name(type_name)
+        .map_err(|_| format!("missing admission-adjusted generated metadata for `{type_name}`"))?;
     let actual_peak_used_bytes = measure_runtime_watermark(make_job)?;
     let raw_underpredicted = actual_peak_used_bytes > metadata.stack_bytes;
     let admission_underpredicted = actual_peak_used_bytes > admitted_stack_bytes;

@@ -257,6 +257,26 @@ pub struct GeneratedFiberTaskMetadataView {
     pub stack_bytes: usize,
     /// Analyzer-resolved task priority.
     pub priority: i8,
+    /// Analyzer-resolved execution strategy.
+    pub execution: FiberTaskExecution,
+}
+
+/// Runtime admission snapshot for one live or completed spawned task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FiberTaskAdmission {
+    /// Carrier queue assigned to this task.
+    pub carrier: usize,
+    /// Admitted stack class for this task.
+    ///
+    /// Inline `NoYield` work still reports the logical class carried by its task attributes even
+    /// though it does not consume one real fiber stack slot.
+    pub stack_class: FiberStackClass,
+    /// Strict-priority scheduling value for this task.
+    pub priority: FiberTaskPriority,
+    /// Optional cooperative run budget for this task.
+    pub yield_budget: Option<Duration>,
+    /// Selected execution strategy for this task.
+    pub execution: FiberTaskExecution,
 }
 
 /// Memory-footprint summary for the stack-backing side of one fiber pool.
@@ -460,6 +480,57 @@ impl FiberStackClassConfig {
     }
 }
 
+/// Hosted-runtime class provisioning expressed as one total budget across all automatic carriers.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostedFiberClassConfig {
+    /// Power-of-two class size in bytes.
+    pub class: FiberStackClass,
+    /// Total stack slots requested for this class across the whole hosted runtime.
+    pub total_slots: usize,
+    /// Total slot count committed together when this class-backed pool grows on demand.
+    pub growth_chunk: usize,
+}
+
+#[cfg(feature = "std")]
+impl HostedFiberClassConfig {
+    /// Creates one checked hosted class-budget entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the class would provision zero total slots.
+    pub const fn new(class: FiberStackClass, total_slots: usize) -> Result<Self, FiberError> {
+        if total_slots == 0 {
+            return Err(FiberError::invalid());
+        }
+        Ok(Self {
+            class,
+            total_slots,
+            growth_chunk: total_slots,
+        })
+    }
+
+    /// Returns one copy of this hosted class-budget entry with an explicit growth chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the chunk is zero or larger than the total slot count.
+    pub const fn with_growth_chunk(mut self, growth_chunk: usize) -> Result<Self, FiberError> {
+        if growth_chunk == 0 || growth_chunk > self.total_slots {
+            return Err(FiberError::invalid());
+        }
+        self.growth_chunk = growth_chunk;
+        Ok(self)
+    }
+
+    const fn validate(self) -> Result<Self, FiberError> {
+        if self.total_slots == 0 || self.growth_chunk == 0 || self.growth_chunk > self.total_slots {
+            return Err(FiberError::invalid());
+        }
+        Ok(self)
+    }
+}
+
 /// Strict-priority value attached to one fiber task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FiberTaskPriority(i8);
@@ -630,6 +701,34 @@ impl FiberTaskPriority {
     }
 }
 
+/// Execution strategy selected for one admitted task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FiberTaskExecution {
+    /// Execute the task on one dedicated fiber stack.
+    Fiber,
+    /// Execute the task inline on the current carrier stack because it is proven not to yield.
+    InlineNoYield,
+}
+
+impl FiberTaskExecution {
+    #[must_use]
+    const fn requires_fiber(self) -> bool {
+        matches!(self, Self::Fiber)
+    }
+
+    /// Returns whether this execution strategy runs on one real fiber stack.
+    #[must_use]
+    pub const fn is_fiber(self) -> bool {
+        self.requires_fiber()
+    }
+
+    /// Returns whether this execution strategy runs inline without one dedicated fiber stack.
+    #[must_use]
+    pub const fn is_inline(self) -> bool {
+        !self.requires_fiber()
+    }
+}
+
 /// Transitional task-side admission metadata for stack class and priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FiberTaskAttributes {
@@ -639,6 +738,8 @@ pub struct FiberTaskAttributes {
     pub priority: FiberTaskPriority,
     /// Optional maximum cooperative run duration between explicit handoff points.
     pub yield_budget: Option<Duration>,
+    /// Selected execution strategy for this task.
+    pub execution: FiberTaskExecution,
 }
 
 impl FiberTaskAttributes {
@@ -649,6 +750,7 @@ impl FiberTaskAttributes {
             stack_class,
             priority: FiberTaskPriority::DEFAULT,
             yield_budget: None,
+            execution: FiberTaskExecution::Fiber,
         }
     }
 
@@ -670,6 +772,13 @@ impl FiberTaskAttributes {
     #[must_use]
     pub const fn with_optional_yield_budget(mut self, yield_budget: Option<Duration>) -> Self {
         self.yield_budget = yield_budget;
+        self
+    }
+
+    /// Returns one copy of these attributes with an explicit execution strategy.
+    #[must_use]
+    pub const fn with_execution(mut self, execution: FiberTaskExecution) -> Self {
+        self.execution = execution;
         self
     }
 
@@ -706,6 +815,8 @@ pub trait ExplicitFiberTask: Send + 'static {
     const PRIORITY: FiberTaskPriority = FiberTaskPriority::DEFAULT;
     /// Optional maximum cooperative run duration between explicit yields or completion.
     const YIELD_BUDGET: Option<Duration> = None;
+    /// Execution strategy for this task.
+    const EXECUTION: FiberTaskExecution = FiberTaskExecution::Fiber;
 
     /// Compile-time task attributes derived from the explicit stack and priority contract.
     ///
@@ -714,7 +825,9 @@ pub trait ExplicitFiberTask: Send + 'static {
     /// politely waiting for runtime.
     const ATTRIBUTES: FiberTaskAttributes =
         match FiberTaskAttributes::from_stack_bytes(Self::STACK_BYTES, Self::PRIORITY) {
-            Ok(attributes) => attributes.with_optional_yield_budget(Self::YIELD_BUDGET),
+            Ok(attributes) => attributes
+                .with_optional_yield_budget(Self::YIELD_BUDGET)
+                .with_execution(Self::EXECUTION),
             Err(_) => panic!("invalid explicit fiber task contract"),
         };
 
@@ -736,6 +849,7 @@ struct GeneratedExplicitFiberTaskMetadata {
     type_name: &'static str,
     stack_bytes: usize,
     priority: i8,
+    execution: FiberTaskExecution,
 }
 
 #[doc(hidden)]
@@ -783,7 +897,9 @@ macro_rules! include_generated_fiber_task_contracts {
 }
 
 const CLOSURE_METADATA_MISS_CACHE_SIZE: usize = 32;
+#[cfg(all(feature = "std", target_os = "linux"))]
 const HOSTED_LINUX_GENERATED_STACK_FLOOR_BYTES: usize = 3304;
+#[cfg(all(feature = "std", target_os = "linux"))]
 const HOSTED_LINUX_GENERATED_STACK_OVERHEAD_BYTES: usize = 352;
 
 #[derive(Debug)]
@@ -845,7 +961,8 @@ fn generated_task_attributes_by_type_name(
     .ok_or_else(FiberError::unsupported)?;
     Ok(
         FiberTaskAttributes::new(FiberStackClass::from_stack_bytes(stack_bytes)?)
-            .with_priority(FiberTaskPriority::new(metadata.priority)),
+            .with_priority(FiberTaskPriority::new(metadata.priority))
+            .with_execution(metadata.execution),
     )
 }
 
@@ -859,6 +976,7 @@ fn generated_task_metadata_by_type_name(
     Ok(GeneratedFiberTaskMetadataView {
         stack_bytes: metadata.stack_bytes,
         priority: metadata.priority,
+        execution: metadata.execution,
     })
 }
 
@@ -977,15 +1095,24 @@ macro_rules! declare_generated_fiber_task_contract {
         $crate::declare_generated_fiber_task_contract!(
             $task,
             $stack_bytes,
-            $crate::thread::FiberTaskPriority::DEFAULT
+            $crate::thread::FiberTaskPriority::DEFAULT,
+            $crate::thread::FiberTaskExecution::Fiber
         );
     };
     ($task:ty, $stack_bytes:expr, $priority:expr $(,)?) => {
+        $crate::declare_generated_fiber_task_contract!(
+            $task,
+            $stack_bytes,
+            $priority,
+            $crate::thread::FiberTaskExecution::Fiber
+        );
+    };
+    ($task:ty, $stack_bytes:expr, $priority:expr, $execution:expr $(,)?) => {
         impl $crate::thread::GeneratedExplicitFiberTaskContract for $task {
             const ATTRIBUTES: $crate::thread::FiberTaskAttributes =
                 match $crate::thread::FiberTaskAttributes::from_stack_bytes($stack_bytes, $priority)
                 {
-                    Ok(attributes) => attributes,
+                    Ok(attributes) => attributes.with_execution($execution),
                     Err(_) => panic!("invalid generated fiber task contract"),
                 };
         }
@@ -1347,7 +1474,7 @@ impl<'a> FiberPoolConfig<'a> {
     /// Returns whether this configuration can honestly admit the requested task attributes.
     #[must_use]
     pub const fn supports_task_attributes(&self, task: FiberTaskAttributes) -> bool {
-        self.supports_task_class(task.stack_class)
+        !task.execution.requires_fiber() || self.supports_task_class(task.stack_class)
     }
 
     /// Validates one explicit task-attribute bundle against this pool configuration.
@@ -1359,11 +1486,13 @@ impl<'a> FiberPoolConfig<'a> {
         &self,
         task: FiberTaskAttributes,
     ) -> Result<(), FiberError> {
-        if self.supports_task_attributes(task) {
-            Ok(())
-        } else {
-            Err(FiberError::unsupported())
+        if !task.execution.requires_fiber() && task.yield_budget.is_some() {
+            return Err(FiberError::unsupported());
         }
+        if !self.supports_task_attributes(task) {
+            return Err(FiberError::unsupported());
+        }
+        Ok(())
     }
 
     /// Asserts in const/static contexts that one raw task-attribute bundle is supported by this
@@ -1476,6 +1605,121 @@ impl<'a> FiberPoolConfig<'a> {
 impl Default for FiberPoolConfig<'static> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Ergonomic fiber-pool bootstrap surface above raw `FiberPoolConfig`.
+#[derive(Debug, Clone, Copy)]
+pub struct FiberPoolBootstrap<'a> {
+    config: FiberPoolConfig<'a>,
+}
+
+impl FiberPoolBootstrap<'static> {
+    /// Returns one deterministic fixed-stack bootstrap with the minimum supported stack size.
+    #[must_use]
+    pub const fn fixed(max_fibers: usize) -> Self {
+        Self::fixed_with_stack(FiberStackClass::MIN.size_bytes(), max_fibers)
+    }
+
+    /// Returns one deterministic fixed-stack bootstrap with an explicit stack size.
+    #[must_use]
+    pub const fn fixed_with_stack(stack_size: NonZeroUsize, max_fibers: usize) -> Self {
+        Self {
+            config: FiberPoolConfig::fixed(stack_size, max_fibers),
+        }
+    }
+
+    /// Returns one hosted-default bootstrap with explicit task capacity.
+    #[must_use]
+    pub const fn hosted_default(max_fibers: usize) -> Self {
+        Self {
+            config: FiberPoolConfig::new()
+                .with_legacy_growth_chunk(max_fibers)
+                .with_legacy_capacity(max_fibers),
+        }
+    }
+}
+
+impl<'a> FiberPoolBootstrap<'a> {
+    /// Returns one class-backed bootstrap surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied class table is invalid.
+    pub const fn classed(classes: &'a [FiberStackClassConfig]) -> Result<Self, FiberError> {
+        match FiberPoolConfig::classed(classes) {
+            Ok(config) => Ok(Self { config }),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Returns one bootstrap surface from an already-built low-level config.
+    #[must_use]
+    pub const fn from_config(config: FiberPoolConfig<'a>) -> Self {
+        Self { config }
+    }
+
+    /// Returns one copy of this bootstrap with explicit telemetry.
+    #[must_use]
+    pub const fn with_telemetry(mut self, telemetry: FiberTelemetry) -> Self {
+        self.config = self.config.with_telemetry(telemetry);
+        self
+    }
+
+    /// Returns one copy of this bootstrap with explicit scheduling.
+    #[must_use]
+    pub const fn with_scheduling(mut self, scheduling: GreenScheduling) -> Self {
+        self.config = self.config.with_scheduling(scheduling);
+        self
+    }
+
+    /// Returns the underlying low-level configuration.
+    #[must_use]
+    pub const fn config(&self) -> &FiberPoolConfig<'a> {
+        &self.config
+    }
+
+    /// Builds one manually-driven current-thread pool from this bootstrap.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the selected backend cannot realize the pool.
+    pub fn build_current(self) -> Result<CurrentFiberPool, FiberError> {
+        CurrentFiberPool::new(&self.config)
+    }
+
+    /// Builds one carrier-backed green pool from this bootstrap.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the selected backend cannot realize the pool.
+    pub fn build_green(self, carriers: &ThreadPool) -> Result<GreenPool, FiberError> {
+        GreenPool::new(&self.config, carriers)
+    }
+
+    /// Builds one hosted carrier-backed runtime using the platform's automatic carrier selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when either the carrier pool or fiber pool cannot be
+    /// realized on the current platform.
+    #[cfg(feature = "std")]
+    pub fn build_hosted(self) -> Result<HostedFiberRuntime, FiberError> {
+        HostedFiberRuntime::from_bootstrap(self)
+    }
+
+    /// Builds one hosted carrier-backed runtime using an explicit carrier-pool shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when either the carrier pool or fiber pool cannot be
+    /// realized on the current platform.
+    #[cfg(feature = "std")]
+    pub fn build_hosted_with(
+        self,
+        runtime: HostedFiberRuntimeConfig<'_>,
+    ) -> Result<HostedFiberRuntime, FiberError> {
+        HostedFiberRuntime::from_bootstrap_with(self, runtime)
     }
 }
 
@@ -4664,6 +4908,7 @@ struct GreenTaskRecord {
     stack_class: FiberStackClass,
     priority: FiberTaskPriority,
     yield_budget: Option<Duration>,
+    execution: FiberTaskExecution,
     fiber: Option<Fiber>,
     job: InlineGreenJobStorage,
     result: InlineGreenResultStorage,
@@ -4681,6 +4926,7 @@ impl GreenTaskRecord {
             stack_class: FiberStackClass::MIN,
             priority: FiberTaskPriority::DEFAULT,
             yield_budget: None,
+            execution: FiberTaskExecution::Fiber,
             fiber: None,
             job: InlineGreenJobStorage::empty(),
             result: InlineGreenResultStorage::empty(),
@@ -4750,7 +4996,8 @@ impl GreenTaskSlot {
     }
 
     fn set_yield_action(&self, action: CurrentGreenYieldAction) -> Result<(), FiberError> {
-        self.yield_action.with(|yield_action| *yield_action = action)?;
+        self.yield_action
+            .with(|yield_action| *yield_action = action)?;
         Ok(())
     }
 
@@ -4933,18 +5180,15 @@ impl GreenTaskSlot {
     }
 
     fn take_yield_action(&self) -> Result<CurrentGreenYieldAction, FiberError> {
-        self.yield_action.with(|yield_action| {
-            core::mem::replace(
-            yield_action,
-            CurrentGreenYieldAction::Requeue,
-        )})
+        self.yield_action
+            .with(|yield_action| core::mem::replace(yield_action, CurrentGreenYieldAction::Requeue))
     }
 
     fn assign<F>(
         &self,
         id: u64,
         carrier: usize,
-        lease: FiberStackLease,
+        lease: Option<FiberStackLease>,
         task: FiberTaskAttributes,
         job: F,
     ) -> Result<(), FiberError>
@@ -4968,11 +5212,12 @@ impl GreenTaskSlot {
             record.allocated = true;
             record.id = id;
             record.carrier = carrier;
-            record.stack_pool_index = lease.pool_index;
-            record.stack_slot = lease.slot_index;
-            record.stack_class = lease.class;
+            record.stack_pool_index = lease.map_or(0, |reserved| reserved.pool_index);
+            record.stack_slot = lease.map_or(0, |reserved| reserved.slot_index);
+            record.stack_class = lease.map_or(task.stack_class, |reserved| reserved.class);
             record.priority = task.priority;
             record.yield_budget = task.yield_budget;
+            record.execution = task.execution;
             record.fiber = None;
             record.state = GreenTaskState::Queued;
             Ok(())
@@ -5002,6 +5247,39 @@ impl GreenTaskSlot {
                 return Err(FiberError::state_conflict());
             }
             Ok(record.priority)
+        })?
+    }
+
+    fn execution(&self) -> Result<FiberTaskExecution, FiberError> {
+        self.record.with_ref(|record| {
+            if !record.allocated {
+                return Err(FiberError::state_conflict());
+            }
+            Ok(record.execution)
+        })?
+    }
+
+    fn execution_for(&self, id: u64) -> Result<FiberTaskExecution, FiberError> {
+        self.record.with_ref(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            Ok(record.execution)
+        })?
+    }
+
+    fn admission_for(&self, id: u64) -> Result<FiberTaskAdmission, FiberError> {
+        self.record.with_ref(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            Ok(FiberTaskAdmission {
+                carrier: record.carrier,
+                stack_class: record.stack_class,
+                priority: record.priority,
+                yield_budget: record.yield_budget,
+                execution: record.execution,
+            })
         })?
     }
 
@@ -5054,12 +5332,12 @@ impl GreenTaskSlot {
             if !Self::matches_id(record, id) {
                 return Err(FiberError::state_conflict());
             }
-        if matches!(
-            record.state,
-            GreenTaskState::Running | GreenTaskState::Waiting | GreenTaskState::Finishing
-        ) {
-            return Err(FiberError::state_conflict());
-        }
+            if matches!(
+                record.state,
+                GreenTaskState::Running | GreenTaskState::Waiting | GreenTaskState::Finishing
+            ) {
+                return Err(FiberError::state_conflict());
+            }
             record.carrier = carrier;
             Ok(())
         })??;
@@ -5201,6 +5479,7 @@ impl GreenTaskSlot {
             record.stack_class = FiberStackClass::MIN;
             record.priority = FiberTaskPriority::DEFAULT;
             record.yield_budget = None;
+            record.execution = FiberTaskExecution::Fiber;
             record.state = GreenTaskState::Completed;
             Ok::<bool, FiberError>(true)
         })??;
@@ -5209,7 +5488,8 @@ impl GreenTaskSlot {
             if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_some() {
                 std::eprintln!(
                     "fusion-std force_recycle: slot_index={} id={}",
-                    self.slot_index, id
+                    self.slot_index,
+                    id
                 );
             }
             self.completion_published.store(false, Ordering::Release);
@@ -5241,6 +5521,7 @@ impl GreenTaskSlot {
             record.stack_class = FiberStackClass::MIN;
             record.priority = FiberTaskPriority::DEFAULT;
             record.yield_budget = None;
+            record.execution = FiberTaskExecution::Fiber;
             record.state = GreenTaskState::Completed;
             Ok::<bool, FiberError>(true)
         })??;
@@ -5249,7 +5530,8 @@ impl GreenTaskSlot {
             if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_some() {
                 std::eprintln!(
                     "fusion-std try_recycle: slot_index={} id={}",
-                    self.slot_index, id
+                    self.slot_index,
+                    id
                 );
             }
             self.completion_published.store(false, Ordering::Release);
@@ -5258,23 +5540,20 @@ impl GreenTaskSlot {
         Ok(recycled)
     }
 
-    fn begin_run(&self) -> Result<(u64, Option<Duration>), FiberError> {
+    fn begin_run(&self) -> Result<(u64, Option<Duration>, FiberTaskExecution), FiberError> {
         self.record.with(|record| {
             if !record.allocated {
                 return Err(FiberError::state_conflict());
             }
             let task_id = record.id;
             let yield_budget = record.yield_budget;
+            let execution = record.execution;
             record.state = GreenTaskState::Running;
-            Ok((task_id, yield_budget))
+            Ok((task_id, yield_budget, execution))
         })?
     }
 
-    fn settle_terminal_state(
-        &self,
-        id: u64,
-        terminal: GreenTaskState,
-    ) -> Result<(), FiberError> {
+    fn settle_terminal_state(&self, id: u64, terminal: GreenTaskState) -> Result<(), FiberError> {
         self.record.with(|record| {
             if !Self::matches_id(record, id) {
                 return Err(FiberError::state_conflict());
@@ -5287,7 +5566,11 @@ impl GreenTaskSlot {
         Ok(())
     }
 
-    fn begin_finish(&self, id: u64, terminal: GreenTaskState) -> Result<GreenTaskState, FiberError> {
+    fn begin_finish(
+        &self,
+        id: u64,
+        terminal: GreenTaskState,
+    ) -> Result<GreenTaskState, FiberError> {
         self.record.with(|record| {
             if !Self::matches_id(record, id) {
                 return Err(FiberError::state_conflict());
@@ -5326,7 +5609,10 @@ impl GreenTaskRegistry {
         }
 
         Ok(Self {
-            free: RuntimeCell::new(fast, MetadataIndexStack::with_prefix(free_entries, slots.len())?),
+            free: RuntimeCell::new(
+                fast,
+                MetadataIndexStack::with_prefix(free_entries, slots.len())?,
+            ),
             slots,
         })
     }
@@ -5347,7 +5633,7 @@ impl GreenTaskRegistry {
         slot_index: usize,
         id: u64,
         carrier: usize,
-        lease: FiberStackLease,
+        lease: Option<FiberStackLease>,
         task: FiberTaskAttributes,
         job: F,
     ) -> Result<(), FiberError>
@@ -5381,6 +5667,18 @@ impl GreenTaskRegistry {
 
     fn priority(&self, slot_index: usize) -> Result<FiberTaskPriority, FiberError> {
         self.slot(slot_index)?.priority()
+    }
+
+    fn execution(&self, slot_index: usize) -> Result<FiberTaskExecution, FiberError> {
+        self.slot(slot_index)?.execution()
+    }
+
+    fn execution_for(&self, slot_index: usize, id: u64) -> Result<FiberTaskExecution, FiberError> {
+        self.slot(slot_index)?.execution_for(id)
+    }
+
+    fn admission_for(&self, slot_index: usize, id: u64) -> Result<FiberTaskAdmission, FiberError> {
+        self.slot(slot_index)?.admission_for(id)
     }
 
     fn install_fiber(&self, slot_index: usize, id: u64, fiber: Fiber) -> Result<(), FiberError> {
@@ -6078,7 +6376,10 @@ impl GreenPoolInner {
                 return Err(error);
             }
         };
-        match queue.queue.with(|ready| ready.enqueue(slot_index, priority)) {
+        match queue
+            .queue
+            .with(|ready| ready.enqueue(slot_index, priority))
+        {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 trace_spawn_failure("enqueue_with_signal.queue", Some(slot_index), &error);
@@ -6240,6 +6541,9 @@ impl GreenPoolInner {
         carrier: usize,
     ) -> Result<(), FiberError> {
         self.tasks.reassign_carrier(slot_index, task_id, carrier)?;
+        if !self.tasks.execution(slot_index)?.requires_fiber() {
+            return Ok(());
+        }
         let (pool_index, stack_slot) = self.tasks.stack_location(slot_index, task_id)?;
         self.stacks.attach_slot_identity(
             pool_index,
@@ -6294,6 +6598,9 @@ impl GreenPoolInner {
     }
 
     fn dispatch_capacity_for_task(&self, slot_index: usize, id: u64) -> Result<(), FiberError> {
+        if !self.tasks.execution(slot_index)?.requires_fiber() {
+            return Ok(());
+        }
         let (pool_index, stack_slot) = self.tasks.stack_location(slot_index, id)?;
         self.stacks
             .dispatch_capacity_event(pool_index, stack_slot, self.capacity_policy)
@@ -6337,7 +6644,11 @@ impl GreenPoolInner {
         terminal_state: GreenTaskState,
     ) -> Result<(), FiberError> {
         let mut first_error = None;
-        let terminal_state = match self.tasks.slot(slot_index)?.begin_finish(id, terminal_state) {
+        let terminal_state = match self
+            .tasks
+            .slot(slot_index)?
+            .begin_finish(id, terminal_state)
+        {
             Ok(terminal_state) => terminal_state,
             Err(error) => {
                 trace_carrier_failure("finish_task.begin_finish", usize::MAX, &error);
@@ -6345,33 +6656,38 @@ impl GreenPoolInner {
             }
         };
 
-        let stack_location = match self.tasks.stack_location(slot_index, id) {
-            Ok(stack_location) => Some(stack_location),
-            Err(error) => {
-                trace_carrier_failure("finish_task.stack_location", usize::MAX, &error);
+        if self.tasks.execution(slot_index)?.requires_fiber() {
+            let stack_location = match self.tasks.stack_location(slot_index, id) {
+                Ok(stack_location) => Some(stack_location),
+                Err(error) => {
+                    trace_carrier_failure("finish_task.stack_location", usize::MAX, &error);
+                    first_error = Some(error);
+                    None
+                }
+            };
+
+            if let Err(error) = self.tasks.clear_fiber(slot_index, id)
+                && first_error.is_none()
+            {
+                trace_carrier_failure("finish_task.clear_fiber", usize::MAX, &error);
                 first_error = Some(error);
-                None
             }
-        };
 
-        if let Err(error) = self.tasks.clear_fiber(slot_index, id)
-            && first_error.is_none()
-        {
-            trace_carrier_failure("finish_task.clear_fiber", usize::MAX, &error);
-            first_error = Some(error);
-        }
-
-        if let Some((pool_index, stack_slot)) = stack_location
-            && let Err(error) = self.stacks.release(pool_index, stack_slot)
-            && first_error.is_none()
-        {
-            trace_carrier_failure("finish_task.release_stack", usize::MAX, &error);
-            first_error = Some(error);
+            if let Some((pool_index, stack_slot)) = stack_location
+                && let Err(error) = self.stacks.release(pool_index, stack_slot)
+                && first_error.is_none()
+            {
+                trace_carrier_failure("finish_task.release_stack", usize::MAX, &error);
+                first_error = Some(error);
+            }
         }
 
         self.active.fetch_sub(1, Ordering::AcqRel);
 
-        if let Err(error) = self.tasks.slot(slot_index)?.settle_terminal_state(id, terminal_state)
+        if let Err(error) = self
+            .tasks
+            .slot(slot_index)?
+            .settle_terminal_state(id, terminal_state)
             && first_error.is_none()
         {
             trace_carrier_failure("finish_task.settle_terminal_state", usize::MAX, &error);
@@ -6433,6 +6749,37 @@ where
     /// Returns an error if the green-thread state cannot be observed honestly.
     pub fn is_finished(&self) -> Result<bool, FiberError> {
         self.inner.tasks.is_finished(self.slot_index, self.id)
+    }
+
+    /// Returns the execution strategy used for this admitted task.
+    ///
+    /// This is the runtime-facing truth for whether the task became one real stackful fiber or
+    /// one admitted inline `NoYield` job.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the green-thread state cannot be observed honestly.
+    pub fn execution(&self) -> Result<FiberTaskExecution, FiberError> {
+        self.inner.tasks.execution_for(self.slot_index, self.id)
+    }
+
+    /// Returns whether this admitted task is executing inline instead of on one dedicated fiber
+    /// stack.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the green-thread state cannot be observed honestly.
+    pub fn runs_inline(&self) -> Result<bool, FiberError> {
+        Ok(self.execution()?.is_inline())
+    }
+
+    /// Returns the runtime admission snapshot for this task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the green-thread state cannot be observed honestly.
+    pub fn admission(&self) -> Result<FiberTaskAdmission, FiberError> {
+        self.inner.tasks.admission_for(self.slot_index, self.id)
     }
 
     /// Waits for the green thread to complete.
@@ -6548,6 +6895,34 @@ where
         self.inner.is_finished()
     }
 
+    /// Returns the execution strategy used for this admitted task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the current-thread pool state cannot be observed honestly.
+    pub fn execution(&self) -> Result<FiberTaskExecution, FiberError> {
+        self.inner.execution()
+    }
+
+    /// Returns whether this admitted task is executing inline instead of on one dedicated fiber
+    /// stack.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the current-thread pool state cannot be observed honestly.
+    pub fn runs_inline(&self) -> Result<bool, FiberError> {
+        self.inner.runs_inline()
+    }
+
+    /// Returns the runtime admission snapshot for this task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the current-thread pool state cannot be observed honestly.
+    pub fn admission(&self) -> Result<FiberTaskAdmission, FiberError> {
+        self.inner.admission()
+    }
+
     /// Waits for the fiber to complete by manually driving the current-thread pool.
     ///
     /// # Errors
@@ -6580,7 +6955,7 @@ pub struct GreenPool {
 
 #[derive(Debug)]
 struct SpawnReservation {
-    lease: FiberStackLease,
+    lease: Option<FiberStackLease>,
     id: u64,
     carrier: usize,
     slot_index: usize,
@@ -6632,7 +7007,7 @@ fn reserve_spawn_slot_for(
     if task.yield_budget.is_some() && !inner.yield_budget_supported {
         return Err(FiberError::unsupported());
     }
-    if !inner.stacks.supports_task_class(task.stack_class) {
+    if task.execution.requires_fiber() && !inner.stacks.supports_task_class(task.stack_class) {
         return Err(FiberError::unsupported());
     }
     loop {
@@ -6649,13 +7024,17 @@ fn reserve_spawn_slot_for(
         }
     }
 
-    let lease = match inner.stacks.acquire(task) {
-        Ok(lease) => lease,
-        Err(error) => {
-            trace_spawn_failure("stacks.acquire", None, &error);
-            inner.active.fetch_sub(1, Ordering::AcqRel);
-            return Err(error);
+    let lease = if task.execution.requires_fiber() {
+        match inner.stacks.acquire(task) {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                trace_spawn_failure("stacks.acquire", None, &error);
+                inner.active.fetch_sub(1, Ordering::AcqRel);
+                return Err(error);
+            }
         }
+    } else {
+        None
     };
 
     let id = inner.next_id.fetch_add(1, Ordering::AcqRel) as u64;
@@ -6664,7 +7043,9 @@ fn reserve_spawn_slot_for(
         Ok(slot_index) => slot_index,
         Err(error) => {
             trace_spawn_failure("tasks.reserve_slot", None, &error);
-            let _ = inner.stacks.release(lease.pool_index, lease.slot_index);
+            if let Some(lease) = lease {
+                let _ = inner.stacks.release(lease.pool_index, lease.slot_index);
+            }
             inner.active.fetch_sub(1, Ordering::AcqRel);
             return Err(error);
         }
@@ -6675,7 +7056,9 @@ fn reserve_spawn_slot_for(
         Err(error) => {
             trace_spawn_failure("tasks.slot_context", Some(slot_index), &error);
             let _ = inner.tasks.abandon(slot_index, id);
-            let _ = inner.stacks.release(lease.pool_index, lease.slot_index);
+            if let Some(lease) = lease {
+                let _ = inner.stacks.release(lease.pool_index, lease.slot_index);
+            }
             inner.active.fetch_sub(1, Ordering::AcqRel);
             return Err(error);
         }
@@ -6692,9 +7075,9 @@ fn reserve_spawn_slot_for(
 
 fn cleanup_failed_spawn_for(inner: &GreenPoolLease, reservation: &SpawnReservation) {
     let _ = inner.tasks.abandon(reservation.slot_index, reservation.id);
-    let _ = inner
-        .stacks
-        .release(reservation.lease.pool_index, reservation.lease.slot_index);
+    if let Some(lease) = reservation.lease {
+        let _ = inner.stacks.release(lease.pool_index, lease.slot_index);
+    }
     inner.active.fetch_sub(1, Ordering::AcqRel);
 }
 
@@ -6738,38 +7121,40 @@ where
         return Err(error);
     }
 
-    if let Err(error) = inner.stacks.attach_slot_identity(
-        reservation.lease.pool_index,
-        reservation.lease.slot_index,
-        reservation.id,
-        reservation.carrier,
-        inner.carriers[reservation.carrier].capacity_token(),
-    ) {
-        trace_spawn_failure("stacks.attach_slot_identity", Some(reservation.slot_index), &error);
-        cleanup_failed_spawn_for(inner, &reservation);
-        return Err(error);
-    }
-
-    let fiber = match Fiber::new(
-        reservation.lease.stack,
-        green_task_entry,
-        reservation.context,
-    ) {
-        Ok(fiber) => fiber,
-        Err(error) => {
-            trace_spawn_failure("Fiber::new", Some(reservation.slot_index), &error);
+    if let Some(lease) = reservation.lease {
+        if let Err(error) = inner.stacks.attach_slot_identity(
+            lease.pool_index,
+            lease.slot_index,
+            reservation.id,
+            reservation.carrier,
+            inner.carriers[reservation.carrier].capacity_token(),
+        ) {
+            trace_spawn_failure(
+                "stacks.attach_slot_identity",
+                Some(reservation.slot_index),
+                &error,
+            );
             cleanup_failed_spawn_for(inner, &reservation);
             return Err(error);
         }
-    };
 
-    if let Err(error) = inner
-        .tasks
-        .install_fiber(reservation.slot_index, reservation.id, fiber)
-    {
-        trace_spawn_failure("tasks.install_fiber", Some(reservation.slot_index), &error);
-        cleanup_failed_spawn_for(inner, &reservation);
-        return Err(error);
+        let fiber = match Fiber::new(lease.stack, green_task_entry, reservation.context) {
+            Ok(fiber) => fiber,
+            Err(error) => {
+                trace_spawn_failure("Fiber::new", Some(reservation.slot_index), &error);
+                cleanup_failed_spawn_for(inner, &reservation);
+                return Err(error);
+            }
+        };
+
+        if let Err(error) = inner
+            .tasks
+            .install_fiber(reservation.slot_index, reservation.id, fiber)
+        {
+            trace_spawn_failure("tasks.install_fiber", Some(reservation.slot_index), &error);
+            cleanup_failed_spawn_for(inner, &reservation);
+            return Err(error);
+        }
     }
 
     if let Err(error) =
@@ -6912,6 +7297,13 @@ impl CurrentFiberPool {
     pub fn validate_task_attributes(&self, task: FiberTaskAttributes) -> Result<(), FiberError> {
         if task.yield_budget.is_some() && !self.inner.yield_budget_supported {
             return Err(FiberError::unsupported());
+        }
+        if !task.execution.requires_fiber() {
+            return task
+                .yield_budget
+                .is_none()
+                .then_some(())
+                .ok_or_else(FiberError::unsupported);
         }
         self.supports_task_class(task.stack_class)
             .then_some(())
@@ -7076,7 +7468,10 @@ impl CurrentFiberPool {
     /// # Errors
     ///
     /// Returns an error when the generated contract is not provisioned by the current pool.
-    pub fn spawn_generated_contract<T>(&self, task: T) -> Result<CurrentFiberHandle<T::Output>, FiberError>
+    pub fn spawn_generated_contract<T>(
+        &self,
+        task: T,
+    ) -> Result<CurrentFiberHandle<T::Output>, FiberError>
     where
         T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
     {
@@ -7140,14 +7535,312 @@ impl Drop for CurrentFiberPool {
 
 #[derive(Debug)]
 #[cfg(feature = "std")]
-struct AutomaticFiberRuntime {
-    _carriers: ThreadPool,
+pub struct HostedFiberRuntime {
+    carriers: ThreadPool,
     fibers: GreenPool,
 }
 
+/// Hosted carrier-pool shape used to build one hosted fiber runtime.
 #[cfg(feature = "std")]
-static AUTOMATIC_FIBER_RUNTIME: OnceLock<SyncMutex<Option<AutomaticFiberRuntime>>> =
-    OnceLock::new();
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostedFiberRuntimeConfig<'a> {
+    /// Number of carrier workers to provision.
+    pub carrier_count: usize,
+    /// Placement policy for the carrier workers.
+    pub placement: PoolPlacement<'a>,
+    /// Optional worker-name prefix for the carrier pool.
+    pub name_prefix: Option<&'a str>,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum HostedCarrierCountPolicy {
+    Automatic,
+    VisibleLogicalCpus,
+    VisibleCores,
+    VisiblePackages,
+}
+
+#[cfg(feature = "std")]
+impl<'a> HostedFiberRuntimeConfig<'a> {
+    /// Returns one explicit hosted runtime config with the supplied carrier count.
+    #[must_use]
+    pub const fn new(carrier_count: usize) -> Self {
+        Self {
+            carrier_count,
+            placement: PoolPlacement::Inherit,
+            name_prefix: Some("fusion-fiber"),
+        }
+    }
+
+    /// Returns one automatic hosted runtime config derived from visible hardware topology.
+    #[must_use]
+    pub fn automatic() -> Self {
+        let carrier_count = automatic_carrier_count();
+        Self {
+            carrier_count,
+            placement: automatic_pool_placement(carrier_count),
+            name_prefix: Some("fusion-fiber"),
+        }
+    }
+
+    /// Returns one hosted runtime config sized to the visible logical CPU count.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the platform cannot truthfully report the visible
+    /// logical CPU count.
+    pub fn visible_logical_cpus() -> Result<Self, FiberError> {
+        let summary = system_hardware()
+            .topology_summary()
+            .map_err(|_| FiberError::unsupported())?;
+        let carrier_count = hosted_carrier_count_from_summary(
+            summary,
+            HostedCarrierCountPolicy::VisibleLogicalCpus,
+        )
+        .ok_or_else(FiberError::unsupported)?;
+        Ok(Self {
+            carrier_count,
+            placement: PoolPlacement::PerCore,
+            name_prefix: Some("fusion-fiber"),
+        })
+    }
+
+    /// Returns one hosted runtime config sized to the visible physical or topology-defined core
+    /// count.
+    ///
+    /// This constructor only derives the carrier count from the visible core count. Hosted thread
+    /// pools do not yet expose a separate physical-core affinity mode, so the default placement
+    /// stays inherited until that story is truthful.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the platform cannot truthfully report the visible
+    /// core count.
+    pub fn visible_cores() -> Result<Self, FiberError> {
+        let summary = system_hardware()
+            .topology_summary()
+            .map_err(|_| FiberError::unsupported())?;
+        let carrier_count =
+            hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::VisibleCores)
+                .ok_or_else(FiberError::unsupported)?;
+        Ok(Self {
+            carrier_count,
+            placement: PoolPlacement::Inherit,
+            name_prefix: Some("fusion-fiber"),
+        })
+    }
+
+    /// Returns one hosted runtime config sized to the visible package/socket count.
+    ///
+    /// This constructor only derives the carrier count from the visible package count. Hosted
+    /// thread pools do not yet expose truthful package affinity, so placement stays inherited
+    /// until the backend can actually honor package-level binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the platform cannot truthfully report the visible
+    /// package count.
+    pub fn visible_packages() -> Result<Self, FiberError> {
+        let summary = system_hardware()
+            .topology_summary()
+            .map_err(|_| FiberError::unsupported())?;
+        let carrier_count =
+            hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::VisiblePackages)
+                .ok_or_else(FiberError::unsupported)?;
+        Ok(Self {
+            carrier_count,
+            placement: PoolPlacement::Inherit,
+            name_prefix: Some("fusion-fiber"),
+        })
+    }
+
+    /// Returns one copy of this hosted runtime config with an explicit placement policy.
+    #[must_use]
+    pub const fn with_placement(mut self, placement: PoolPlacement<'a>) -> Self {
+        self.placement = placement;
+        self
+    }
+
+    /// Returns one copy of this hosted runtime config with an explicit carrier name prefix.
+    #[must_use]
+    pub const fn with_name_prefix(mut self, name_prefix: Option<&'a str>) -> Self {
+        self.name_prefix = name_prefix;
+        self
+    }
+
+    const fn to_thread_pool_config(self) -> Result<ThreadPoolConfig<'a>, FiberError> {
+        if self.carrier_count == 0 {
+            return Err(FiberError::invalid());
+        }
+        Ok(ThreadPoolConfig {
+            min_threads: self.carrier_count,
+            max_threads: self.carrier_count,
+            placement: self.placement,
+            name_prefix: self.name_prefix,
+            ..ThreadPoolConfig::new()
+        })
+    }
+}
+
+#[cfg(feature = "std")]
+static AUTOMATIC_FIBER_RUNTIME: OnceLock<SyncMutex<Option<HostedFiberRuntime>>> = OnceLock::new();
+
+#[cfg(feature = "std")]
+impl HostedFiberRuntime {
+    /// Builds one fixed-stack hosted runtime with a total requested fiber budget spread across the
+    /// automatically selected carrier count.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the total budget is invalid or the selected runtime
+    /// cannot be realized on the current platform.
+    pub fn fixed(total_fibers: usize) -> Result<Self, FiberError> {
+        Self::fixed_with_stack(FiberStackClass::MIN.size_bytes(), total_fibers)
+    }
+
+    /// Builds one fixed-stack hosted runtime with an explicit carrier-pool shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the total budget is invalid or the selected runtime
+    /// cannot be realized on the current platform.
+    pub fn fixed_with_config(
+        total_fibers: usize,
+        runtime: HostedFiberRuntimeConfig<'_>,
+    ) -> Result<Self, FiberError> {
+        Self::fixed_with_stack_and_config(FiberStackClass::MIN.size_bytes(), total_fibers, runtime)
+    }
+
+    /// Builds one fixed-stack hosted runtime with an explicit stack size and a total requested
+    /// fiber budget spread across the automatically selected carrier count.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the total budget is invalid or the selected runtime
+    /// cannot be realized on the current platform.
+    pub fn fixed_with_stack(
+        stack_size: NonZeroUsize,
+        total_fibers: usize,
+    ) -> Result<Self, FiberError> {
+        Self::fixed_with_stack_and_config(
+            stack_size,
+            total_fibers,
+            HostedFiberRuntimeConfig::automatic(),
+        )
+    }
+
+    /// Builds one fixed-stack hosted runtime with an explicit stack size and carrier-pool shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the total budget is invalid or the selected runtime
+    /// cannot be realized on the current platform.
+    pub fn fixed_with_stack_and_config(
+        stack_size: NonZeroUsize,
+        total_fibers: usize,
+        runtime: HostedFiberRuntimeConfig<'_>,
+    ) -> Result<Self, FiberError> {
+        let per_carrier = per_carrier_capacity_for_total(total_fibers, runtime.carrier_count)?;
+        FiberPoolBootstrap::fixed_with_stack(stack_size, per_carrier).build_hosted_with(runtime)
+    }
+
+    /// Builds one hosted-default runtime with a total requested fiber budget spread across the
+    /// automatically selected carrier count.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the total budget is invalid or the selected runtime
+    /// cannot be realized on the current platform.
+    pub fn hosted_default(total_fibers: usize) -> Result<Self, FiberError> {
+        Self::hosted_default_with_config(total_fibers, HostedFiberRuntimeConfig::automatic())
+    }
+
+    /// Builds one hosted-default runtime with an explicit carrier-pool shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the total budget is invalid or the selected runtime
+    /// cannot be realized on the current platform.
+    pub fn hosted_default_with_config(
+        total_fibers: usize,
+        runtime: HostedFiberRuntimeConfig<'_>,
+    ) -> Result<Self, FiberError> {
+        let per_carrier = per_carrier_capacity_for_total(total_fibers, runtime.carrier_count)?;
+        FiberPoolBootstrap::hosted_default(per_carrier).build_hosted_with(runtime)
+    }
+
+    /// Builds one class-backed hosted runtime from total per-class budgets spread across the
+    /// automatically selected carrier count.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the supplied class table is invalid or the selected
+    /// runtime cannot be realized on the current platform.
+    pub fn classed(classes: &[HostedFiberClassConfig]) -> Result<Self, FiberError> {
+        Self::classed_with_config(classes, HostedFiberRuntimeConfig::automatic())
+    }
+
+    /// Builds one class-backed hosted runtime from total per-class budgets and an explicit
+    /// carrier-pool shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the supplied class table is invalid or the selected
+    /// runtime cannot be realized on the current platform.
+    pub fn classed_with_config(
+        classes: &[HostedFiberClassConfig],
+        runtime: HostedFiberRuntimeConfig<'_>,
+    ) -> Result<Self, FiberError> {
+        let distributed = distribute_hosted_class_configs(classes, runtime.carrier_count)?;
+        FiberPoolBootstrap::classed(distributed.as_slice())?.build_hosted_with(runtime)
+    }
+
+    /// Builds one hosted carrier-backed runtime from an explicit bootstrap surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the selected runtime cannot be realized on the
+    /// current platform.
+    pub fn from_bootstrap(bootstrap: FiberPoolBootstrap<'_>) -> Result<Self, FiberError> {
+        Self::from_bootstrap_with(bootstrap, HostedFiberRuntimeConfig::automatic())
+    }
+
+    /// Builds one hosted carrier-backed runtime from an explicit bootstrap surface and carrier
+    /// configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the selected runtime cannot be realized on the
+    /// current platform.
+    pub fn from_bootstrap_with(
+        bootstrap: FiberPoolBootstrap<'_>,
+        runtime: HostedFiberRuntimeConfig<'_>,
+    ) -> Result<Self, FiberError> {
+        let carrier_config = runtime.to_thread_pool_config()?;
+        let carriers = ThreadPool::new(&carrier_config).map_err(fiber_error_from_thread_pool)?;
+        let fibers = GreenPool::new(bootstrap.config(), &carriers)?;
+        Ok(Self { carriers, fibers })
+    }
+
+    /// Returns the owned carrier thread pool backing this hosted runtime.
+    #[must_use]
+    pub const fn carriers(&self) -> &ThreadPool {
+        &self.carriers
+    }
+
+    /// Returns the carrier-backed green-fiber pool exposed by this hosted runtime.
+    #[must_use]
+    pub const fn fibers(&self) -> &GreenPool {
+        &self.fibers
+    }
+
+    /// Releases the owned carrier pool and green-fiber pool back to the caller.
+    #[must_use]
+    pub fn into_parts(self) -> (ThreadPool, GreenPool) {
+        (self.carriers, self.fibers)
+    }
+}
 
 impl GreenPool {
     /// Returns the low-level fiber support available on the current backend.
@@ -7277,6 +7970,8 @@ impl GreenPool {
                                 error.kind()
                             );
                         }
+                        #[cfg(not(feature = "std"))]
+                        let _ = error;
                         let _ = carrier_inner.request_shutdown();
                     }
                 })
@@ -7328,6 +8023,13 @@ impl GreenPool {
     pub fn validate_task_attributes(&self, task: FiberTaskAttributes) -> Result<(), FiberError> {
         if task.yield_budget.is_some() && !self.inner.yield_budget_supported {
             return Err(FiberError::unsupported());
+        }
+        if !task.execution.requires_fiber() {
+            return task
+                .yield_budget
+                .is_none()
+                .then_some(())
+                .ok_or_else(FiberError::unsupported);
         }
         self.supports_task_class(task.stack_class)
             .then_some(())
@@ -7571,25 +8273,11 @@ impl Drop for GreenPool {
 }
 
 #[cfg(feature = "std")]
-fn build_automatic_fiber_runtime() -> Result<AutomaticFiberRuntime, FiberError> {
-    let carrier_count = automatic_carrier_count();
-    let carrier_config = ThreadPoolConfig {
-        min_threads: carrier_count,
-        max_threads: carrier_count,
-        placement: if carrier_count > 1 {
-            PoolPlacement::PerCore
-        } else {
-            PoolPlacement::Inherit
-        },
-        name_prefix: Some("fusion-fiber"),
-        ..ThreadPoolConfig::new()
-    };
-    let carriers = ThreadPool::new(&carrier_config).map_err(fiber_error_from_thread_pool)?;
-    let fibers = GreenPool::new(&automatic_fiber_config(), &carriers)?;
-    Ok(AutomaticFiberRuntime {
-        _carriers: carriers,
-        fibers,
-    })
+fn build_automatic_fiber_runtime() -> Result<HostedFiberRuntime, FiberError> {
+    HostedFiberRuntime::from_bootstrap_with(
+        FiberPoolBootstrap::from_config(automatic_fiber_config()),
+        HostedFiberRuntimeConfig::automatic(),
+    )
 }
 
 #[cfg(feature = "std")]
@@ -7597,6 +8285,51 @@ fn automatic_carrier_count() -> usize {
     hal_visible_carrier_count()
         .filter(|count| *count != 0)
         .unwrap_or(1)
+}
+
+#[cfg(feature = "std")]
+const fn automatic_pool_placement(carrier_count: usize) -> PoolPlacement<'static> {
+    if carrier_count > 1 {
+        PoolPlacement::PerCore
+    } else {
+        PoolPlacement::Inherit
+    }
+}
+
+#[cfg(feature = "std")]
+fn per_carrier_capacity_for_total(
+    total_fibers: usize,
+    carrier_count: usize,
+) -> Result<usize, FiberError> {
+    if total_fibers == 0 || carrier_count == 0 {
+        return Err(FiberError::invalid());
+    }
+    let adjusted = total_fibers
+        .checked_add(carrier_count - 1)
+        .ok_or_else(FiberError::resource_exhausted)?;
+    Ok(adjusted / carrier_count)
+}
+
+#[cfg(feature = "std")]
+fn distribute_hosted_class_configs(
+    classes: &[HostedFiberClassConfig],
+    carrier_count: usize,
+) -> Result<std::vec::Vec<FiberStackClassConfig>, FiberError> {
+    if classes.is_empty() || carrier_count == 0 {
+        return Err(FiberError::invalid());
+    }
+
+    let mut distributed = std::vec::Vec::with_capacity(classes.len());
+    for class in classes {
+        let class = class.validate()?;
+        let slots_per_carrier = per_carrier_capacity_for_total(class.total_slots, carrier_count)?;
+        let growth_chunk = per_carrier_capacity_for_total(class.growth_chunk, carrier_count)?;
+        distributed.push(
+            FiberStackClassConfig::new(class.class, slots_per_carrier)?
+                .with_growth_chunk(growth_chunk)?,
+        );
+    }
+    Ok(distributed)
 }
 
 #[cfg(feature = "std")]
@@ -7609,10 +8342,26 @@ fn hal_visible_carrier_count() -> Option<usize> {
 }
 
 #[cfg(feature = "std")]
-fn select_automatic_carrier_count(
+const fn select_automatic_carrier_count(
     summary: fusion_pal::hal::HardwareTopologySummary,
 ) -> Option<usize> {
-    summary.core_count.or(summary.logical_cpu_count)
+    hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::Automatic)
+}
+
+#[cfg(feature = "std")]
+const fn hosted_carrier_count_from_summary(
+    summary: fusion_pal::hal::HardwareTopologySummary,
+    policy: HostedCarrierCountPolicy,
+) -> Option<usize> {
+    match policy {
+        HostedCarrierCountPolicy::Automatic => match summary.core_count {
+            Some(count) => Some(count),
+            None => summary.logical_cpu_count,
+        },
+        HostedCarrierCountPolicy::VisibleLogicalCpus => summary.logical_cpu_count,
+        HostedCarrierCountPolicy::VisibleCores => summary.core_count,
+        HostedCarrierCountPolicy::VisiblePackages => summary.package_count,
+    }
 }
 
 #[cfg(feature = "std")]
@@ -7745,11 +8494,7 @@ fn run_carrier_loop(inner: &GreenPoolInner, carrier_index: usize) -> Result<(), 
         }
         if let Some(slot_index) = inner.try_steal_ready(carrier_index)? {
             if let Err(error) = run_ready_task(inner, carrier_index, slot_index) {
-                trace_carrier_failure(
-                    "run_carrier_loop.run_stolen_task",
-                    carrier_index,
-                    &error,
-                );
+                trace_carrier_failure("run_carrier_loop.run_stolen_task", carrier_index, &error);
                 return Err(error);
             }
             continue;
@@ -7857,19 +8602,48 @@ fn dequeue_ready(
     Ok(slot_index)
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_ready_task(
     inner: &GreenPoolInner,
     carrier_index: usize,
     slot_index: usize,
 ) -> Result<(), FiberError> {
     let slot = inner.tasks.slot(slot_index)?;
-    let (task_id, yield_budget) = match slot.begin_run() {
+    let (task_id, yield_budget, execution) = match slot.begin_run() {
         Ok(values) => values,
         Err(error) => {
             trace_carrier_failure("run_ready_task.begin_run", carrier_index, &error);
             return Err(error);
         }
     };
+    if !execution.requires_fiber() {
+        let runner = match slot.take_job_runner(task_id) {
+            Ok(runner) => runner,
+            Err(error) => {
+                trace_carrier_failure("run_ready_task.take_job_runner", carrier_index, &error);
+                inner.finish_task(slot_index, task_id, GreenTaskState::Failed(error))?;
+                return Ok(());
+            }
+        };
+
+        #[cfg(feature = "std")]
+        let run_result = run_green_job_contained(runner);
+        #[cfg(not(feature = "std"))]
+        let run_result = {
+            run_green_job_contained(runner);
+            Ok(())
+        };
+
+        match run_result {
+            Ok(()) => inner.finish_task(slot_index, task_id, GreenTaskState::Completed)?,
+            Err(()) => inner.finish_task(
+                slot_index,
+                task_id,
+                GreenTaskState::Failed(FiberError::state_conflict()),
+            )?,
+        }
+        return Ok(());
+    }
     if let Err(error) = slot.set_yield_action(CurrentGreenYieldAction::Requeue) {
         trace_carrier_failure("run_ready_task.set_yield_action", carrier_index, &error);
         return Err(error);
@@ -8090,6 +8864,20 @@ mod tests {
             NonZeroUsize::new(8 * 1024).expect("non-zero supported stack");
 
         fn run(self) -> Self::Output {}
+    }
+
+    struct SupportedInlineNoYieldTask;
+
+    impl ExplicitFiberTask for SupportedInlineNoYieldTask {
+        type Output = u32;
+
+        const STACK_BYTES: NonZeroUsize =
+            NonZeroUsize::new(32 * 1024).expect("non-zero oversized inline stack");
+        const EXECUTION: FiberTaskExecution = FiberTaskExecution::InlineNoYield;
+
+        fn run(self) -> Self::Output {
+            17
+        }
     }
 
     struct SupportedGeneratedContractTask;
@@ -9606,6 +10394,86 @@ mod tests {
         assert_eq!(select_automatic_carrier_count(no_cores), Some(8));
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn hosted_carrier_count_policy_reads_requested_topology_count() {
+        let summary = fusion_pal::hal::HardwareTopologySummary {
+            logical_cpu_count: Some(12),
+            core_count: Some(6),
+            cluster_count: Some(3),
+            package_count: Some(2),
+            numa_node_count: None,
+            core_class_count: None,
+        };
+        assert_eq!(
+            hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::Automatic),
+            Some(6)
+        );
+        assert_eq!(
+            hosted_carrier_count_from_summary(
+                summary,
+                HostedCarrierCountPolicy::VisibleLogicalCpus
+            ),
+            Some(12)
+        );
+        assert_eq!(
+            hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::VisibleCores),
+            Some(6)
+        );
+        assert_eq!(
+            hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::VisiblePackages),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn per_carrier_capacity_rounds_total_budget_up() {
+        assert_eq!(
+            per_carrier_capacity_for_total(8, 4).expect("capacity should divide cleanly"),
+            2
+        );
+        assert_eq!(
+            per_carrier_capacity_for_total(9, 4).expect("capacity should round up"),
+            3
+        );
+        assert_eq!(
+            per_carrier_capacity_for_total(1, 8).expect("single total fiber should still admit"),
+            1
+        );
+        assert_eq!(
+            per_carrier_capacity_for_total(0, 1)
+                .expect_err("zero total fibers should be rejected")
+                .kind(),
+            FiberError::invalid().kind()
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hosted_class_distribution_rounds_total_slots_and_growth_chunk_up() {
+        let classes = [
+            HostedFiberClassConfig::new(FiberStackClass::MIN, 5)
+                .expect("hosted class config should build")
+                .with_growth_chunk(3)
+                .expect("hosted growth chunk should build"),
+            HostedFiberClassConfig::new(
+                FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class"))
+                    .expect("valid class"),
+                9,
+            )
+            .expect("hosted class config should build"),
+        ];
+
+        let distributed = distribute_hosted_class_configs(&classes, 4)
+            .expect("class configs should distribute across carriers");
+        assert_eq!(distributed[0].class, FiberStackClass::MIN);
+        assert_eq!(distributed[0].slots_per_carrier, 2);
+        assert_eq!(distributed[0].growth_chunk, 1);
+        assert_eq!(distributed[1].class.size_bytes().get(), 8 * 1024);
+        assert_eq!(distributed[1].slots_per_carrier, 3);
+        assert_eq!(distributed[1].growth_chunk, 3);
+    }
+
     #[test]
     fn steal_seed_randomizes_the_first_victim_choice() {
         let first = (xorshift64(initial_steal_seed(0)) % 7) + 1;
@@ -9742,6 +10610,197 @@ mod tests {
         fibers
             .shutdown()
             .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn current_fiber_pool_handles_report_execution_mode() {
+        let fibers = CurrentFiberPool::new(&FiberPoolConfig::new())
+            .expect("current fiber pool should build");
+
+        let inline = fibers
+            .spawn_explicit(SupportedInlineNoYieldTask)
+            .expect("inline task should spawn");
+        let inline_admission = inline
+            .admission()
+            .expect("inline admission should be observable");
+        assert_eq!(
+            inline
+                .execution()
+                .expect("inline execution should be observable"),
+            FiberTaskExecution::InlineNoYield
+        );
+        assert!(
+            inline
+                .runs_inline()
+                .expect("inline realization should be observable")
+        );
+        assert_eq!(
+            inline_admission.execution,
+            FiberTaskExecution::InlineNoYield
+        );
+        assert_eq!(inline_admission.priority, FiberTaskPriority::DEFAULT);
+        assert_eq!(inline_admission.yield_budget, None);
+        assert_eq!(inline.join().expect("inline task should complete"), 17);
+
+        let yielding = fibers
+            .spawn(|| -> Result<(), FiberError> {
+                yield_now()?;
+                Ok(())
+            })
+            .expect("yielding task should spawn");
+        let yielding_admission = yielding
+            .admission()
+            .expect("fiber admission should be observable");
+        assert_eq!(
+            yielding
+                .execution()
+                .expect("fiber execution should be observable"),
+            FiberTaskExecution::Fiber
+        );
+        assert!(
+            !yielding
+                .runs_inline()
+                .expect("fiber realization should be observable")
+        );
+        assert_eq!(yielding_admission.execution, FiberTaskExecution::Fiber);
+        assert_eq!(yielding_admission.priority, FiberTaskPriority::DEFAULT);
+        assert_eq!(yielding_admission.yield_budget, None);
+        yielding
+            .join()
+            .expect("yielding task should complete")
+            .expect("yielding task should not fail");
+
+        fibers
+            .shutdown()
+            .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn current_fiber_pool_runs_no_yield_tasks_inline_without_stack_admission() {
+        let fibers = CurrentFiberPool::new(
+            &FiberPoolConfig::fixed(NonZeroUsize::new(4 * 1024).expect("non-zero stack"), 1)
+                .with_telemetry(FiberTelemetry::Full),
+        )
+        .expect("current fiber pool should build");
+
+        assert_eq!(
+            fibers
+                .spawn_explicit(SupportedInlineNoYieldTask)
+                .expect("inline no-yield task should spawn")
+                .join()
+                .expect("inline no-yield task should complete"),
+            17
+        );
+        assert_eq!(
+            fibers
+                .stack_stats()
+                .expect("telemetry should be enabled")
+                .peak_used_bytes,
+            0
+        );
+
+        fibers
+            .shutdown()
+            .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn fiber_pool_bootstrap_fixed_builds_current_thread_pool() {
+        let fibers = FiberPoolBootstrap::fixed(2)
+            .build_current()
+            .expect("bootstrap should build one current-thread pool");
+        assert_eq!(fibers.active_count(), 0);
+        fibers
+            .shutdown()
+            .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hosted_fiber_runtime_bootstrap_builds_automatic_carriers() {
+        let runtime = FiberPoolBootstrap::fixed(2)
+            .build_hosted()
+            .expect("hosted runtime should build");
+        assert!(
+            runtime
+                .carriers()
+                .worker_count()
+                .expect("worker count should be observable")
+                >= 1
+        );
+        assert_eq!(runtime.fibers().active_count(), 0);
+        let (carriers, fibers) = runtime.into_parts();
+        fibers
+            .shutdown()
+            .expect("hosted fiber pool should shut down cleanly");
+        carriers
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hosted_fiber_runtime_classed_builds_from_total_budget() {
+        let runtime = HostedFiberRuntime::classed(&[
+            HostedFiberClassConfig::new(FiberStackClass::MIN, 2)
+                .expect("hosted class config should build"),
+            HostedFiberClassConfig::new(
+                FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class"))
+                    .expect("valid class"),
+                2,
+            )
+            .expect("hosted class config should build"),
+        ])
+        .expect("classed hosted runtime should build");
+        assert_eq!(runtime.fibers().active_count(), 0);
+        let (carriers, fibers) = runtime.into_parts();
+        fibers
+            .shutdown()
+            .expect("hosted fiber pool should shut down cleanly");
+        carriers
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hosted_runtime_config_defaults_to_fusion_carrier_shape() {
+        let automatic = HostedFiberRuntimeConfig::automatic();
+        assert!(automatic.carrier_count >= 1);
+        assert_eq!(automatic.name_prefix, Some("fusion-fiber"));
+
+        let explicit = HostedFiberRuntimeConfig::new(2)
+            .with_placement(PoolPlacement::PerCore)
+            .with_name_prefix(Some("fusion-explicit"));
+        assert_eq!(explicit.carrier_count, 2);
+        assert_eq!(explicit.placement, PoolPlacement::PerCore);
+        assert_eq!(explicit.name_prefix, Some("fusion-explicit"));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hosted_fiber_runtime_respects_explicit_carrier_config() {
+        let runtime = FiberPoolBootstrap::fixed(2)
+            .build_hosted_with(
+                HostedFiberRuntimeConfig::new(1)
+                    .with_placement(PoolPlacement::Inherit)
+                    .with_name_prefix(Some("fusion-test")),
+            )
+            .expect("hosted runtime should build from explicit carrier config");
+        assert_eq!(
+            runtime
+                .carriers()
+                .worker_count()
+                .expect("worker count should be observable"),
+            1
+        );
+        let (carriers, fibers) = runtime.into_parts();
+        fibers
+            .shutdown()
+            .expect("hosted fiber pool should shut down cleanly");
+        carriers
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
     }
 }
 

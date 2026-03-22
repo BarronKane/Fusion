@@ -21,6 +21,9 @@ pub mod event;
 #[path = "fiber/fiber.rs"]
 /// fusion-sys stackful execution and fiber contracts.
 pub mod fiber;
+#[path = "gpio/gpio.rs"]
+/// fusion-sys GPIO ownership and capability surfaces.
+pub mod gpio;
 #[path = "mem/mem.rs"]
 /// fusion-sys memory contracts and resource abstractions.
 pub mod mem;

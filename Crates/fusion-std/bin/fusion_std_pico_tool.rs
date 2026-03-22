@@ -19,6 +19,7 @@ const UF2_FLAG_FAMILY_ID_PRESENT: u32 = 0x0000_2000;
 const UF2_PAYLOAD_SIZE: usize = 256;
 const UF2_FAMILY_RP2XXX_ABSOLUTE: u32 = 0xe48b_ff57;
 const UF2_FAMILY_RP2350_ARM_S: u32 = 0xe48b_ff59;
+const DEFAULT_PROBE_CHIP: &str = "RP235x";
 const PROBE_CHIP_ENV: &str = "FUSION_PICO_PROBE_CHIP";
 const PROBE_SELECTOR_ENV: &str = "FUSION_PICO_PROBE_SELECTOR";
 
@@ -75,7 +76,7 @@ fn usage() -> String {
          bin = {DEFAULT_BIN}\n  \
          family = rp2xxx-absolute\n\n\
          environment:\n  \
-         {PROBE_CHIP_ENV}=chip-name for probe-rs wrappers\n  \
+         {PROBE_CHIP_ENV}=chip-name for probe-rs wrappers (defaults to {DEFAULT_PROBE_CHIP})\n  \
          {PROBE_SELECTOR_ENV}=probe selector passed through to probe-rs"
     )
 }
@@ -237,15 +238,11 @@ impl CommandOptions {
             .ok_or_else(|| format!("ELF path {} has no parent directory", elf.display()))
     }
 
-    fn resolve_chip(&self) -> Result<String, String> {
+    fn resolve_chip(&self) -> String {
         self.chip
             .clone()
             .or_else(|| env::var(PROBE_CHIP_ENV).ok())
-            .ok_or_else(|| {
-                format!(
-                    "probe target chip is required; pass `--chip <name>` or set {PROBE_CHIP_ENV}"
-                )
-            })
+            .unwrap_or_else(|| DEFAULT_PROBE_CHIP.to_owned())
     }
 
     fn resolve_probe_selector(&self) -> Option<String> {
@@ -301,7 +298,7 @@ fn run_uf2(options: &CommandOptions) -> Result<(), String> {
 fn run_probe_flash(options: &CommandOptions) -> Result<(), String> {
     let manifest_path = options.manifest_path()?;
     let project_dir = options.project_dir()?;
-    let chip = options.resolve_chip()?;
+    let chip = options.resolve_chip();
     let mut command = Command::new("cargo-flash");
     command.current_dir(project_dir);
     command.arg("--manifest-path").arg(manifest_path);
@@ -320,7 +317,7 @@ fn run_probe_flash(options: &CommandOptions) -> Result<(), String> {
 
 fn run_probe_rs(subcommand: &str, options: &CommandOptions) -> Result<(), String> {
     build_example_elf(options)?;
-    let chip = options.resolve_chip()?;
+    let chip = options.resolve_chip();
     let elf_path = options.elf_path()?;
     let mut command = Command::new("probe-rs");
     command.arg(subcommand);

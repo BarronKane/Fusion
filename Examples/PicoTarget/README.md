@@ -31,29 +31,34 @@ Then hold `BOOTSEL`, plug in or reset the board, and copy `pico.uf2` onto the mo
 ## probe-rs / SWD
 
 These commands require a physical SWD probe and either `probe-rs` or `cargo-flash` installed on
-the host.
+the host. The repo now carries one checked-in [Embed.toml](/volumes/projects/rust/fusion/Examples/PicoTarget/Embed.toml)
+using the standard `RP235x` probe-rs target name from the upstream `rp-rs` RP235x template.
 
-Probe wrappers require a chip name either on the command line or through the environment:
+Probe wrappers default to `RP235x`. Override only if your local probe-rs build wants something
+different:
 
-- `FUSION_PICO_PROBE_CHIP`
+- `FUSION_PICO_PROBE_CHIP` (optional override)
 - `FUSION_PICO_PROBE_SELECTOR` (optional)
 
 Examples:
 
 ```sh
-FUSION_PICO_PROBE_CHIP=rp235x cargo pico-flash
-FUSION_PICO_PROBE_CHIP=rp235x cargo pico-run
-FUSION_PICO_PROBE_CHIP=rp235x cargo pico-attach
+cargo pico-flash
+cargo pico-run
+cargo pico-attach
 ```
 
 Or explicitly:
 
 ```sh
-cargo pico-flash -- --chip rp235x
-cargo pico-run -- --chip rp235x
-cargo pico-attach -- --chip rp235x
+cargo pico-flash -- --chip RP235x
+cargo pico-run -- --chip RP235x
+cargo pico-attach -- --chip RP235x
 ```
 
-The wrappers intentionally leave the chip string operator-supplied until first hardware validation
-locks down the exact target spelling worth baking into repo defaults. Embedded life: all the fun
-of being precise, none of the reward.
+If you want the full probe-rs workflow instead of the thin wrapper, the checked-in
+[Embed.toml](/volumes/projects/rust/fusion/Examples/PicoTarget/Embed.toml) is ready for:
+
+```sh
+cargo embed --release
+```
