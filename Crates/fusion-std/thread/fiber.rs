@@ -71,6 +71,7 @@ use fusion_sys::fiber::{
     current_context as system_fiber_context,
     yield_now as system_yield_now,
 };
+use fusion_sys::sync::Mutex as SysMutex;
 use fusion_sys::thread::{ThreadSchedulerCaps, ThreadSystem};
 
 use super::ThreadPool;
@@ -2216,7 +2217,7 @@ impl MetadataIndexStack {
 struct RuntimeCell<T> {
     fast: bool,
     value: UnsafeCell<T>,
-    lock: SyncMutex<()>,
+    lock: SysMutex<()>,
 }
 
 unsafe impl<T: Send> Send for RuntimeCell<T> {}
@@ -2235,7 +2236,7 @@ impl<T> RuntimeCell<T> {
         Self {
             fast,
             value: UnsafeCell::new(value),
-            lock: SyncMutex::new(()),
+            lock: SysMutex::new(()),
         }
     }
 
@@ -7540,6 +7541,16 @@ pub struct HostedFiberRuntime {
     fibers: GreenPool,
 }
 
+#[cfg(feature = "std")]
+impl Drop for HostedFiberRuntime {
+    fn drop(&mut self) {
+        let _ = self.fibers.shutdown();
+        if let Ok(carriers) = self.carriers.try_clone() {
+            let _ = carriers.shutdown();
+        }
+    }
+}
+
 /// Hosted carrier-pool shape used to build one hosted fiber runtime.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -7838,7 +7849,9 @@ impl HostedFiberRuntime {
     /// Releases the owned carrier pool and green-fiber pool back to the caller.
     #[must_use]
     pub fn into_parts(self) -> (ThreadPool, GreenPool) {
-        (self.carriers, self.fibers)
+        let this = ManuallyDrop::new(self);
+        // SAFETY: `this` will not run `Drop`; we move both owned fields out exactly once.
+        unsafe { (ptr::read(&this.carriers), ptr::read(&this.fibers)) }
     }
 }
 

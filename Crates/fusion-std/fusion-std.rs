@@ -4,6 +4,7 @@
 //! runtime vocabulary, profiles, and orchestration surfaces while keeping platform truth
 //! and low-level system contracts below the `fusion-sys` boundary where they belong.
 
+#![cfg_attr(feature = "std", feature(thread_local))]
 #![no_std]
 
 #[cfg(any(test, feature = "std"))]

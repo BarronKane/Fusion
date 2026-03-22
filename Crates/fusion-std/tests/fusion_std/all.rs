@@ -14,7 +14,6 @@ use fusion_std::sync::{
 use fusion_std::thread::{
     Executor,
     ExecutorConfig,
-    ExecutorError,
     ExecutorMode,
     ThreadConfig,
     ThreadEntryReturn,
@@ -300,10 +299,16 @@ fn executor_current_thread_and_pool_paths_are_real() {
             .expect("current-thread executor should drive one future"),
         5
     );
-    assert!(matches!(
-        current.spawn_local(async { 7_u8 }),
-        Err(ExecutorError::Unsupported)
-    ));
+    let local = current
+        .spawn_local(async { 7_u8 })
+        .expect("current-thread executor should admit local future");
+    assert_eq!(
+        current
+            .block_on(local)
+            .expect("current-thread executor should drive local future")
+            .expect("local future should complete"),
+        7
+    );
 
     let carrier = match ThreadPool::new(&ThreadPoolConfig::new()) {
         Ok(pool) => pool,
@@ -328,6 +333,7 @@ fn executor_current_thread_and_pool_paths_are_real() {
             .expect("thread-pool executor task should complete"),
         11
     );
+    drop(pool_executor);
 
     carrier
         .shutdown()
