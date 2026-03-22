@@ -377,7 +377,7 @@ fn generate_fiber_task_metadata(
                 }),
         )
     } else {
-        explicit_metadata_source
+        explicit_metadata_source.or(auto_metadata_source)
     };
     let report_source = explicit_report_source;
     let mut entries =
@@ -475,10 +475,8 @@ fn load_generated_entries(path: &Path) -> Result<Vec<GeneratedFiberTaskEntry>, S
             .next()
             .ok_or_else(|| format!("line {} is missing stack bytes", line_no + 1))?
             .parse::<usize>()
-            .map_err(|error| format!("line {} stack bytes parse failed: {error}", line_no + 1))?;
-        if stack_bytes == 0 {
-            return Err(format!("line {} stack bytes must be non-zero", line_no + 1));
-        }
+            .map_err(|error| format!("line {} stack bytes parse failed: {error}", line_no + 1))?
+            .max(1);
 
         let priority = match parts.next() {
             Some(raw) if !raw.is_empty() => raw
@@ -523,6 +521,9 @@ fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
     rendered.push_str("];\n\n");
 
     for entry in entries {
+        if !generated_contract_type_is_nameable(&entry.type_name) {
+            continue;
+        }
         rendered.push_str("impl GeneratedExplicitFiberTaskContract for ");
         rendered.push_str(&render_type_path(&entry.type_name));
         rendered.push_str(" {\n");
@@ -543,6 +544,10 @@ fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
     }
 
     rendered
+}
+
+fn generated_contract_type_is_nameable(type_name: &str) -> bool {
+    !type_name.contains("{{closure}}")
 }
 
 fn assert_report_has_no_unresolved_symbols(path: &Path) -> Result<(), String> {

@@ -93,6 +93,7 @@ const ACTIVE_COOPERATIVE_EXCLUSION_FAST_LEAF_WORDS: usize =
     ACTIVE_COOPERATIVE_EXCLUSION_FAST_SPAN_CAPACITY / COOPERATIVE_EXCLUSION_TREE_WORD_BITS;
 const UNRANKED_COOPERATIVE_LOCK: u16 = 0;
 const NO_COOPERATIVE_EXCLUSION_SPAN: u16 = 0;
+const FIXED_STACK_WATERMARK_SENTINEL: u8 = 0xA5;
 #[cfg(feature = "std")]
 const FIBER_YIELD_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(1);
 #[cfg(target_pointer_width = "64")]
@@ -237,12 +238,68 @@ pub struct FiberYieldBudgetEvent {
 pub struct FiberStackStats {
     /// Total growth events across live fibers in the pool.
     pub total_growth_events: u64,
+    /// Maximum exact byte watermark observed across released fixed stacks in this pool.
+    pub peak_used_bytes: usize,
     /// Maximum committed-page count observed across live fibers.
     pub peak_committed_pages: u32,
     /// Distribution of live fibers by committed-page count.
     pub committed_distribution: FiberStackDistribution,
     /// Number of live fibers currently at reservation capacity.
     pub at_capacity_count: usize,
+}
+
+/// Exact generated-task metadata resolved for one concrete task type.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GeneratedFiberTaskMetadataView {
+    /// Exact analyzer-predicted stack budget in bytes before class rounding.
+    pub stack_bytes: usize,
+    /// Analyzer-resolved task priority.
+    pub priority: i8,
+}
+
+/// Memory-footprint summary for the stack-backing side of one fiber pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FiberStackMemoryFootprint {
+    /// Total schedulable stack slots across all fixed/classed stack pools.
+    pub total_capacity: usize,
+    /// Total reserved stack-region bytes across all stack pools, excluding metadata/control.
+    pub reserved_stack_bytes: usize,
+    /// Total usable stack bytes across all slots, excluding guards and metadata.
+    pub usable_stack_bytes: usize,
+    /// Stack-pool metadata bytes, including slab headers and class-pool registries.
+    pub metadata_bytes: usize,
+}
+
+impl FiberStackMemoryFootprint {
+    /// Returns the total bytes reserved by stack backing plus stack metadata.
+    #[must_use]
+    pub const fn total_bytes(self) -> usize {
+        self.reserved_stack_bytes + self.metadata_bytes
+    }
+}
+
+/// Memory-footprint summary for one live fiber pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FiberPoolMemoryFootprint {
+    /// Number of carrier queues provisioned for this pool.
+    pub carrier_count: usize,
+    /// Total schedulable task slots across the pool.
+    pub task_capacity: usize,
+    /// Stack-backing footprint for the pool.
+    pub stack: FiberStackMemoryFootprint,
+    /// Scheduler/task metadata bytes outside the stack backing itself.
+    pub runtime_metadata_bytes: usize,
+    /// Control-block bytes used to own the shared pool root.
+    pub control_bytes: usize,
+}
+
+impl FiberPoolMemoryFootprint {
+    /// Returns the total bytes reserved by this pool across stack, metadata, and control state.
+    #[must_use]
+    pub const fn total_bytes(self) -> usize {
+        self.stack.total_bytes() + self.runtime_metadata_bytes + self.control_bytes
+    }
 }
 
 /// Huge-page preference for large fiber stack reservations.
@@ -724,18 +781,55 @@ macro_rules! include_generated_fiber_task_contracts {
     };
 }
 
-fn generated_explicit_task_attributes<T: 'static>() -> Result<FiberTaskAttributes, FiberError> {
-    let type_name = type_name::<T>();
-    let metadata = GENERATED_EXPLICIT_FIBER_TASKS
-        .iter()
-        .find(|entry| entry.type_name == type_name)
-        .ok_or_else(FiberError::unsupported)?;
+fn generated_task_attributes_by_type_name(
+    type_name: &str,
+) -> Result<FiberTaskAttributes, FiberError> {
+    let metadata = generated_task_metadata_by_type_name(type_name)?;
     let stack_bytes =
         NonZeroUsize::new(metadata.stack_bytes).ok_or_else(FiberError::unsupported)?;
     Ok(
         FiberTaskAttributes::new(FiberStackClass::from_stack_bytes(stack_bytes)?)
             .with_priority(FiberTaskPriority::new(metadata.priority)),
     )
+}
+
+fn generated_task_metadata_by_type_name(
+    type_name: &str,
+) -> Result<GeneratedFiberTaskMetadataView, FiberError> {
+    let metadata = GENERATED_EXPLICIT_FIBER_TASKS
+        .iter()
+        .find(|entry| entry.type_name == type_name)
+        .ok_or_else(FiberError::unsupported)?;
+    Ok(GeneratedFiberTaskMetadataView {
+        stack_bytes: metadata.stack_bytes,
+        priority: metadata.priority,
+    })
+}
+
+/// Returns the exact generated-task metadata for one runtime type name when it exists.
+///
+/// This is the measurement-facing view of the build-generated manifest: it preserves the exact
+/// predicted stack bytes before class rounding so external probes can compare runtime watermarks
+/// against the analyzer output instead of against a rounded admission class.
+///
+/// # Errors
+///
+/// Returns an error when the generated manifest does not contain the supplied type name.
+#[doc(hidden)]
+pub fn generated_fiber_task_metadata_by_type_name(
+    type_name: &str,
+) -> Result<GeneratedFiberTaskMetadataView, FiberError> {
+    generated_task_metadata_by_type_name(type_name)
+}
+
+fn generated_task_attributes<T: 'static>() -> Result<FiberTaskAttributes, FiberError> {
+    generated_task_attributes_by_type_name(type_name::<T>())
+}
+
+fn closure_spawn_task_attributes<F: 'static>(
+    default_class: FiberStackClass,
+) -> FiberTaskAttributes {
+    generated_task_attributes::<F>().unwrap_or_else(|_| FiberTaskAttributes::new(default_class))
 }
 
 /// Explicit fiber-task contract resolved through build-generated metadata.
@@ -762,8 +856,7 @@ pub trait GeneratedExplicitFiberTask: Send + 'static {
     where
         Self: Sized,
     {
-        Ok(generated_explicit_task_attributes::<Self>()?
-            .with_optional_yield_budget(Self::YIELD_BUDGET))
+        Ok(generated_task_attributes::<Self>()?.with_optional_yield_budget(Self::YIELD_BUDGET))
     }
 }
 
@@ -852,6 +945,22 @@ pub const extern "Rust" fn generated_fiber_task_metadata_anchor(bytes: u32) -> u
 #[inline(never)]
 const fn generated_fiber_task_metadata_anchor_leaf(bytes: u32) -> u32 {
     bytes.saturating_add(1)
+}
+
+#[inline(never)]
+fn generated_closure_task_root<F, T>(job: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    job()
+}
+
+/// Hidden closure-root anchor used to exercise closure-task metadata generation in ordinary
+/// library artifacts.
+#[doc(hidden)]
+#[unsafe(no_mangle)]
+pub extern "Rust" fn generated_closure_task_metadata_anchor(bytes: u32) -> u32 {
+    generated_closure_task_root(|| generated_fiber_task_metadata_anchor_leaf(bytes))
 }
 
 impl GeneratedExplicitFiberTask for GeneratedFiberTaskMetadataAnchorTask {
@@ -2343,6 +2452,7 @@ struct FiberStackSlab {
     huge_pages: HugePagePolicy,
     stack_direction: ContextStackDirection,
     backing: FiberStackBackingState,
+    peak_used_bytes: AtomicUsize,
     state: SyncMutex<FiberStackSlabState>,
 }
 
@@ -2476,6 +2586,7 @@ impl FiberStackSlab {
                     metadata: elastic_metadata.ok_or_else(FiberError::invalid)?,
                 },
             },
+            peak_used_bytes: AtomicUsize::new(0),
             state: SyncMutex::new(state),
         };
         debug_assert_eq!(header.capacity, count);
@@ -2972,6 +3083,13 @@ impl FiberStackSlab {
     }
 
     fn release(&self, slot_index: usize) -> Result<(), FiberError> {
+        if let FiberStackBackingState::Fixed(layout) = &self.backing
+            && !matches!(self.telemetry, FiberTelemetry::Disabled)
+        {
+            let used_bytes = self.observe_fixed_slot_usage(slot_index, *layout)?;
+            self.peak_used_bytes.fetch_max(used_bytes, Ordering::AcqRel);
+        }
+
         self.reset_slot(slot_index)?;
 
         let mut state = self.state.lock().map_err(fiber_error_from_sync)?;
@@ -2995,6 +3113,7 @@ impl FiberStackSlab {
         let FiberStackBackingState::Elastic { metadata, .. } = &self.backing else {
             return Some(FiberStackStats {
                 total_growth_events: 0,
+                peak_used_bytes: self.peak_used_bytes.load(Ordering::Acquire),
                 peak_committed_pages: 0,
                 committed_distribution: FiberStackDistribution::new(),
                 at_capacity_count: 0,
@@ -3003,6 +3122,7 @@ impl FiberStackSlab {
 
         let mut stats = FiberStackStats {
             total_growth_events: 0,
+            peak_used_bytes: 0,
             peak_committed_pages: 0,
             committed_distribution: FiberStackDistribution::new(),
             at_capacity_count: 0,
@@ -3030,6 +3150,24 @@ impl FiberStackSlab {
         }
         stats.committed_distribution.sort();
         Some(stats)
+    }
+
+    const fn memory_footprint(&self) -> FiberStackMemoryFootprint {
+        let metadata_bytes = self.region.base.get() - self.mapping.base.get();
+        let usable_stack_bytes = match &self.backing {
+            FiberStackBackingState::Fixed(layout) => {
+                layout.usable_size.saturating_mul(self.capacity)
+            }
+            FiberStackBackingState::Elastic { layout, .. } => {
+                layout.max.saturating_mul(self.capacity)
+            }
+        };
+        FiberStackMemoryFootprint {
+            total_capacity: self.capacity,
+            reserved_stack_bytes: self.region.len,
+            usable_stack_bytes,
+            metadata_bytes,
+        }
     }
 
     const fn max_stack_bytes(&self) -> usize {
@@ -3232,6 +3370,12 @@ impl FiberStackSlab {
     }
 
     fn mark_slot_allocated(&self, slot_index: usize) -> Result<(), FiberError> {
+        if let FiberStackBackingState::Fixed(layout) = &self.backing
+            && !matches!(self.telemetry, FiberTelemetry::Disabled)
+        {
+            self.paint_fixed_slot(slot_index, *layout)?;
+        }
+
         let FiberStackBackingState::Elastic { metadata, .. } = &self.backing else {
             return Ok(());
         };
@@ -3243,6 +3387,46 @@ impl FiberStackSlab {
         meta.at_capacity.store(false, Ordering::Release);
         meta.capacity_pending.store(false, Ordering::Release);
         Ok(())
+    }
+
+    fn paint_fixed_slot(
+        &self,
+        slot_index: usize,
+        layout: FixedStackLayout,
+    ) -> Result<(), FiberError> {
+        let usable = self.fixed_usable_region(slot_index, layout)?;
+        // SAFETY: the slot's usable stack region is writable while the slot is reserved to this slab.
+        unsafe {
+            ptr::write_bytes(
+                usable.base.get() as *mut u8,
+                FIXED_STACK_WATERMARK_SENTINEL,
+                usable.len,
+            );
+        }
+        Ok(())
+    }
+
+    fn observe_fixed_slot_usage(
+        &self,
+        slot_index: usize,
+        layout: FixedStackLayout,
+    ) -> Result<usize, FiberError> {
+        let usable = self.fixed_usable_region(slot_index, layout)?;
+        // SAFETY: the slot remains mapped and readable until the slab releases it.
+        let bytes =
+            unsafe { core::slice::from_raw_parts(usable.base.get() as *const u8, usable.len) };
+        let used = match self.stack_direction {
+            ContextStackDirection::Down => bytes
+                .iter()
+                .position(|byte| *byte != FIXED_STACK_WATERMARK_SENTINEL)
+                .map_or(0, |index| usable.len.saturating_sub(index)),
+            ContextStackDirection::Up => bytes
+                .iter()
+                .rposition(|byte| *byte != FIXED_STACK_WATERMARK_SENTINEL)
+                .map_or(0, |index| index.saturating_add(1)),
+            ContextStackDirection::Unknown => return Err(FiberError::unsupported()),
+        };
+        Ok(used)
     }
 
     fn attach_slot_identity(
@@ -3484,6 +3668,27 @@ impl FiberStackClassPools {
             .iter()
             .any(|entry| entry.slab.requires_signal_handler())
     }
+
+    fn memory_footprint(&self) -> FiberStackMemoryFootprint {
+        let mut footprint = FiberStackMemoryFootprint {
+            total_capacity: 0,
+            reserved_stack_bytes: 0,
+            usable_stack_bytes: 0,
+            metadata_bytes: self.mapping.len,
+        };
+        for entry in self.as_slice() {
+            let slab = entry.slab.memory_footprint();
+            footprint.total_capacity = footprint.total_capacity.saturating_add(slab.total_capacity);
+            footprint.reserved_stack_bytes = footprint
+                .reserved_stack_bytes
+                .saturating_add(slab.reserved_stack_bytes);
+            footprint.usable_stack_bytes = footprint
+                .usable_stack_bytes
+                .saturating_add(slab.usable_stack_bytes);
+            footprint.metadata_bytes = footprint.metadata_bytes.saturating_add(slab.metadata_bytes);
+        }
+        footprint
+    }
 }
 
 impl Drop for FiberStackClassPools {
@@ -3618,6 +3823,13 @@ impl FiberStackStore {
         match self {
             Self::Legacy(slab) => slab.stack_stats(),
             Self::Classes(_) => None,
+        }
+    }
+
+    fn memory_footprint(&self) -> FiberStackMemoryFootprint {
+        match self {
+            Self::Legacy(slab) => slab.memory_footprint(),
+            Self::Classes(pools) => pools.memory_footprint(),
         }
     }
 }
@@ -5536,6 +5748,17 @@ impl GreenPoolLease {
         // SAFETY: a live lease always points at a live green-pool control block.
         unsafe { self.ptr.as_ref() }
     }
+
+    fn memory_footprint(&self) -> FiberPoolMemoryFootprint {
+        let block = self.block();
+        FiberPoolMemoryFootprint {
+            carrier_count: block.inner.carriers.len(),
+            task_capacity: block.inner.stacks.total_capacity(),
+            stack: block.inner.stacks.memory_footprint(),
+            runtime_metadata_bytes: block.metadata.mapping.len,
+            control_bytes: block.region.len,
+        }
+    }
 }
 
 impl Deref for GreenPoolLease {
@@ -5612,10 +5835,6 @@ struct GreenPoolInner {
 }
 
 impl GreenPoolInner {
-    fn enqueue(&self, carrier: usize, slot_index: usize) -> Result<(), FiberError> {
-        self.enqueue_with_signal(carrier, slot_index, true)
-    }
-
     fn enqueue_with_signal(
         &self,
         carrier: usize,
@@ -5921,11 +6140,19 @@ impl GreenPoolInner {
 }
 
 /// Opaque public green-thread handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GreenHandleDriveMode {
+    CarrierPool,
+    CurrentThread,
+}
+
+/// Opaque public green-thread handle.
 #[derive(Debug)]
 pub struct GreenHandle<T = ()> {
     id: u64,
     slot_index: usize,
     inner: GreenPoolLease,
+    drive_mode: GreenHandleDriveMode,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -5970,9 +6197,21 @@ where
                 system_yield_now()?;
             }
         } else {
-            self.inner
-                .tasks
-                .wait_until_terminal(self.slot_index, self.id)?
+            match self.drive_mode {
+                GreenHandleDriveMode::CarrierPool => self
+                    .inner
+                    .tasks
+                    .wait_until_terminal(self.slot_index, self.id)?,
+                GreenHandleDriveMode::CurrentThread => loop {
+                    let state = self.inner.tasks.state(self.slot_index, self.id)?;
+                    if is_terminal_task_state(state) {
+                        break state;
+                    }
+                    if !drive_current_pool_once(&self.inner)? {
+                        return Err(FiberError::state_conflict());
+                    }
+                },
+            }
         };
 
         match state {
@@ -6010,6 +6249,7 @@ impl GreenHandle<()> {
             id: self.id,
             slot_index: self.slot_index,
             inner,
+            drive_mode: self.drive_mode,
             _marker: PhantomData,
         })
     }
@@ -6034,6 +6274,505 @@ struct SpawnReservation {
     carrier: usize,
     slot_index: usize,
     context: *mut (),
+}
+
+fn task_attributes_from_stack_bytes<const STACK_BYTES: usize>()
+-> Result<FiberTaskAttributes, FiberError> {
+    let stack_bytes = NonZeroUsize::new(STACK_BYTES).ok_or_else(FiberError::invalid)?;
+    FiberTaskAttributes::from_stack_bytes(stack_bytes, FiberTaskPriority::DEFAULT)
+}
+
+fn reserve_spawn_slot_for(
+    inner: &GreenPoolLease,
+    task: FiberTaskAttributes,
+) -> Result<SpawnReservation, FiberError> {
+    if task.yield_budget.is_some() && !inner.yield_budget_supported {
+        return Err(FiberError::unsupported());
+    }
+    if !inner.stacks.supports_task_class(task.stack_class) {
+        return Err(FiberError::unsupported());
+    }
+    loop {
+        let active = inner.active.load(Ordering::Acquire);
+        if active >= inner.stacks.total_capacity() {
+            return Err(FiberError::resource_exhausted());
+        }
+        if inner
+            .active
+            .compare_exchange(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            break;
+        }
+    }
+
+    let lease = match inner.stacks.acquire(task) {
+        Ok(lease) => lease,
+        Err(error) => {
+            inner.active.fetch_sub(1, Ordering::AcqRel);
+            return Err(error);
+        }
+    };
+
+    let id = inner.next_id.fetch_add(1, Ordering::AcqRel) as u64;
+    let carrier = inner.next_carrier.fetch_add(1, Ordering::AcqRel) % inner.carriers.len();
+    let slot_index = match inner.tasks.reserve_slot() {
+        Ok(slot_index) => slot_index,
+        Err(error) => {
+            let _ = inner.stacks.release(lease.pool_index, lease.slot_index);
+            inner.active.fetch_sub(1, Ordering::AcqRel);
+            return Err(error);
+        }
+    };
+
+    let context = match inner.tasks.slot_context(slot_index) {
+        Ok(context) => context,
+        Err(error) => {
+            let _ = inner.tasks.abandon(slot_index, id);
+            let _ = inner.stacks.release(lease.pool_index, lease.slot_index);
+            inner.active.fetch_sub(1, Ordering::AcqRel);
+            return Err(error);
+        }
+    };
+
+    Ok(SpawnReservation {
+        lease,
+        id,
+        carrier,
+        slot_index,
+        context,
+    })
+}
+
+fn cleanup_failed_spawn_for(inner: &GreenPoolLease, reservation: &SpawnReservation) {
+    let _ = inner.tasks.abandon(reservation.slot_index, reservation.id);
+    let _ = inner
+        .stacks
+        .release(reservation.lease.pool_index, reservation.lease.slot_index);
+    inner.active.fetch_sub(1, Ordering::AcqRel);
+}
+
+fn spawn_on_lease<F, T>(
+    inner: &GreenPoolLease,
+    task: FiberTaskAttributes,
+    job: F,
+    signal: bool,
+    drive_mode: GreenHandleDriveMode,
+) -> Result<GreenHandle<T>, FiberError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: 'static,
+{
+    if !InlineGreenResultStorage::supports::<T>() {
+        return Err(FiberError::unsupported());
+    }
+
+    let reservation = reserve_spawn_slot_for(inner, task)?;
+    let slot_addr = reservation.context as usize;
+    let wrapped = move || {
+        let output = generated_closure_task_root(job);
+        let slot = unsafe { &*(slot_addr as *const GreenTaskSlot) };
+        if let Ok(id) = slot.current_id()
+            && slot.store_output(id, output).is_err()
+        {
+            let _ = slot.set_state(id, GreenTaskState::Failed(FiberError::state_conflict()));
+        }
+    };
+
+    if let Err(error) = inner.tasks.assign_job(
+        reservation.slot_index,
+        reservation.id,
+        reservation.carrier,
+        reservation.lease,
+        task,
+        wrapped,
+    ) {
+        cleanup_failed_spawn_for(inner, &reservation);
+        return Err(error);
+    }
+
+    if let Err(error) = inner.stacks.attach_slot_identity(
+        reservation.lease.pool_index,
+        reservation.lease.slot_index,
+        reservation.id,
+        reservation.carrier,
+        inner.carriers[reservation.carrier].capacity_token(),
+    ) {
+        cleanup_failed_spawn_for(inner, &reservation);
+        return Err(error);
+    }
+
+    let fiber = match Fiber::new(
+        reservation.lease.stack,
+        green_task_entry,
+        reservation.context,
+    ) {
+        Ok(fiber) => fiber,
+        Err(error) => {
+            cleanup_failed_spawn_for(inner, &reservation);
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = inner
+        .tasks
+        .install_fiber(reservation.slot_index, reservation.id, fiber)
+    {
+        cleanup_failed_spawn_for(inner, &reservation);
+        return Err(error);
+    }
+
+    if let Err(error) =
+        inner.enqueue_with_signal(reservation.carrier, reservation.slot_index, signal)
+    {
+        cleanup_failed_spawn_for(inner, &reservation);
+        return Err(error);
+    }
+
+    Ok(GreenHandle {
+        id: reservation.id,
+        slot_index: reservation.slot_index,
+        inner: inner.try_clone()?,
+        drive_mode,
+        _marker: PhantomData,
+    })
+}
+
+fn drive_current_pool_once(inner: &GreenPoolLease) -> Result<bool, FiberError> {
+    let Some(slot_index) = dequeue_ready(inner, 0)? else {
+        return Ok(false);
+    };
+    run_ready_task(inner, 0, slot_index)?;
+    Ok(true)
+}
+
+/// Public current-thread fiber pool wrapper for manual same-thread driving.
+#[derive(Debug)]
+pub struct CurrentFiberPool {
+    inner: GreenPoolLease,
+}
+
+impl CurrentFiberPool {
+    /// Creates one manually-driven current-thread fiber pool with one carrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the backend cannot support same-thread fiber switching, or
+    /// when the configured stack backing cannot be realized.
+    pub fn new(config: &FiberPoolConfig<'_>) -> Result<Self, FiberError> {
+        let support = FiberSystem::new().support();
+        if !support.context.caps.contains(ContextCaps::MAKE)
+            || !support.context.caps.contains(ContextCaps::SWAP)
+        {
+            return Err(FiberError::unsupported());
+        }
+        if support.context.guard_required && config.guard_pages == 0 {
+            return Err(FiberError::invalid());
+        }
+        let task_capacity_per_carrier = config.task_capacity_per_carrier()?;
+        if config.growth_chunk == 0 || task_capacity_per_carrier == 0 {
+            return Err(FiberError::invalid());
+        }
+        if !config.uses_classes() && config.growth_chunk > config.max_fibers_per_carrier {
+            return Err(FiberError::invalid());
+        }
+        if matches!(config.scheduling, GreenScheduling::WorkStealing) {
+            return Err(FiberError::unsupported());
+        }
+        if config.classes.is_empty()
+            && matches!(config.stack_backing, FiberStackBacking::Fixed { .. })
+            && !matches!(config.growth, GreenGrowth::Fixed)
+        {
+            return Err(FiberError::unsupported());
+        }
+
+        let alignment = support.context.min_stack_alignment.max(16);
+        let stacks = FiberStackStore::new(config, alignment, support.context.stack_direction)?;
+        let task_capacity = stacks.total_capacity();
+        let (pool_metadata, tasks, carriers) = GreenPoolMetadata::new(
+            1,
+            task_capacity,
+            config.scheduling,
+            config.priority_age_cap,
+            false,
+        )?;
+
+        let inner = GreenPoolLease::new(
+            GreenPoolInner {
+                support,
+                scheduling: config.scheduling,
+                capacity_policy: config.capacity_policy,
+                yield_budget_supported: yield_budget_enforcement_supported(),
+                #[cfg(feature = "std")]
+                yield_budget_policy: config.yield_budget_policy,
+                shutdown: AtomicBool::new(false),
+                client_refs: AtomicUsize::new(1),
+                active: AtomicUsize::new(0),
+                next_id: AtomicUsize::new(1),
+                next_carrier: AtomicUsize::new(0),
+                carriers,
+                tasks,
+                stacks,
+                #[cfg(feature = "std")]
+                yield_budget_runtime: GreenYieldBudgetRuntime::new(1),
+            },
+            pool_metadata,
+        )?;
+        inner.tasks.initialize_owner(inner.as_ptr());
+        Ok(Self { inner })
+    }
+
+    /// Attempts to clone one current-thread pool handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the shared pool root cannot be retained honestly.
+    pub fn try_clone(&self) -> Result<Self, FiberError> {
+        let inner = self.inner.try_clone()?;
+        inner.client_refs.fetch_add(1, Ordering::AcqRel);
+        Ok(Self { inner })
+    }
+
+    /// Returns the number of active fibers currently admitted.
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        self.inner.active.load(Ordering::Acquire)
+    }
+
+    /// Returns whether this pool can honestly admit the requested task class.
+    #[must_use]
+    pub fn supports_task_class(&self, class: FiberStackClass) -> bool {
+        self.inner.stacks.supports_task_class(class)
+    }
+
+    /// Validates one explicit task-attribute bundle against this live pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested task class is not provisioned by the current pool.
+    pub fn validate_task_attributes(&self, task: FiberTaskAttributes) -> Result<(), FiberError> {
+        if task.yield_budget.is_some() && !self.inner.yield_budget_supported {
+            return Err(FiberError::unsupported());
+        }
+        self.supports_task_class(task.stack_class)
+            .then_some(())
+            .ok_or_else(FiberError::unsupported)
+    }
+
+    /// Validates one explicit fiber task against this live pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task's declared contract is not provisioned by this pool.
+    pub fn validate_explicit_task<T: ExplicitFiberTask>(&self) -> Result<(), FiberError> {
+        self.validate_task_attributes(T::task_attributes()?)
+    }
+
+    /// Validates one build-generated explicit task against this live pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when generated metadata is missing or the resolved class is unsupported.
+    #[cfg(not(feature = "critical-safe-generated-contracts"))]
+    pub fn validate_generated_task<T: GeneratedExplicitFiberTask>(&self) -> Result<(), FiberError> {
+        self.validate_task_attributes(T::task_attributes()?)
+    }
+
+    /// Validates one build-generated explicit task against this live pool through its compile-time
+    /// generated contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated contract is not provisioned by the current pool.
+    pub fn validate_generated_task_contract<T>(&self) -> Result<(), FiberError>
+    where
+        T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+    {
+        self.validate_task_attributes(
+            generated_explicit_task_contract_attributes::<T>()
+                .with_optional_yield_budget(T::YIELD_BUDGET),
+        )
+    }
+
+    /// Validates one build-generated explicit task against this live pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated contract is not provisioned by the current pool.
+    #[cfg(feature = "critical-safe-generated-contracts")]
+    pub fn validate_generated_task<T>(&self) -> Result<(), FiberError>
+    where
+        T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+    {
+        self.validate_task_attributes(
+            generated_explicit_task_contract_attributes::<T>()
+                .with_optional_yield_budget(T::YIELD_BUDGET),
+        )
+    }
+
+    /// Spawns one current-thread fiber job using build-generated metadata when available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the submitted closure cannot be admitted honestly.
+    pub fn spawn<F, T>(&self, job: F) -> Result<GreenHandle<T>, FiberError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: 'static,
+    {
+        let task = closure_spawn_task_attributes::<F>(self.inner.stacks.default_task_class()?);
+        self.spawn_with_attrs(task, job)
+    }
+
+    /// Spawns one current-thread fiber job with an explicit stack-byte contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the declared stack bytes cannot be mapped to a supported class.
+    pub fn spawn_with_stack<const STACK_BYTES: usize, F, T>(
+        &self,
+        job: F,
+    ) -> Result<GreenHandle<T>, FiberError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: 'static,
+    {
+        self.spawn_with_attrs(task_attributes_from_stack_bytes::<STACK_BYTES>()?, job)
+    }
+
+    /// Spawns one current-thread fiber using explicit task attributes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task cannot be admitted honestly.
+    pub fn spawn_with_attrs<F, T>(
+        &self,
+        task: FiberTaskAttributes,
+        job: F,
+    ) -> Result<GreenHandle<T>, FiberError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: 'static,
+    {
+        spawn_on_lease(
+            &self.inner,
+            task,
+            job,
+            false,
+            GreenHandleDriveMode::CurrentThread,
+        )
+    }
+
+    /// Spawns one explicit fiber task carrying compile-time stack metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task contract cannot be mapped or admitted honestly.
+    pub fn spawn_explicit<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
+    where
+        T: ExplicitFiberTask,
+    {
+        let attributes = T::task_attributes()?;
+        self.validate_task_attributes(attributes)?;
+        self.spawn_with_attrs(attributes, move || task.run())
+    }
+
+    /// Spawns one explicit fiber task using build-generated stack metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when generated metadata is missing or the task cannot be admitted.
+    #[cfg(not(feature = "critical-safe-generated-contracts"))]
+    pub fn spawn_generated<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
+    where
+        T: GeneratedExplicitFiberTask,
+    {
+        let attributes = T::task_attributes()?;
+        self.validate_task_attributes(attributes)?;
+        self.spawn_with_attrs(attributes, move || task.run())
+    }
+
+    /// Spawns one explicit fiber task using a compile-time generated contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated contract is not provisioned by the current pool.
+    #[cfg(feature = "critical-safe-generated-contracts")]
+    pub fn spawn_generated<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
+    where
+        T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+    {
+        let attributes = generated_explicit_task_contract_attributes::<T>()
+            .with_optional_yield_budget(T::YIELD_BUDGET);
+        self.validate_task_attributes(attributes)?;
+        self.spawn_with_attrs(attributes, move || task.run())
+    }
+
+    /// Spawns one explicit fiber task using a compile-time generated contract directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated contract is not provisioned by the current pool.
+    pub fn spawn_generated_contract<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
+    where
+        T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+    {
+        let attributes = generated_explicit_task_contract_attributes::<T>()
+            .with_optional_yield_budget(T::YIELD_BUDGET);
+        self.validate_task_attributes(attributes)?;
+        self.spawn_with_attrs(attributes, move || task.run())
+    }
+
+    /// Drives at most one ready task segment on the current thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the current pool cannot resume the next ready fiber honestly.
+    pub fn drive_once(&self) -> Result<bool, FiberError> {
+        drive_current_pool_once(&self.inner)
+    }
+
+    /// Drives ready work until the current-thread pool reaches an idle state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when one resumed task fails dishonestly.
+    pub fn run_until_idle(&self) -> Result<usize, FiberError> {
+        let mut steps = 0usize;
+        while self.drive_once()? {
+            steps = steps.saturating_add(1);
+        }
+        Ok(steps)
+    }
+
+    /// Returns an approximate stack-telemetry snapshot for this current-thread pool.
+    #[must_use]
+    pub fn stack_stats(&self) -> Option<FiberStackStats> {
+        self.inner.stacks.stack_stats()
+    }
+
+    /// Returns the exact live memory footprint of this current-thread pool.
+    #[must_use]
+    pub fn memory_footprint(&self) -> FiberPoolMemoryFootprint {
+        self.inner.memory_footprint()
+    }
+
+    /// Requests shutdown of the current-thread pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the wakeup path cannot be signaled honestly.
+    pub fn shutdown(&self) -> Result<(), FiberError> {
+        self.inner.request_shutdown()
+    }
+}
+
+impl Drop for CurrentFiberPool {
+    fn drop(&mut self) {
+        if self.inner.client_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let _ = self.inner.request_shutdown();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -6288,86 +7027,10 @@ impl GreenPool {
         self.inner.stacks.stack_stats()
     }
 
-    fn reserve_spawn_slot(
-        &self,
-        task: FiberTaskAttributes,
-    ) -> Result<SpawnReservation, FiberError> {
-        if task.yield_budget.is_some() && !self.inner.yield_budget_supported {
-            return Err(FiberError::unsupported());
-        }
-        if !self.inner.stacks.supports_task_class(task.stack_class) {
-            return Err(FiberError::unsupported());
-        }
-        loop {
-            let active = self.inner.active.load(Ordering::Acquire);
-            if active >= self.inner.stacks.total_capacity() {
-                return Err(FiberError::resource_exhausted());
-            }
-            if self
-                .inner
-                .active
-                .compare_exchange(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                break;
-            }
-        }
-
-        let lease = match self.inner.stacks.acquire(task) {
-            Ok(lease) => lease,
-            Err(error) => {
-                self.inner.active.fetch_sub(1, Ordering::AcqRel);
-                return Err(error);
-            }
-        };
-
-        let id = self.inner.next_id.fetch_add(1, Ordering::AcqRel) as u64;
-        let carrier =
-            self.inner.next_carrier.fetch_add(1, Ordering::AcqRel) % self.inner.carriers.len();
-        let slot_index = match self.inner.tasks.reserve_slot() {
-            Ok(slot_index) => slot_index,
-            Err(error) => {
-                let _ = self
-                    .inner
-                    .stacks
-                    .release(lease.pool_index, lease.slot_index);
-                self.inner.active.fetch_sub(1, Ordering::AcqRel);
-                return Err(error);
-            }
-        };
-
-        let context = match self.inner.tasks.slot_context(slot_index) {
-            Ok(context) => context,
-            Err(error) => {
-                let _ = self.inner.tasks.abandon(slot_index, id);
-                let _ = self
-                    .inner
-                    .stacks
-                    .release(lease.pool_index, lease.slot_index);
-                self.inner.active.fetch_sub(1, Ordering::AcqRel);
-                return Err(error);
-            }
-        };
-
-        Ok(SpawnReservation {
-            lease,
-            id,
-            carrier,
-            slot_index,
-            context,
-        })
-    }
-
-    fn cleanup_failed_spawn(&self, reservation: &SpawnReservation) {
-        let _ = self
-            .inner
-            .tasks
-            .abandon(reservation.slot_index, reservation.id);
-        let _ = self
-            .inner
-            .stacks
-            .release(reservation.lease.pool_index, reservation.lease.slot_index);
-        self.inner.active.fetch_sub(1, Ordering::AcqRel);
+    /// Returns the exact live memory footprint of this carrier-backed pool.
+    #[must_use]
+    pub fn memory_footprint(&self) -> FiberPoolMemoryFootprint {
+        self.inner.memory_footprint()
     }
 
     /// Spawns one green-thread job onto the carrier-backed scheduler.
@@ -6382,8 +7045,24 @@ impl GreenPool {
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
     {
-        let task = FiberTaskAttributes::new(self.inner.stacks.default_task_class()?);
+        let task = closure_spawn_task_attributes::<F>(self.inner.stacks.default_task_class()?);
         self.spawn_with_attrs(task, job)
+    }
+
+    /// Spawns one green-thread job with an explicit stack-byte contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the declared stack bytes cannot be mapped to a supported class.
+    pub fn spawn_with_stack<const STACK_BYTES: usize, F, T>(
+        &self,
+        job: F,
+    ) -> Result<GreenHandle<T>, FiberError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: 'static,
+    {
+        self.spawn_with_attrs(task_attributes_from_stack_bytes::<STACK_BYTES>()?, job)
     }
 
     /// Spawns one explicit fiber task carrying compile-time stack metadata.
@@ -6479,80 +7158,13 @@ impl GreenPool {
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
     {
-        if !InlineGreenResultStorage::supports::<T>() {
-            return Err(FiberError::unsupported());
-        }
-
-        let reservation = self.reserve_spawn_slot(task)?;
-        let slot_addr = reservation.context as usize;
-        let wrapped = move || {
-            let output = job();
-            let slot = unsafe { &*(slot_addr as *const GreenTaskSlot) };
-            if let Ok(id) = slot.current_id()
-                && slot.store_output(id, output).is_err()
-            {
-                let _ = slot.set_state(id, GreenTaskState::Failed(FiberError::state_conflict()));
-            }
-        };
-
-        if let Err(error) = self.inner.tasks.assign_job(
-            reservation.slot_index,
-            reservation.id,
-            reservation.carrier,
-            reservation.lease,
+        spawn_on_lease(
+            &self.inner,
             task,
-            wrapped,
-        ) {
-            self.cleanup_failed_spawn(&reservation);
-            return Err(error);
-        }
-
-        if let Err(error) = self.inner.stacks.attach_slot_identity(
-            reservation.lease.pool_index,
-            reservation.lease.slot_index,
-            reservation.id,
-            reservation.carrier,
-            self.inner.carriers[reservation.carrier].capacity_token(),
-        ) {
-            self.cleanup_failed_spawn(&reservation);
-            return Err(error);
-        }
-
-        let fiber = match Fiber::new(
-            reservation.lease.stack,
-            green_task_entry,
-            reservation.context,
-        ) {
-            Ok(fiber) => fiber,
-            Err(error) => {
-                self.cleanup_failed_spawn(&reservation);
-                return Err(error);
-            }
-        };
-
-        if let Err(error) =
-            self.inner
-                .tasks
-                .install_fiber(reservation.slot_index, reservation.id, fiber)
-        {
-            self.cleanup_failed_spawn(&reservation);
-            return Err(error);
-        }
-
-        if let Err(error) = self
-            .inner
-            .enqueue(reservation.carrier, reservation.slot_index)
-        {
-            self.cleanup_failed_spawn(&reservation);
-            return Err(error);
-        }
-
-        Ok(GreenHandle {
-            id: reservation.id,
-            slot_index: reservation.slot_index,
-            inner: self.inner.try_clone()?,
-            _marker: PhantomData,
-        })
+            job,
+            true,
+            GreenHandleDriveMode::CarrierPool,
+        )
     }
 
     /// Requests scheduler shutdown and wakes every carrier loop.
@@ -8598,6 +9210,137 @@ mod tests {
         let first = (xorshift64(initial_steal_seed(0)) % 7) + 1;
         let second = (xorshift64(initial_steal_seed(1)) % 7) + 1;
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn current_fiber_pool_join_drives_yielding_closure_to_completion() {
+        let fibers = CurrentFiberPool::new(&FiberPoolConfig::new())
+            .expect("current fiber pool should build");
+        let stages = Arc::new(AtomicUsize::new(0));
+
+        let task = fibers
+            .spawn({
+                let stages = Arc::clone(&stages);
+                move || -> Result<u32, FiberError> {
+                    stages.fetch_add(1, Ordering::AcqRel);
+                    yield_now()?;
+                    stages.fetch_add(1, Ordering::AcqRel);
+                    Ok(42)
+                }
+            })
+            .expect("yielding task should spawn");
+
+        assert_eq!(
+            task.join()
+                .expect("current-thread join should drive the pool")
+                .expect("task should complete without runtime failure"),
+            42
+        );
+        assert_eq!(stages.load(Ordering::Acquire), 2);
+
+        fibers
+            .shutdown()
+            .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn current_fiber_pool_run_until_idle_drives_multiple_ready_segments() {
+        let fibers = CurrentFiberPool::new(&FiberPoolConfig::new())
+            .expect("current fiber pool should build");
+        let total = Arc::new(AtomicUsize::new(0));
+
+        let first = fibers
+            .spawn({
+                let total = Arc::clone(&total);
+                move || {
+                    total.fetch_add(1, Ordering::AcqRel);
+                    yield_now().expect("first task should yield cleanly");
+                    total.fetch_add(10, Ordering::AcqRel);
+                }
+            })
+            .expect("first current-thread task should spawn");
+        let second = fibers
+            .spawn({
+                let total = Arc::clone(&total);
+                move || {
+                    total.fetch_add(100, Ordering::AcqRel);
+                }
+            })
+            .expect("second current-thread task should spawn");
+
+        assert_eq!(
+            fibers
+                .run_until_idle()
+                .expect("current-thread pool should drive until idle"),
+            3
+        );
+        assert_eq!(total.load(Ordering::Acquire), 111);
+        first
+            .join()
+            .expect("first task should already be complete after run_until_idle");
+        second
+            .join()
+            .expect("second task should already be complete after run_until_idle");
+
+        fibers
+            .shutdown()
+            .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn current_fiber_pool_spawns_generated_contract_tasks() {
+        let classes = [FiberStackClassConfig::new(
+            FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class"))
+                .expect("valid class"),
+            1,
+        )
+        .expect("valid class config")];
+        let fibers = CurrentFiberPool::new(
+            &FiberPoolConfig::classed(&classes).expect("classed config should build"),
+        )
+        .expect("current fiber pool should build");
+
+        fibers
+            .spawn_generated_contract(SupportedGeneratedContractTask)
+            .expect("generated-contract task should spawn")
+            .join()
+            .expect("generated-contract task should complete");
+
+        fibers
+            .shutdown()
+            .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn current_fiber_pool_spawn_with_stack_admits_closure_override() {
+        let classes = [FiberStackClassConfig::new(
+            FiberStackClass::new(NonZeroUsize::new(4 * 1024).expect("non-zero class"))
+                .expect("valid class"),
+            1,
+        )
+        .expect("valid class config")];
+        let fibers = CurrentFiberPool::new(
+            &FiberPoolConfig::classed(&classes).expect("classed config should build"),
+        )
+        .expect("current fiber pool should build");
+
+        assert_eq!(
+            fibers
+                .spawn_with_stack::<4096, _, _>(|| 7_u32)
+                .expect("stack-constrained closure should spawn")
+                .join()
+                .expect("stack-constrained closure should complete"),
+            7
+        );
+
+        let error = fibers
+            .spawn_with_stack::<8192, _, _>(|| ())
+            .expect_err("unsupported stack class should be rejected");
+        assert_eq!(error.kind(), FiberError::unsupported().kind());
+
+        fibers
+            .shutdown()
+            .expect("current fiber pool should shut down cleanly");
     }
 }
 

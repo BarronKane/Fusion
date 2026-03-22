@@ -7,5 +7,7 @@ memcpy = 256
 memmove = 256
 memcmp = 128
 bcmp = 128
+core::sync::atomic::atomic_* = 128
+_Unwind_Resume = 512
 core::panicking::panic_* = 512
 rust_begin_unwind = 1024

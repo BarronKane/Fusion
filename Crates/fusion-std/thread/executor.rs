@@ -654,6 +654,8 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    // SAFETY: executor futures live inside arena-backed task slots whose addresses remain stable
+    // for the lifetime of the live slot lease; the arena never relocates allocations.
     let future = unsafe { Pin::new_unchecked(&mut *ptr.cast::<F>()) };
 
     #[cfg(feature = "std")]

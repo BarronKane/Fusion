@@ -54,6 +54,10 @@ pub enum ArenaInitError<E> {
 }
 
 /// Typed contiguous slice backed by arena-owned memory.
+///
+/// The described element range has a stable address for the lifetime of this wrapper. A
+/// `BoundedArena` never relocates previously allocated regions; it only advances one cursor and,
+/// for mortal arenas, refuses `reset()` while any live typed slice still exists.
 pub struct ArenaSlice<T> {
     control: ControlLease<ArenaControl>,
     ptr: NonNull<T>,
@@ -150,6 +154,13 @@ impl<T> Drop for ArenaSlice<T> {
 }
 
 /// Bounded lifetime allocator intended for bulk-free or reset-driven use.
+///
+/// Allocation from a `BoundedArena` is monotonic and non-relocating: each successful request
+/// carves a new range from the reserved extent, and later requests never move earlier ones.
+/// That makes typed results such as [`ArenaSlice`] suitable backing for pin-sensitive storage as
+/// long as the returned lease remains live. Mortal arenas additionally refuse [`reset`](Self::reset)
+/// while any typed slice lease still exists, so a live lease continues to pin its backing bytes in
+/// place instead of letting the arena reuse them behind its back.
 pub struct BoundedArena<L: LifetimePolicy = Mortal> {
     control: ManuallyDrop<ControlLease<ArenaControl>>,
     _lifetime: PhantomData<L>,

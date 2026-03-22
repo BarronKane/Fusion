@@ -30,6 +30,14 @@ name = "fusion_std_fiber_task_roots"
 path = "bin/fiber_task_roots.rs"
 
 [[bin]]
+name = "fusion_std_fiber_task_closure_fixture"
+path = "bin/fiber_task_closure_fixture.rs"
+
+[[bin]]
+name = "fusion_std_fiber_metrics_probe"
+path = "bin/fiber_metrics_probe.rs"
+
+[[bin]]
 name = "fusion_std_pico_tool"
 path = "bin/fusion_std_pico_tool.rs"
 
@@ -52,6 +60,9 @@ object = { version = "0.36.7", default-features = false, features = ["read"] }
 
 [dev-dependencies]
 libc = "0.2"
+
+[target.'cfg(not(target_os = "none"))'.dev-dependencies]
+tokio = { version = "1.44", features = ["rt", "rt-multi-thread"] }
 
 [lints]
 workspace = true
