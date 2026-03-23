@@ -58,3 +58,6 @@ nursery = "warn"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }
+
+[profile.bench]
+debug = 2

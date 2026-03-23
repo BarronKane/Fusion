@@ -38,6 +38,10 @@ name = "fusion_std_fiber_metrics_probe"
 path = "bin/fiber_metrics_probe.rs"
 
 [[bin]]
+name = "fusion_std_fiber_lifecycle_probe"
+path = "bin/fiber_lifecycle_probe.rs"
+
+[[bin]]
 name = "fusion_std_pico_tool"
 path = "bin/fusion_std_pico_tool.rs"
 

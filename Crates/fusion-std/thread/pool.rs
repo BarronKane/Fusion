@@ -2,8 +2,30 @@
 
 use core::fmt;
 use core::mem::{MaybeUninit, align_of, size_of};
+use core::ops::Deref;
+use core::ptr::{self, NonNull};
 
-use crate::sync::{Mutex as SyncMutex, SyncError, SyncErrorKind};
+use crate::sync::{
+    Mutex as SyncMutex,
+    OnceLock,
+    SharedHeader,
+    SharedRelease,
+    SyncError,
+    SyncErrorKind,
+};
+use fusion_pal::sys::mem::{
+    Backing,
+    CachePolicy,
+    MapFlags,
+    MapRequest,
+    MemBase,
+    MemMap,
+    Placement,
+    Protect,
+    Region,
+    RegionAttrs,
+    system_mem,
+};
 use fusion_sys::alloc::{AllocRequest, AllocationStrategy, Allocator, ControlLease, Slab};
 use fusion_sys::thread::{
     SystemPoolPlacement,
@@ -192,6 +214,11 @@ pub type ThreadPoolError = SystemThreadPoolError;
 const THREAD_POOL_JOB_INLINE_BYTES: usize = 768;
 const THREAD_POOL_JOB_SLOT_BYTES: usize = 1024;
 const THREAD_POOL_JOB_SLOT_COUNT: usize = 256;
+const THREAD_POOL_SHARED_REGION_CACHE_SLOTS: usize = 4;
+
+static THREAD_POOL_SHARED_REGION_CACHE: OnceLock<
+    SyncMutex<[Option<Region>; THREAD_POOL_SHARED_REGION_CACHE_SLOTS]>,
+> = OnceLock::new();
 
 #[derive(Debug)]
 struct ThreadPoolJobStore {
@@ -201,7 +228,142 @@ struct ThreadPoolJobStore {
 #[derive(Debug)]
 struct ThreadPoolShared {
     inner: SyncMutex<Option<SystemThreadPool>>,
-    jobs: ControlLease<ThreadPoolJobStore>,
+    jobs: SyncMutex<Option<ControlLease<ThreadPoolJobStore>>>,
+}
+
+#[repr(C)]
+struct ThreadPoolSharedBlock {
+    header: SharedHeader,
+    region: Region,
+    shared: ThreadPoolShared,
+}
+
+struct ThreadPoolSharedLease {
+    ptr: NonNull<ThreadPoolSharedBlock>,
+}
+
+unsafe impl Send for ThreadPoolSharedLease {}
+unsafe impl Sync for ThreadPoolSharedLease {}
+
+impl fmt::Debug for ThreadPoolSharedLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThreadPoolSharedLease")
+            .field("ptr", &self.ptr)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ThreadPoolSharedLease {
+    fn new(shared: ThreadPoolShared) -> Result<Self, ThreadPoolError> {
+        let memory = system_mem();
+        let page = memory.page_info().alloc_granule.get();
+        let len = thread_pool_align_up(size_of::<ThreadPoolSharedBlock>(), page)?;
+        let region = if let Some(region) = try_take_cached_thread_pool_shared_region(len)? {
+            region
+        } else {
+            unsafe {
+                memory.map(&MapRequest {
+                    len,
+                    align: page.max(align_of::<ThreadPoolSharedBlock>()),
+                    protect: Protect::READ | Protect::WRITE,
+                    flags: MapFlags::PRIVATE,
+                    attrs: RegionAttrs::VIRTUAL_ONLY,
+                    cache: CachePolicy::Default,
+                    placement: Placement::Anywhere,
+                    backing: Backing::Anonymous,
+                })
+            }
+            .map_err(thread_pool_error_from_mem)?
+        };
+
+        let ptr = NonNull::new(region.base.cast::<ThreadPoolSharedBlock>())
+            .ok_or_else(ThreadPoolError::invalid)?;
+        unsafe {
+            ptr.as_ptr().write(ThreadPoolSharedBlock {
+                header: SharedHeader::new(),
+                region,
+                shared,
+            });
+        }
+        Ok(Self { ptr })
+    }
+
+    fn try_clone(&self) -> Result<Self, ThreadPoolError> {
+        self.block()
+            .header
+            .try_retain()
+            .map_err(thread_pool_error_from_sync)?;
+        Ok(Self { ptr: self.ptr })
+    }
+
+    const fn block(&self) -> &ThreadPoolSharedBlock {
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
+impl Deref for ThreadPoolSharedLease {
+    type Target = ThreadPoolShared;
+
+    fn deref(&self) -> &Self::Target {
+        &self.block().shared
+    }
+}
+
+impl Drop for ThreadPoolSharedLease {
+    fn drop(&mut self) {
+        let Ok(release) = self.block().header.release() else {
+            return;
+        };
+        if release != SharedRelease::Last {
+            return;
+        }
+
+        let block = self.ptr.as_ptr();
+        unsafe {
+            ptr::drop_in_place(core::ptr::addr_of_mut!((*block).shared));
+            let region = (*block).region;
+            if !cache_thread_pool_shared_region(region).unwrap_or(false) {
+                let _ = system_mem().unmap(region);
+            }
+        }
+    }
+}
+
+fn thread_pool_shared_region_cache() -> Result<
+    &'static SyncMutex<[Option<Region>; THREAD_POOL_SHARED_REGION_CACHE_SLOTS]>,
+    ThreadPoolError,
+> {
+    THREAD_POOL_SHARED_REGION_CACHE
+        .get_or_init(|| SyncMutex::new([None; THREAD_POOL_SHARED_REGION_CACHE_SLOTS]))
+        .map_err(thread_pool_error_from_sync)
+}
+
+fn try_take_cached_thread_pool_shared_region(
+    len: usize,
+) -> Result<Option<Region>, ThreadPoolError> {
+    let cache = thread_pool_shared_region_cache()?;
+    let mut guard = cache.lock().map_err(thread_pool_error_from_sync)?;
+    for slot in &mut *guard {
+        if let Some(region) = *slot
+            && region.len == len
+        {
+            *slot = None;
+            return Ok(Some(region));
+        }
+    }
+    Ok(None)
+}
+
+fn cache_thread_pool_shared_region(region: Region) -> Result<bool, ThreadPoolError> {
+    let cache = thread_pool_shared_region_cache()?;
+    let mut guard = cache.lock().map_err(thread_pool_error_from_sync)?;
+    for slot in &mut *guard {
+        if slot.is_none() {
+            *slot = Some(region);
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[repr(C, align(64))]
@@ -385,7 +547,7 @@ impl ThreadJobRecord {
 /// Public carrier thread-pool wrapper.
 #[derive(Debug)]
 pub struct ThreadPool {
-    shared: ControlLease<ThreadPoolShared>,
+    shared: ThreadPoolSharedLease,
 }
 
 impl ThreadPool {
@@ -402,45 +564,10 @@ impl ThreadPool {
     /// Returns any honest lower-level configuration or support failure.
     pub fn new(config: &ThreadPoolConfig<'_>) -> Result<Self, ThreadPoolError> {
         let inner = SystemThreadPool::new(ThreadSystem::new(), &config.to_system())?;
-        let slab_bytes = THREAD_POOL_JOB_SLOT_BYTES
-            .checked_mul(THREAD_POOL_JOB_SLOT_COUNT)
-            .ok_or_else(ThreadPoolError::resource_exhausted)?;
-        let jobs_control_bytes = ControlLease::<ThreadPoolJobStore>::extent_request()
-            .map_err(thread_pool_error_from_alloc)?
-            .len;
-        let shared_control_bytes = ControlLease::<ThreadPoolShared>::extent_request()
-            .map_err(thread_pool_error_from_alloc)?
-            .len;
-        let allocator = Allocator::<1, 1>::system_default_with_capacity(
-            slab_bytes
-                .checked_add(jobs_control_bytes)
-                .and_then(|total| total.checked_add(shared_control_bytes))
-                .ok_or_else(ThreadPoolError::resource_exhausted)?,
-        )
-        .map_err(thread_pool_error_from_alloc)?;
-        let default_domain = allocator
-            .default_domain()
-            .ok_or_else(ThreadPoolError::state_conflict)?;
-        let jobs = allocator
-            .slab::<THREAD_POOL_JOB_SLOT_BYTES, THREAD_POOL_JOB_SLOT_COUNT>(default_domain)
-            .map_err(thread_pool_error_from_alloc)?;
-        let jobs = allocator
-            .control(
-                default_domain,
-                ThreadPoolJobStore {
-                    jobs: SyncMutex::new(jobs),
-                },
-            )
-            .map_err(thread_pool_error_from_alloc)?;
-        let shared = allocator
-            .control(
-                default_domain,
-                ThreadPoolShared {
-                    inner: SyncMutex::new(Some(inner)),
-                    jobs,
-                },
-            )
-            .map_err(thread_pool_error_from_alloc)?;
+        let shared = ThreadPoolSharedLease::new(ThreadPoolShared {
+            inner: SyncMutex::new(Some(inner)),
+            jobs: SyncMutex::new(None),
+        })?;
         Ok(Self { shared })
     }
 
@@ -451,10 +578,7 @@ impl ThreadPool {
     /// Returns an error when the shared pool state cannot be retained honestly.
     pub fn try_clone(&self) -> Result<Self, ThreadPoolError> {
         Ok(Self {
-            shared: self
-                .shared
-                .try_clone()
-                .map_err(thread_pool_error_from_alloc)?,
+            shared: self.shared.try_clone()?,
         })
     }
 
@@ -530,14 +654,10 @@ impl ThreadPool {
 
         let mut storage = InlineThreadJobStorage::empty();
         storage.store(work)?;
+        let jobs = self.ensure_job_store()?;
 
         let allocation = {
-            let slab = self
-                .shared
-                .jobs
-                .jobs
-                .lock()
-                .map_err(thread_pool_error_from_sync)?;
+            let slab = jobs.jobs.lock().map_err(thread_pool_error_from_sync)?;
             slab.allocate(&AllocRequest {
                 len: size_of::<ThreadJobRecord>(),
                 align: align_of::<ThreadJobRecord>(),
@@ -546,19 +666,6 @@ impl ThreadPool {
             .map_err(thread_pool_error_from_alloc)?
         };
         let context = allocation.ptr.cast::<ThreadJobRecord>();
-        let jobs = match self.shared.jobs.try_clone() {
-            Ok(jobs) => jobs,
-            Err(error) => {
-                self.shared
-                    .jobs
-                    .jobs
-                    .lock()
-                    .map_err(thread_pool_error_from_sync)?
-                    .deallocate(allocation)
-                    .map_err(thread_pool_error_from_alloc)?;
-                return Err(thread_pool_error_from_alloc(error));
-            }
-        };
         let record = ThreadJobRecord::new(jobs, allocation, storage);
         // SAFETY: the slab allocation reserves enough space for one `ThreadJobRecord` and is
         // uniquely owned until the worker consumes and recycles it.
@@ -578,6 +685,47 @@ impl ThreadPool {
                 Err(error)
             }
         }
+    }
+
+    fn ensure_job_store(&self) -> Result<ControlLease<ThreadPoolJobStore>, ThreadPoolError> {
+        let mut guard = self
+            .shared
+            .jobs
+            .lock()
+            .map_err(thread_pool_error_from_sync)?;
+        if let Some(store) = guard.as_ref() {
+            return store.try_clone().map_err(thread_pool_error_from_alloc);
+        }
+
+        let slab_bytes = THREAD_POOL_JOB_SLOT_BYTES
+            .checked_mul(THREAD_POOL_JOB_SLOT_COUNT)
+            .ok_or_else(ThreadPoolError::resource_exhausted)?;
+        let jobs_control_bytes = ControlLease::<ThreadPoolJobStore>::extent_request()
+            .map_err(thread_pool_error_from_alloc)?
+            .len;
+        let allocator = Allocator::<1, 1>::system_default_with_capacity(
+            slab_bytes
+                .checked_add(jobs_control_bytes)
+                .ok_or_else(ThreadPoolError::resource_exhausted)?,
+        )
+        .map_err(thread_pool_error_from_alloc)?;
+        let default_domain = allocator
+            .default_domain()
+            .ok_or_else(ThreadPoolError::state_conflict)?;
+        let jobs = allocator
+            .slab::<THREAD_POOL_JOB_SLOT_BYTES, THREAD_POOL_JOB_SLOT_COUNT>(default_domain)
+            .map_err(thread_pool_error_from_alloc)?;
+        let jobs = allocator
+            .control(
+                default_domain,
+                ThreadPoolJobStore {
+                    jobs: SyncMutex::new(jobs),
+                },
+            )
+            .map_err(thread_pool_error_from_alloc)?;
+        let clone = jobs.try_clone().map_err(thread_pool_error_from_alloc)?;
+        *guard = Some(jobs);
+        Ok(clone)
     }
 
     /// Shuts the carrier pool down according to its configured shutdown policy.
@@ -611,6 +759,36 @@ fn run_inline_job_contained(job: InlineThreadJobRunner) {
     #[cfg(not(feature = "std"))]
     {
         job.run();
+    }
+}
+
+const fn thread_pool_align_up(value: usize, align: usize) -> Result<usize, ThreadPoolError> {
+    if align == 0 || !align.is_power_of_two() {
+        return Err(ThreadPoolError::invalid());
+    }
+    let mask = match align.checked_sub(1) {
+        Some(mask) => mask,
+        None => return Err(ThreadPoolError::invalid()),
+    };
+    let sum = match value.checked_add(mask) {
+        Some(sum) => sum,
+        None => return Err(ThreadPoolError::resource_exhausted()),
+    };
+    Ok(sum & !mask)
+}
+
+const fn thread_pool_error_from_mem(error: fusion_pal::sys::mem::MemError) -> ThreadPoolError {
+    match error.kind {
+        fusion_pal::sys::mem::MemErrorKind::Unsupported => ThreadPoolError::unsupported(),
+        fusion_pal::sys::mem::MemErrorKind::InvalidInput
+        | fusion_pal::sys::mem::MemErrorKind::InvalidAddress
+        | fusion_pal::sys::mem::MemErrorKind::Misaligned
+        | fusion_pal::sys::mem::MemErrorKind::OutOfBounds
+        | fusion_pal::sys::mem::MemErrorKind::PermissionDenied
+        | fusion_pal::sys::mem::MemErrorKind::Overflow => ThreadPoolError::invalid(),
+        fusion_pal::sys::mem::MemErrorKind::OutOfMemory => ThreadPoolError::resource_exhausted(),
+        fusion_pal::sys::mem::MemErrorKind::Busy
+        | fusion_pal::sys::mem::MemErrorKind::Platform(_) => ThreadPoolError::state_conflict(),
     }
 }
 

@@ -287,7 +287,10 @@ impl PoolSlot {
     }
 
     fn reset(&mut self) {
+        let work_ready = self.work_ready.take();
         *self = Self::new();
+        self.work_ready = work_ready;
+        self.drain_work_ready();
     }
 
     const fn enqueue(&mut self, item: SystemWorkItem) -> Result<(), ThreadError> {
@@ -322,6 +325,13 @@ impl PoolSlot {
                 unsafe { cancel(item.context) };
             }
         }
+    }
+
+    fn drain_work_ready(&self) {
+        let Some(semaphore) = self.work_ready.as_ref() else {
+            return;
+        };
+        while semaphore.try_acquire().unwrap_or(false) {}
     }
 }
 
@@ -590,7 +600,11 @@ fn allocate_pool_slot(
 
     let semaphore_max = u32::try_from(MAX_POOL_QUEUE_ITEMS + MAX_POOL_WORKERS)
         .map_err(|_| ThreadError::resource_exhausted())?;
-    slot.work_ready = Some(Semaphore::new(0, semaphore_max).map_err(thread_error_from_sync)?);
+    if slot.work_ready.is_none() {
+        slot.work_ready = Some(Semaphore::new(0, semaphore_max).map_err(thread_error_from_sync)?);
+    } else {
+        slot.drain_work_ready();
+    }
     slot.allocated = true;
     slot.accepting = true;
     slot.shutting_down = false;

@@ -2014,7 +2014,7 @@ struct AsyncTaskSlot {
     state: AtomicU8,
     error: ExecutorCell<Option<ExecutorError>>,
     join_waker: ExecutorCell<Option<Waker>>,
-    completed: Option<Semaphore>,
+    completed: ExecutorCell<Option<Semaphore>>,
     scheduled: AtomicBool,
     handle_live: AtomicBool,
     waker_refs: AtomicUsize,
@@ -2043,11 +2043,7 @@ impl AsyncTaskSlot {
             state: AtomicU8::new(SLOT_EMPTY),
             error: ExecutorCell::new(fast, None),
             join_waker: ExecutorCell::new(fast, None),
-            completed: if fast {
-                None
-            } else {
-                Some(Semaphore::new(0, 1).map_err(executor_error_from_sync)?)
-            },
+            completed: ExecutorCell::new(fast, None),
             scheduled: AtomicBool::new(false),
             handle_live: AtomicBool::new(false),
             waker_refs: AtomicUsize::new(0),
@@ -2170,9 +2166,7 @@ impl AsyncTaskSlot {
         self.error.with(|error| *error = None)?;
         self.scheduled.store(false, Ordering::Release);
         self.wake_join_waker()?;
-        if let Some(completed) = &self.completed {
-            completed.release(1).map_err(executor_error_from_sync)?;
-        }
+        self.signal_completed()?;
         Ok(())
     }
 
@@ -2198,9 +2192,7 @@ impl AsyncTaskSlot {
         self.error.with(|slot| *slot = Some(error))?;
         self.scheduled.store(false, Ordering::Release);
         self.wake_join_waker()?;
-        if let Some(completed) = &self.completed {
-            completed.release(1).map_err(executor_error_from_sync)?;
-        }
+        self.signal_completed()?;
         Ok(())
     }
 
@@ -2297,11 +2289,50 @@ impl AsyncTaskSlot {
     }
 
     fn drain_completed(&self) -> Result<(), ExecutorError> {
-        let Some(completed) = &self.completed else {
-            return Ok(());
-        };
-        while completed.try_acquire().map_err(executor_error_from_sync)? {}
-        Ok(())
+        self.completed.with_ref(|completed| {
+            let Some(completed) = completed.as_ref() else {
+                return Ok(());
+            };
+            while completed.try_acquire().map_err(executor_error_from_sync)? {}
+            Ok(())
+        })?
+    }
+
+    fn ensure_completed_semaphore(&self) -> Result<(), ExecutorError> {
+        self.completed.with(|completed| {
+            if completed.is_none() {
+                let semaphore = Semaphore::new(0, 1).map_err(executor_error_from_sync)?;
+                if matches!(self.state(), SLOT_READY | SLOT_FAILED) {
+                    semaphore.release(1).map_err(executor_error_from_sync)?;
+                }
+                *completed = Some(semaphore);
+            }
+            Ok::<(), ExecutorError>(())
+        })?
+    }
+
+    fn signal_completed(&self) -> Result<(), ExecutorError> {
+        self.completed.with_ref(|completed| {
+            if let Some(completed) = completed.as_ref() {
+                completed.release(1).map_err(executor_error_from_sync)?;
+            }
+            Ok(())
+        })?
+    }
+
+    fn wait_completed(&self) -> Result<(), ExecutorError> {
+        self.ensure_completed_semaphore()?;
+        let completed = self.completed.with_ref(|completed| {
+            completed
+                .as_ref()
+                .map(|completed| core::ptr::from_ref(completed))
+                .ok_or_else(executor_invalid)
+        })??;
+        // SAFETY: the slot keeps its completion semaphore allocated for the active generation.
+        unsafe { completed.as_ref() }
+            .ok_or_else(executor_invalid)?
+            .acquire()
+            .map_err(executor_error_from_sync)
     }
 
     fn register_join_waker(&self, generation: u64, waker: &Waker) -> Result<(), ExecutorError> {
@@ -2575,6 +2606,8 @@ struct ExecutorCore {
     current_queue: CurrentQueue,
     reactor_state: ExecutorReactorState,
     reactor_driver_ready: AtomicBool,
+    #[cfg(feature = "std")]
+    reactor_driver: ExecutorCell<Option<Arc<ExecutorReactorDriverState>>>,
     scheduler: SchedulerBinding,
     next_id: AtomicUsize,
     registry: ExecutorRegistry,
@@ -2591,6 +2624,31 @@ impl fmt::Debug for ExecutorCore {
 }
 
 impl ExecutorCore {
+    #[cfg(feature = "std")]
+    fn ensure_reactor_driver(&self) -> Result<(), ExecutorError> {
+        if !matches!(self.scheduler, SchedulerBinding::ThreadWorkers(_)) {
+            return Ok(());
+        }
+        if self.reactor_driver_ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let driver = self
+            .reactor_driver
+            .with_ref(|driver| driver.as_ref().cloned())?
+            .ok_or(ExecutorError::Unsupported)?;
+        driver.ensure_started(&self.reactor_state, &self.reactor_driver_ready)
+    }
+
+    #[cfg(feature = "std")]
+    fn join_reactor_driver(&self) {
+        if let Ok(Some(driver)) = self
+            .reactor_driver
+            .with_ref(|driver| driver.as_ref().cloned())
+        {
+            driver.join();
+        }
+    }
+
     fn allocate_task_id(&self) -> Result<TaskId, ExecutorError> {
         let sequence = self
             .next_id
@@ -2618,16 +2676,17 @@ impl ExecutorCore {
         if matches!(self.scheduler, SchedulerBinding::GreenPool(_)) {
             return Err(ExecutorError::Unsupported);
         }
+        #[cfg(feature = "std")]
+        if matches!(self.scheduler, SchedulerBinding::ThreadWorkers(_)) {
+            self.ensure_reactor_driver()?;
+            return self
+                .reactor_state
+                .queue_readiness_wait(slot_index, generation, source, interest);
+        }
         if self.scheduler.uses_external_carrier()
             && !self.reactor_driver_ready.load(Ordering::Acquire)
         {
             return Err(ExecutorError::Unsupported);
-        }
-        #[cfg(feature = "std")]
-        if matches!(self.scheduler, SchedulerBinding::ThreadWorkers(_)) {
-            return self
-                .reactor_state
-                .queue_readiness_wait(slot_index, generation, source, interest);
         }
         self.reactor_state.register_readiness_wait(
             self.reactor,
@@ -2646,6 +2705,10 @@ impl ExecutorCore {
     ) -> Result<(), ExecutorError> {
         if matches!(self.scheduler, SchedulerBinding::GreenPool(_)) {
             return Err(ExecutorError::Unsupported);
+        }
+        #[cfg(feature = "std")]
+        if matches!(self.scheduler, SchedulerBinding::ThreadWorkers(_)) {
+            self.ensure_reactor_driver()?;
         }
         if self.scheduler.uses_external_carrier()
             && !self.reactor_driver_ready.load(Ordering::Acquire)
@@ -2915,6 +2978,8 @@ impl ExecutorCore {
             let _ = self.clear_wait(slot_index, generation);
             let _ = slot.force_shutdown(generation);
         }
+        #[cfg(feature = "std")]
+        self.join_reactor_driver();
     }
 }
 
@@ -3068,11 +3133,10 @@ impl<T> TaskHandleInner<T> {
             }
             _ => {
                 if !slot.is_finished(self.generation)? {
-                    slot.completed
-                        .as_ref()
-                        .ok_or_else(executor_invalid)?
-                        .acquire()
-                        .map_err(executor_error_from_sync)?;
+                    slot.ensure_completed_semaphore()?;
+                    if !slot.is_finished(self.generation)? {
+                        slot.wait_completed()?;
+                    }
                 }
             }
         }
@@ -3442,8 +3506,6 @@ pub struct Executor {
     config: ExecutorConfig,
     reactor: Reactor,
     inner: ExecutorInner,
-    #[cfg(feature = "std")]
-    driver: Option<ExecutorReactorDriver>,
 }
 
 /// Current-thread async runtime using ordinary Rust futures as the front door.
@@ -3656,25 +3718,50 @@ enum ExecutorInner {
 
 #[cfg(feature = "std")]
 #[derive(Debug)]
-struct ExecutorReactorDriver {
-    thread: Option<JoinHandle<()>>,
+struct ExecutorReactorDriverState {
+    core: ControlLease<ExecutorCore>,
+    thread: SyncMutex<Option<JoinHandle<()>>>,
 }
 
 #[cfg(feature = "std")]
-impl ExecutorReactorDriver {
-    fn spawn(core: &ControlLease<ExecutorCore>) -> Result<Self, ExecutorError> {
-        let core = core.try_clone().map_err(executor_error_from_alloc)?;
+impl ExecutorReactorDriverState {
+    fn new(core: &ControlLease<ExecutorCore>) -> Result<Arc<Self>, ExecutorError> {
+        Ok(Arc::new(Self {
+            core: core.try_clone().map_err(executor_error_from_alloc)?,
+            thread: SyncMutex::new(None),
+        }))
+    }
+
+    fn ensure_started(
+        &self,
+        reactor_state: &ExecutorReactorState,
+        ready: &AtomicBool,
+    ) -> Result<(), ExecutorError> {
+        if ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut thread_slot = self.thread.lock().map_err(executor_error_from_sync)?;
+        if thread_slot.is_some() {
+            ready.store(true, Ordering::Release);
+            return Ok(());
+        }
+        reactor_state.install_driver_wake_signal()?;
+        let core = self.core.try_clone().map_err(executor_error_from_alloc)?;
         let thread = StdThreadBuilder::new()
             .name(String::from("fusion-async-reactor"))
             .spawn(move || run_reactor_driver(core))
             .map_err(executor_error_from_std_thread)?;
-        Ok(Self {
-            thread: Some(thread),
-        })
+        *thread_slot = Some(thread);
+        ready.store(true, Ordering::Release);
+        Ok(())
     }
 
-    fn join(&mut self) {
-        if let Some(thread) = self.thread.take() {
+    fn join(&self) {
+        let mut thread_slot = match self.thread.lock().map_err(executor_error_from_sync) {
+            Ok(thread_slot) => thread_slot,
+            Err(_) => return,
+        };
+        if let Some(thread) = thread_slot.take() {
             let _ = thread.join();
         }
     }
@@ -3708,6 +3795,8 @@ impl Executor {
                             current_queue: CurrentQueue::new(fast_current),
                             reactor_state: ExecutorReactorState::new(fast_current),
                             reactor_driver_ready: AtomicBool::new(false),
+                            #[cfg(feature = "std")]
+                            reactor_driver: ExecutorCell::new(fast_current, None),
                             scheduler,
                             next_id: AtomicUsize::new(1),
                             registry: ExecutorRegistry::new(TASK_REGISTRY_CAPACITY, fast_current),
@@ -3721,33 +3810,18 @@ impl Executor {
             Err(error) => ExecutorInner::Error(error),
         };
         #[cfg(feature = "std")]
-        let driver = match &inner {
-            ExecutorInner::Ready(core)
-                if !matches!(
-                    core.scheduler,
-                    SchedulerBinding::Current | SchedulerBinding::Unsupported
-                ) =>
-            {
-                if core.reactor_state.install_driver_wake_signal().is_ok() {
-                    match ExecutorReactorDriver::spawn(core) {
-                        Ok(driver) => {
-                            core.reactor_driver_ready.store(true, Ordering::Release);
-                            Some(driver)
-                        }
-                        Err(_) => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            ExecutorInner::Ready(_) | ExecutorInner::Error(_) => None,
-        };
+        if let ExecutorInner::Ready(core) = &inner
+            && matches!(core.scheduler, SchedulerBinding::ThreadWorkers(_))
+            && let Ok(driver) = ExecutorReactorDriverState::new(core)
+        {
+            let _ = core
+                .reactor_driver
+                .with(|reactor_driver| *reactor_driver = Some(driver));
+        }
         Self {
             config,
             reactor,
             inner,
-            #[cfg(feature = "std")]
-            driver,
         }
     }
 
@@ -4016,10 +4090,6 @@ impl Drop for Executor {
     fn drop(&mut self) {
         if let ExecutorInner::Ready(core) = &self.inner {
             core.shutdown();
-        }
-        #[cfg(feature = "std")]
-        if let Some(driver) = self.driver.as_mut() {
-            driver.join();
         }
     }
 }
