@@ -7,10 +7,12 @@
 mod handle;
 mod pool;
 mod system;
+mod time;
 
 pub use handle::*;
 pub use pool::*;
 pub use system::*;
+pub use time::*;
 
 pub use fusion_pal::sys::thread::{
     RawThreadEntry,
@@ -28,6 +30,7 @@ pub use fusion_pal::sys::thread::{
     ThreadGuarantee,
     ThreadId,
     ThreadIdentityStability,
+    ThreadImplementationKind,
     ThreadJoinPolicy,
     ThreadLifecycle,
     ThreadLifecycleCaps,

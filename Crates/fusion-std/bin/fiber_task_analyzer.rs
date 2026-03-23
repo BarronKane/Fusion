@@ -37,6 +37,22 @@ fn run() -> Result<(), String> {
         fs::write(path, rendered)
             .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
     }
+    if let Some(path) = config.async_poll_stack_output_path.as_ref() {
+        let rendered = outputs
+            .async_poll_stack_manifest_output
+            .as_ref()
+            .ok_or_else(|| "missing generated async poll-stack manifest".to_owned())?;
+        fs::write(path, rendered)
+            .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    }
+    if let Some(path) = config.async_poll_stack_rust_path.as_ref() {
+        let rendered = outputs
+            .async_poll_stack_rust_output
+            .as_ref()
+            .ok_or_else(|| "missing generated async poll-stack Rust contracts".to_owned())?;
+        fs::write(path, rendered)
+            .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    }
 
     fs::write(&config.output_path, outputs.manifest_output)
         .map_err(|error| format!("failed to write {}: {error}", config.output_path.display()))
@@ -53,6 +69,9 @@ struct AnalyzerConfig {
     rust_contracts_path: Option<PathBuf>,
     red_inline_contracts_path: Option<PathBuf>,
     red_inline_rust_path: Option<PathBuf>,
+    async_poll_stack_roots_path: Option<PathBuf>,
+    async_poll_stack_output_path: Option<PathBuf>,
+    async_poll_stack_rust_path: Option<PathBuf>,
     crate_name: Option<String>,
 }
 
@@ -78,6 +97,9 @@ impl AnalyzerConfig {
         let mut rust_contracts_path = None;
         let mut red_inline_contracts_path = None;
         let mut red_inline_rust_path = None;
+        let mut async_poll_stack_roots_path = None;
+        let mut async_poll_stack_output_path = None;
+        let mut async_poll_stack_rust_path = None;
         let mut crate_name = None;
         while let Some(arg) = args.next() {
             match arg.to_string_lossy().as_ref() {
@@ -111,6 +133,24 @@ impl AnalyzerConfig {
                             usage("missing value for --red-inline-rust")
                         })?));
                 }
+                "--async-poll-stack-roots" => {
+                    async_poll_stack_roots_path =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            usage("missing value for --async-poll-stack-roots")
+                        })?));
+                }
+                "--async-poll-stack-output" => {
+                    async_poll_stack_output_path =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            usage("missing value for --async-poll-stack-output")
+                        })?));
+                }
+                "--async-poll-stack-rust" => {
+                    async_poll_stack_rust_path =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            usage("missing value for --async-poll-stack-rust")
+                        })?));
+                }
                 "--crate-name" => {
                     crate_name = Some(
                         args.next()
@@ -131,6 +171,28 @@ impl AnalyzerConfig {
             }
         }
 
+        match (
+            async_poll_stack_roots_path.is_some(),
+            async_poll_stack_output_path.is_some(),
+        ) {
+            (true, false) if async_poll_stack_rust_path.is_none() => {
+                return Err(usage(
+                    "missing --async-poll-stack-output/--async-poll-stack-rust for async poll-stack roots",
+                ));
+            }
+            (false, true) => {
+                return Err(usage(
+                    "missing --async-poll-stack-roots for async poll-stack output",
+                ));
+            }
+            _ => {}
+        }
+        if async_poll_stack_roots_path.is_none() && async_poll_stack_rust_path.is_some() {
+            return Err(usage(
+                "missing --async-poll-stack-roots for async poll-stack Rust contracts",
+            ));
+        }
+
         Ok(Self {
             roots_path,
             stack_sizes_path,
@@ -141,6 +203,9 @@ impl AnalyzerConfig {
             rust_contracts_path,
             red_inline_contracts_path,
             red_inline_rust_path,
+            async_poll_stack_roots_path,
+            async_poll_stack_output_path,
+            async_poll_stack_rust_path,
             crate_name,
         })
     }
@@ -150,7 +215,15 @@ impl AnalyzerConfig {
 struct GeneratedOutputs {
     manifest_output: String,
     generated_entries: Vec<GeneratedRustContractEntry>,
+    async_poll_stack_manifest_output: Option<String>,
+    async_poll_stack_rust_output: Option<String>,
     unknown_symbol_report: UnknownSymbolReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneratedAsyncPollStackRustContractEntry {
+    type_name: String,
+    poll_stack_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -267,6 +340,12 @@ struct SymbolResolutionContext<'a> {
 
 fn generate_outputs(config: &AnalyzerConfig) -> Result<GeneratedOutputs, String> {
     let roots = load_roots(&config.roots_path)?;
+    let async_poll_stack_roots = config
+        .async_poll_stack_roots_path
+        .as_ref()
+        .map(load_roots)
+        .transpose()?
+        .unwrap_or_default();
     let stack_size_input = load_stack_sizes(&config.stack_sizes_path)?;
     let call_graph = config.call_graph_path.as_ref().map_or_else(
         || {
@@ -354,11 +433,117 @@ fn generate_outputs(config: &AnalyzerConfig) -> Result<GeneratedOutputs, String>
         manifest_output.push('\n');
     }
 
+    let async_poll_stack_entries = if async_poll_stack_roots.is_empty() {
+        Vec::new()
+    } else {
+        build_async_poll_stack_entries(
+            &async_poll_stack_roots,
+            &stack_size_input.stack_sizes,
+            stack_size_input.symbol_index.as_ref(),
+            call_graph.as_ref(),
+            &contracts,
+            &mut unknown_symbol_report,
+            &mut aggregated_stack_sizes,
+        )?
+    };
+    let async_poll_stack_manifest_output = (!async_poll_stack_entries.is_empty())
+        .then(|| render_async_poll_stack_manifest(&async_poll_stack_entries));
+    let async_poll_stack_rust_output = (!async_poll_stack_entries.is_empty()).then(|| {
+        render_async_poll_stack_rust_contracts(
+            &async_poll_stack_entries,
+            config.crate_name.as_deref(),
+        )
+    });
+
     Ok(GeneratedOutputs {
         manifest_output,
         generated_entries,
+        async_poll_stack_manifest_output,
+        async_poll_stack_rust_output,
         unknown_symbol_report,
     })
+}
+
+fn build_async_poll_stack_entries(
+    roots: &[RootEntry],
+    stack_sizes: &BTreeMap<String, usize>,
+    symbol_index: Option<&ArtifactSymbolIndex>,
+    call_graph: Option<&BTreeMap<String, Vec<String>>>,
+    contracts: &[UnknownSymbolContract],
+    unknown_symbol_report: &mut UnknownSymbolReport,
+    aggregated_stack_sizes: &mut BTreeMap<String, usize>,
+) -> Result<Vec<GeneratedAsyncPollStackRustContractEntry>, String> {
+    let mut merged_entries = BTreeMap::<String, usize>::new();
+    for root in roots {
+        let stack_bytes = resolve_root_stack_bytes(
+            root,
+            stack_sizes,
+            symbol_index,
+            call_graph,
+            contracts,
+            unknown_symbol_report,
+            aggregated_stack_sizes,
+        )?
+        .max(1);
+        merged_entries
+            .entry(root.type_name.clone())
+            .and_modify(|existing| {
+                if stack_bytes > *existing {
+                    *existing = stack_bytes;
+                }
+            })
+            .or_insert(stack_bytes);
+    }
+
+    Ok(merged_entries
+        .into_iter()
+        .map(
+            |(type_name, poll_stack_bytes)| GeneratedAsyncPollStackRustContractEntry {
+                type_name,
+                poll_stack_bytes,
+            },
+        )
+        .collect())
+}
+
+fn render_async_poll_stack_manifest(
+    entries: &[GeneratedAsyncPollStackRustContractEntry],
+) -> String {
+    let mut rendered = String::from(
+        "# Generated by fusion_std_fiber_task_analyzer\n\
+         # type_name = poll_stack_bytes\n",
+    );
+    for entry in entries {
+        rendered.push_str(&entry.type_name);
+        rendered.push_str(" = ");
+        rendered.push_str(&entry.poll_stack_bytes.to_string());
+        rendered.push('\n');
+    }
+    rendered
+}
+
+fn render_async_poll_stack_rust_contracts(
+    entries: &[GeneratedAsyncPollStackRustContractEntry],
+    crate_name: Option<&str>,
+) -> String {
+    let mut rendered = String::from(
+        "// Generated by fusion_std_fiber_task_analyzer\n\
+         // Include this file from a consumer crate to declare generated async poll-stack contracts.\n",
+    );
+    for entry in entries {
+        if !generated_contract_type_is_nameable(&entry.type_name) {
+            continue;
+        }
+        rendered.push_str("fusion_std::declare_generated_async_poll_stack_contract!(\n");
+        rendered.push_str("    ");
+        rendered.push_str(&render_contract_type_path(&entry.type_name, crate_name));
+        rendered.push_str(",\n");
+        rendered.push_str("    ");
+        rendered.push_str(&entry.poll_stack_bytes.to_string());
+        rendered.push_str(",\n");
+        rendered.push_str(");\n\n");
+    }
+    rendered
 }
 
 fn resolve_root_stack_bytes(
@@ -1675,7 +1860,7 @@ fn parse_stack_size_value(raw: &str) -> Result<usize, String> {
 
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage: cargo run -p fusion-std --bin fiber_task_analyzer -- <roots> <stack-sizes|artifact> <output> [call-graph|artifact] [--contracts <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-contracts <path>] [--red-inline-rust <path>] [--crate-name <name>]"
+        "{reason}\nusage: cargo run -p fusion-std --bin fiber_task_analyzer -- <roots> <stack-sizes|artifact> <output> [call-graph|artifact] [--contracts <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-contracts <path>] [--red-inline-rust <path>] [--async-poll-stack-roots <path> [--async-poll-stack-output <path>] [--async-poll-stack-rust <path>]] [--crate-name <name>]"
     )
 }
 
@@ -2233,6 +2418,54 @@ Disassembly of section .text:\n\
     }
 
     #[test]
+    fn renders_async_poll_stack_rust_contracts_with_crate_relative_type_paths() {
+        let rendered = render_async_poll_stack_rust_contracts(
+            &[GeneratedAsyncPollStackRustContractEntry {
+                type_name:
+                    "fusion_std::thread::executor::GeneratedAsyncPollStackMetadataAnchorFuture"
+                        .to_owned(),
+                poll_stack_bytes: 1536,
+            }],
+            Some("fusion_std"),
+        );
+
+        assert!(rendered.contains("fusion_std::declare_generated_async_poll_stack_contract!("));
+        assert!(
+            rendered
+                .contains("crate::thread::executor::GeneratedAsyncPollStackMetadataAnchorFuture")
+        );
+        assert!(rendered.contains("1536"));
+    }
+
+    #[test]
+    fn render_async_poll_stack_rust_contracts_skips_unnameable_closure_types() {
+        let rendered = render_async_poll_stack_rust_contracts(
+            &[GeneratedAsyncPollStackRustContractEntry {
+                type_name: "fusion_example_pico::main::{{closure}}".to_owned(),
+                poll_stack_bytes: 1024,
+            }],
+            Some("fusion_example_pico"),
+        );
+
+        assert!(!rendered.contains("declare_generated_async_poll_stack_contract!"));
+    }
+
+    #[test]
+    fn renders_async_poll_stack_rust_contracts_with_absolute_external_type_paths() {
+        let rendered = render_async_poll_stack_rust_contracts(
+            &[GeneratedAsyncPollStackRustContractEntry {
+                type_name: "external_crate::task::ExternalFuture".to_owned(),
+                poll_stack_bytes: 896,
+            }],
+            Some("fusion_example_pico"),
+        );
+
+        assert!(rendered.contains("declare_generated_async_poll_stack_contract!"));
+        assert!(rendered.contains("external_crate::task::ExternalFuture"));
+        assert!(rendered.contains("896"));
+    }
+
+    #[test]
     fn generate_outputs_merges_duplicate_type_names_to_worst_case_stack() {
         let temp_root = std::env::temp_dir().join(format!(
             "fusion-std-fiber-task-analyzer-{}",
@@ -2265,6 +2498,9 @@ Disassembly of section .text:\n\
             rust_contracts_path: None,
             red_inline_contracts_path: None,
             red_inline_rust_path: None,
+            async_poll_stack_roots_path: None,
+            async_poll_stack_output_path: None,
+            async_poll_stack_rust_path: None,
             crate_name: None,
         })
         .expect("outputs should generate");
@@ -2280,5 +2516,62 @@ Disassembly of section .text:\n\
             "test::Task::{{closure}}"
         );
         assert_eq!(outputs.generated_entries[0].stack_bytes, 256);
+        assert!(outputs.async_poll_stack_manifest_output.is_none());
+        assert!(outputs.async_poll_stack_rust_output.is_none());
+    }
+
+    #[test]
+    fn generate_outputs_renders_async_poll_stack_manifest() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "fusion-std-async-poll-stack-analyzer-{}",
+            std::process::id()
+        ));
+        let roots_path = temp_root.join("roots.txt");
+        let async_roots_path = temp_root.join("async-roots.txt");
+        let stack_sizes_path = temp_root.join("stack.txt");
+        let output_path = temp_root.join("out.generated");
+        fs::create_dir_all(&temp_root).expect("temp dir should be creatable");
+        fs::write(&roots_path, "test::FiberTask = fiber_root\n").expect("roots should write");
+        fs::write(
+            &async_roots_path,
+            "test::AsyncFuture = async_root_a\n\
+             test::AsyncFuture = async_root_b\n",
+        )
+        .expect("async roots should write");
+        fs::write(
+            &stack_sizes_path,
+            "fiber_root = 128\n\
+             async_root_a = 640\n\
+             async_root_b = 768\n",
+        )
+        .expect("stack sizes should write");
+
+        let outputs = generate_outputs(&AnalyzerConfig {
+            roots_path,
+            stack_sizes_path,
+            output_path,
+            call_graph_path: None,
+            contracts_path: None,
+            report_path: None,
+            rust_contracts_path: None,
+            red_inline_contracts_path: None,
+            red_inline_rust_path: None,
+            async_poll_stack_roots_path: Some(async_roots_path),
+            async_poll_stack_output_path: Some(temp_root.join("async.generated")),
+            async_poll_stack_rust_path: Some(temp_root.join("async.contracts.rs")),
+            crate_name: None,
+        })
+        .expect("outputs should generate");
+
+        let async_manifest = outputs
+            .async_poll_stack_manifest_output
+            .expect("async poll stack manifest should render");
+        assert!(async_manifest.contains("test::AsyncFuture = 768"));
+        let async_rust = outputs
+            .async_poll_stack_rust_output
+            .expect("async poll stack Rust contracts should render");
+        assert!(async_rust.contains("declare_generated_async_poll_stack_contract!"));
+        assert!(async_rust.contains("test::AsyncFuture"));
+        assert!(async_rust.contains("768"));
     }
 }

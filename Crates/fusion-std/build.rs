@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -5,9 +6,12 @@ use std::path::{Path, PathBuf};
 const AUTO_MANIFEST_NAME: &str = "fusion-std-fiber-task.generated";
 const AUTO_REPORT_NAME: &str = "fusion-std-fiber-task.report";
 const OUTPUT_NAME: &str = "fiber_task_generated.rs";
+const ASYNC_POLL_STACK_OUTPUT_NAME: &str = "async_task_generated.rs";
+const AUTO_ASYNC_POLL_STACK_MANIFEST_NAME: &str = "fusion-std-async-poll-stack.generated";
 const MEMORY_LAYOUT_OUTPUT_NAME: &str = "memory.x";
 const GENERATED_METADATA_ENV: &str = "FUSION_FIBER_TASK_METADATA";
 const GENERATED_REPORT_ENV: &str = "FUSION_FIBER_TASK_REPORT";
+const GENERATED_ASYNC_POLL_STACK_METADATA_ENV: &str = "FUSION_ASYNC_POLL_STACK_METADATA";
 const STRICT_CONTRACTS_FEATURE_ENV: &str = "CARGO_FEATURE_CRITICAL_SAFE_GENERATED_CONTRACTS";
 const SYS_CORTEX_M_FEATURE_ENV: &str = "CARGO_FEATURE_SYS_CORTEX_M";
 const SOC_RP2350_FEATURE_ENV: &str = "CARGO_FEATURE_SOC_RP2350";
@@ -24,6 +28,9 @@ const RP2350_BOOT_IMAGE_TYPE_EXE: u32 = 0x0001;
 const RP2350_BOOT_IMAGE_TYPE_SECURITY_NS: u32 = 0x0010;
 const RP2350_BOOT_IMAGE_TYPE_SECURITY_S: u32 = 0x0020;
 const RP2350_BOOT_IMAGE_TYPE_CHIP_RP2350: u32 = 0x1000;
+const GENERATED_ASYNC_POLL_STACK_ANCHOR_TYPE_NAME: &str =
+    "fusion_std::thread::executor::GeneratedAsyncPollStackMetadataAnchorFuture";
+const GENERATED_ASYNC_POLL_STACK_ANCHOR_BYTES: usize = 1536;
 
 #[derive(Debug, Clone)]
 struct GeneratedFiberTaskEntry {
@@ -31,6 +38,12 @@ struct GeneratedFiberTaskEntry {
     stack_bytes: usize,
     priority: i8,
     execution: GeneratedFiberTaskExecution,
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedAsyncPollStackEntry {
+    type_name: String,
+    poll_stack_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +93,8 @@ enum CortexMFlashBootMetadata {
 }
 
 fn main() {
-    let (auto_manifest_candidates, auto_report_candidates) = setup_build_inputs();
+    let (auto_manifest_candidates, auto_report_candidates, auto_async_poll_stack_candidates) =
+        setup_build_inputs();
     emit_platform_memory_layout();
     let output_path =
         PathBuf::from(env::var("OUT_DIR").expect("Cargo should provide OUT_DIR")).join(OUTPUT_NAME);
@@ -92,12 +106,24 @@ fn main() {
             output_path.display()
         )
     });
+    let async_output_path =
+        PathBuf::from(env::var("OUT_DIR").expect("Cargo should provide OUT_DIR"))
+            .join(ASYNC_POLL_STACK_OUTPUT_NAME);
+    let generated_async_poll_stack =
+        generate_async_poll_stack_metadata(&auto_async_poll_stack_candidates);
+    fs::write(&async_output_path, generated_async_poll_stack).unwrap_or_else(|error| {
+        panic!(
+            "fusion-std: failed to write {}: {error}",
+            async_output_path.display()
+        )
+    });
 }
 
-fn setup_build_inputs() -> (Vec<PathBuf>, Vec<PathBuf>) {
+fn setup_build_inputs() -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed={GENERATED_METADATA_ENV}");
     println!("cargo:rerun-if-env-changed={GENERATED_REPORT_ENV}");
+    println!("cargo:rerun-if-env-changed={GENERATED_ASYNC_POLL_STACK_METADATA_ENV}");
     println!("cargo:rerun-if-env-changed={STRICT_CONTRACTS_FEATURE_ENV}");
     println!("cargo:rerun-if-env-changed={SYS_CORTEX_M_FEATURE_ENV}");
     println!("cargo:rerun-if-env-changed={SOC_RP2350_FEATURE_ENV}");
@@ -108,14 +134,23 @@ fn setup_build_inputs() -> (Vec<PathBuf>, Vec<PathBuf>) {
     );
     let auto_manifest_candidates = candidate_auto_artifact_paths(&manifest_dir, AUTO_MANIFEST_NAME);
     let auto_report_candidates = candidate_auto_artifact_paths(&manifest_dir, AUTO_REPORT_NAME);
+    let auto_async_poll_stack_candidates =
+        candidate_auto_artifact_paths(&manifest_dir, AUTO_ASYNC_POLL_STACK_MANIFEST_NAME);
     let analyzer_metadata = env::var_os(GENERATED_METADATA_ENV).map(PathBuf::from);
     let analyzer_report = env::var_os(GENERATED_REPORT_ENV).map(PathBuf::from);
+    let async_poll_stack_metadata =
+        env::var_os(GENERATED_ASYNC_POLL_STACK_METADATA_ENV).map(PathBuf::from);
     if let Some(path) = analyzer_metadata.as_ref()
         && path.is_file()
     {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     if let Some(path) = analyzer_report.as_ref()
+        && path.is_file()
+    {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    if let Some(path) = async_poll_stack_metadata.as_ref()
         && path.is_file()
     {
         println!("cargo:rerun-if-changed={}", path.display());
@@ -130,7 +165,16 @@ fn setup_build_inputs() -> (Vec<PathBuf>, Vec<PathBuf>) {
             println!("cargo:rerun-if-changed={}", path.display());
         }
     }
-    (auto_manifest_candidates, auto_report_candidates)
+    for path in &auto_async_poll_stack_candidates {
+        if path.is_file() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+    (
+        auto_manifest_candidates,
+        auto_report_candidates,
+        auto_async_poll_stack_candidates,
+    )
 }
 
 fn emit_platform_memory_layout() {
@@ -440,6 +484,53 @@ fn generate_fiber_task_metadata(
     render_generated_entries(&entries)
 }
 
+fn generate_async_poll_stack_metadata(auto_manifest_candidates: &[PathBuf]) -> String {
+    let explicit_source = env::var_os(GENERATED_ASYNC_POLL_STACK_METADATA_ENV).map(PathBuf::from);
+    let metadata_source = explicit_source
+        .as_deref()
+        .filter(|path| path.is_file())
+        .or_else(|| first_existing_path(auto_manifest_candidates).map(PathBuf::as_path));
+    let mut entries = metadata_source.map_or_else(Vec::new, |path| {
+        load_generated_async_poll_stack_entries(path).unwrap_or_else(|error| {
+            panic!(
+                "fusion-std: failed to load generated async poll-stack metadata from {}: {error}",
+                path.display()
+            )
+        })
+    });
+    entries = merge_async_poll_stack_entries(entries);
+    if !entries
+        .iter()
+        .any(|entry| entry.type_name == GENERATED_ASYNC_POLL_STACK_ANCHOR_TYPE_NAME)
+    {
+        entries.push(GeneratedAsyncPollStackEntry {
+            type_name: GENERATED_ASYNC_POLL_STACK_ANCHOR_TYPE_NAME.to_owned(),
+            poll_stack_bytes: GENERATED_ASYNC_POLL_STACK_ANCHOR_BYTES,
+        });
+    }
+    entries.sort_by(|left, right| left.type_name.cmp(&right.type_name));
+    render_generated_async_poll_stack_entries(&entries)
+}
+
+fn merge_async_poll_stack_entries(
+    entries: Vec<GeneratedAsyncPollStackEntry>,
+) -> Vec<GeneratedAsyncPollStackEntry> {
+    let mut merged = BTreeMap::<String, usize>::new();
+    for entry in entries {
+        let budget = merged.entry(entry.type_name).or_insert(0);
+        *budget = (*budget).max(entry.poll_stack_bytes);
+    }
+    merged
+        .into_iter()
+        .map(
+            |(type_name, poll_stack_bytes)| GeneratedAsyncPollStackEntry {
+                type_name,
+                poll_stack_bytes,
+            },
+        )
+        .collect()
+}
+
 fn candidate_auto_artifact_paths(manifest_dir: &Path, artifact_name: &str) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(target_dir) = env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
@@ -545,6 +636,48 @@ fn load_generated_entries(path: &Path) -> Result<Vec<GeneratedFiberTaskEntry>, S
     Ok(entries)
 }
 
+fn load_generated_async_poll_stack_entries(
+    path: &Path,
+) -> Result<Vec<GeneratedAsyncPollStackEntry>, String> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+
+    let mut entries = Vec::new();
+    for (line_no, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let (type_name, raw_bytes) = line
+            .split_once('=')
+            .ok_or_else(|| format!("line {} is missing '='", line_no + 1))?;
+        let type_name = type_name.trim();
+        if type_name.is_empty() {
+            return Err(format!("line {} has an empty type name", line_no + 1));
+        }
+
+        let poll_stack_bytes = parse_linker_scalar(raw_bytes.trim())
+            .map_err(|error| format!("line {} poll stack parse failed: {error}", line_no + 1))?;
+        if poll_stack_bytes == 0 {
+            return Err(format!(
+                "line {} poll stack bytes must be non-zero",
+                line_no + 1
+            ));
+        }
+
+        entries.push(GeneratedAsyncPollStackEntry {
+            type_name: type_name.to_owned(),
+            poll_stack_bytes,
+        });
+    }
+
+    Ok(entries)
+}
+
 fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
     let mut rendered = String::from(
         "#[allow(dead_code)]\nconst GENERATED_EXPLICIT_FIBER_TASKS: &[GeneratedExplicitFiberTaskMetadata] = &[\n",
@@ -596,6 +729,25 @@ fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
     rendered
 }
 
+fn render_generated_async_poll_stack_entries(entries: &[GeneratedAsyncPollStackEntry]) -> String {
+    let mut rendered = String::from(
+        "#[allow(dead_code)]\n\
+         const GENERATED_ASYNC_POLL_STACK_TASKS: &[GeneratedAsyncPollStackMetadataEntry] = &[\n",
+    );
+    for entry in entries {
+        rendered.push_str("    GeneratedAsyncPollStackMetadataEntry {\n");
+        rendered.push_str("        type_name: \"");
+        rendered.push_str(&escape_rust_string(&entry.type_name));
+        rendered.push_str("\",\n");
+        rendered.push_str("        poll_stack_bytes: ");
+        rendered.push_str(&entry.poll_stack_bytes.to_string());
+        rendered.push_str(",\n");
+        rendered.push_str("    },\n");
+    }
+    rendered.push_str("];\n");
+    rendered
+}
+
 fn generated_contract_type_is_nameable(type_name: &str) -> bool {
     !type_name.contains("{{closure}}")
 }
@@ -636,4 +788,33 @@ fn escape_rust_string(input: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_async_poll_stack_entries_keeps_worst_case_budget_per_type() {
+        let merged = merge_async_poll_stack_entries(vec![
+            GeneratedAsyncPollStackEntry {
+                type_name: "crate::future::A".to_owned(),
+                poll_stack_bytes: 512,
+            },
+            GeneratedAsyncPollStackEntry {
+                type_name: "crate::future::A".to_owned(),
+                poll_stack_bytes: 1024,
+            },
+            GeneratedAsyncPollStackEntry {
+                type_name: "crate::future::B".to_owned(),
+                poll_stack_bytes: 768,
+            },
+        ]);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].type_name, "crate::future::A");
+        assert_eq!(merged[0].poll_stack_bytes, 1024);
+        assert_eq!(merged[1].type_name, "crate::future::B");
+        assert_eq!(merged[1].poll_stack_bytes, 768);
+    }
 }

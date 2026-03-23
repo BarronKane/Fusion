@@ -24,12 +24,17 @@ use fusion_std::thread::{
     EventReadiness,
     EventRecord,
     EventSourceHandle,
+    ExecutorConfig,
+    FiberPoolBootstrap,
     FiberPoolConfig,
     FiberStackClass,
     FiberTaskAttributes,
     FiberTaskExecution,
     GreenPool,
     GreenReactorPolicy,
+    HostedFiberRuntime,
+    HostedFiberRuntimeConfig,
+    PoolPlacement,
     Reactor,
     ThreadAsyncRuntime,
     ThreadPool,
@@ -245,25 +250,19 @@ pub fn green_pool_with_carriers(carrier_count: usize) -> (ThreadPool, GreenPool)
     (carriers, fibers)
 }
 
-pub fn green_pool_lifecycle_with_carriers(carrier_count: usize) -> (ThreadPool, GreenPool) {
-    let carriers = ThreadPool::new(&ThreadPoolConfig {
-        min_threads: carrier_count,
-        max_threads: carrier_count,
-        ..ThreadPoolConfig::new()
-    })
-    .expect("carrier pool should build for lifecycle benches");
+pub fn green_pool_lifecycle_with_carriers(carrier_count: usize) -> HostedFiberRuntime {
     let per_carrier_growth = BENCH_LIFECYCLE_GROWTH_TOTAL.div_ceil(carrier_count).max(1);
-    let config = FiberPoolConfig::fixed_growing(
+    FiberPoolBootstrap::fixed_growing_with_stack(
         NonZeroUsize::new(BENCH_POOL_STACK_BYTES)
             .expect("benchmark fixed stack size should be non-zero"),
         THROUGHPUT_BATCH_SIZE,
         per_carrier_growth,
     )
     .expect("lifecycle bench fixed-growing config should build")
-    .with_reactor_policy(GreenReactorPolicy::Disabled);
-    let fibers =
-        GreenPool::new(&config, &carriers).expect("green pool should build for lifecycle benches");
-    (carriers, fibers)
+    .build_hosted_with(
+        HostedFiberRuntimeConfig::new(carrier_count).with_placement(PoolPlacement::Inherit),
+    )
+    .expect("hosted fiber runtime should build for lifecycle benches")
 }
 
 pub fn green_pool_bootstrap_with_warm_carriers(carrier_count: usize) -> ThreadPool {
@@ -276,11 +275,14 @@ pub fn green_pool_bootstrap_with_warm_carriers(carrier_count: usize) -> ThreadPo
 }
 
 pub fn thread_async_runtime(worker_count: usize) -> ThreadAsyncRuntime {
-    ThreadAsyncRuntime::new(&ThreadPoolConfig {
-        min_threads: worker_count,
-        max_threads: worker_count,
-        ..ThreadPoolConfig::new()
-    })
+    ThreadAsyncRuntime::with_executor_config(
+        &ThreadPoolConfig {
+            min_threads: worker_count,
+            max_threads: worker_count,
+            ..ThreadPoolConfig::new()
+        },
+        ExecutorConfig::thread_pool().with_capacity(THROUGHPUT_BATCH_SIZE),
+    )
     .expect("thread async runtime should build for benches")
 }
 
@@ -932,7 +934,8 @@ pub fn bench_green_pool_steady_state_inline_noop(b: &mut Bencher, carrier_count:
 
 pub fn bench_green_pool_lifecycle_throughput(b: &mut Bencher, carrier_count: usize, job: fn()) {
     b.iter(|| {
-        let (carriers, fibers) = green_pool_lifecycle_with_carriers(carrier_count);
+        let runtime = green_pool_lifecycle_with_carriers(carrier_count);
+        let fibers = runtime.fibers();
         let mut handles = Vec::with_capacity(THROUGHPUT_BATCH_SIZE);
         handles.clear();
         for _ in 0..THROUGHPUT_BATCH_SIZE {
@@ -948,8 +951,8 @@ pub fn bench_green_pool_lifecycle_throughput(b: &mut Bencher, carrier_count: usi
                 .expect("lifecycle throughput task should join cleanly");
             black_box(());
         }
+        let (mut carriers, fibers) = runtime.into_parts();
         fibers.shutdown().expect("benchmark pool should shut down");
-        drop(fibers);
         carriers.shutdown().expect("carrier pool should shut down");
         black_box(());
     });
@@ -957,7 +960,8 @@ pub fn bench_green_pool_lifecycle_throughput(b: &mut Bencher, carrier_count: usi
 
 pub fn bench_green_pool_lifecycle_inline_noop(b: &mut Bencher, carrier_count: usize) {
     b.iter(|| {
-        let (carriers, fibers) = green_pool_lifecycle_with_carriers(carrier_count);
+        let runtime = green_pool_lifecycle_with_carriers(carrier_count);
+        let fibers = runtime.fibers();
         let mut handles = Vec::with_capacity(THROUGHPUT_BATCH_SIZE);
         handles.clear();
         for _ in 0..THROUGHPUT_BATCH_SIZE {
@@ -973,8 +977,8 @@ pub fn bench_green_pool_lifecycle_inline_noop(b: &mut Bencher, carrier_count: us
                 .expect("lifecycle throughput task should join cleanly");
             black_box(());
         }
+        let (mut carriers, fibers) = runtime.into_parts();
         fibers.shutdown().expect("benchmark pool should shut down");
-        drop(fibers);
         carriers.shutdown().expect("carrier pool should shut down");
         black_box(());
     });

@@ -62,6 +62,8 @@ pub use super::board_contract::{
     CortexMDmaRequestClass,
     CortexMDmaRequestDescriptor,
     CortexMDmaTransferCaps,
+    CortexMEventTimeoutImplementation,
+    CortexMEventTimeoutSupport,
     CortexMExceptionStackObservation,
     CortexMFlashRegionDescriptor,
     CortexMIrqClass,
@@ -78,6 +80,9 @@ pub use super::board_contract::{
     CortexMSocDeviceIdSupport,
     CortexMSocDeviceIdentity,
     CortexMSocExecutionObservation,
+    CortexMSocMonotonicTimeImpact,
+    CortexMSocOverclockProfile,
+    CortexMSocOverclockSupport,
 };
 
 /// Compile-time descriptor for the RP2350 SoC family.
@@ -162,6 +167,17 @@ const RP2350_PIO_VALID_LANE_MASK: u8 = 0x0f;
 const RP2350_EVENT_TIMEOUT_TIMER_BASE: usize = RP2350_TIMER0_BASE;
 const RP2350_EVENT_TIMEOUT_ALARM_INDEX: u16 = 3;
 const RP2350_EVENT_TIMEOUT_IRQN: u16 = 3;
+const RP2350_EVENT_TIMEOUT_TICK_HZ: u64 = 1_000_000;
+const RP2350_EVENT_TIMEOUT_COUNTER_BITS: u32 = 32;
+const RP2350_EVENT_TIMEOUT_MAX_RELATIVE_TIMEOUT: Duration = Duration::from_micros(u32::MAX as u64);
+
+const RP2350_EVENT_TIMEOUT_SUPPORT: CortexMEventTimeoutSupport = CortexMEventTimeoutSupport {
+    implementation: CortexMEventTimeoutImplementation::ReservedOneShotAlarm,
+    irqn: Some(RP2350_EVENT_TIMEOUT_IRQN),
+    counter_bits: Some(RP2350_EVENT_TIMEOUT_COUNTER_BITS),
+    tick_hz: Some(RP2350_EVENT_TIMEOUT_TICK_HZ),
+    max_relative_timeout: Some(RP2350_EVENT_TIMEOUT_MAX_RELATIVE_TIMEOUT),
+};
 const RP2350_INLINE_EXCEPTION_STACK_RESERVE_BYTES: usize = 128;
 const RP2350_IO_BANK0_INTR0_OFFSET: usize = 0x230;
 const RP2350_IO_QSPI_INTR_OFFSET: usize = 0x218;
@@ -262,6 +278,29 @@ const CLK_ADC_AUX_SOURCES: &[&str] = &[
     "clksrc_pll_usb",
     "rosc_clksrc_ph",
     "xosc_clksrc",
+];
+
+const RP2350_OVERCLOCK_PROFILES: &[CortexMSocOverclockProfile] = &[
+    CortexMSocOverclockProfile {
+        name: "stock-150mhz",
+        sys_clock_hz: 150_000_000,
+        monotonic_time_impact: CortexMSocMonotonicTimeImpact::Unknown,
+    },
+    CortexMSocOverclockProfile {
+        name: "oc-200mhz",
+        sys_clock_hz: 200_000_000,
+        monotonic_time_impact: CortexMSocMonotonicTimeImpact::Unknown,
+    },
+    CortexMSocOverclockProfile {
+        name: "oc-250mhz",
+        sys_clock_hz: 250_000_000,
+        monotonic_time_impact: CortexMSocMonotonicTimeImpact::Unknown,
+    },
+    CortexMSocOverclockProfile {
+        name: "oc-300mhz",
+        sys_clock_hz: 300_000_000,
+        monotonic_time_impact: CortexMSocMonotonicTimeImpact::Unknown,
+    },
 ];
 const CLK_ADC_CONSUMERS: &[&str] = &["adc"];
 const RP2350_SLEEP_WAKE_SOURCES: &[&str] = &["irq", "sev", "timer", "gpio"];
@@ -2641,12 +2680,8 @@ impl CortexMSocBoard for Rp2350Soc {
         &POWER_MODES
     }
 
-    fn event_timeout_supported(&self) -> bool {
-        true
-    }
-
-    fn event_timeout_irq(&self) -> Option<u16> {
-        Some(RP2350_EVENT_TIMEOUT_IRQN)
+    fn event_timeout_support(&self) -> Option<CortexMEventTimeoutSupport> {
+        Some(RP2350_EVENT_TIMEOUT_SUPPORT)
     }
 
     fn arm_event_timeout(&self, timeout: Duration) -> Result<(), HardwareError> {
@@ -2677,6 +2712,34 @@ impl CortexMSocBoard for Rp2350Soc {
 
     fn monotonic_now(&self) -> Result<Duration, HardwareError> {
         Ok(rp2350_monotonic_now())
+    }
+
+    fn monotonic_raw_bits(&self) -> Option<u32> {
+        Some(64)
+    }
+
+    fn monotonic_tick_hz(&self) -> Option<u64> {
+        Some(1_000_000)
+    }
+
+    fn monotonic_raw_now(&self) -> Result<u64, HardwareError> {
+        Ok(rp2350_monotonic_now_ticks())
+    }
+
+    fn overclock_support(&self) -> CortexMSocOverclockSupport {
+        CortexMSocOverclockSupport::ProfileCatalog
+    }
+
+    fn overclock_profiles(&self) -> &'static [CortexMSocOverclockProfile] {
+        RP2350_OVERCLOCK_PROFILES
+    }
+
+    fn current_sys_clock_hz(&self) -> Option<u64> {
+        Some(150_000_000)
+    }
+
+    fn active_overclock_profile(&self) -> Option<&'static str> {
+        Some("stock-150mhz")
     }
 
     fn pal_power_modes(&self) -> &'static [PowerModeDescriptor] {
@@ -3272,6 +3335,12 @@ pub fn event_timeout_supported() -> bool {
     board_contract::event_timeout_supported(system_soc())
 }
 
+/// Returns one truthful finite event-timeout source summary for the selected RP2350 board.
+#[must_use]
+pub fn event_timeout_support() -> Option<CortexMEventTimeoutSupport> {
+    board_contract::event_timeout_support(system_soc())
+}
+
 /// Returns the board-reserved IRQ line used by the selected RP2350 board's event timeout source.
 #[must_use]
 pub fn event_timeout_irq() -> Option<u16> {
@@ -3320,6 +3389,64 @@ pub fn monotonic_now() -> Result<Duration, HardwareError> {
     board_contract::monotonic_now(system_soc())
 }
 
+/// Returns the width in bits of the selected RP2350 board's raw monotonic counter, when one
+/// exists.
+#[must_use]
+pub fn monotonic_raw_bits() -> Option<u32> {
+    board_contract::monotonic_raw_bits(system_soc())
+}
+
+/// Returns the tick rate of the selected RP2350 board's raw monotonic counter, when one exists.
+#[must_use]
+pub fn monotonic_tick_hz() -> Option<u64> {
+    board_contract::monotonic_tick_hz(system_soc())
+}
+
+/// Returns the selected RP2350 board's raw monotonic counter widened into `u64`.
+///
+/// # Errors
+///
+/// Returns an error if the selected RP2350 board cannot surface one truthful raw monotonic
+/// counter.
+pub fn monotonic_raw_now() -> Result<u64, HardwareError> {
+    board_contract::monotonic_raw_now(system_soc())
+}
+
+/// Returns the selected RP2350 board's overclock or system-clock profile support level.
+#[must_use]
+pub fn overclock_support() -> CortexMSocOverclockSupport {
+    board_contract::overclock_support(system_soc())
+}
+
+/// Returns the selected RP2350 board's overclock or system-clock profiles.
+#[must_use]
+pub fn overclock_profiles() -> &'static [CortexMSocOverclockProfile] {
+    board_contract::overclock_profiles(system_soc())
+}
+
+/// Returns the selected RP2350 board's current effective system/core clock frequency, when it can
+/// be surfaced honestly.
+#[must_use]
+pub fn current_sys_clock_hz() -> Option<u64> {
+    board_contract::current_sys_clock_hz(system_soc())
+}
+
+/// Returns the selected RP2350 board's currently active overclock or system-clock profile, when
+/// it can be surfaced honestly.
+#[must_use]
+pub fn active_overclock_profile() -> Option<&'static str> {
+    board_contract::active_overclock_profile(system_soc())
+}
+
+/// Applies one named overclock or system-clock profile on the selected RP2350 target.
+///
+/// # Errors
+///
+/// Returns an error because runtime profile application is not yet implemented honestly.
+pub fn apply_overclock_profile(name: &str) -> Result<(), HardwareError> {
+    board_contract::apply_overclock_profile(system_soc(), name)
+}
+
 /// Returns the selected RP2350 PAL-facing power descriptors.
 #[must_use]
 pub fn pal_power_modes() -> &'static [PowerModeDescriptor] {
@@ -3348,8 +3475,10 @@ mod tests {
         CLK_REF_MAIN_SOURCES,
         CLOCK_TREE,
         CortexMDmaRequestClass,
+        CortexMEventTimeoutImplementation,
         CortexMIrqClass,
         CortexMSocDeviceIdSupport,
+        CortexMSocMonotonicTimeImpact,
         DEVICE_ID_SUPPORT,
         DMA_CONTROLLERS,
         DMA_REQUESTS,
@@ -3357,7 +3486,13 @@ mod tests {
         IRQS,
         MEMORY_MAP,
         POWER_MODES,
+        RP2350_EVENT_TIMEOUT_COUNTER_BITS,
+        RP2350_EVENT_TIMEOUT_IRQN,
+        RP2350_EVENT_TIMEOUT_MAX_RELATIVE_TIMEOUT,
+        RP2350_EVENT_TIMEOUT_TICK_HZ,
+        RP2350_OVERCLOCK_PROFILES,
         Rp2350PowerModeAction,
+        event_timeout_support,
         rp2350_chip_manufacturer,
         rp2350_chip_part,
         rp2350_chip_revision,
@@ -3397,6 +3532,39 @@ mod tests {
             .expect("sram descriptor should exist");
 
         assert!(!sram.allocatable);
+    }
+
+    #[test]
+    fn overclock_profiles_surface_known_targets_and_time_impacts() {
+        assert!(
+            RP2350_OVERCLOCK_PROFILES
+                .iter()
+                .any(|profile| profile.name == "oc-200mhz")
+        );
+        assert!(RP2350_OVERCLOCK_PROFILES.iter().all(|profile| matches!(
+            profile.monotonic_time_impact,
+            CortexMSocMonotonicTimeImpact::Unknown
+        )));
+    }
+
+    #[test]
+    fn event_timeout_support_surfaces_reserved_alarm_shape() {
+        let timeout = event_timeout_support().expect("rp2350 timeout support should exist");
+
+        assert_eq!(
+            timeout.implementation,
+            CortexMEventTimeoutImplementation::ReservedOneShotAlarm
+        );
+        assert_eq!(timeout.irqn, Some(RP2350_EVENT_TIMEOUT_IRQN));
+        assert_eq!(
+            timeout.counter_bits,
+            Some(RP2350_EVENT_TIMEOUT_COUNTER_BITS)
+        );
+        assert_eq!(timeout.tick_hz, Some(RP2350_EVENT_TIMEOUT_TICK_HZ));
+        assert_eq!(
+            timeout.max_relative_timeout,
+            Some(RP2350_EVENT_TIMEOUT_MAX_RELATIVE_TIMEOUT)
+        );
     }
 
     #[test]

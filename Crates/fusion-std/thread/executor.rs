@@ -27,7 +27,7 @@
 //! # demo();
 //! ```
 
-use core::any::TypeId;
+use core::any::{TypeId, type_name};
 use core::array;
 use core::cell::UnsafeCell;
 use core::fmt;
@@ -46,11 +46,13 @@ use crate::sync::{Mutex as SyncMutex, Semaphore, SyncError, SyncErrorKind};
 use fusion_sys::alloc::{
     AllocError,
     AllocErrorKind,
+    AllocationStrategy,
     Allocator,
     ArenaInitError,
     ArenaSlice,
     BoundedArena,
     ControlLease,
+    Slab,
 };
 use fusion_sys::event::EventSystem;
 pub use fusion_sys::event::{
@@ -72,7 +74,22 @@ pub use fusion_sys::event::{
 };
 use fusion_sys::fiber::{FiberError, FiberErrorKind};
 use fusion_sys::sync::Mutex as SysMutex;
-use fusion_sys::thread::system_thread;
+use fusion_sys::thread::{
+    CanonicalInstant,
+    MonotonicRawInstant,
+    system_monotonic_time,
+    system_thread,
+};
+#[cfg(feature = "std")]
+use fusion_sys::thread::{
+    ThreadConfig,
+    ThreadEntryReturn,
+    ThreadHandle,
+    ThreadJoinPolicy,
+    ThreadPlacementRequest,
+    ThreadStartMode,
+    ThreadSystem,
+};
 
 #[cfg(feature = "std")]
 use super::HostedFiberRuntime;
@@ -85,6 +102,8 @@ use std::string::String;
 use std::sync::Arc;
 #[cfg(feature = "std")]
 use std::thread::{Builder as StdThreadBuilder, JoinHandle};
+#[cfg(feature = "std")]
+use std::vec::Vec;
 /// Public executor operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExecutorMode {
@@ -107,26 +126,251 @@ pub struct AsyncTaskAdmission {
     pub future_bytes: usize,
     /// Concrete future frame alignment in bytes.
     pub future_align: usize,
+    /// Effective future storage class selected for the task.
+    pub future_storage_class: AsyncStorageClass,
     /// Concrete output storage size in bytes.
     pub output_bytes: usize,
     /// Concrete output storage alignment in bytes.
     pub output_align: usize,
+    /// Effective output storage class selected for the task.
+    pub output_storage_class: AsyncStorageClass,
+    /// Distinct poll-stack contract carried alongside the future frame layout.
+    pub poll_stack: AsyncPollStackContract,
 }
 
 impl AsyncTaskAdmission {
-    const fn for_future<F>(carrier: ExecutorMode) -> Self
+    fn for_future<F>(carrier: ExecutorMode) -> Self
     where
         F: Future + 'static,
         F::Output: 'static,
     {
+        let future_storage_class = async_storage_class_for_layout(
+            size_of::<F>(),
+            align_of::<F>(),
+            INLINE_ASYNC_FUTURE_BYTES,
+            ASYNC_FUTURE_CLASS_MEDIUM_BYTES,
+            ASYNC_FUTURE_CLASS_LARGE_BYTES,
+        );
+        let output_storage_class = async_storage_class_for_layout(
+            size_of::<F::Output>(),
+            align_of::<F::Output>(),
+            INLINE_ASYNC_RESULT_BYTES,
+            ASYNC_RESULT_CLASS_MEDIUM_BYTES,
+            ASYNC_RESULT_CLASS_LARGE_BYTES,
+        );
+        let poll_stack = generated_async_poll_stack_contract::<F>().unwrap_or_else(|| {
+            AsyncPollStackContract::from_future_storage_class(future_storage_class)
+        });
         Self {
             carrier,
             future_bytes: size_of::<F>(),
             future_align: align_of::<F>(),
+            future_storage_class,
             output_bytes: size_of::<F::Output>(),
             output_align: align_of::<F::Output>(),
+            output_storage_class,
+            poll_stack,
         }
     }
+
+    const fn with_poll_stack_bytes(mut self, bytes: usize) -> Self {
+        self.poll_stack = AsyncPollStackContract::from_bytes(bytes);
+        self
+    }
+}
+
+/// Effective slab class selected for one async frame or result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AsyncStorageClass {
+    /// Stored inline inside the task slot.
+    Inline,
+    /// Stored in the medium slab-backed class.
+    Medium,
+    /// Stored in the large slab-backed class.
+    Large,
+    /// Does not fit one supported storage class honestly.
+    Unsupported,
+}
+
+/// Separate poll-stack contract for one async task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AsyncPollStackContract {
+    /// No honest poll-stack bound has been attached.
+    Unknown,
+    /// One build-generated poll-stack budget was emitted for this exact future type.
+    Generated { bytes: usize },
+    /// One generated heuristic poll-stack budget was derived from the admitted future frame class.
+    DerivedHeuristic { bytes: usize },
+    /// One explicit poll-stack byte budget was attached to the task admission.
+    Explicit { bytes: usize },
+}
+
+impl AsyncPollStackContract {
+    const fn from_future_storage_class(class: AsyncStorageClass) -> Self {
+        match class {
+            AsyncStorageClass::Inline => Self::DerivedHeuristic { bytes: 512 },
+            AsyncStorageClass::Medium => Self::DerivedHeuristic { bytes: 1024 },
+            AsyncStorageClass::Large => Self::DerivedHeuristic { bytes: 2048 },
+            AsyncStorageClass::Unsupported => Self::Unknown,
+        }
+    }
+
+    const fn from_bytes(bytes: usize) -> Self {
+        if bytes == 0 {
+            Self::Unknown
+        } else {
+            Self::Explicit { bytes }
+        }
+    }
+}
+
+#[doc(hidden)]
+pub struct GeneratedAsyncPollStackMetadataEntry {
+    pub type_name: &'static str,
+    pub poll_stack_bytes: usize,
+}
+
+/// Hidden compile-time async poll-stack contract emitted or declared inside the current crate.
+#[doc(hidden)]
+pub trait GeneratedExplicitAsyncPollStackContract {
+    const POLL_STACK_BYTES: usize;
+}
+
+include!(concat!(env!("OUT_DIR"), "/async_task_generated.rs"));
+
+/// Returns the compile-time generated async poll-stack budget for one nameable future type.
+#[must_use]
+pub const fn generated_explicit_async_poll_stack_bytes<
+    T: GeneratedExplicitAsyncPollStackContract,
+>() -> usize {
+    T::POLL_STACK_BYTES
+}
+
+/// Includes one generated Rust sidecar emitted by the async poll-stack analyzer pipeline.
+#[macro_export]
+macro_rules! include_generated_async_poll_stack_contracts {
+    ($path:expr $(,)?) => {
+        include!($path);
+    };
+}
+
+/// Declares one build-generated async poll-stack contract for use in downstream crates.
+#[macro_export]
+macro_rules! declare_generated_async_poll_stack_contract {
+    ($future:ty, $poll_stack_bytes:expr $(,)?) => {
+        impl $crate::thread::GeneratedExplicitAsyncPollStackContract for $future {
+            const POLL_STACK_BYTES: usize = $poll_stack_bytes;
+        }
+    };
+}
+
+#[doc(hidden)]
+pub struct GeneratedAsyncPollStackMetadataAnchorFuture;
+
+impl Future for GeneratedAsyncPollStackMetadataAnchorFuture {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Ready(())
+    }
+}
+
+/// Hidden async-poll anchor used to exercise the build-generated poll-stack metadata pipeline in
+/// normal library artifacts before link-time stripping can erase the evidence.
+#[doc(hidden)]
+#[unsafe(no_mangle)]
+pub extern "Rust" fn generated_async_poll_stack_metadata_anchor() -> bool {
+    let waker = unsafe { Waker::from_raw(noop_async_task_raw_waker()) };
+    let mut context = Context::from_waker(&waker);
+    let mut future = GeneratedAsyncPollStackMetadataAnchorFuture;
+    matches!(
+        generated_async_poll_stack_root(unsafe { Pin::new_unchecked(&mut future) }, &mut context),
+        Poll::Ready(())
+    )
+}
+
+#[inline(never)]
+fn generated_async_poll_stack_root<F>(
+    future: Pin<&mut F>,
+    context: &mut Context<'_>,
+) -> Poll<F::Output>
+where
+    F: Future,
+{
+    Future::poll(future, context)
+}
+
+fn generated_async_poll_stack_bytes_by_type_name(type_name: &str) -> Option<usize> {
+    GENERATED_ASYNC_POLL_STACK_TASKS
+        .binary_search_by(|entry| entry.type_name.cmp(type_name))
+        .ok()
+        .map(|index| GENERATED_ASYNC_POLL_STACK_TASKS[index].poll_stack_bytes)
+}
+
+fn generated_async_poll_stack_contract<F: 'static>() -> Option<AsyncPollStackContract> {
+    generated_async_poll_stack_bytes_by_type_name(type_name::<F>())
+        .map(|bytes| AsyncPollStackContract::Generated { bytes })
+}
+
+fn runtime_monotonic_now_instant() -> Result<CanonicalInstant, ExecutorError> {
+    system_monotonic_time()
+        .now_instant()
+        .map_err(executor_error_from_thread)
+}
+
+fn runtime_monotonic_raw_now() -> Result<MonotonicRawInstant, ExecutorError> {
+    system_monotonic_time()
+        .raw_now()
+        .map_err(executor_error_from_thread)
+}
+
+fn runtime_monotonic_checked_add(
+    base: CanonicalInstant,
+    duration: Duration,
+) -> Result<CanonicalInstant, ExecutorError> {
+    system_monotonic_time()
+        .checked_add_duration(base, duration)
+        .map_err(executor_error_from_thread)
+}
+
+fn runtime_monotonic_duration_until(deadline: CanonicalInstant) -> Result<Duration, ExecutorError> {
+    system_monotonic_time()
+        .duration_until(deadline)
+        .map_err(executor_error_from_thread)
+}
+
+const fn async_storage_class_for_layout(
+    bytes: usize,
+    align: usize,
+    inline_bytes: usize,
+    medium_bytes: usize,
+    large_bytes: usize,
+) -> AsyncStorageClass {
+    if bytes <= inline_bytes && align <= INLINE_ASYNC_STORAGE_ALIGN {
+        return AsyncStorageClass::Inline;
+    }
+    if bytes <= medium_bytes && align <= async_storage_class_slot_align(medium_bytes) {
+        return AsyncStorageClass::Medium;
+    }
+    if bytes <= large_bytes && align <= async_storage_class_slot_align(large_bytes) {
+        return AsyncStorageClass::Large;
+    }
+    AsyncStorageClass::Unsupported
+}
+
+const fn async_storage_class_slot_align(bytes: usize) -> usize {
+    1usize << bytes.trailing_zeros()
+}
+
+fn build_async_slab<const SIZE: usize, const COUNT: usize>()
+-> Result<Slab<SIZE, COUNT>, ExecutorError> {
+    let bytes = SIZE.checked_mul(COUNT).ok_or_else(executor_overflow)?;
+    let allocator = Allocator::<1, 1>::system_default_with_capacity(bytes)
+        .map_err(executor_error_from_alloc)?;
+    let domain = allocator.default_domain().ok_or_else(executor_invalid)?;
+    allocator
+        .slab::<SIZE, COUNT>(domain)
+        .map_err(executor_error_from_alloc)
 }
 
 /// Cooperative async yield future for the Fusion executor.
@@ -479,9 +723,15 @@ pub const fn async_wait_for_readiness(
 }
 
 /// One future that resolves at the selected monotonic deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AsyncSleepDeadline {
+    Canonical(CanonicalInstant),
+    LegacyDuration(Duration),
+}
+
 #[derive(Debug, Clone)]
 pub struct AsyncSleepUntil {
-    deadline: Duration,
+    deadline: AsyncSleepDeadline,
     registration: Option<AsyncWaitRegistration>,
 }
 
@@ -496,11 +746,22 @@ impl Future for AsyncSleepUntil {
             self.registration = None;
             return Poll::Ready(Err(ExecutorError::Unsupported));
         }
-        let now = match system_thread().monotonic_now() {
-            Ok(now) => now,
-            Err(error) => return Poll::Ready(Err(executor_error_from_thread(error))),
+        let deadline = match self.deadline {
+            AsyncSleepDeadline::Canonical(deadline) => deadline,
+            AsyncSleepDeadline::LegacyDuration(duration) => {
+                let deadline = match system_monotonic_time().instant_from_duration(duration) {
+                    Ok(deadline) => deadline,
+                    Err(error) => return Poll::Ready(Err(executor_error_from_thread(error))),
+                };
+                self.deadline = AsyncSleepDeadline::Canonical(deadline);
+                deadline
+            }
         };
-        if now >= self.deadline {
+        let now = match runtime_monotonic_now_instant() {
+            Ok(now) => now,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        if now >= deadline {
             if let Some(registration) = self.registration.take() {
                 let _ = registration.clear();
             }
@@ -536,11 +797,7 @@ impl Future for AsyncSleepUntil {
             let core = unsafe { (registration.core as *const ExecutorCore).as_ref() }
                 .ok_or(ExecutorError::Stopped);
             match core.and_then(|core| {
-                core.register_sleep_wait(
-                    registration.slot_index,
-                    registration.generation,
-                    self.deadline,
-                )
+                core.register_sleep_wait(registration.slot_index, registration.generation, deadline)
             }) {
                 Ok(()) => {
                     self.registration = Some(registration);
@@ -562,9 +819,19 @@ impl Drop for AsyncSleepUntil {
 
 /// Returns one future that resolves at the selected monotonic deadline.
 #[must_use]
+pub const fn async_sleep_until_instant(deadline: CanonicalInstant) -> AsyncSleepUntil {
+    AsyncSleepUntil {
+        deadline: AsyncSleepDeadline::Canonical(deadline),
+        registration: None,
+    }
+}
+
+/// Returns one future that resolves at the selected monotonic deadline expressed as elapsed
+/// runtime time from the backend-defined monotonic origin.
+#[must_use]
 pub const fn async_sleep_until(deadline: Duration) -> AsyncSleepUntil {
     AsyncSleepUntil {
-        deadline,
+        deadline: AsyncSleepDeadline::LegacyDuration(deadline),
         registration: None,
     }
 }
@@ -580,16 +847,23 @@ impl Future for AsyncSleepFor {
     type Output = Result<(), ExecutorError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if matches!(
+            current_async_task_scheduler(),
+            Some(AsyncTaskSchedulerTag::GreenPool)
+        ) {
+            self.inner = None;
+            return Poll::Ready(Err(ExecutorError::Unsupported));
+        }
         if self.inner.is_none() {
-            let now = match system_thread().monotonic_now() {
+            let now = match runtime_monotonic_now_instant() {
                 Ok(now) => now,
-                Err(error) => return Poll::Ready(Err(executor_error_from_thread(error))),
+                Err(error) => return Poll::Ready(Err(error)),
             };
-            let deadline = match now.checked_add(self.duration) {
-                Some(deadline) => deadline,
-                None => return Poll::Ready(Err(executor_overflow())),
+            let deadline = match runtime_monotonic_checked_add(now, self.duration) {
+                Ok(deadline) => deadline,
+                Err(error) => return Poll::Ready(Err(error)),
             };
-            self.inner = Some(async_sleep_until(deadline));
+            self.inner = Some(async_sleep_until_instant(deadline));
         }
         match self.inner.as_mut() {
             Some(inner) => Pin::new(inner).poll(cx),
@@ -635,6 +909,8 @@ pub struct ExecutorConfig {
     pub mode: ExecutorMode,
     /// Reactor configuration for I/O readiness or completion integration.
     pub reactor: ReactorConfig,
+    /// Fixed task-registry capacity admitted by this executor.
+    pub capacity: usize,
 }
 
 impl ExecutorConfig {
@@ -644,6 +920,7 @@ impl ExecutorConfig {
         Self {
             mode: ExecutorMode::CurrentThread,
             reactor: ReactorConfig::new(),
+            capacity: TASK_REGISTRY_CAPACITY,
         }
     }
 
@@ -653,6 +930,7 @@ impl ExecutorConfig {
         Self {
             mode: ExecutorMode::ThreadPool,
             reactor: ReactorConfig::new(),
+            capacity: TASK_REGISTRY_CAPACITY,
         }
     }
 
@@ -662,6 +940,7 @@ impl ExecutorConfig {
         Self {
             mode: ExecutorMode::GreenPool,
             reactor: ReactorConfig::new(),
+            capacity: TASK_REGISTRY_CAPACITY,
         }
     }
 
@@ -669,6 +948,13 @@ impl ExecutorConfig {
     #[must_use]
     pub const fn with_mode(mut self, mode: ExecutorMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    /// Returns one copy of this configuration with one explicit task-registry capacity.
+    #[must_use]
+    pub const fn with_capacity(mut self, capacity: usize) -> Self {
+        self.capacity = capacity;
         self
     }
 }
@@ -853,8 +1139,13 @@ impl Default for Reactor {
 const CURRENT_QUEUE_CAPACITY: usize = 256;
 const TASK_REGISTRY_CAPACITY: usize = 256;
 const JOIN_SET_CAPACITY: usize = 64;
+const INLINE_ASYNC_STORAGE_ALIGN: usize = 64;
 const INLINE_ASYNC_FUTURE_BYTES: usize = 256;
+const ASYNC_FUTURE_CLASS_MEDIUM_BYTES: usize = 512;
+const ASYNC_FUTURE_CLASS_LARGE_BYTES: usize = 1024;
 const INLINE_ASYNC_RESULT_BYTES: usize = 256;
+const ASYNC_RESULT_CLASS_MEDIUM_BYTES: usize = 512;
+const ASYNC_RESULT_CLASS_LARGE_BYTES: usize = 1024;
 const REACTOR_EVENT_BATCH: usize = 16;
 const REACTOR_WAIT_BATCH: usize = TASK_REGISTRY_CAPACITY;
 
@@ -958,7 +1249,8 @@ enum AsyncReactorWaitKind {
     },
     Sleep {
         generation: u64,
-        deadline: Duration,
+        deadline: CanonicalInstant,
+        raw_deadline: Option<MonotonicRawInstant>,
     },
 }
 
@@ -993,11 +1285,16 @@ impl AsyncReactorWaitEntry {
         }
     }
 
-    const fn sleep(generation: u64, deadline: Duration) -> Self {
+    const fn sleep(
+        generation: u64,
+        deadline: CanonicalInstant,
+        raw_deadline: Option<MonotonicRawInstant>,
+    ) -> Self {
         Self {
             kind: AsyncReactorWaitKind::Sleep {
                 generation,
                 deadline,
+                raw_deadline,
             },
         }
     }
@@ -1024,7 +1321,6 @@ struct CurrentQueueState {
     tail: usize,
     len: usize,
 }
-
 impl CurrentQueue {
     const fn new(fast: bool) -> Self {
         Self {
@@ -1218,10 +1514,13 @@ impl ExecutorReactorState {
         &self,
         slot_index: usize,
         generation: u64,
-        deadline: Duration,
+        deadline: CanonicalInstant,
     ) -> Result<(), ExecutorError> {
+        let raw_deadline = system_monotonic_time()
+            .raw_deadline_for_sleep(deadline)
+            .map_err(executor_error_from_thread)?;
         self.waits.with(|waits| {
-            waits[slot_index] = AsyncReactorWaitEntry::sleep(generation, deadline);
+            waits[slot_index] = AsyncReactorWaitEntry::sleep(generation, deadline, raw_deadline);
         })?;
         self.outcomes.with(|outcomes| outcomes[slot_index] = None)?;
         #[cfg(feature = "std")]
@@ -1332,17 +1631,18 @@ impl ExecutorReactorState {
         self.outcomes.with(|outcomes| outcomes[slot_index].take())
     }
 
-    fn next_timer_deadline(&self) -> Result<Option<Duration>, ExecutorError> {
+    fn next_timer_deadline(&self) -> Result<Option<CanonicalInstant>, ExecutorError> {
         self.waits.with_ref(|waits| {
-            waits
-                .iter()
-                .fold(None::<Duration>, |next_deadline, entry| match entry.kind {
+            waits.iter().fold(
+                None::<CanonicalInstant>,
+                |next_deadline, entry| match entry.kind {
                     AsyncReactorWaitKind::Sleep { deadline, .. } => Some(match next_deadline {
                         Some(current) => current.min(deadline),
                         None => deadline,
                     }),
                     _ => next_deadline,
-                })
+                },
+            )
         })
     }
 
@@ -1446,7 +1746,8 @@ impl ExecutorReactorState {
     fn collect_due_timers(
         &self,
         core: &ExecutorCore,
-        now: Duration,
+        now: CanonicalInstant,
+        now_raw: Option<MonotonicRawInstant>,
     ) -> Result<bool, ExecutorError> {
         let mut ready = [None; REACTOR_WAIT_BATCH];
         self.waits.with(|waits| {
@@ -1455,11 +1756,16 @@ impl ExecutorReactorState {
                 let AsyncReactorWaitKind::Sleep {
                     generation,
                     deadline,
+                    raw_deadline,
                 } = entry.kind
                 else {
                     continue;
                 };
-                if deadline > now || count == ready.len() {
+                let due = match (now_raw, raw_deadline) {
+                    (Some(now_raw), Some(raw_deadline)) => now_raw.deadline_reached(raw_deadline),
+                    _ => now >= deadline,
+                };
+                if !due || count == ready.len() {
                     continue;
                 }
                 entry.kind = AsyncReactorWaitKind::None;
@@ -1602,35 +1908,38 @@ impl ExecutorReactorState {
             progressed |= self.activate_pending_readiness_waits(core, core.reactor)?;
         }
         let now = if self.next_timer_deadline()?.is_some() {
-            Some(
-                system_thread()
-                    .monotonic_now()
-                    .map_err(executor_error_from_thread)?,
-            )
+            Some(runtime_monotonic_now_instant()?)
         } else {
             None
         };
         if let Some(now) = now {
-            progressed |= self.collect_due_timers(core, now)?;
+            let now_raw = runtime_monotonic_raw_now().ok();
+            progressed |= self.collect_due_timers(core, now, now_raw)?;
         }
 
         let has_readiness_waiters = self.has_readiness_waiters()?;
-        #[cfg(feature = "std")]
-        let should_poll = blocking || has_readiness_waiters;
-        #[cfg(not(feature = "std"))]
-        let should_poll = has_readiness_waiters;
+        let next_deadline = self.next_timer_deadline()?;
+        let should_poll = has_readiness_waiters || (blocking && next_deadline.is_some());
         if !should_poll {
             return Ok(progressed);
         }
 
+        if blocking
+            && !has_readiness_waiters
+            && let Some(deadline) = next_deadline
+        {
+            system_monotonic_time()
+                .sleep_until(deadline)
+                .map_err(executor_error_from_thread)?;
+            let now = runtime_monotonic_now_instant()?;
+            let now_raw = runtime_monotonic_raw_now().ok();
+            progressed |= self.collect_due_timers(core, now, now_raw)?;
+            return Ok(progressed);
+        }
+
         let timeout = if blocking {
-            match self.next_timer_deadline()? {
-                Some(deadline) => {
-                    let now = system_thread()
-                        .monotonic_now()
-                        .map_err(executor_error_from_thread)?;
-                    Some(deadline.saturating_sub(now))
-                }
+            match next_deadline {
+                Some(deadline) => Some(runtime_monotonic_duration_until(deadline)?),
                 None => None,
             }
         } else {
@@ -1650,13 +1959,10 @@ impl ExecutorReactorState {
         })??;
         progressed |= self.resolve_reactor_events(core, core.reactor, count)?;
 
-        if let Some(now) = now {
-            progressed |= self.collect_due_timers(core, now)?;
-        } else if blocking && self.next_timer_deadline()?.is_some() {
-            let now = system_thread()
-                .monotonic_now()
-                .map_err(executor_error_from_thread)?;
-            progressed |= self.collect_due_timers(core, now)?;
+        if self.next_timer_deadline()?.is_some() {
+            let now = runtime_monotonic_now_instant()?;
+            let now_raw = runtime_monotonic_raw_now().ok();
+            progressed |= self.collect_due_timers(core, now, now_raw)?;
         }
         Ok(progressed)
     }
@@ -1698,7 +2004,7 @@ impl CurrentQueueState {
         job
     }
 
-    #[cfg_attr(not(feature = "std"), allow(dead_code))]
+    #[allow(dead_code)]
     fn clear(&mut self) -> usize {
         let dropped = self.len;
         while self.dequeue().is_some() {}
@@ -1747,11 +2053,13 @@ struct InlineAsyncFutureBytes {
 type InlineAsyncPollFn = unsafe fn(
     *mut u8,
     &ExecutorCell<InlineAsyncResultStorage>,
+    &AsyncTaskResultStore,
     &mut Context<'_>,
 ) -> Result<Poll<()>, ExecutorError>;
 
 struct InlineAsyncFutureStorage {
     storage: MaybeUninit<InlineAsyncFutureBytes>,
+    allocation: Option<AsyncFutureFrameAllocation>,
     poll: Option<InlineAsyncPollFn>,
     drop: Option<unsafe fn(*mut u8)>,
     occupied: bool,
@@ -1769,23 +2077,27 @@ impl InlineAsyncFutureStorage {
     const fn empty() -> Self {
         Self {
             storage: MaybeUninit::uninit(),
+            allocation: None,
             poll: None,
             drop: None,
             occupied: false,
         }
     }
 
-    const fn supports<F>() -> bool
+    const fn supports_inline<F>() -> bool
     where
         F: Future + 'static,
-        F::Output: 'static,
     {
         size_of::<F>() <= size_of::<InlineAsyncFutureBytes>()
             && align_of::<F>() <= align_of::<InlineAsyncFutureBytes>()
-            && InlineAsyncResultStorage::supports::<F::Output>()
     }
 
-    fn store_future<F>(&mut self, future: F) -> Result<(), ExecutorError>
+    fn store_future<F>(
+        &mut self,
+        future_store: &AsyncTaskFutureStore,
+        result_store: &AsyncTaskResultStore,
+        future: F,
+    ) -> Result<(), ExecutorError>
     where
         F: Future + 'static,
         F::Output: 'static,
@@ -1793,12 +2105,20 @@ impl InlineAsyncFutureStorage {
         if self.occupied {
             return Err(executor_invalid());
         }
-        if !Self::supports::<F>() {
+        if !InlineAsyncResultStorage::supports::<F::Output>(result_store) {
             return Err(ExecutorError::Unsupported);
         }
 
+        let target = if Self::supports_inline::<F>() {
+            self.storage.as_mut_ptr().cast::<F>()
+        } else {
+            let mut allocation = future_store.allocate_for::<F>()?;
+            let ptr = allocation.ptr().cast::<F>();
+            self.allocation = Some(allocation);
+            ptr
+        };
         unsafe {
-            self.storage.as_mut_ptr().cast::<F>().write(future);
+            target.write(future);
         }
         self.poll = Some(poll_inline_async_future::<F>);
         self.drop = Some(drop_inline_async_value::<F>);
@@ -1809,25 +2129,43 @@ impl InlineAsyncFutureStorage {
     fn poll_in_place(
         &mut self,
         result: &ExecutorCell<InlineAsyncResultStorage>,
+        result_store: &AsyncTaskResultStore,
         context: &mut Context<'_>,
     ) -> Result<Poll<()>, ExecutorError> {
         if !self.occupied {
             return Err(executor_invalid());
         }
         let poll = self.poll.ok_or_else(executor_invalid)?;
-        unsafe { poll(self.storage.as_mut_ptr().cast::<u8>(), result, context) }
+        unsafe { poll(self.storage_ptr(), result, result_store, context) }
     }
 
-    fn clear(&mut self) {
+    fn clear(&mut self, future_store: &AsyncTaskFutureStore) -> Result<(), ExecutorError> {
+        self.drop_value_only();
+        if let Some(allocation) = self.allocation.take() {
+            future_store.deallocate(allocation)?;
+        }
+        self.poll = None;
+        Ok(())
+    }
+
+    fn storage_ptr(&mut self) -> *mut u8 {
+        match self.allocation.as_mut() {
+            Some(allocation) => allocation.ptr(),
+            None => self.storage.as_mut_ptr().cast::<u8>(),
+        }
+    }
+
+    fn drop_value_only(&mut self) {
         if !self.occupied {
             self.poll = None;
             self.drop = None;
+            self.allocation = None;
             return;
         }
 
         if let Some(drop) = self.drop.take() {
             unsafe {
-                drop(self.storage.as_mut_ptr().cast::<u8>());
+                drop(self.storage_ptr());
             }
         }
         self.poll = None;
@@ -1837,9 +2175,113 @@ impl InlineAsyncFutureStorage {
 
 impl Drop for InlineAsyncFutureStorage {
     fn drop(&mut self) {
-        self.clear();
+        self.drop_value_only();
     }
 }
+
+#[derive(Debug)]
+struct AsyncTaskFutureStore {
+    medium: ExecutorCell<Option<Slab<ASYNC_FUTURE_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>>>,
+    large: ExecutorCell<Option<Slab<ASYNC_FUTURE_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>>>,
+}
+
+impl AsyncTaskFutureStore {
+    const fn new(fast: bool) -> Self {
+        Self {
+            medium: ExecutorCell::new(fast, None),
+            large: ExecutorCell::new(fast, None),
+        }
+    }
+
+    fn allocate_for<F>(&self) -> Result<AsyncFutureFrameAllocation, ExecutorError>
+    where
+        F: Future + 'static,
+    {
+        let len = size_of::<F>();
+        let align = align_of::<F>();
+        let request = fusion_sys::alloc::AllocRequest {
+            len,
+            align,
+            zeroed: false,
+        };
+        if len <= ASYNC_FUTURE_CLASS_MEDIUM_BYTES
+            && align <= async_storage_class_slot_align(ASYNC_FUTURE_CLASS_MEDIUM_BYTES)
+        {
+            return self.medium.with(|medium| {
+                if medium.is_none() {
+                    *medium = Some(build_async_slab::<
+                        ASYNC_FUTURE_CLASS_MEDIUM_BYTES,
+                        TASK_REGISTRY_CAPACITY,
+                    >()?);
+                }
+                medium
+                    .as_ref()
+                    .ok_or_else(executor_invalid)?
+                    .allocate(&request)
+                    .map(AsyncFutureFrameAllocation::Medium)
+                    .map_err(executor_error_from_alloc)
+            })?;
+        }
+        if len <= ASYNC_FUTURE_CLASS_LARGE_BYTES
+            && align <= async_storage_class_slot_align(ASYNC_FUTURE_CLASS_LARGE_BYTES)
+        {
+            return self.large.with(|large| {
+                if large.is_none() {
+                    *large = Some(build_async_slab::<
+                        ASYNC_FUTURE_CLASS_LARGE_BYTES,
+                        TASK_REGISTRY_CAPACITY,
+                    >()?);
+                }
+                large
+                    .as_ref()
+                    .ok_or_else(executor_invalid)?
+                    .allocate(&request)
+                    .map(AsyncFutureFrameAllocation::Large)
+                    .map_err(executor_error_from_alloc)
+            })?;
+        }
+        Err(ExecutorError::Unsupported)
+    }
+
+    fn deallocate(&self, allocation: AsyncFutureFrameAllocation) -> Result<(), ExecutorError> {
+        match allocation {
+            AsyncFutureFrameAllocation::Medium(allocation) => self.medium.with(|medium| {
+                medium
+                    .as_ref()
+                    .ok_or_else(executor_invalid)?
+                    .deallocate(allocation)
+                    .map_err(executor_error_from_alloc)
+            })?,
+            AsyncFutureFrameAllocation::Large(allocation) => self.large.with(|large| {
+                large
+                    .as_ref()
+                    .ok_or_else(executor_invalid)?
+                    .deallocate(allocation)
+                    .map_err(executor_error_from_alloc)
+            })?,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum AsyncFutureFrameAllocation {
+    Medium(fusion_sys::alloc::AllocResult),
+    Large(fusion_sys::alloc::AllocResult),
+}
+
+impl AsyncFutureFrameAllocation {
+    fn ptr(&mut self) -> *mut u8 {
+        match self {
+            Self::Medium(allocation) | Self::Large(allocation) => allocation.ptr.as_ptr(),
+        }
+    }
+}
+
+// SAFETY: frame allocations are owned linearly by one task slot, and moving the allocation token
+// between scheduler threads does not invalidate the underlying slab-backed storage.
+unsafe impl Send for AsyncFutureFrameAllocation {}
+// SAFETY: shared references do not permit mutation; slot-level synchronization still governs use.
+unsafe impl Sync for AsyncFutureFrameAllocation {}
 
 #[repr(C, align(64))]
 struct InlineAsyncResultBytes {
@@ -1848,6 +2290,7 @@ struct InlineAsyncResultBytes {
 
 struct InlineAsyncResultStorage {
     storage: MaybeUninit<InlineAsyncResultBytes>,
+    allocation: Option<AsyncResultFrameAllocation>,
     drop: Option<unsafe fn(*mut u8)>,
     type_id: Option<TypeId>,
     occupied: bool,
@@ -1865,27 +2308,44 @@ impl InlineAsyncResultStorage {
     const fn empty() -> Self {
         Self {
             storage: MaybeUninit::uninit(),
+            allocation: None,
             drop: None,
             type_id: None,
             occupied: false,
         }
     }
 
-    const fn supports<T: 'static>() -> bool {
+    const fn supports_inline<T: 'static>() -> bool {
         size_of::<T>() <= size_of::<InlineAsyncResultBytes>()
             && align_of::<T>() <= align_of::<InlineAsyncResultBytes>()
     }
 
-    fn store<T: 'static>(&mut self, value: T) -> Result<(), ExecutorError> {
+    fn supports<T: 'static>(result_store: &AsyncTaskResultStore) -> bool {
+        Self::supports_inline::<T>() || result_store.supports::<T>()
+    }
+
+    fn store<T: 'static>(
+        &mut self,
+        result_store: &AsyncTaskResultStore,
+        value: T,
+    ) -> Result<(), ExecutorError> {
         if self.occupied {
             return Err(executor_invalid());
         }
-        if !Self::supports::<T>() {
+        if !Self::supports::<T>(result_store) {
             return Err(ExecutorError::Unsupported);
         }
 
+        let target = if Self::supports_inline::<T>() {
+            self.storage.as_mut_ptr().cast::<T>()
+        } else {
+            let mut allocation = result_store.allocate_for::<T>()?;
+            let ptr = allocation.ptr().cast::<T>();
+            self.allocation = Some(allocation);
+            ptr
+        };
         unsafe {
-            self.storage.as_mut_ptr().cast::<T>().write(value);
+            target.write(value);
         }
         self.drop = Some(drop_inline_async_value::<T>);
         self.type_id = Some(TypeId::of::<T>());
@@ -1893,7 +2353,10 @@ impl InlineAsyncResultStorage {
         Ok(())
     }
 
-    fn take<T: 'static>(&mut self) -> Result<T, ExecutorError> {
+    fn take<T: 'static>(
+        &mut self,
+        result_store: &AsyncTaskResultStore,
+    ) -> Result<T, ExecutorError> {
         if !self.occupied || self.type_id != Some(TypeId::of::<T>()) {
             return Err(executor_invalid());
         }
@@ -1901,10 +2364,30 @@ impl InlineAsyncResultStorage {
         self.drop = None;
         self.type_id = None;
         self.occupied = false;
-        Ok(unsafe { self.storage.as_ptr().cast::<T>().read() })
+        let value = unsafe { self.storage_ptr().cast::<T>().read() };
+        if let Some(allocation) = self.allocation.take() {
+            result_store.deallocate(allocation)?;
+        }
+        Ok(value)
     }
 
-    fn clear(&mut self) {
+    fn clear(&mut self, result_store: &AsyncTaskResultStore) -> Result<(), ExecutorError> {
+        self.drop_value_only();
+        if let Some(allocation) = self.allocation.take() {
+            result_store.deallocate(allocation)?;
+        }
+        self.type_id = None;
+        Ok(())
+    }
+
+    fn storage_ptr(&mut self) -> *mut u8 {
+        match self.allocation.as_mut() {
+            Some(allocation) => allocation.ptr(),
+            None => self.storage.as_mut_ptr().cast::<u8>(),
+        }
+    }
+
+    fn drop_value_only(&mut self) {
         if !self.occupied {
             self.drop = None;
             self.type_id = None;
@@ -1913,7 +2396,7 @@ impl InlineAsyncResultStorage {
 
         if let Some(drop) = self.drop.take() {
             unsafe {
-                drop(self.storage.as_mut_ptr().cast::<u8>());
+                drop(self.storage_ptr());
             }
         }
         self.type_id = None;
@@ -1923,13 +2406,119 @@ impl InlineAsyncResultStorage {
 
 impl Drop for InlineAsyncResultStorage {
     fn drop(&mut self) {
-        self.clear();
+        self.drop_value_only();
     }
 }
+
+#[derive(Debug)]
+struct AsyncTaskResultStore {
+    medium: ExecutorCell<Option<Slab<ASYNC_RESULT_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>>>,
+    large: ExecutorCell<Option<Slab<ASYNC_RESULT_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>>>,
+}
+
+impl AsyncTaskResultStore {
+    const fn new(fast: bool) -> Self {
+        Self {
+            medium: ExecutorCell::new(fast, None),
+            large: ExecutorCell::new(fast, None),
+        }
+    }
+
+    fn supports<T: 'static>(&self) -> bool {
+        let len = size_of::<T>();
+        let align = align_of::<T>();
+        (len <= ASYNC_RESULT_CLASS_MEDIUM_BYTES
+            && align <= async_storage_class_slot_align(ASYNC_RESULT_CLASS_MEDIUM_BYTES))
+            || (len <= ASYNC_RESULT_CLASS_LARGE_BYTES
+                && align <= async_storage_class_slot_align(ASYNC_RESULT_CLASS_LARGE_BYTES))
+    }
+
+    fn allocate_for<T: 'static>(&self) -> Result<AsyncResultFrameAllocation, ExecutorError> {
+        let request = fusion_sys::alloc::AllocRequest {
+            len: size_of::<T>(),
+            align: align_of::<T>(),
+            zeroed: false,
+        };
+        if request.len <= ASYNC_RESULT_CLASS_MEDIUM_BYTES
+            && request.align <= async_storage_class_slot_align(ASYNC_RESULT_CLASS_MEDIUM_BYTES)
+        {
+            return self.medium.with(|medium| {
+                if medium.is_none() {
+                    *medium = Some(build_async_slab::<
+                        ASYNC_RESULT_CLASS_MEDIUM_BYTES,
+                        TASK_REGISTRY_CAPACITY,
+                    >()?);
+                }
+                medium
+                    .as_ref()
+                    .ok_or_else(executor_invalid)?
+                    .allocate(&request)
+                    .map(AsyncResultFrameAllocation::Medium)
+                    .map_err(executor_error_from_alloc)
+            })?;
+        }
+        if request.len <= ASYNC_RESULT_CLASS_LARGE_BYTES
+            && request.align <= async_storage_class_slot_align(ASYNC_RESULT_CLASS_LARGE_BYTES)
+        {
+            return self.large.with(|large| {
+                if large.is_none() {
+                    *large = Some(build_async_slab::<
+                        ASYNC_RESULT_CLASS_LARGE_BYTES,
+                        TASK_REGISTRY_CAPACITY,
+                    >()?);
+                }
+                large
+                    .as_ref()
+                    .ok_or_else(executor_invalid)?
+                    .allocate(&request)
+                    .map(AsyncResultFrameAllocation::Large)
+                    .map_err(executor_error_from_alloc)
+            })?;
+        }
+        Err(ExecutorError::Unsupported)
+    }
+
+    fn deallocate(&self, allocation: AsyncResultFrameAllocation) -> Result<(), ExecutorError> {
+        match allocation {
+            AsyncResultFrameAllocation::Medium(allocation) => self.medium.with(|medium| {
+                medium
+                    .as_ref()
+                    .ok_or_else(executor_invalid)?
+                    .deallocate(allocation)
+                    .map_err(executor_error_from_alloc)
+            })?,
+            AsyncResultFrameAllocation::Large(allocation) => self.large.with(|large| {
+                large
+                    .as_ref()
+                    .ok_or_else(executor_invalid)?
+                    .deallocate(allocation)
+                    .map_err(executor_error_from_alloc)
+            })?,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum AsyncResultFrameAllocation {
+    Medium(fusion_sys::alloc::AllocResult),
+    Large(fusion_sys::alloc::AllocResult),
+}
+
+impl AsyncResultFrameAllocation {
+    fn ptr(&mut self) -> *mut u8 {
+        match self {
+            Self::Medium(allocation) | Self::Large(allocation) => allocation.ptr.as_ptr(),
+        }
+    }
+}
+
+unsafe impl Send for AsyncResultFrameAllocation {}
+unsafe impl Sync for AsyncResultFrameAllocation {}
 
 unsafe fn poll_inline_async_future<F>(
     ptr: *mut u8,
     result: &ExecutorCell<InlineAsyncResultStorage>,
+    result_store: &AsyncTaskResultStore,
     context: &mut Context<'_>,
 ) -> Result<Poll<()>, ExecutorError>
 where
@@ -1943,7 +2532,7 @@ where
     #[cfg(feature = "std")]
     match poll_future_contained(future, context) {
         Ok(Poll::Ready(output)) => {
-            result.with(|result| result.store(output))??;
+            result.with(|result| result.store(result_store, output))??;
             Ok(Poll::Ready(()))
         }
         Ok(Poll::Pending) => Ok(Poll::Pending),
@@ -1953,7 +2542,7 @@ where
     #[cfg(not(feature = "std"))]
     match poll_future_contained(future, context) {
         Poll::Ready(output) => {
-            result.with(|result| result.store(output))??;
+            result.with(|result| result.store(result_store, output))??;
             Ok(Poll::Ready(()))
         }
         Poll::Pending => Ok(Poll::Pending),
@@ -2075,7 +2664,11 @@ impl AsyncTaskSlot {
         self.state.load(Ordering::Acquire)
     }
 
-    fn initialize_for_allocation(&self) -> Result<u64, ExecutorError> {
+    fn initialize_for_allocation(
+        &self,
+        future_store: &AsyncTaskFutureStore,
+        result_store: &AsyncTaskResultStore,
+    ) -> Result<u64, ExecutorError> {
         if self.state() != SLOT_EMPTY {
             return Err(executor_invalid());
         }
@@ -2088,8 +2681,8 @@ impl AsyncTaskSlot {
             .map_err(|_| executor_overflow())?;
         let generation = previous.checked_add(1).ok_or_else(executor_overflow)? as u64;
 
-        self.future.with(InlineAsyncFutureStorage::clear)?;
-        self.result.with(InlineAsyncResultStorage::clear)?;
+        self.future.with(|future| future.clear(future_store))??;
+        self.result.with(|result| result.clear(result_store))??;
         self.error.with(|error| *error = None)?;
         self.join_waker.with(|waker| *waker = None)?;
         self.drain_completed()?;
@@ -2101,12 +2694,18 @@ impl AsyncTaskSlot {
         Ok(generation)
     }
 
-    fn store_future<F>(&self, future: F) -> Result<(), ExecutorError>
+    fn store_future<F>(
+        &self,
+        future_store: &AsyncTaskFutureStore,
+        result_store: &AsyncTaskResultStore,
+        future: F,
+    ) -> Result<(), ExecutorError>
     where
         F: Future + 'static,
         F::Output: 'static,
     {
-        self.future.with(|slot| slot.store_future(future))?
+        self.future
+            .with(|slot| slot.store_future(future_store, result_store, future))?
     }
 
     fn create_waker(&self, generation: u64) -> Result<Waker, ExecutorError> {
@@ -2135,6 +2734,7 @@ impl AsyncTaskSlot {
 
     fn poll_in_place(
         &self,
+        result_store: &AsyncTaskResultStore,
         generation: u64,
         context: &mut Context<'_>,
     ) -> Result<Poll<()>, ExecutorError> {
@@ -2142,10 +2742,14 @@ impl AsyncTaskSlot {
             return Ok(Poll::Ready(()));
         }
         self.future
-            .with(|future| future.poll_in_place(&self.result, context))?
+            .with(|future| future.poll_in_place(&self.result, result_store, context))?
     }
 
-    fn complete(&self, generation: u64) -> Result<(), ExecutorError> {
+    fn complete(
+        &self,
+        future_store: &AsyncTaskFutureStore,
+        generation: u64,
+    ) -> Result<(), ExecutorError> {
         if self.generation() != generation {
             return Ok(());
         }
@@ -2162,7 +2766,7 @@ impl AsyncTaskSlot {
             return Ok(());
         }
 
-        self.future.with(InlineAsyncFutureStorage::clear)?;
+        self.future.with(|future| future.clear(future_store))??;
         self.error.with(|error| *error = None)?;
         self.scheduled.store(false, Ordering::Release);
         self.wake_join_waker()?;
@@ -2170,7 +2774,13 @@ impl AsyncTaskSlot {
         Ok(())
     }
 
-    fn fail(&self, generation: u64, error: ExecutorError) -> Result<(), ExecutorError> {
+    fn fail(
+        &self,
+        future_store: &AsyncTaskFutureStore,
+        result_store: &AsyncTaskResultStore,
+        generation: u64,
+        error: ExecutorError,
+    ) -> Result<(), ExecutorError> {
         if self.generation() != generation {
             return Ok(());
         }
@@ -2187,8 +2797,8 @@ impl AsyncTaskSlot {
             return Ok(());
         }
 
-        self.future.with(InlineAsyncFutureStorage::clear)?;
-        self.result.with(InlineAsyncResultStorage::clear)?;
+        self.future.with(|future| future.clear(future_store))??;
+        self.result.with(|result| result.clear(result_store))??;
         self.error.with(|slot| *slot = Some(error))?;
         self.scheduled.store(false, Ordering::Release);
         self.wake_join_waker()?;
@@ -2196,8 +2806,18 @@ impl AsyncTaskSlot {
         Ok(())
     }
 
-    fn cancel(&self, generation: u64) -> Result<(), ExecutorError> {
-        self.fail(generation, ExecutorError::Cancelled)
+    fn cancel(
+        &self,
+        future_store: &AsyncTaskFutureStore,
+        result_store: &AsyncTaskResultStore,
+        generation: u64,
+    ) -> Result<(), ExecutorError> {
+        self.fail(
+            future_store,
+            result_store,
+            generation,
+            ExecutorError::Cancelled,
+        )
     }
 
     fn clear_core_if_no_wakers(&self, generation: u64) -> Result<bool, ExecutorError> {
@@ -2212,14 +2832,24 @@ impl AsyncTaskSlot {
         Ok(true)
     }
 
-    fn force_shutdown(&self, generation: u64) -> Result<(), ExecutorError> {
+    fn force_shutdown(
+        &self,
+        future_store: &AsyncTaskFutureStore,
+        result_store: &AsyncTaskResultStore,
+        generation: u64,
+    ) -> Result<(), ExecutorError> {
         if self.generation() != generation {
             return Ok(());
         }
 
         match self.state() {
             SLOT_PENDING => {
-                let _ = self.fail(generation, ExecutorError::Stopped);
+                let _ = self.fail(
+                    future_store,
+                    result_store,
+                    generation,
+                    ExecutorError::Stopped,
+                );
             }
             SLOT_READY | SLOT_FAILED | SLOT_EMPTY => {}
             _ => return Err(executor_invalid()),
@@ -2237,12 +2867,16 @@ impl AsyncTaskSlot {
         Ok(matches!(self.state(), SLOT_READY | SLOT_FAILED))
     }
 
-    fn take_result<T: 'static>(&self, generation: u64) -> Result<T, ExecutorError> {
+    fn take_result<T: 'static>(
+        &self,
+        result_store: &AsyncTaskResultStore,
+        generation: u64,
+    ) -> Result<T, ExecutorError> {
         if self.generation() != generation {
             return Err(ExecutorError::Stopped);
         }
         match self.state() {
-            SLOT_READY => self.result.with(InlineAsyncResultStorage::take::<T>)?,
+            SLOT_READY => self.result.with(|result| result.take::<T>(result_store))?,
             SLOT_FAILED => Err(self
                 .error
                 .with(Option::take)?
@@ -2270,13 +2904,18 @@ impl AsyncTaskSlot {
             && matches!(state, SLOT_READY | SLOT_FAILED))
     }
 
-    fn reset_empty(&self, generation: u64) -> Result<(), ExecutorError> {
+    fn reset_empty(
+        &self,
+        future_store: &AsyncTaskFutureStore,
+        result_store: &AsyncTaskResultStore,
+        generation: u64,
+    ) -> Result<(), ExecutorError> {
         if self.generation() != generation {
             return Err(ExecutorError::Stopped);
         }
 
-        self.future.with(InlineAsyncFutureStorage::clear)?;
-        self.result.with(InlineAsyncResultStorage::clear)?;
+        self.future.with(|future| future.clear(future_store))??;
+        self.result.with(|result| result.clear(result_store))??;
         self.error.with(|error| *error = None)?;
         self.join_waker.with(|waker| *waker = None)?;
         self.drain_completed()?;
@@ -2374,6 +3013,8 @@ impl AsyncTaskSlot {
 struct AsyncTaskRegistry {
     slots: ArenaSlice<AsyncTaskSlot>,
     free: ExecutorCell<FixedIndexStack>,
+    future_store: AsyncTaskFutureStore,
+    result_store: AsyncTaskResultStore,
     _arena: BoundedArena,
 }
 
@@ -2405,6 +3046,8 @@ impl AsyncTaskRegistry {
         Ok(Self {
             slots,
             free: ExecutorCell::new(fast, FixedIndexStack::new_in(&arena, capacity)?),
+            future_store: AsyncTaskFutureStore::new(fast),
+            result_store: AsyncTaskResultStore::new(fast),
             _arena: arena,
         })
     }
@@ -2418,7 +3061,9 @@ impl AsyncTaskRegistry {
             .free
             .with(FixedIndexStack::pop)?
             .ok_or_else(executor_busy)?;
-        let generation = self.slot(slot_index)?.initialize_for_allocation()?;
+        let generation = self
+            .slot(slot_index)?
+            .initialize_for_allocation(&self.future_store, &self.result_store)?;
         Ok((slot_index, generation))
     }
 
@@ -2428,6 +3073,19 @@ impl AsyncTaskRegistry {
             return Err(executor_invalid());
         }
         self.free.with(|free| free.push(slot_index))?
+    }
+}
+
+impl Drop for AsyncTaskRegistry {
+    fn drop(&mut self) {
+        for slot in &self.slots {
+            let generation = slot.generation();
+            if generation == 0 {
+                continue;
+            }
+            let _ = slot.force_shutdown(&self.future_store, &self.result_store, generation);
+            let _ = slot.reset_empty(&self.future_store, &self.result_store, generation);
+        }
     }
 }
 
@@ -2459,6 +3117,31 @@ struct HostedThreadScheduler {
 }
 
 #[cfg(feature = "std")]
+#[derive(Debug)]
+struct HostedThreadWorkers {
+    scheduler: Arc<HostedThreadScheduler>,
+    handles: Vec<ThreadHandle>,
+    system: ThreadSystem,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug)]
+enum ThreadAsyncCarriers {
+    Direct(HostedThreadWorkers),
+    ThreadPool(ThreadPool),
+}
+
+/// Hosted thread-async runtime bootstrap realization.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ThreadAsyncRuntimeBootstrap {
+    /// Hosted async workers are born directly as long-lived OS-thread carriers.
+    DirectHostedWorkers,
+    /// Hosted async workers are composed on top of one generic thread pool.
+    ComposedThreadPool,
+}
+
+#[cfg(feature = "std")]
 impl HostedThreadScheduler {
     fn new(pool: &ThreadPool) -> Result<Arc<Self>, ExecutorError> {
         let worker_count = pool
@@ -2485,6 +3168,64 @@ impl HostedThreadScheduler {
         Ok(scheduler)
     }
 
+    fn new_direct(
+        config: &super::ThreadPoolConfig<'_>,
+    ) -> Result<HostedThreadWorkers, ExecutorError> {
+        let worker_count = config.max_threads.max(1);
+        let scheduler = Arc::new(Self {
+            ready: SyncMutex::new(CurrentQueueState::new()),
+            signal: Semaphore::new(
+                0,
+                u32::try_from(CURRENT_QUEUE_CAPACITY.saturating_add(worker_count))
+                    .unwrap_or(u32::MAX),
+            )
+            .map_err(executor_error_from_sync)?,
+            shutdown: AtomicBool::new(false),
+            worker_count,
+        });
+        let mut handles = Vec::with_capacity(worker_count);
+
+        let system = ThreadSystem::new();
+        let thread_config = ThreadConfig {
+            join_policy: ThreadJoinPolicy::Joinable,
+            name: config.name_prefix,
+            start_mode: ThreadStartMode::Immediate,
+            placement: ThreadPlacementRequest::new(),
+            scheduler: config.scheduler,
+            stack: config.stack,
+        };
+
+        for _ in 0..worker_count {
+            let scheduler_context = Arc::into_raw(Arc::clone(&scheduler));
+            let handle = unsafe {
+                system.spawn_raw(
+                    &thread_config,
+                    hosted_thread_scheduler_entry,
+                    scheduler_context.cast_mut().cast(),
+                )
+            };
+            match handle {
+                Ok(handle) => handles.push(handle),
+                Err(error) => {
+                    unsafe {
+                        drop(Arc::from_raw(scheduler_context));
+                    }
+                    let _ = scheduler.request_shutdown();
+                    for handle in handles.drain(..) {
+                        let _ = system.join(handle);
+                    }
+                    return Err(executor_error_from_thread(error));
+                }
+            }
+        }
+
+        Ok(HostedThreadWorkers {
+            scheduler,
+            handles,
+            system,
+        })
+    }
+
     fn enqueue(&self, job: CurrentJob) -> Result<(), ExecutorError> {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(ExecutorError::Stopped);
@@ -2503,6 +3244,23 @@ impl HostedThreadScheduler {
             .release(u32::try_from(self.worker_count).unwrap_or(u32::MAX))
             .map_err(executor_error_from_sync)?;
         Ok(dropped)
+    }
+}
+
+#[cfg(feature = "std")]
+impl HostedThreadWorkers {
+    fn direct_supported(config: &super::ThreadPoolConfig<'_>) -> bool {
+        matches!(config.placement, super::PoolPlacement::Inherit)
+            && matches!(config.resize_policy, super::ResizePolicy::Fixed)
+            && matches!(config.shutdown_policy, super::ShutdownPolicy::Drain)
+            && config.min_threads == config.max_threads
+            && config.min_threads != 0
+    }
+    fn shutdown_and_join(&mut self) {
+        let _ = self.scheduler.request_shutdown();
+        for handle in self.handles.drain(..) {
+            let _ = self.system.join(handle);
+        }
     }
 }
 
@@ -2701,7 +3459,7 @@ impl ExecutorCore {
         &self,
         slot_index: usize,
         generation: u64,
-        deadline: Duration,
+        deadline: CanonicalInstant,
     ) -> Result<(), ExecutorError> {
         if matches!(self.scheduler, SchedulerBinding::GreenPool(_)) {
             return Err(ExecutorError::Unsupported);
@@ -2790,7 +3548,8 @@ impl ExecutorCore {
         generation: u64,
         scheduled_core: Option<ControlLease<ExecutorCore>>,
     ) -> Result<(), ExecutorError> {
-        let slot = self.registry()?.slot(slot_index)?;
+        let registry = self.registry()?;
+        let slot = registry.slot(slot_index)?;
         if slot.generation() != generation || slot.state() != SLOT_PENDING {
             return Ok(());
         }
@@ -2801,7 +3560,12 @@ impl ExecutorCore {
         let tracked = self.scheduler.uses_external_carrier();
         if tracked && let Err(error) = self.begin_external_schedule() {
             slot.scheduled.store(false, Ordering::Release);
-            let _ = slot.fail(generation, error);
+            let _ = slot.fail(
+                &registry.future_store,
+                &registry.result_store,
+                generation,
+                error,
+            );
             let _ = self.recycle_slot_if_possible(slot_index, generation);
             return Err(error);
         }
@@ -2847,7 +3611,12 @@ impl ExecutorCore {
                 self.finish_external_schedule();
             }
             slot.scheduled.store(false, Ordering::Release);
-            let _ = slot.fail(generation, error);
+            let _ = slot.fail(
+                &registry.future_store,
+                &registry.result_store,
+                generation,
+                error,
+            );
             let _ = self.recycle_slot_if_possible(slot_index, generation);
             return Err(error);
         }
@@ -2879,7 +3648,7 @@ impl ExecutorCore {
                 return AsyncSlotRunDisposition::Terminal;
             };
             let mut context = Context::from_waker(&waker);
-            slot.poll_in_place(generation, &mut context)
+            slot.poll_in_place(&registry.result_store, generation, &mut context)
         };
         let self_requeue = take_current_async_requeue();
         #[cfg(feature = "std")]
@@ -2888,7 +3657,7 @@ impl ExecutorCore {
 
         match poll {
             Ok(Poll::Ready(())) => {
-                let _ = slot.complete(generation);
+                let _ = slot.complete(&registry.future_store, generation);
                 let _ = self.recycle_slot_if_possible(slot_index, generation);
                 AsyncSlotRunDisposition::Terminal
             }
@@ -2911,7 +3680,12 @@ impl ExecutorCore {
                 AsyncSlotRunDisposition::Pending
             }
             Err(error) => {
-                let _ = slot.fail(generation, error);
+                let _ = slot.fail(
+                    &registry.future_store,
+                    &registry.result_store,
+                    generation,
+                    error,
+                );
                 let _ = self.recycle_slot_if_possible(slot_index, generation);
                 AsyncSlotRunDisposition::Terminal
             }
@@ -2941,7 +3715,7 @@ impl ExecutorCore {
             return Ok(());
         }
         self.clear_wait(slot_index, generation)?;
-        slot.reset_empty(generation)?;
+        slot.reset_empty(&registry.future_store, &registry.result_store, generation)?;
         registry.release_slot(slot_index, generation)
     }
 
@@ -2976,7 +3750,7 @@ impl ExecutorCore {
             }
             let slot_index = slot.waker.slot_index;
             let _ = self.clear_wait(slot_index, generation);
-            let _ = slot.force_shutdown(generation);
+            let _ = slot.force_shutdown(&registry.future_store, &registry.result_store, generation);
         }
         #[cfg(feature = "std")]
         self.join_reactor_driver();
@@ -3122,11 +3896,15 @@ impl<T> TaskHandleInner<T> {
     where
         T: 'static,
     {
-        let slot = self.core.registry()?.slot(self.slot_index)?;
+        let registry = self.core.registry()?;
+        let slot = registry.slot(self.slot_index)?;
         match &self.core.scheduler {
             SchedulerBinding::Current => {
                 while !slot.is_finished(self.generation)? {
-                    if !self.core.drive_current_once()? && system_thread().yield_now().is_err() {
+                    if !self.core.drive_current_once()?
+                        && !self.core.drive_reactor_once(true)?
+                        && system_thread().yield_now().is_err()
+                    {
                         spin_loop();
                     }
                 }
@@ -3141,7 +3919,7 @@ impl<T> TaskHandleInner<T> {
             }
         }
 
-        let result = slot.take_result::<T>(self.generation);
+        let result = slot.take_result::<T>(&registry.result_store, self.generation);
         self.active = false;
         let _ = self.core.detach_handle(self.slot_index, self.generation);
         result
@@ -3150,7 +3928,12 @@ impl<T> TaskHandleInner<T> {
     fn abort(&self) -> Result<(), ExecutorError> {
         let slot = self.core.registry()?.slot(self.slot_index)?;
         let _ = self.core.clear_wait(self.slot_index, self.generation);
-        slot.cancel(self.generation)?;
+        let registry = self.core.registry()?;
+        slot.cancel(
+            &registry.future_store,
+            &registry.result_store,
+            self.generation,
+        )?;
         self.core
             .recycle_slot_if_possible(self.slot_index, self.generation)
     }
@@ -3175,7 +3958,11 @@ impl<T> TaskHandleInner<T> {
         }
         match slot.is_finished(self.generation) {
             Ok(true) => {
-                let result = slot.take_result::<T>(self.generation);
+                let registry = match self.core.registry() {
+                    Ok(registry) => registry,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                let result = slot.take_result::<T>(&registry.result_store, self.generation);
                 self.active = false;
                 let _ = self.core.detach_handle(self.slot_index, self.generation);
                 Poll::Ready(result)
@@ -3487,7 +4274,10 @@ impl<T> JoinSet<T> {
             }
 
             if let Some(core) = current_executor {
-                if !core.drive_current_once()? && system_thread().yield_now().is_err() {
+                if !core.drive_current_once()?
+                    && !core.drive_reactor_once(true)?
+                    && system_thread().yield_now().is_err()
+                {
                     spin_loop();
                 }
                 continue;
@@ -3531,6 +4321,19 @@ impl CurrentAsyncRuntime {
         }
     }
 
+    /// Creates one current-thread async runtime with one explicit executor configuration.
+    #[must_use]
+    pub fn with_executor_config(config: ExecutorConfig) -> Self {
+        Self {
+            executor: Executor::with_scheduler(
+                config.with_mode(ExecutorMode::CurrentThread),
+                SchedulerBinding::Current,
+                true,
+            ),
+            _not_send_sync: PhantomData,
+        }
+    }
+
     /// Returns the underlying executor.
     #[must_use]
     pub const fn executor(&self) -> &Executor {
@@ -3550,6 +4353,38 @@ impl CurrentAsyncRuntime {
         self.executor.spawn(future)
     }
 
+    /// Spawns one ordinary Rust future with one explicit poll-stack contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn_with_poll_stack_bytes<F>(
+        &self,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.executor
+            .spawn_with_poll_stack_bytes(poll_stack_bytes, future)
+    }
+
+    /// Spawns one ordinary Rust future using one compile-time generated async poll-stack
+    /// contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn_generated<F>(&self, future: F) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static + GeneratedExplicitAsyncPollStackContract,
+        F::Output: Send + 'static,
+    {
+        self.executor.spawn_generated(future)
+    }
+
     /// Spawns one local non-`Send` future onto the current-thread runtime.
     ///
     /// # Errors
@@ -3561,6 +4396,41 @@ impl CurrentAsyncRuntime {
         F::Output: 'static,
     {
         self.executor.spawn_local(future)
+    }
+
+    /// Spawns one local non-`Send` future with one explicit poll-stack contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn_local_with_poll_stack_bytes<F>(
+        &self,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<LocalTaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        self.executor
+            .spawn_local_with_poll_stack_bytes(poll_stack_bytes, future)
+    }
+
+    /// Spawns one local non-`Send` future using one compile-time generated async poll-stack
+    /// contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn_local_generated<F>(
+        &self,
+        future: F,
+    ) -> Result<LocalTaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + 'static + GeneratedExplicitAsyncPollStackContract,
+        F::Output: 'static,
+    {
+        self.executor.spawn_local_generated(future)
     }
 
     /// Drives one ready async task.
@@ -3599,33 +4469,80 @@ impl CurrentAsyncRuntime {
 #[cfg(feature = "std")]
 #[derive(Debug)]
 pub struct ThreadAsyncRuntime {
-    executor: Executor,
-    carriers: ThreadPool,
+    executor: Option<Executor>,
+    carriers: Option<ThreadAsyncCarriers>,
 }
 
 #[cfg(feature = "std")]
 impl ThreadAsyncRuntime {
-    /// Creates one async runtime on top of an owned thread pool.
+    /// Creates one hosted async runtime.
     ///
     /// # Errors
     ///
-    /// Returns any honest carrier-pool or executor binding failure.
+    /// Returns any honest carrier bootstrap or executor binding failure.
     pub fn new(config: &super::ThreadPoolConfig<'_>) -> Result<Self, ExecutorError> {
-        let carriers = ThreadPool::new(config).map_err(executor_error_from_thread_pool)?;
-        let executor = Executor::new(ExecutorConfig::thread_pool()).on_pool(&carriers)?;
-        Ok(Self { executor, carriers })
+        Self::with_executor_config(config, ExecutorConfig::thread_pool())
     }
 
-    /// Returns the owned carrier thread pool.
+    /// Creates one hosted async runtime with one explicit executor configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest carrier bootstrap or executor binding failure.
+    pub fn with_executor_config(
+        config: &super::ThreadPoolConfig<'_>,
+        executor_config: ExecutorConfig,
+    ) -> Result<Self, ExecutorError> {
+        if HostedThreadWorkers::direct_supported(config) {
+            let carriers = HostedThreadScheduler::new_direct(config)?;
+            let executor = Executor::with_scheduler(
+                executor_config.with_mode(ExecutorMode::ThreadPool),
+                SchedulerBinding::ThreadWorkers(Arc::clone(&carriers.scheduler)),
+                false,
+            );
+            return Ok(Self {
+                executor: Some(executor),
+                carriers: Some(ThreadAsyncCarriers::Direct(carriers)),
+            });
+        }
+
+        let carriers = ThreadPool::new(config).map_err(executor_error_from_thread_pool)?;
+        let executor = Executor::new(executor_config.with_mode(ExecutorMode::ThreadPool))
+            .on_pool(&carriers)?;
+        Ok(Self {
+            executor: Some(executor),
+            carriers: Some(ThreadAsyncCarriers::ThreadPool(carriers)),
+        })
+    }
+
+    /// Returns how this hosted runtime bootstrapped its carriers.
     #[must_use]
-    pub const fn carriers(&self) -> &ThreadPool {
-        &self.carriers
+    pub const fn bootstrap(&self) -> ThreadAsyncRuntimeBootstrap {
+        match self.carriers.as_ref() {
+            Some(ThreadAsyncCarriers::Direct(_)) => {
+                ThreadAsyncRuntimeBootstrap::DirectHostedWorkers
+            }
+            Some(ThreadAsyncCarriers::ThreadPool(_)) | None => {
+                ThreadAsyncRuntimeBootstrap::ComposedThreadPool
+            }
+        }
+    }
+
+    /// Returns the owned carrier thread pool when this runtime uses the composed hosted bootstrap.
+    #[must_use]
+    pub fn thread_pool(&self) -> Option<&ThreadPool> {
+        match self.carriers.as_ref() {
+            Some(ThreadAsyncCarriers::ThreadPool(pool)) => Some(pool),
+            _ => None,
+        }
     }
 
     /// Returns the underlying executor.
     #[must_use]
-    pub const fn executor(&self) -> &Executor {
-        &self.executor
+    pub fn executor(&self) -> &Executor {
+        self.executor
+            .as_ref()
+            .expect("thread async runtime executor should exist while borrowed")
     }
 
     /// Spawns one ordinary Rust future onto the thread-backed runtime.
@@ -3638,13 +4555,66 @@ impl ThreadAsyncRuntime {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.executor.spawn(future)
+        self.executor().spawn(future)
     }
 
-    /// Releases the owned carrier pool and executor back to the caller.
+    /// Spawns one ordinary Rust future with one explicit poll-stack contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn_with_poll_stack_bytes<F>(
+        &self,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.executor()
+            .spawn_with_poll_stack_bytes(poll_stack_bytes, future)
+    }
+
+    /// Spawns one ordinary Rust future using one compile-time generated async poll-stack
+    /// contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn_generated<F>(&self, future: F) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static + GeneratedExplicitAsyncPollStackContract,
+        F::Output: Send + 'static,
+    {
+        self.executor().spawn_generated(future)
+    }
+
+    /// Releases the owned carrier bootstrap and executor back to the caller.
     #[must_use]
-    pub fn into_parts(self) -> (ThreadPool, Executor) {
-        (self.carriers, self.executor)
+    pub fn into_parts(mut self) -> (Option<ThreadPool>, Executor) {
+        let executor = self
+            .executor
+            .take()
+            .expect("thread async runtime executor should exist during into_parts");
+        let carriers = match self.carriers.take() {
+            Some(ThreadAsyncCarriers::ThreadPool(pool)) => Some(pool),
+            _ => None,
+        };
+        (carriers, executor)
+    }
+}
+
+#[cfg(feature = "std")]
+impl Drop for ThreadAsyncRuntime {
+    fn drop(&mut self) {
+        drop(self.executor.take());
+        if let Some(mut carriers) = self.carriers.take() {
+            match &mut carriers {
+                ThreadAsyncCarriers::Direct(workers) => workers.shutdown_and_join(),
+                ThreadAsyncCarriers::ThreadPool(_) => {}
+            }
+        }
     }
 }
 
@@ -3664,7 +4634,21 @@ impl FiberAsyncRuntime {
     ///
     /// Returns any honest executor binding failure.
     pub fn from_hosted_fibers(fibers: HostedFiberRuntime) -> Result<Self, ExecutorError> {
-        let executor = Executor::new(ExecutorConfig::green_pool()).on_hosted_fibers(&fibers)?;
+        Self::from_hosted_fibers_with_executor_config(fibers, ExecutorConfig::green_pool())
+    }
+
+    /// Creates one async runtime from an owned hosted fiber runtime with one explicit executor
+    /// configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor binding failure.
+    pub fn from_hosted_fibers_with_executor_config(
+        fibers: HostedFiberRuntime,
+        executor_config: ExecutorConfig,
+    ) -> Result<Self, ExecutorError> {
+        let executor = Executor::new(executor_config.with_mode(ExecutorMode::GreenPool))
+            .on_hosted_fibers(&fibers)?;
         Ok(Self { executor, fibers })
     }
 
@@ -3674,8 +4658,21 @@ impl FiberAsyncRuntime {
     ///
     /// Returns any honest hosted-fiber bootstrap or executor binding failure.
     pub fn fixed(total_fibers: usize) -> Result<Self, ExecutorError> {
+        Self::fixed_with_executor_config(total_fibers, ExecutorConfig::green_pool())
+    }
+
+    /// Builds one fixed-capacity hosted fiber async runtime with one explicit executor
+    /// configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest hosted-fiber bootstrap or executor binding failure.
+    pub fn fixed_with_executor_config(
+        total_fibers: usize,
+        executor_config: ExecutorConfig,
+    ) -> Result<Self, ExecutorError> {
         let fibers = HostedFiberRuntime::fixed(total_fibers).map_err(executor_error_from_fiber)?;
-        Self::from_hosted_fibers(fibers)
+        Self::from_hosted_fibers_with_executor_config(fibers, executor_config)
     }
 
     /// Returns the owned hosted fiber runtime.
@@ -3701,6 +4698,38 @@ impl FiberAsyncRuntime {
         F::Output: Send + 'static,
     {
         self.executor.spawn(future)
+    }
+
+    /// Spawns one ordinary Rust future with one explicit poll-stack contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn_with_poll_stack_bytes<F>(
+        &self,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.executor
+            .spawn_with_poll_stack_bytes(poll_stack_bytes, future)
+    }
+
+    /// Spawns one ordinary Rust future using one compile-time generated async poll-stack
+    /// contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn_generated<F>(&self, future: F) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static + GeneratedExplicitAsyncPollStackContract,
+        F::Output: Send + 'static,
+    {
+        self.executor.spawn_generated(future)
     }
 
     /// Releases the owned hosted fiber runtime and executor back to the caller.
@@ -3799,7 +4828,7 @@ impl Executor {
                             reactor_driver: ExecutorCell::new(fast_current, None),
                             scheduler,
                             next_id: AtomicUsize::new(1),
-                            registry: ExecutorRegistry::new(TASK_REGISTRY_CAPACITY, fast_current),
+                            registry: ExecutorRegistry::new(config.capacity, fast_current),
                             shutdown_requested: AtomicBool::new(false),
                             external_inflight: AtomicUsize::new(0),
                         },
@@ -3874,7 +4903,50 @@ impl Executor {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let admission = AsyncTaskAdmission::for_future::<F>(self.mode());
+        self.spawn_with_admission(AsyncTaskAdmission::for_future::<F>(self.mode()), future)
+    }
+
+    /// Spawns a `Send` future with one explicit poll-stack contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn_with_poll_stack_bytes<F>(
+        &self,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let admission = AsyncTaskAdmission::for_future::<F>(self.mode())
+            .with_poll_stack_bytes(poll_stack_bytes);
+        self.spawn_with_admission(admission, future)
+    }
+
+    /// Spawns a `Send` future using one compile-time generated async poll-stack contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn spawn_generated<F>(&self, future: F) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static + GeneratedExplicitAsyncPollStackContract,
+        F::Output: Send + 'static,
+    {
+        self.spawn_with_poll_stack_bytes(generated_explicit_async_poll_stack_bytes::<F>(), future)
+    }
+
+    fn spawn_with_admission<F>(
+        &self,
+        admission: AsyncTaskAdmission,
+        future: F,
+    ) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
         let core = self.core()?;
         let handle_core = self
             .core_lease()?
@@ -3886,14 +4958,16 @@ impl Executor {
         let slot = registry.slot(slot_index)?;
         if let Err(error) = slot.bind_core(self.core_lease()?, generation) {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(generation)?;
+            slot.reset_empty(&registry.future_store, &registry.result_store, generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
 
-        if let Err(error) = slot.store_future(future) {
+        if let Err(error) =
+            slot.store_future(&registry.future_store, &registry.result_store, future)
+        {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(generation)?;
+            slot.reset_empty(&registry.future_store, &registry.result_store, generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
@@ -3927,11 +5001,62 @@ impl Executor {
         F: Future + 'static,
         F::Output: 'static,
     {
+        self.spawn_local_with_admission(AsyncTaskAdmission::for_future::<F>(self.mode()), future)
+    }
+
+    /// Spawns a non-`Send` future local to the current execution domain with one explicit
+    /// poll-stack contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unsupported` when this executor is not current-thread driven.
+    pub fn spawn_local_with_poll_stack_bytes<F>(
+        &self,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<LocalTaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        let admission = AsyncTaskAdmission::for_future::<F>(self.mode())
+            .with_poll_stack_bytes(poll_stack_bytes);
+        self.spawn_local_with_admission(admission, future)
+    }
+
+    /// Spawns a non-`Send` future local to the current execution domain using one compile-time
+    /// generated async poll-stack contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unsupported` when this executor is not current-thread driven.
+    pub fn spawn_local_generated<F>(
+        &self,
+        future: F,
+    ) -> Result<LocalTaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + 'static + GeneratedExplicitAsyncPollStackContract,
+        F::Output: 'static,
+    {
+        self.spawn_local_with_poll_stack_bytes(
+            generated_explicit_async_poll_stack_bytes::<F>(),
+            future,
+        )
+    }
+
+    fn spawn_local_with_admission<F>(
+        &self,
+        admission: AsyncTaskAdmission,
+        future: F,
+    ) -> Result<LocalTaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
         let core = self.core()?;
         let SchedulerBinding::Current = &core.scheduler else {
             return Err(ExecutorError::Unsupported);
         };
-        let admission = AsyncTaskAdmission::for_future::<F>(self.mode());
         let handle_core = self
             .core_lease()?
             .try_clone()
@@ -3942,14 +5067,16 @@ impl Executor {
         let slot = registry.slot(slot_index)?;
         if let Err(error) = slot.bind_core(self.core_lease()?, generation) {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(generation)?;
+            slot.reset_empty(&registry.future_store, &registry.result_store, generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
 
-        if let Err(error) = slot.store_future(future) {
+        if let Err(error) =
+            slot.store_future(&registry.future_store, &registry.result_store, future)
+        {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(generation)?;
+            slot.reset_empty(&registry.future_store, &registry.result_store, generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
@@ -3991,7 +5118,10 @@ impl Executor {
 
         let handle = self.spawn_local(future)?;
         while !handle.is_finished()? {
-            if !self.drive_once()? && system_thread().yield_now().is_err() {
+            if !self.drive_once()?
+                && !core.drive_reactor_once(true)?
+                && system_thread().yield_now().is_err()
+            {
                 spin_loop();
             }
         }
@@ -4100,6 +5230,13 @@ unsafe fn run_current_slot(core: usize, slot_index: usize, generation: u64) {
 }
 
 #[cfg(feature = "std")]
+unsafe fn hosted_thread_scheduler_entry(context: *mut ()) -> ThreadEntryReturn {
+    let scheduler = unsafe { Arc::from_raw(context.cast::<HostedThreadScheduler>()) };
+    run_hosted_thread_scheduler(&scheduler);
+    ThreadEntryReturn::new(0)
+}
+
+#[cfg(feature = "std")]
 fn run_hosted_thread_scheduler(queue: &Arc<HostedThreadScheduler>) {
     loop {
         if queue
@@ -4163,7 +5300,12 @@ fn run_scheduled_green_slot_lease(
                     if let Ok(registry) = core.registry()
                         && let Ok(slot) = registry.slot(slot_index)
                     {
-                        let _ = slot.fail(generation, ExecutorError::Stopped);
+                        let _ = slot.fail(
+                            &registry.future_store,
+                            &registry.result_store,
+                            generation,
+                            ExecutorError::Stopped,
+                        );
                         let _ = core.recycle_slot_if_possible(slot_index, generation);
                     }
                     break;
@@ -4187,7 +5329,10 @@ where
     {
         use std::panic::{AssertUnwindSafe, catch_unwind};
 
-        catch_unwind(AssertUnwindSafe(|| future.poll(context))).map_err(|_| ())
+        catch_unwind(AssertUnwindSafe(|| {
+            generated_async_poll_stack_root(future, context)
+        }))
+        .map_err(|_| ())
     }
 }
 
@@ -4197,7 +5342,7 @@ where
     F: Future + 'static,
     F::Output: 'static,
 {
-    future.poll(context)
+    generated_async_poll_stack_root(future, context)
 }
 
 const fn executor_error_from_sync(error: SyncError) -> ExecutorError {
@@ -4333,13 +5478,26 @@ fn executor_registry_capacity(capacity: usize) -> Result<usize, ExecutorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thread::ThreadPoolConfig;
+    use crate::thread::{PoolPlacement, ThreadPoolConfig};
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use fusion_sys::thread::{ThreadLogicalCpuId, ThreadProcessorGroupId};
     use std::sync::Arc;
     #[cfg(feature = "std")]
     use std::thread;
     #[cfg(feature = "std")]
     use std::time::Duration;
+
+    struct ExplicitGeneratedPollStackFuture;
+
+    impl Future for ExplicitGeneratedPollStackFuture {
+        type Output = u8;
+
+        fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Ready(55)
+        }
+    }
+
+    crate::declare_generated_async_poll_stack_contract!(ExplicitGeneratedPollStackFuture, 1792);
 
     #[cfg(feature = "std")]
     #[derive(Debug)]
@@ -4486,9 +5644,81 @@ mod tests {
         assert_eq!(admission.output_bytes, size_of::<[u16; 4]>());
         assert_eq!(admission.output_align, align_of::<[u16; 4]>());
         assert_eq!(
+            admission.poll_stack,
+            AsyncPollStackContract::DerivedHeuristic { bytes: 512 }
+        );
+        assert_eq!(
             handle.join().expect("task should complete"),
             [1_u16, 2, 3, 4]
         );
+    }
+
+    #[test]
+    fn task_handle_reports_storage_classes_and_poll_stack_contract() {
+        let executor = Executor::new(ExecutorConfig::new());
+        let sample_payload = [0_u8; 384];
+        let sample = async move {
+            let _ = sample_payload[0];
+            [7_u8; 384]
+        };
+        assert!(size_of_val(&sample) > INLINE_ASYNC_FUTURE_BYTES);
+
+        let payload = [0_u8; 384];
+        let handle = executor
+            .spawn_with_poll_stack_bytes(1536, async move {
+                let _ = payload[0];
+                [7_u8; 384]
+            })
+            .expect("task should spawn");
+        let admission = handle.admission();
+        assert_eq!(admission.future_storage_class, AsyncStorageClass::Medium);
+        assert_eq!(admission.output_storage_class, AsyncStorageClass::Medium);
+        assert_eq!(
+            admission.poll_stack,
+            AsyncPollStackContract::Explicit { bytes: 1536 }
+        );
+        assert_eq!(handle.join().expect("task should complete"), [7_u8; 384]);
+    }
+
+    #[test]
+    fn generated_async_poll_stack_contract_overrides_default_heuristic() {
+        let executor = Executor::new(ExecutorConfig::new());
+        assert_eq!(
+            generated_async_poll_stack_bytes_by_type_name(type_name::<
+                GeneratedAsyncPollStackMetadataAnchorFuture,
+            >()),
+            Some(1536)
+        );
+
+        let handle = executor
+            .spawn(GeneratedAsyncPollStackMetadataAnchorFuture)
+            .expect("anchor future should spawn");
+        assert_eq!(
+            handle.admission().poll_stack,
+            AsyncPollStackContract::Generated { bytes: 1536 }
+        );
+        handle.join().expect("anchor future should complete");
+    }
+
+    #[test]
+    fn classed_future_storage_derives_one_poll_stack_heuristic_by_default() {
+        let executor = Executor::new(ExecutorConfig::new());
+        let payload = [0_u8; 384];
+        let handle = executor
+            .spawn(async move {
+                let _ = payload[0];
+                5_u8
+            })
+            .expect("task should spawn");
+        assert_eq!(
+            handle.admission().future_storage_class,
+            AsyncStorageClass::Medium
+        );
+        assert_eq!(
+            handle.admission().poll_stack,
+            AsyncPollStackContract::DerivedHeuristic { bytes: 1024 }
+        );
+        assert_eq!(handle.join().expect("task should complete"), 5);
     }
 
     #[test]
@@ -4508,12 +5738,51 @@ mod tests {
     }
 
     #[test]
+    fn classed_future_storage_accepts_medium_future_frames() {
+        let executor = Executor::new(ExecutorConfig::new());
+        let sample_payload = [0_u8; 384];
+        let sample = async move { sample_payload.len() };
+        assert!(size_of_val(&sample) > INLINE_ASYNC_FUTURE_BYTES);
+
+        let payload = [0_u8; 384];
+        let handle = executor
+            .spawn(async move { payload.len() })
+            .expect("medium-sized future should spill into classed storage");
+
+        assert_eq!(handle.join().expect("task should complete"), 384);
+    }
+
+    #[test]
     fn oversized_futures_are_rejected_honestly() {
         let executor = Executor::new(ExecutorConfig::new());
-        let oversized = [0_u8; 1024];
+        let oversized = [0_u8; 2048];
 
         assert!(matches!(
             executor.spawn(async move { oversized.len() }),
+            Err(ExecutorError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn classed_result_storage_accepts_medium_outputs() {
+        let executor = Executor::new(ExecutorConfig::new());
+        assert!(size_of::<[u8; 384]>() > INLINE_ASYNC_RESULT_BYTES);
+
+        let handle = executor
+            .spawn(async move { [7_u8; 384] })
+            .expect("medium-sized outputs should spill into classed result storage");
+
+        let output = handle.join().expect("task should complete");
+        assert_eq!(output.len(), 384);
+        assert!(output.iter().all(|byte| *byte == 7));
+    }
+
+    #[test]
+    fn oversized_results_are_rejected_honestly() {
+        let executor = Executor::new(ExecutorConfig::new());
+
+        assert!(matches!(
+            executor.spawn(async move { [0_u8; 2048] }),
             Err(ExecutorError::Unsupported)
         ));
     }
@@ -4614,6 +5883,32 @@ mod tests {
     }
 
     #[test]
+    fn current_runtime_spawn_with_poll_stack_bytes_preserves_contract() {
+        let runtime = CurrentAsyncRuntime::new();
+        let handle = runtime
+            .spawn_with_poll_stack_bytes(2048, async { 9_u8 })
+            .expect("task should spawn");
+        assert_eq!(
+            handle.admission().poll_stack,
+            AsyncPollStackContract::Explicit { bytes: 2048 }
+        );
+        assert_eq!(handle.join().expect("task should complete"), 9);
+    }
+
+    #[test]
+    fn current_runtime_spawn_generated_preserves_contract() {
+        let runtime = CurrentAsyncRuntime::new();
+        let handle = runtime
+            .spawn_generated(ExplicitGeneratedPollStackFuture)
+            .expect("generated-contract task should spawn");
+        assert_eq!(
+            handle.admission().poll_stack,
+            AsyncPollStackContract::Explicit { bytes: 1792 }
+        );
+        assert_eq!(handle.join().expect("task should complete"), 55);
+    }
+
+    #[test]
     fn current_runtime_spawn_local_accepts_non_send_future() {
         use std::rc::Rc;
 
@@ -4632,6 +5927,44 @@ mod tests {
             .block_on(handle)
             .expect("runtime should drive local task join");
         assert_eq!(result.expect("local task should complete"), 7);
+    }
+
+    #[test]
+    fn current_runtime_spawn_local_with_poll_stack_bytes_preserves_contract() {
+        use std::rc::Rc;
+
+        let runtime = CurrentAsyncRuntime::new();
+        let local = Rc::new(3_u8);
+        let handle = runtime
+            .spawn_local_with_poll_stack_bytes(1024, {
+                let local = Rc::clone(&local);
+                async move { *local + 4 }
+            })
+            .expect("local task should spawn");
+        assert_eq!(
+            handle.admission().poll_stack,
+            AsyncPollStackContract::Explicit { bytes: 1024 }
+        );
+        let result = runtime
+            .block_on(handle)
+            .expect("runtime should drive local task join");
+        assert_eq!(result.expect("local task should complete"), 7);
+    }
+
+    #[test]
+    fn current_runtime_spawn_local_generated_preserves_contract() {
+        let runtime = CurrentAsyncRuntime::new();
+        let handle = runtime
+            .spawn_local_generated(ExplicitGeneratedPollStackFuture)
+            .expect("generated-contract local task should spawn");
+        assert_eq!(
+            handle.admission().poll_stack,
+            AsyncPollStackContract::Explicit { bytes: 1792 }
+        );
+        let result = runtime
+            .block_on(handle)
+            .expect("runtime should drive generated local task");
+        assert_eq!(result.expect("local task should complete"), 55);
     }
 
     #[test]
@@ -4710,6 +6043,51 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
+    fn current_runtime_sleep_until_instant_completes() {
+        let runtime = CurrentAsyncRuntime::new();
+        let clock = system_monotonic_time();
+        let start = clock
+            .now_instant()
+            .expect("monotonic runtime instant should be readable");
+        let deadline = clock
+            .checked_add_duration(start, Duration::from_millis(1))
+            .expect("deadline should fit");
+        let handle = runtime
+            .spawn(async move {
+                async_sleep_until_instant(deadline)
+                    .await
+                    .expect("sleep-until should complete");
+                41_u8
+            })
+            .expect("task should spawn");
+
+        assert_eq!(
+            runtime
+                .block_on(handle)
+                .expect("runtime should drive timer task")
+                .expect("task should complete"),
+            41
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn current_task_handle_join_drives_timer_only_waits() {
+        let executor = Executor::new_fast_current();
+        let handle = executor
+            .spawn(async {
+                async_sleep_for(Duration::from_millis(1))
+                    .await
+                    .expect("sleep should complete");
+                73_u8
+            })
+            .expect("task should spawn");
+
+        assert_eq!(handle.join().expect("timer-only join should complete"), 73);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
     fn thread_async_runtime_runs_async_fn() {
         async fn value() -> u8 {
             async_yield_now().await;
@@ -4724,6 +6102,109 @@ mod tests {
         .expect("thread async runtime should build");
         let handle = runtime.spawn(value()).expect("task should spawn");
         assert_eq!(handle.join().expect("task should complete"), 55);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn thread_async_runtime_defaults_to_direct_hosted_workers() {
+        let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("thread async runtime should build");
+
+        assert_eq!(
+            runtime.bootstrap(),
+            ThreadAsyncRuntimeBootstrap::DirectHostedWorkers
+        );
+        assert!(runtime.thread_pool().is_none());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn thread_async_runtime_spawn_generated_preserves_contract() {
+        let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("thread async runtime should build");
+        let handle = runtime
+            .spawn_generated(ExplicitGeneratedPollStackFuture)
+            .expect("generated-contract task should spawn");
+        assert_eq!(
+            handle.admission().poll_stack,
+            AsyncPollStackContract::Explicit { bytes: 1792 }
+        );
+        assert_eq!(handle.join().expect("task should complete"), 55);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn thread_async_runtime_falls_back_to_composed_thread_pool_for_non_inherit_placement() {
+        let cpu = ThreadLogicalCpuId {
+            group: ThreadProcessorGroupId(0),
+            index: 0,
+        };
+        let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            placement: PoolPlacement::Static(core::slice::from_ref(&cpu)),
+            ..ThreadPoolConfig::new()
+        })
+        .expect("thread async runtime should build");
+
+        assert_eq!(
+            runtime.bootstrap(),
+            ThreadAsyncRuntimeBootstrap::ComposedThreadPool
+        );
+        assert!(runtime.thread_pool().is_some());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn current_runtime_executor_capacity_can_be_shaped_explicitly() {
+        let runtime =
+            CurrentAsyncRuntime::with_executor_config(ExecutorConfig::new().with_capacity(1));
+        let _first = runtime
+            .spawn(async {
+                core::future::pending::<()>().await;
+            })
+            .expect("first task should fit in one-slot runtime");
+
+        assert_eq!(
+            runtime
+                .spawn(async { 1_u8 })
+                .expect_err("second task should exhaust one-slot runtime"),
+            executor_busy()
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn thread_async_runtime_executor_capacity_can_be_shaped_explicitly() {
+        let runtime = ThreadAsyncRuntime::with_executor_config(
+            &ThreadPoolConfig {
+                min_threads: 1,
+                max_threads: 1,
+                ..ThreadPoolConfig::new()
+            },
+            ExecutorConfig::thread_pool().with_capacity(1),
+        )
+        .expect("thread async runtime should build");
+        let _first = runtime
+            .spawn(async {
+                core::future::pending::<()>().await;
+            })
+            .expect("first task should fit in one-slot runtime");
+
+        assert_eq!(
+            runtime
+                .spawn(async { 2_u8 })
+                .expect_err("second task should exhaust one-slot runtime"),
+            executor_busy()
+        );
     }
 
     #[cfg(feature = "std")]
@@ -4806,6 +6287,20 @@ mod tests {
             FiberAsyncRuntime::from_hosted_fibers(hosted).expect("fiber async runtime should bind");
         assert_eq!(runtime.executor().mode(), ExecutorMode::GreenPool);
         core::mem::forget(runtime);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn fiber_async_runtime_spawn_generated_preserves_contract() {
+        let runtime = FiberAsyncRuntime::fixed(2).expect("fiber async runtime should build");
+        let handle = runtime
+            .spawn_generated(ExplicitGeneratedPollStackFuture)
+            .expect("generated-contract task should spawn");
+        assert_eq!(
+            handle.admission().poll_stack,
+            AsyncPollStackContract::Explicit { bytes: 1792 }
+        );
+        assert_eq!(handle.join().expect("task should complete"), 55);
     }
 
     #[cfg(feature = "std")]

@@ -72,6 +72,22 @@ use fusion_sys::fiber::{
     yield_now as system_yield_now,
 };
 use fusion_sys::sync::Mutex as SysMutex;
+#[cfg(feature = "std")]
+use fusion_sys::thread::{
+    RawThreadEntry,
+    ThreadConfig,
+    ThreadConstraintMode,
+    ThreadEntryReturn,
+    ThreadHandle,
+    ThreadJoinPolicy,
+    ThreadLogicalCpuId,
+    ThreadMigrationPolicy,
+    ThreadPlacementPhase,
+    ThreadPlacementRequest,
+    ThreadPlacementTarget,
+    ThreadProcessorGroupId,
+    ThreadStartMode,
+};
 use fusion_sys::thread::{SystemWorkItem, ThreadSchedulerCaps, ThreadSystem};
 
 use super::ThreadPool;
@@ -103,6 +119,11 @@ const GREEN_RUNTIME_REGION_CACHE_SLOTS: usize = 4;
 const STEAL_SEED_MIX: usize = 0x9e37_79b9_7f4a_7c15;
 #[cfg(not(target_pointer_width = "64"))]
 const STEAL_SEED_MIX: usize = 0x7f4a_7c15;
+#[cfg(feature = "std")]
+const ZERO_LOGICAL_CPU: ThreadLogicalCpuId = ThreadLogicalCpuId {
+    group: ThreadProcessorGroupId(0),
+    index: 0,
+};
 
 #[allow(clippy::cast_possible_truncation)]
 const fn wake_token_to_word(token: PlatformWakeToken) -> usize {
@@ -6094,7 +6115,6 @@ struct GreenPoolMetadata {
     initialized_carriers: usize,
 }
 
-#[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy)]
 struct CarrierLoopContext {
     control: NonNull<GreenPoolControlBlock>,
@@ -6254,14 +6274,10 @@ impl GreenPoolMetadata {
         let task_slots = cursor.reserve_slice::<GreenTaskSlot>(task_capacity)?;
         let free_entries = cursor.reserve_slice::<usize>(task_capacity)?;
         let carriers = cursor.reserve_slice::<CarrierQueue>(carrier_count)?;
-        #[cfg(feature = "std")]
         let carrier_contexts = cursor.reserve_slice::<CarrierLoopContext>(carrier_count)?;
         metadata.tasks = task_slots;
         metadata.carriers = carriers;
-        #[cfg(feature = "std")]
-        {
-            metadata.carrier_contexts = carrier_contexts;
-        }
+        metadata.carrier_contexts = carrier_contexts;
 
         let header = GreenPoolMetadataHeader {
             metadata_len: metadata.mapping.len,
@@ -6327,7 +6343,6 @@ impl GreenPoolMetadata {
         Ok((tasks, carriers))
     }
 
-    #[cfg(feature = "std")]
     fn initialize_carrier_contexts(
         &self,
         control: NonNull<GreenPoolControlBlock>,
@@ -7839,7 +7854,7 @@ impl Drop for CurrentFiberPool {
 #[derive(Debug)]
 #[cfg(feature = "std")]
 pub struct HostedFiberRuntime {
-    carriers: ThreadPool,
+    carriers: HostedCarrierRuntime,
     fibers: GreenPool,
 }
 
@@ -7847,9 +7862,229 @@ pub struct HostedFiberRuntime {
 impl Drop for HostedFiberRuntime {
     fn drop(&mut self) {
         let _ = self.fibers.shutdown();
-        if let Ok(carriers) = self.carriers.try_clone() {
-            let _ = carriers.shutdown();
+        let _ = self.carriers.shutdown();
+    }
+}
+
+/// Hosted carrier bootstrap model used to realize one hosted fiber runtime.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostedCarrierBootstrap {
+    /// Spawn direct OS-thread carriers whose thread entry is the green carrier loop itself.
+    Direct,
+    /// Build one generic carrier thread pool first, then submit carrier loops into it.
+    ThreadPool,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub enum HostedCarrierRuntime {
+    /// Direct hosted OS-thread carriers.
+    Direct(HostedDirectCarrierSet),
+    /// Generic carrier thread pool used as the hosted green substrate.
+    ThreadPool(ThreadPool),
+}
+
+#[cfg(feature = "std")]
+impl HostedCarrierRuntime {
+    /// Returns the configured carrier bootstrap model.
+    #[must_use]
+    pub const fn bootstrap(&self) -> HostedCarrierBootstrap {
+        match self {
+            Self::Direct(_) => HostedCarrierBootstrap::Direct,
+            Self::ThreadPool(_) => HostedCarrierBootstrap::ThreadPool,
         }
+    }
+
+    /// Returns the active worker count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying hosted carrier runtime cannot report its worker count
+    /// honestly.
+    pub fn worker_count(&self) -> Result<usize, FiberError> {
+        match self {
+            Self::Direct(carriers) => Ok(carriers.worker_count()),
+            Self::ThreadPool(carriers) => carriers
+                .worker_count()
+                .map_err(fiber_error_from_thread_pool),
+        }
+    }
+
+    /// Shuts the hosted carrier runtime down.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the carrier runtime cannot complete shutdown honestly.
+    pub fn shutdown(&mut self) -> Result<(), FiberError> {
+        match self {
+            Self::Direct(carriers) => carriers.shutdown(),
+            Self::ThreadPool(carriers) => {
+                let carriers = carriers.try_clone().map_err(fiber_error_from_thread_pool)?;
+                carriers.shutdown().map_err(fiber_error_from_thread_pool)
+            }
+        }
+    }
+
+    /// Returns the carrier thread pool when this hosted runtime still uses the composed thread-pool
+    /// carrier model.
+    #[must_use]
+    pub const fn thread_pool(&self) -> Option<&ThreadPool> {
+        match self {
+            Self::Direct(_) => None,
+            Self::ThreadPool(carriers) => Some(carriers),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub struct HostedDirectCarrierSet {
+    system: ThreadSystem,
+    handles: std::boxed::Box<[Option<ThreadHandle>]>,
+}
+
+#[cfg(feature = "std")]
+impl HostedDirectCarrierSet {
+    fn new(
+        runtime: HostedFiberRuntimeConfig<'_>,
+        inner: &GreenPoolLease,
+    ) -> Result<Self, FiberError> {
+        let system = ThreadSystem::new();
+        let placement = resolve_hosted_direct_placement(runtime)?;
+        let mut handles = std::iter::repeat_with(|| None)
+            .take(runtime.carrier_count)
+            .collect::<std::vec::Vec<_>>()
+            .into_boxed_slice();
+
+        for carrier_index in 0..runtime.carrier_count {
+            let context = inner
+                .block()
+                .metadata
+                .carrier_contexts
+                .ptr
+                .as_ptr()
+                .wrapping_add(carrier_index)
+                .cast::<()>();
+            retain_carrier_loop_context(context.cast_const().cast())?;
+            let handle = match placement.as_ref() {
+                Some(HostedDirectPlacement::LogicalCpus(cpus)) => {
+                    let single = &cpus[carrier_index..=carrier_index];
+                    let targets = [ThreadPlacementTarget::LogicalCpus(single)];
+                    let placement = ThreadPlacementRequest {
+                        targets: &targets,
+                        mode: ThreadConstraintMode::Require,
+                        phase: ThreadPlacementPhase::PreStartPreferred,
+                        migration: ThreadMigrationPolicy::Inherit,
+                    };
+                    let config = ThreadConfig {
+                        join_policy: ThreadJoinPolicy::Joinable,
+                        name: runtime.name_prefix,
+                        start_mode: ThreadStartMode::PlacementCommitted,
+                        placement,
+                        scheduler: fusion_sys::thread::ThreadSchedulerRequest::new(),
+                        stack: fusion_sys::thread::ThreadStackRequest::new(),
+                    };
+                    unsafe {
+                        system.spawn_raw(
+                            &config,
+                            run_direct_carrier_thread as RawThreadEntry,
+                            context,
+                        )
+                    }
+                }
+                Some(HostedDirectPlacement::CoreClasses(classes)) => {
+                    let targets = [ThreadPlacementTarget::CoreClasses(classes)];
+                    let placement = ThreadPlacementRequest {
+                        targets: &targets,
+                        mode: ThreadConstraintMode::Prefer,
+                        phase: ThreadPlacementPhase::PreStartPreferred,
+                        migration: ThreadMigrationPolicy::Inherit,
+                    };
+                    let config = ThreadConfig {
+                        join_policy: ThreadJoinPolicy::Joinable,
+                        name: runtime.name_prefix,
+                        start_mode: ThreadStartMode::PlacementCommitted,
+                        placement,
+                        scheduler: fusion_sys::thread::ThreadSchedulerRequest::new(),
+                        stack: fusion_sys::thread::ThreadStackRequest::new(),
+                    };
+                    unsafe {
+                        system.spawn_raw(
+                            &config,
+                            run_direct_carrier_thread as RawThreadEntry,
+                            context,
+                        )
+                    }
+                }
+                None => {
+                    let config = ThreadConfig {
+                        join_policy: ThreadJoinPolicy::Joinable,
+                        name: runtime.name_prefix,
+                        start_mode: ThreadStartMode::Immediate,
+                        placement: ThreadPlacementRequest::new(),
+                        scheduler: fusion_sys::thread::ThreadSchedulerRequest::new(),
+                        stack: fusion_sys::thread::ThreadStackRequest::new(),
+                    };
+                    unsafe {
+                        system.spawn_raw(
+                            &config,
+                            run_direct_carrier_thread as RawThreadEntry,
+                            context,
+                        )
+                    }
+                }
+            };
+            let handle = match handle {
+                Ok(handle) => handle,
+                Err(error) => {
+                    let _ = unsafe { release_carrier_loop_context(context.cast_const().cast()) };
+                    let _ = inner.request_shutdown();
+                    let mut carriers = Self { system, handles };
+                    let _ = carriers.shutdown();
+                    return Err(fiber_error_from_thread_pool(error));
+                }
+            };
+            handles[carrier_index] = Some(handle);
+        }
+
+        Ok(Self { system, handles })
+    }
+
+    /// Returns the number of active hosted carrier threads.
+    #[must_use]
+    pub fn worker_count(&self) -> usize {
+        self.handles.iter().flatten().count()
+    }
+
+    /// Shuts the direct hosted carrier set down by joining all live carrier threads.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first honest thread shutdown failure, if any.
+    pub fn shutdown(&mut self) -> Result<(), FiberError> {
+        let mut first_error = None;
+        for handle in &mut *self.handles {
+            let Some(handle) = handle.take() else {
+                continue;
+            };
+            if let Err(error) = self.system.join(handle)
+                && first_error.is_none()
+            {
+                first_error = Some(fiber_error_from_thread_pool(error));
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "std")]
+impl Drop for HostedDirectCarrierSet {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
     }
 }
 
@@ -7859,6 +8094,8 @@ impl Drop for HostedFiberRuntime {
 pub struct HostedFiberRuntimeConfig<'a> {
     /// Number of carrier workers to provision.
     pub carrier_count: usize,
+    /// Hosted carrier bootstrap model.
+    pub bootstrap: HostedCarrierBootstrap,
     /// Placement policy for the carrier workers.
     pub placement: PoolPlacement<'a>,
     /// Optional worker-name prefix for the carrier pool.
@@ -7881,6 +8118,7 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
     pub const fn new(carrier_count: usize) -> Self {
         Self {
             carrier_count,
+            bootstrap: HostedCarrierBootstrap::Direct,
             placement: PoolPlacement::Inherit,
             name_prefix: Some("fusion-fiber"),
         }
@@ -7892,6 +8130,7 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
         let carrier_count = automatic_carrier_count();
         Self {
             carrier_count,
+            bootstrap: HostedCarrierBootstrap::Direct,
             placement: automatic_pool_placement(carrier_count),
             name_prefix: Some("fusion-fiber"),
         }
@@ -7914,6 +8153,7 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
         .ok_or_else(FiberError::unsupported)?;
         Ok(Self {
             carrier_count,
+            bootstrap: HostedCarrierBootstrap::Direct,
             placement: PoolPlacement::PerCore,
             name_prefix: Some("fusion-fiber"),
         })
@@ -7939,6 +8179,7 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
                 .ok_or_else(FiberError::unsupported)?;
         Ok(Self {
             carrier_count,
+            bootstrap: HostedCarrierBootstrap::Direct,
             placement: PoolPlacement::Inherit,
             name_prefix: Some("fusion-fiber"),
         })
@@ -7963,9 +8204,17 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
                 .ok_or_else(FiberError::unsupported)?;
         Ok(Self {
             carrier_count,
+            bootstrap: HostedCarrierBootstrap::Direct,
             placement: PoolPlacement::Inherit,
             name_prefix: Some("fusion-fiber"),
         })
+    }
+
+    /// Returns one copy of this hosted runtime config with an explicit carrier bootstrap model.
+    #[must_use]
+    pub const fn with_bootstrap(mut self, bootstrap: HostedCarrierBootstrap) -> Self {
+        self.bootstrap = bootstrap;
+        self
     }
 
     /// Returns one copy of this hosted runtime config with an explicit placement policy.
@@ -7993,6 +8242,50 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
             name_prefix: self.name_prefix,
             ..ThreadPoolConfig::new()
         })
+    }
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy)]
+enum HostedDirectPlacement<'a> {
+    LogicalCpus([ThreadLogicalCpuId; 32]),
+    CoreClasses(&'a [fusion_sys::thread::ThreadCoreClassId]),
+}
+
+#[cfg(feature = "std")]
+fn resolve_hosted_direct_placement(
+    runtime: HostedFiberRuntimeConfig<'_>,
+) -> Result<Option<HostedDirectPlacement<'_>>, FiberError> {
+    if runtime.carrier_count == 0 {
+        return Err(FiberError::invalid());
+    }
+    if runtime.carrier_count > 32 {
+        return Err(FiberError::unsupported());
+    }
+    match runtime.placement {
+        PoolPlacement::Inherit => Ok(None),
+        PoolPlacement::Static(cpus) => {
+            if cpus.len() < runtime.carrier_count {
+                return Err(FiberError::invalid());
+            }
+            let mut resolved = [ZERO_LOGICAL_CPU; 32];
+            resolved[..runtime.carrier_count].copy_from_slice(&cpus[..runtime.carrier_count]);
+            Ok(Some(HostedDirectPlacement::LogicalCpus(resolved)))
+        }
+        PoolPlacement::PerCore => {
+            let mut resolved = [ZERO_LOGICAL_CPU; 32];
+            let summary = system_hardware()
+                .write_logical_cpus(&mut resolved[..runtime.carrier_count])
+                .map_err(|_| FiberError::unsupported())?;
+            if summary.total < runtime.carrier_count {
+                return Err(FiberError::resource_exhausted());
+            }
+            Ok(Some(HostedDirectPlacement::LogicalCpus(resolved)))
+        }
+        PoolPlacement::CoreClasses(classes) => {
+            Ok(Some(HostedDirectPlacement::CoreClasses(classes)))
+        }
+        PoolPlacement::PerPackage | PoolPlacement::Dynamic => Err(FiberError::unsupported()),
     }
 }
 
@@ -8212,15 +8505,31 @@ impl HostedFiberRuntime {
         bootstrap: FiberPoolBootstrap<'_>,
         runtime: HostedFiberRuntimeConfig<'_>,
     ) -> Result<Self, FiberError> {
-        let carrier_config = runtime.to_thread_pool_config()?;
-        let carriers = ThreadPool::new(&carrier_config).map_err(fiber_error_from_thread_pool)?;
-        let fibers = GreenPool::new(bootstrap.config(), &carriers)?;
-        Ok(Self { carriers, fibers })
+        match runtime.bootstrap {
+            HostedCarrierBootstrap::Direct => {
+                let (fibers, carriers) =
+                    GreenPool::build_hosted_direct(bootstrap.config(), runtime)?;
+                Ok(Self {
+                    carriers: HostedCarrierRuntime::Direct(carriers),
+                    fibers,
+                })
+            }
+            HostedCarrierBootstrap::ThreadPool => {
+                let carrier_config = runtime.to_thread_pool_config()?;
+                let carriers =
+                    ThreadPool::new(&carrier_config).map_err(fiber_error_from_thread_pool)?;
+                let fibers = GreenPool::new(bootstrap.config(), &carriers)?;
+                Ok(Self {
+                    carriers: HostedCarrierRuntime::ThreadPool(carriers),
+                    fibers,
+                })
+            }
+        }
     }
 
-    /// Returns the owned carrier thread pool backing this hosted runtime.
+    /// Returns the owned hosted carrier runtime backing this hosted fiber runtime.
     #[must_use]
-    pub const fn carriers(&self) -> &ThreadPool {
+    pub const fn carriers(&self) -> &HostedCarrierRuntime {
         &self.carriers
     }
 
@@ -8232,11 +8541,129 @@ impl HostedFiberRuntime {
 
     /// Releases the owned carrier pool and green-fiber pool back to the caller.
     #[must_use]
-    pub fn into_parts(self) -> (ThreadPool, GreenPool) {
+    pub fn into_parts(self) -> (HostedCarrierRuntime, GreenPool) {
         let this = ManuallyDrop::new(self);
         // SAFETY: `this` will not run `Drop`; we move both owned fields out exactly once.
         unsafe { (ptr::read(&this.carriers), ptr::read(&this.fibers)) }
     }
+}
+
+fn build_hosted_green_inner(
+    config: &FiberPoolConfig<'_>,
+    carrier_workers: usize,
+) -> Result<GreenPoolLease, FiberError> {
+    let support = GreenPool::support();
+    if !support.context.caps.contains(ContextCaps::MAKE)
+        || !support.context.caps.contains(ContextCaps::SWAP)
+    {
+        return Err(FiberError::unsupported());
+    }
+    if support.context.guard_required && config.guard_pages == 0 {
+        return Err(FiberError::invalid());
+    }
+
+    let task_capacity_per_carrier = config.task_capacity_per_carrier()?;
+    if config.growth_chunk == 0 || task_capacity_per_carrier == 0 || carrier_workers == 0 {
+        return Err(FiberError::invalid());
+    }
+    if !config.uses_classes() && config.growth_chunk > config.max_fibers_per_carrier {
+        return Err(FiberError::invalid());
+    }
+    if matches!(config.scheduling, GreenScheduling::Priority) && carrier_workers > 1 {
+        return Err(FiberError::unsupported());
+    }
+    if matches!(config.scheduling, GreenScheduling::WorkStealing)
+        && support.context.migration != ContextMigrationSupport::CrossCarrier
+    {
+        return Err(FiberError::unsupported());
+    }
+    let alignment = support.context.min_stack_alignment.max(16);
+    let stacks = FiberStackStore::new(config, alignment, support.context.stack_direction)?;
+    let reactor_enabled = EventSystem::new()
+        .support()
+        .caps
+        .contains(EventCaps::READINESS)
+        && system_fiber_host().support().wake_signal
+        && matches!(config.reactor_policy, GreenReactorPolicy::Automatic);
+    let task_capacity = stacks.total_capacity();
+    let (runtime_region, metadata_region) = green_pool_runtime_regions(
+        carrier_workers,
+        task_capacity,
+        config.scheduling,
+        reactor_enabled,
+    )?;
+    let (pool_metadata, tasks, carriers) = match GreenPoolMetadata::new_in_region(
+        metadata_region,
+        carrier_workers,
+        task_capacity,
+        config.scheduling,
+        config.priority_age_cap,
+        reactor_enabled,
+        false,
+    ) {
+        Ok(parts) => parts,
+        Err(error) => {
+            let _ = unsafe { system_mem().unmap(runtime_region) };
+            return Err(error);
+        }
+    };
+
+    let inner = GreenPoolLease::new(
+        runtime_region,
+        GreenPoolInner {
+            support,
+            scheduling: config.scheduling,
+            capacity_policy: config.capacity_policy,
+            yield_budget_supported: yield_budget_enforcement_supported(),
+            #[cfg(feature = "std")]
+            yield_budget_policy: config.yield_budget_policy,
+            shutdown: AtomicBool::new(false),
+            client_refs: AtomicUsize::new(1),
+            active: AtomicUsize::new(0),
+            next_id: AtomicUsize::new(1),
+            next_carrier: AtomicUsize::new(0),
+            carriers,
+            tasks,
+            stacks,
+            #[cfg(feature = "std")]
+            yield_budget_runtime: GreenYieldBudgetRuntime::new(carrier_workers),
+        },
+        pool_metadata,
+    )?;
+    inner
+        .block()
+        .metadata
+        .initialize_carrier_contexts(inner.ptr)?;
+    inner.tasks.initialize_owner(inner.as_ptr());
+    Ok(inner)
+}
+
+fn launch_thread_pool_green_carriers(
+    inner: &GreenPoolLease,
+    carrier: &ThreadPool,
+) -> Result<(), FiberError> {
+    for carrier_index in 0..inner.carriers.len() {
+        let context = inner
+            .block()
+            .metadata
+            .carrier_contexts
+            .ptr
+            .as_ptr()
+            .wrapping_add(carrier_index)
+            .cast::<()>();
+        retain_carrier_loop_context(context.cast_const().cast())?;
+        let work =
+            SystemWorkItem::with_cancel(run_carrier_loop_job, context, cancel_carrier_loop_job);
+        if let Err(error) = carrier
+            .submit_raw(work)
+            .map_err(fiber_error_from_thread_pool)
+        {
+            let _ = unsafe { release_carrier_loop_context(context.cast_const().cast()) };
+            let _ = inner.request_shutdown();
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 impl GreenPool {
@@ -8280,140 +8707,22 @@ impl GreenPool {
     /// realized.
     #[allow(clippy::too_many_lines)]
     pub fn new(config: &FiberPoolConfig<'_>, carrier: &ThreadPool) -> Result<Self, FiberError> {
-        let support = Self::support();
-        if !support.context.caps.contains(ContextCaps::MAKE)
-            || !support.context.caps.contains(ContextCaps::SWAP)
-        {
-            return Err(FiberError::unsupported());
-        }
-        if support.context.guard_required && config.guard_pages == 0 {
-            return Err(FiberError::invalid());
-        }
-
         let carrier_workers = carrier
             .worker_count()
             .map_err(fiber_error_from_thread_pool)?;
-        let task_capacity_per_carrier = config.task_capacity_per_carrier()?;
-        if config.growth_chunk == 0 || task_capacity_per_carrier == 0 || carrier_workers == 0 {
-            return Err(FiberError::invalid());
-        }
-        if !config.uses_classes() && config.growth_chunk > config.max_fibers_per_carrier {
-            return Err(FiberError::invalid());
-        }
-        if matches!(config.scheduling, GreenScheduling::Priority) && carrier_workers > 1 {
-            return Err(FiberError::unsupported());
-        }
-        if matches!(config.scheduling, GreenScheduling::WorkStealing)
-            && support.context.migration != ContextMigrationSupport::CrossCarrier
-        {
-            return Err(FiberError::unsupported());
-        }
-        let alignment = support.context.min_stack_alignment.max(16);
-        let stacks = FiberStackStore::new(config, alignment, support.context.stack_direction)?;
-        let reactor_enabled = EventSystem::new()
-            .support()
-            .caps
-            .contains(EventCaps::READINESS)
-            && system_fiber_host().support().wake_signal
-            && matches!(config.reactor_policy, GreenReactorPolicy::Automatic);
-        let task_capacity = stacks.total_capacity();
-        let (runtime_region, metadata_region) = green_pool_runtime_regions(
-            carrier_workers,
-            task_capacity,
-            config.scheduling,
-            reactor_enabled,
-        )?;
-        let (pool_metadata, tasks, carriers) = match GreenPoolMetadata::new_in_region(
-            metadata_region,
-            carrier_workers,
-            task_capacity,
-            config.scheduling,
-            config.priority_age_cap,
-            reactor_enabled,
-            false,
-        ) {
-            Ok(parts) => parts,
-            Err(error) => {
-                let _ = unsafe { system_mem().unmap(runtime_region) };
-                return Err(error);
-            }
-        };
-
-        let inner = GreenPoolLease::new(
-            runtime_region,
-            GreenPoolInner {
-                support,
-                scheduling: config.scheduling,
-                capacity_policy: config.capacity_policy,
-                yield_budget_supported: yield_budget_enforcement_supported(),
-                #[cfg(feature = "std")]
-                yield_budget_policy: config.yield_budget_policy,
-                shutdown: AtomicBool::new(false),
-                client_refs: AtomicUsize::new(1),
-                active: AtomicUsize::new(0),
-                next_id: AtomicUsize::new(1),
-                next_carrier: AtomicUsize::new(0),
-                carriers,
-                tasks,
-                stacks,
-                #[cfg(feature = "std")]
-                yield_budget_runtime: GreenYieldBudgetRuntime::new(carrier_workers),
-            },
-            pool_metadata,
-        )?;
-        #[cfg(feature = "std")]
-        inner
-            .block()
-            .metadata
-            .initialize_carrier_contexts(inner.ptr)?;
-        inner.tasks.initialize_owner(inner.as_ptr());
-
-        for carrier_index in 0..inner.carriers.len() {
-            #[cfg(feature = "std")]
-            {
-                let context = inner
-                    .block()
-                    .metadata
-                    .carrier_contexts
-                    .ptr
-                    .as_ptr()
-                    .wrapping_add(carrier_index)
-                    .cast::<()>();
-                retain_carrier_loop_context(context.cast_const().cast())?;
-                let work = SystemWorkItem::with_cancel(
-                    run_carrier_loop_job,
-                    context,
-                    cancel_carrier_loop_job,
-                );
-                if let Err(error) = carrier
-                    .submit_raw(work)
-                    .map_err(fiber_error_from_thread_pool)
-                {
-                    let _ = unsafe { release_carrier_loop_context(context.cast_const().cast()) };
-                    let _ = inner.request_shutdown();
-                    return Err(error);
-                }
-            }
-
-            #[cfg(not(feature = "std"))]
-            {
-                let carrier_inner = inner.try_clone()?;
-                if let Err(error) = carrier
-                    .submit(move || {
-                        if let Err(error) = run_carrier_loop(&carrier_inner, carrier_index) {
-                            let _ = error;
-                            let _ = carrier_inner.request_shutdown();
-                        }
-                    })
-                    .map_err(fiber_error_from_thread_pool)
-                {
-                    let _ = inner.request_shutdown();
-                    return Err(error);
-                }
-            }
-        }
-
+        let inner = build_hosted_green_inner(config, carrier_workers)?;
+        launch_thread_pool_green_carriers(&inner, carrier)?;
         Ok(Self { inner })
+    }
+
+    #[cfg(feature = "std")]
+    fn build_hosted_direct(
+        config: &FiberPoolConfig<'_>,
+        runtime: HostedFiberRuntimeConfig<'_>,
+    ) -> Result<(Self, HostedDirectCarrierSet), FiberError> {
+        let inner = build_hosted_green_inner(config, runtime.carrier_count)?;
+        let carriers = HostedDirectCarrierSet::new(runtime, &inner)?;
+        Ok((Self { inner }, carriers))
     }
 
     /// Returns the currently configured low-level support surface.
@@ -9252,23 +9561,30 @@ fn run_green_job_contained(runner: InlineGreenJobRunner) {
 }
 
 #[cfg(feature = "std")]
+unsafe fn run_direct_carrier_thread(context: *mut ()) -> ThreadEntryReturn {
+    unsafe { run_carrier_loop_job(context) };
+    ThreadEntryReturn::new(0)
+}
+
 unsafe fn run_carrier_loop_job(context: *mut ()) {
     let context = unsafe { &*context.cast::<CarrierLoopContext>() };
     let inner = unsafe { &context.control.as_ref().inner };
-    if let Err(error) = run_carrier_loop(inner, context.carrier_index) {
-        if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_some() {
-            std::eprintln!(
-                "fusion-std carrier loop error: carrier_index={} kind={:?}",
-                context.carrier_index,
-                error.kind()
-            );
+    if let Err(_error) = run_carrier_loop(inner, context.carrier_index) {
+        #[cfg(feature = "std")]
+        {
+            if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_some() {
+                std::eprintln!(
+                    "fusion-std carrier loop error: carrier_index={} kind={:?}",
+                    context.carrier_index,
+                    _error.kind()
+                );
+            }
         }
         let _ = inner.request_shutdown();
     }
     let _ = unsafe { release_carrier_loop_context(context) };
 }
 
-#[cfg(feature = "std")]
 unsafe fn cancel_carrier_loop_job(context: *mut ()) {
     let context = unsafe { &*context.cast::<CarrierLoopContext>() };
     let inner = unsafe { &context.control.as_ref().inner };
@@ -9276,14 +9592,12 @@ unsafe fn cancel_carrier_loop_job(context: *mut ()) {
     let _ = unsafe { release_carrier_loop_context(context) };
 }
 
-#[cfg(feature = "std")]
 fn retain_carrier_loop_context(context: *const CarrierLoopContext) -> Result<(), FiberError> {
     let context = unsafe { context.as_ref().ok_or_else(FiberError::invalid)? };
     let block = unsafe { context.control.as_ref() };
     block.header.try_retain().map_err(fiber_error_from_sync)
 }
 
-#[cfg(feature = "std")]
 unsafe fn release_carrier_loop_context(
     context: *const CarrierLoopContext,
 ) -> Result<(), FiberError> {
@@ -11258,6 +11572,10 @@ mod tests {
         let runtime = FiberPoolBootstrap::fixed(2)
             .build_hosted()
             .expect("hosted runtime should build");
+        assert_eq!(
+            runtime.carriers().bootstrap(),
+            HostedCarrierBootstrap::Direct
+        );
         assert!(
             runtime
                 .carriers()
@@ -11266,7 +11584,7 @@ mod tests {
                 >= 1
         );
         assert_eq!(runtime.fibers().active_count(), 0);
-        let (carriers, fibers) = runtime.into_parts();
+        let (mut carriers, fibers) = runtime.into_parts();
         fibers
             .shutdown()
             .expect("hosted fiber pool should shut down cleanly");
@@ -11285,7 +11603,7 @@ mod tests {
         )
         .expect("fixed growing hosted runtime should build");
         assert_eq!(runtime.fibers().active_count(), 0);
-        let (carriers, fibers) = runtime.into_parts();
+        let (mut carriers, fibers) = runtime.into_parts();
         fibers
             .shutdown()
             .expect("hosted fiber pool should shut down cleanly");
@@ -11571,7 +11889,7 @@ mod tests {
         ])
         .expect("classed hosted runtime should build");
         assert_eq!(runtime.fibers().active_count(), 0);
-        let (carriers, fibers) = runtime.into_parts();
+        let (mut carriers, fibers) = runtime.into_parts();
         fibers
             .shutdown()
             .expect("hosted fiber pool should shut down cleanly");
@@ -11612,7 +11930,42 @@ mod tests {
                 .expect("worker count should be observable"),
             1
         );
-        let (carriers, fibers) = runtime.into_parts();
+        assert_eq!(
+            runtime.carriers().bootstrap(),
+            HostedCarrierBootstrap::Direct
+        );
+        let (mut carriers, fibers) = runtime.into_parts();
+        fibers
+            .shutdown()
+            .expect("hosted fiber pool should shut down cleanly");
+        carriers
+            .shutdown()
+            .expect("carrier pool should shut down cleanly");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hosted_fiber_runtime_can_use_composed_thread_pool_bootstrap() {
+        let runtime = FiberPoolBootstrap::fixed(2)
+            .build_hosted_with(
+                HostedFiberRuntimeConfig::new(1)
+                    .with_bootstrap(HostedCarrierBootstrap::ThreadPool)
+                    .with_placement(PoolPlacement::Inherit),
+            )
+            .expect("hosted runtime should build from composed carrier config");
+        assert_eq!(
+            runtime.carriers().bootstrap(),
+            HostedCarrierBootstrap::ThreadPool
+        );
+        assert_eq!(
+            runtime
+                .carriers()
+                .worker_count()
+                .expect("worker count should be observable"),
+            1
+        );
+        assert!(runtime.carriers().thread_pool().is_some());
+        let (mut carriers, fibers) = runtime.into_parts();
         fibers
             .shutdown()
             .expect("hosted fiber pool should shut down cleanly");

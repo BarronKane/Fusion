@@ -252,6 +252,61 @@ pub struct CortexMClockDescriptor {
     pub consumers: &'static [&'static str],
 }
 
+/// Runtime support level for board-visible system-clock or overclock profile control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CortexMSocOverclockSupport {
+    /// No truthful overclock or system-clock profile surface exists.
+    Unsupported,
+    /// The board can surface a truthful static profile catalog, but not apply one at runtime.
+    ProfileCatalog,
+    /// The board can surface a truthful profile catalog and apply one at runtime.
+    RuntimeProfiles,
+}
+
+/// Honest monotonic-time implication of one board-visible clock profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CortexMSocMonotonicTimeImpact {
+    /// The board cannot honestly prove how the clock profile affects the monotonic timebase.
+    Unknown,
+    /// The monotonic timebase remains unchanged across the profile transition.
+    Unaffected,
+    /// The monotonic timebase frequency or conversion contract changes with this profile.
+    FrequencyShifted,
+}
+
+/// One board-visible system-clock or overclock profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CortexMSocOverclockProfile {
+    /// Human-readable profile name.
+    pub name: &'static str,
+    /// Effective system/core clock frequency for the profile.
+    pub sys_clock_hz: u64,
+    /// Honest monotonic-time implication of selecting the profile.
+    pub monotonic_time_impact: CortexMSocMonotonicTimeImpact,
+}
+
+/// Implementation shape for one board-visible finite timeout source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CortexMEventTimeoutImplementation {
+    /// One dedicated or reserved one-shot hardware alarm/comparator drives timeout wakeups.
+    ReservedOneShotAlarm,
+}
+
+/// Truthful board-visible finite-timeout source surfaced for scheduler/runtime use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CortexMEventTimeoutSupport {
+    /// Backend implementation shape used by this timeout source.
+    pub implementation: CortexMEventTimeoutImplementation,
+    /// Board-reserved IRQ line used by the timeout source when one exists.
+    pub irqn: Option<u16>,
+    /// Effective compare/counter width used by the timeout source in bits.
+    pub counter_bits: Option<u32>,
+    /// Effective timeout tick rate in ticks per second.
+    pub tick_hz: Option<u64>,
+    /// Maximum truthful relative timeout admitted by the source, when one finite bound exists.
+    pub max_relative_timeout: Option<Duration>,
+}
+
 bitflags::bitflags! {
     /// Supported DMA transfer shapes surfaced by a Cortex-M SoC board.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -717,14 +772,22 @@ pub trait CortexMSocBoard: Copy {
     /// shared Cortex-M event backend.
     #[must_use]
     fn event_timeout_supported(&self) -> bool {
-        false
+        self.event_timeout_support().is_some()
+    }
+
+    /// Returns one truthful finite-timeout event source summary for the shared Cortex-M event
+    /// backend.
+    #[must_use]
+    fn event_timeout_support(&self) -> Option<CortexMEventTimeoutSupport> {
+        None
     }
 
     /// Returns the board-reserved IRQ line used by the shared Cortex-M event timeout source, when
     /// one exists.
     #[must_use]
     fn event_timeout_irq(&self) -> Option<u16> {
-        None
+        self.event_timeout_support()
+            .and_then(|support| support.irqn)
     }
 
     /// Arms the board-defined event timeout source.
@@ -794,10 +857,68 @@ pub trait CortexMSocBoard: Copy {
         Err(HardwareError::unsupported())
     }
 
+    /// Returns the width in bits of the board-defined raw monotonic counter, when one honest raw
+    /// counter surface exists.
+    #[must_use]
+    fn monotonic_raw_bits(&self) -> Option<u32> {
+        None
+    }
+
+    /// Returns the frequency in ticks per second of the raw monotonic counter, when one honest
+    /// raw counter surface exists.
+    #[must_use]
+    fn monotonic_tick_hz(&self) -> Option<u64> {
+        None
+    }
+
+    /// Returns the current raw monotonic counter reading widened into `u64`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the board cannot surface one truthful raw monotonic counter.
+    fn monotonic_raw_now(&self) -> Result<u64, HardwareError> {
+        Err(HardwareError::unsupported())
+    }
+
     /// Returns the major board-visible clock descriptors surfaced by this SoC board.
     #[must_use]
     fn clock_tree(&self) -> &'static [CortexMClockDescriptor] {
         &[]
+    }
+
+    /// Returns the runtime support level for board-visible overclock or system-clock profiles.
+    #[must_use]
+    fn overclock_support(&self) -> CortexMSocOverclockSupport {
+        CortexMSocOverclockSupport::Unsupported
+    }
+
+    /// Returns the board-visible overclock or system-clock profiles.
+    #[must_use]
+    fn overclock_profiles(&self) -> &'static [CortexMSocOverclockProfile] {
+        &[]
+    }
+
+    /// Returns the current effective system/core clock frequency, when it can be surfaced
+    /// honestly.
+    #[must_use]
+    fn current_sys_clock_hz(&self) -> Option<u64> {
+        None
+    }
+
+    /// Returns the currently active board-visible clock profile, when it can be surfaced
+    /// honestly.
+    #[must_use]
+    fn active_overclock_profile(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Applies one named board-visible overclock or system-clock profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the board cannot honestly apply the requested profile.
+    fn apply_overclock_profile(&self, _name: &str) -> Result<(), HardwareError> {
+        Err(HardwareError::unsupported())
     }
 
     /// Returns DMA controller descriptors surfaced by this SoC board.
@@ -1112,6 +1233,12 @@ pub fn event_timeout_supported<T: CortexMSocBoard>(soc: T) -> bool {
     soc.event_timeout_supported()
 }
 
+/// Returns one truthful finite-timeout event source summary for the selected SoC board.
+#[must_use]
+pub fn event_timeout_support<T: CortexMSocBoard>(soc: T) -> Option<CortexMEventTimeoutSupport> {
+    soc.event_timeout_support()
+}
+
 /// Returns the board-reserved IRQ line used by the selected SoC board's event timeout source.
 #[must_use]
 pub fn event_timeout_irq<T: CortexMSocBoard>(soc: T) -> Option<u16> {
@@ -1185,10 +1312,69 @@ pub fn monotonic_now<T: CortexMSocBoard>(soc: T) -> Result<Duration, HardwareErr
     soc.monotonic_now()
 }
 
+/// Returns the width in bits of the selected SoC board's raw monotonic counter, when one exists.
+#[must_use]
+pub fn monotonic_raw_bits<T: CortexMSocBoard>(soc: T) -> Option<u32> {
+    soc.monotonic_raw_bits()
+}
+
+/// Returns the tick rate of the selected SoC board's raw monotonic counter, when one exists.
+#[must_use]
+pub fn monotonic_tick_hz<T: CortexMSocBoard>(soc: T) -> Option<u64> {
+    soc.monotonic_tick_hz()
+}
+
+/// Returns the selected SoC board's raw monotonic counter widened into `u64`.
+///
+/// # Errors
+///
+/// Returns an error if the selected board cannot surface one truthful raw monotonic counter.
+pub fn monotonic_raw_now<T: CortexMSocBoard>(soc: T) -> Result<u64, HardwareError> {
+    soc.monotonic_raw_now()
+}
+
 /// Returns the major clock descriptors for the selected SoC board.
 #[must_use]
 pub fn clock_tree<T: CortexMSocBoard>(soc: T) -> &'static [CortexMClockDescriptor] {
     soc.clock_tree()
+}
+
+/// Returns the selected SoC board's overclock or system-clock profile support level.
+#[must_use]
+pub fn overclock_support<T: CortexMSocBoard>(soc: T) -> CortexMSocOverclockSupport {
+    soc.overclock_support()
+}
+
+/// Returns the selected SoC board's overclock or system-clock profiles.
+#[must_use]
+pub fn overclock_profiles<T: CortexMSocBoard>(soc: T) -> &'static [CortexMSocOverclockProfile] {
+    soc.overclock_profiles()
+}
+
+/// Returns the selected SoC board's current effective system/core clock frequency, when it can be
+/// surfaced honestly.
+#[must_use]
+pub fn current_sys_clock_hz<T: CortexMSocBoard>(soc: T) -> Option<u64> {
+    soc.current_sys_clock_hz()
+}
+
+/// Returns the selected SoC board's currently active overclock or system-clock profile, when it
+/// can be surfaced honestly.
+#[must_use]
+pub fn active_overclock_profile<T: CortexMSocBoard>(soc: T) -> Option<&'static str> {
+    soc.active_overclock_profile()
+}
+
+/// Applies one named overclock or system-clock profile on the selected SoC board.
+///
+/// # Errors
+///
+/// Returns an error if the selected SoC board cannot honestly apply the requested profile.
+pub fn apply_overclock_profile<T: CortexMSocBoard>(
+    soc: T,
+    name: &str,
+) -> Result<(), HardwareError> {
+    soc.apply_overclock_profile(name)
 }
 
 /// Returns the DMA controller descriptors for the selected SoC board.

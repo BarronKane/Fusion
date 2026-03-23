@@ -4,15 +4,20 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 
 use fusion_sys::thread::{
+    MonotonicDeadlineWaitKind,
+    MonotonicRuntimeTimeCaps,
     SystemThreadPool,
     SystemThreadPoolConfig,
     SystemWorkItem,
     ThreadConfig,
     ThreadEntryReturn,
     ThreadErrorKind,
+    ThreadGuarantee,
     ThreadLifecycleCaps,
+    ThreadSchedulerCaps,
     ThreadStackCaps,
     ThreadSystem,
+    system_monotonic_time,
     system_thread,
 };
 use std::sync::Arc;
@@ -238,6 +243,263 @@ fn monotonic_now_is_honest() {
             thread
                 .monotonic_now()
                 .expect_err("unsupported monotonic clock")
+                .kind(),
+            ThreadErrorKind::Unsupported
+        );
+    }
+}
+
+#[test]
+fn monotonic_runtime_time_support_tracks_thread_scheduler_truth() {
+    let clock = system_monotonic_time();
+    let runtime_support = clock.support();
+    let scheduler_support = system_thread().support().scheduler;
+
+    assert_eq!(
+        runtime_support.caps.contains(MonotonicRuntimeTimeCaps::NOW),
+        scheduler_support
+            .caps
+            .contains(ThreadSchedulerCaps::MONOTONIC_NOW)
+    );
+    assert_eq!(
+        runtime_support
+            .caps
+            .contains(MonotonicRuntimeTimeCaps::SLEEP_FOR),
+        scheduler_support
+            .caps
+            .contains(ThreadSchedulerCaps::SLEEP_FOR)
+    );
+    if runtime_support.caps.contains(MonotonicRuntimeTimeCaps::NOW) {
+        assert_eq!(runtime_support.observation, scheduler_support.observation);
+        assert!(runtime_support.raw_bits.is_some());
+        assert!(runtime_support.tick_hz.is_some());
+        assert!(runtime_support.canonicalization.is_some());
+        assert!(
+            runtime_support
+                .caps
+                .contains(MonotonicRuntimeTimeCaps::RAW_DEADLINE_COMPARE)
+        );
+    } else {
+        assert_eq!(runtime_support.observation, ThreadGuarantee::Unsupported);
+        assert_eq!(runtime_support.raw_bits, None);
+        assert_eq!(runtime_support.tick_hz, None);
+        assert_eq!(runtime_support.canonicalization, None);
+        assert_eq!(
+            runtime_support
+                .caps
+                .contains(MonotonicRuntimeTimeCaps::RAW_DEADLINE_COMPARE),
+            false
+        );
+    }
+    if runtime_support
+        .caps
+        .contains(MonotonicRuntimeTimeCaps::SLEEP_FOR)
+    {
+        assert!(
+            runtime_support
+                .caps
+                .contains(MonotonicRuntimeTimeCaps::SLEEP_UNTIL)
+        );
+        assert!(runtime_support.deadline_wait.is_some());
+    } else {
+        assert_eq!(
+            runtime_support
+                .caps
+                .contains(MonotonicRuntimeTimeCaps::SLEEP_UNTIL),
+            false
+        );
+        assert_eq!(runtime_support.deadline_wait, None);
+    }
+}
+
+#[test]
+fn monotonic_runtime_time_now_is_honest() {
+    let clock = system_monotonic_time();
+    let support = clock.support();
+
+    if support.caps.contains(MonotonicRuntimeTimeCaps::NOW) {
+        let first = clock
+            .now()
+            .expect("monotonic runtime time should be readable");
+        let second = clock
+            .now()
+            .expect("monotonic runtime time should remain readable");
+        assert!(second >= first);
+    } else {
+        assert_eq!(
+            clock
+                .now()
+                .expect_err("unsupported monotonic runtime time")
+                .kind(),
+            ThreadErrorKind::Unsupported
+        );
+    }
+}
+
+#[test]
+fn monotonic_runtime_time_now_instant_is_honest() {
+    let clock = system_monotonic_time();
+    let support = clock.support();
+
+    if support.caps.contains(MonotonicRuntimeTimeCaps::NOW) {
+        let first = clock
+            .now_instant()
+            .expect("monotonic runtime instant should be readable");
+        let second = clock
+            .now_instant()
+            .expect("monotonic runtime instant should remain readable");
+        assert!(second >= first);
+    } else {
+        assert_eq!(
+            clock
+                .now_instant()
+                .expect_err("unsupported monotonic runtime instant")
+                .kind(),
+            ThreadErrorKind::Unsupported
+        );
+    }
+}
+
+#[test]
+fn monotonic_runtime_time_instant_duration_round_trip_is_honest() {
+    let clock = system_monotonic_time();
+    let support = clock.support();
+
+    if support.caps.contains(MonotonicRuntimeTimeCaps::NOW) {
+        let instant = clock
+            .now_instant()
+            .expect("monotonic runtime instant should be readable");
+        let duration = clock
+            .duration_from_instant(instant)
+            .expect("instant should convert back into duration");
+        let reconstructed = clock
+            .instant_from_duration(duration)
+            .expect("duration should convert back into canonical instant");
+        assert!(reconstructed <= instant);
+    }
+}
+
+#[test]
+fn monotonic_runtime_time_sleep_for_is_honest() {
+    let clock = system_monotonic_time();
+    let support = clock.support();
+
+    if support.caps.contains(MonotonicRuntimeTimeCaps::SLEEP_FOR) {
+        assert!(clock.sleep_for(Duration::from_millis(1)).is_ok());
+    } else {
+        assert_eq!(
+            clock
+                .sleep_for(Duration::from_millis(1))
+                .expect_err("unsupported monotonic runtime sleep")
+                .kind(),
+            ThreadErrorKind::Unsupported
+        );
+    }
+}
+
+#[test]
+fn monotonic_runtime_time_sleep_until_is_honest() {
+    let clock = system_monotonic_time();
+    let support = clock.support();
+
+    if support
+        .caps
+        .contains(MonotonicRuntimeTimeCaps::NOW | MonotonicRuntimeTimeCaps::SLEEP_UNTIL)
+    {
+        let start = clock
+            .now_instant()
+            .expect("monotonic runtime instant should be readable");
+        let deadline = clock
+            .checked_add_duration(start, Duration::from_millis(1))
+            .expect("deadline should fit");
+        clock
+            .sleep_until(deadline)
+            .expect("sleep_until should be supported");
+    } else {
+        assert_eq!(
+            clock
+                .instant_from_duration(Duration::from_millis(1))
+                .expect_err("unsupported monotonic runtime instant conversion")
+                .kind(),
+            ThreadErrorKind::Unsupported
+        );
+    }
+}
+
+#[test]
+fn monotonic_runtime_time_deadline_support_is_shaped_honestly() {
+    let support = system_monotonic_time().support();
+
+    if let Some(deadline_wait) = support.deadline_wait {
+        match deadline_wait.kind {
+            MonotonicDeadlineWaitKind::ReservedOneShotAlarm => {
+                assert!(
+                    support
+                        .caps
+                        .contains(MonotonicRuntimeTimeCaps::ONE_SHOT_ALARM)
+                );
+                assert!(deadline_wait.irqn.is_some());
+            }
+            MonotonicDeadlineWaitKind::RelativeSleep => {
+                assert!(deadline_wait.irqn.is_none());
+            }
+        }
+    } else {
+        assert_eq!(
+            support
+                .caps
+                .contains(MonotonicRuntimeTimeCaps::ONE_SHOT_ALARM),
+            false
+        );
+    }
+}
+
+#[test]
+fn monotonic_runtime_time_one_shot_alarm_controls_are_honest() {
+    let clock = system_monotonic_time();
+    let support = clock.support();
+
+    if support
+        .caps
+        .contains(MonotonicRuntimeTimeCaps::ONE_SHOT_ALARM)
+    {
+        let start = clock
+            .now_instant()
+            .expect("monotonic runtime instant should be readable");
+        let deadline = clock
+            .checked_add_duration(start, Duration::from_millis(1))
+            .expect("deadline should fit");
+        assert!(
+            clock
+                .one_shot_alarm_timeout_until(deadline)
+                .expect("one-shot timeout conversion should succeed")
+                .is_some()
+        );
+        assert!(
+            clock
+                .arm_one_shot_alarm_until(deadline)
+                .expect("one-shot alarm should arm")
+        );
+        assert!(
+            !clock
+                .one_shot_alarm_fired()
+                .expect("one-shot alarm status should be readable")
+        );
+        clock
+            .cancel_one_shot_alarm()
+            .expect("one-shot alarm should cancel");
+    } else {
+        assert_eq!(
+            clock
+                .cancel_one_shot_alarm()
+                .expect_err("unsupported one-shot alarm cancel should fail")
+                .kind(),
+            ThreadErrorKind::Unsupported
+        );
+        assert_eq!(
+            clock
+                .one_shot_alarm_fired()
+                .expect_err("unsupported one-shot alarm status should fail")
                 .kind(),
             ThreadErrorKind::Unsupported
         );

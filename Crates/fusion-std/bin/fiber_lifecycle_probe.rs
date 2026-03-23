@@ -4,12 +4,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fusion_std::thread::{
+    FiberPoolBootstrap,
     FiberPoolConfig,
     FiberStackClass,
     FiberTaskAttributes,
     FiberTaskExecution,
     GreenPool,
     GreenReactorPolicy,
+    HostedFiberRuntime,
+    HostedFiberRuntimeConfig,
+    PoolPlacement,
     ThreadPool,
     ThreadPoolConfig,
     yield_now as green_yield_now,
@@ -111,8 +115,8 @@ fn measure_green_pool_lifecycle(
 
     for _ in 0..sample_count {
         let start = Instant::now();
-        let carriers = thread_pool(carrier_count)?;
-        let fibers = green_pool(&carriers, carrier_count)?;
+        let runtime = green_runtime(carrier_count)?;
+        let fibers = runtime.fibers();
         let mut handles = Vec::with_capacity(PROBE_TASK_CAPACITY);
         for _ in 0..PROBE_TASK_CAPACITY {
             handles.push(match kind {
@@ -131,10 +135,10 @@ fn measure_green_pool_lifecycle(
                 .join()
                 .map_err(|error| format!("lifecycle green batch join failed: {error}"))?;
         }
+        let (mut carriers, fibers) = runtime.into_parts();
         fibers
             .shutdown()
             .map_err(|error| format!("green lifecycle cleanup failed: {error}"))?;
-        drop(fibers);
         carriers
             .shutdown()
             .map_err(|error| format!("green lifecycle carrier cleanup failed: {error}"))?;
@@ -363,6 +367,22 @@ fn green_pool(carriers: &ThreadPool, carrier_count: usize) -> Result<GreenPool, 
         carriers,
     )
     .map_err(|error| format!("failed to build green pool ({carrier_count} carriers): {error}"))
+}
+
+fn green_runtime(carrier_count: usize) -> Result<HostedFiberRuntime, String> {
+    let growth_chunk = PROBE_TASK_CAPACITY.div_ceil(carrier_count).max(1);
+    FiberPoolBootstrap::fixed_growing_with_stack(
+        NonZeroUsize::new(PROBE_STACK_BYTES).expect("non-zero probe stack bytes"),
+        PROBE_TASK_CAPACITY,
+        growth_chunk,
+    )
+    .expect("probe fixed-growing config should build")
+    .build_hosted_with(
+        HostedFiberRuntimeConfig::new(carrier_count).with_placement(PoolPlacement::Inherit),
+    )
+    .map_err(|error| {
+        format!("failed to build hosted fiber runtime ({carrier_count} carriers): {error}")
+    })
 }
 
 fn duration_nanos(start: Instant) -> u128 {

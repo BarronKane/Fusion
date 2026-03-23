@@ -6,7 +6,10 @@ use std::process::Command;
 use std::time::SystemTime;
 
 const DEFAULT_OUTPUT_NAME: &str = "fusion-std-fiber-task.generated";
+const DEFAULT_ASYNC_POLL_STACK_OUTPUT_NAME: &str = "fusion-std-async-poll-stack.generated";
+const DEFAULT_ASYNC_POLL_STACK_RUST_NAME: &str = "fusion-std-async-poll-stack.contracts.rs";
 const DEFAULT_GENERATED_ROOTS_NAME: &str = "fusion-std-fiber-task.roots";
+const DEFAULT_ASYNC_POLL_STACK_ROOTS_NAME: &str = "async-poll-stack.roots";
 const DEFAULT_REPORT_NAME: &str = "fusion-std-fiber-task.report";
 const DEFAULT_RUST_CONTRACTS_NAME: &str = "fusion-std-fiber-task.contracts.rs";
 const DEFAULT_CONTRACTS_NAME: &str = "fiber-task.contracts";
@@ -14,6 +17,8 @@ const DEFAULT_RED_INLINE_CONTRACTS_NAME: &str = "red-inline.contracts";
 const DEFAULT_RED_INLINE_RUST_NAME: &str = "fusion-std-red-inline.contracts.rs";
 const GENERATED_CLOSURE_ROOT_SYMBOL_PREFIX: &str =
     "fusion_std::thread::fiber::generated_closure_task_root";
+const GENERATED_ASYNC_POLL_STACK_ROOT_SYMBOL_PREFIX: &str =
+    "fusion_std::thread::executor::generated_async_poll_stack_root";
 
 fn main() {
     if let Err(error) = run() {
@@ -36,7 +41,15 @@ fn run() -> Result<(), String> {
     build_target_artifact(&workspace_root, &target_dir, &config)?;
     let artifact = find_target_artifact(&target_dir, &config)?;
     let roots_path = materialize_roots(&workspace_root, &target_dir, &config, &artifact)?;
-    run_analyzer(&workspace_root, &config, &roots_path, &artifact)?;
+    let async_poll_stack_roots_path =
+        materialize_async_poll_stack_roots(&target_dir, &config, &artifact)?;
+    run_analyzer(
+        &workspace_root,
+        &config,
+        &roots_path,
+        async_poll_stack_roots_path.as_deref(),
+        &artifact,
+    )?;
     Ok(())
 }
 
@@ -66,10 +79,13 @@ struct PipelineConfig {
     roots_path: Option<PathBuf>,
     contracts_path: Option<PathBuf>,
     red_inline_contracts_path: Option<PathBuf>,
+    async_poll_stack_roots_path: Option<PathBuf>,
     report_path: PathBuf,
     rust_contracts_path: PathBuf,
     red_inline_rust_path: PathBuf,
     output_path: PathBuf,
+    async_poll_stack_output_path: PathBuf,
+    async_poll_stack_rust_path: PathBuf,
     toolchain: String,
     package: String,
     crate_name: String,
@@ -98,6 +114,10 @@ impl PipelineConfig {
             .join(DEFAULT_RED_INLINE_CONTRACTS_NAME)
             .is_file()
             .then(|| manifest_dir.join(DEFAULT_RED_INLINE_CONTRACTS_NAME));
+        let mut async_poll_stack_roots_path = manifest_dir
+            .join(DEFAULT_ASYNC_POLL_STACK_ROOTS_NAME)
+            .is_file()
+            .then(|| manifest_dir.join(DEFAULT_ASYNC_POLL_STACK_ROOTS_NAME));
         let mut report_path = workspace_root.join("target").join(DEFAULT_REPORT_NAME);
         let mut rust_contracts_path = workspace_root
             .join("target")
@@ -106,6 +126,12 @@ impl PipelineConfig {
             .join("target")
             .join(DEFAULT_RED_INLINE_RUST_NAME);
         let mut output_path = workspace_root.join("target").join(DEFAULT_OUTPUT_NAME);
+        let mut async_poll_stack_output_path = workspace_root
+            .join("target")
+            .join(DEFAULT_ASYNC_POLL_STACK_OUTPUT_NAME);
+        let mut async_poll_stack_rust_path = workspace_root
+            .join("target")
+            .join(DEFAULT_ASYNC_POLL_STACK_RUST_NAME);
         let mut toolchain = load_workspace_toolchain(workspace_root)?;
         let mut package = "fusion-std".to_owned();
         let mut crate_name = "fusion_std".to_owned();
@@ -123,10 +149,13 @@ impl PipelineConfig {
                 &mut roots_path,
                 &mut contracts_path,
                 &mut red_inline_contracts_path,
+                &mut async_poll_stack_roots_path,
                 &mut report_path,
                 &mut rust_contracts_path,
                 &mut red_inline_rust_path,
                 &mut output_path,
+                &mut async_poll_stack_output_path,
+                &mut async_poll_stack_rust_path,
                 &mut toolchain,
                 &mut package,
                 &mut crate_name,
@@ -138,14 +167,26 @@ impl PipelineConfig {
             )?;
         }
 
+        if async_poll_stack_roots_path.is_none()
+            && manifest_dir
+                .join(DEFAULT_ASYNC_POLL_STACK_ROOTS_NAME)
+                .is_file()
+        {
+            async_poll_stack_roots_path =
+                Some(manifest_dir.join(DEFAULT_ASYNC_POLL_STACK_ROOTS_NAME));
+        }
+
         Ok(Self {
             roots_path,
             contracts_path,
             red_inline_contracts_path,
+            async_poll_stack_roots_path,
             report_path,
             rust_contracts_path,
             red_inline_rust_path,
             output_path,
+            async_poll_stack_output_path,
+            async_poll_stack_rust_path,
             toolchain,
             package,
             crate_name,
@@ -166,10 +207,13 @@ fn apply_cli_arg(
     roots_path: &mut Option<PathBuf>,
     contracts_path: &mut Option<PathBuf>,
     red_inline_contracts_path: &mut Option<PathBuf>,
+    async_poll_stack_roots_path: &mut Option<PathBuf>,
     report_path: &mut PathBuf,
     rust_contracts_path: &mut PathBuf,
     red_inline_rust_path: &mut PathBuf,
     output_path: &mut PathBuf,
+    async_poll_stack_output_path: &mut PathBuf,
+    async_poll_stack_rust_path: &mut PathBuf,
     toolchain: &mut String,
     package: &mut String,
     crate_name: &mut String,
@@ -198,6 +242,24 @@ fn apply_cli_arg(
                 ),
             );
         }
+        "--async-poll-stack-output" => {
+            *async_poll_stack_output_path = resolve_cli_path(
+                current_dir,
+                &PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| usage("missing value for --async-poll-stack-output"))?,
+                ),
+            );
+        }
+        "--async-poll-stack-rust" => {
+            *async_poll_stack_rust_path = resolve_cli_path(
+                current_dir,
+                &PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| usage("missing value for --async-poll-stack-rust"))?,
+                ),
+            );
+        }
         "--contracts" => {
             *contracts_path = Some(resolve_cli_path(
                 current_dir,
@@ -213,6 +275,15 @@ fn apply_cli_arg(
                 &PathBuf::from(
                     args.next()
                         .ok_or_else(|| usage("missing value for --red-inline-contracts"))?,
+                ),
+            ));
+        }
+        "--async-poll-stack-roots" => {
+            *async_poll_stack_roots_path = Some(resolve_cli_path(
+                current_dir,
+                &PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| usage("missing value for --async-poll-stack-roots"))?,
                 ),
             ));
         }
@@ -429,6 +500,39 @@ fn should_collect_discovered_closure_roots(config: &PipelineConfig) -> bool {
     !matches!(config.target_artifact, TargetArtifact::Lib) || config.package != "fusion-std"
 }
 
+fn materialize_async_poll_stack_roots(
+    target_dir: &Path,
+    config: &PipelineConfig,
+    artifact: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let explicit = config.async_poll_stack_roots_path.as_ref().cloned();
+    let discovered = collect_generated_async_poll_stack_roots(artifact)?;
+    if explicit.is_none() && discovered.is_empty() {
+        return Ok(None);
+    }
+
+    let output_path = target_dir.join(DEFAULT_ASYNC_POLL_STACK_ROOTS_NAME);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+
+    let mut rendered = String::new();
+    if let Some(path) = explicit {
+        rendered.push_str(
+            &fs::read_to_string(&path)
+                .map_err(|error| format!("failed to read {}: {error}", path.display()))?,
+        );
+        if !rendered.ends_with('\n') && !rendered.is_empty() {
+            rendered.push('\n');
+        }
+    }
+    rendered.push_str(&discovered);
+    fs::write(&output_path, rendered)
+        .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
+    Ok(Some(output_path))
+}
+
 fn collect_named_roots_from_emitter(
     workspace_root: &Path,
     toolchain: &str,
@@ -555,6 +659,57 @@ fn collect_generated_closure_roots(artifact: &Path, crate_name: &str) -> Result<
         rendered.push('\n');
     }
     Ok(rendered)
+}
+
+fn collect_generated_async_poll_stack_roots(artifact: &Path) -> Result<String, String> {
+    let symbol_index = load_artifact_symbol_index(artifact)?;
+    let call_graph = load_artifact_call_graph(artifact)?;
+    let roots = collect_generated_async_poll_stack_root_entries(&symbol_index, &call_graph);
+
+    let mut rendered = String::new();
+    for (type_name, symbol) in roots {
+        rendered.push_str(&type_name);
+        rendered.push_str(" = ");
+        rendered.push_str(&symbol);
+        rendered.push('\n');
+    }
+    Ok(rendered)
+}
+
+fn extract_async_future_type_from_poll_symbol(symbol: &str) -> Option<&str> {
+    let symbol = symbol.strip_prefix('<')?;
+    let symbol = symbol.strip_suffix(" as core::future::future::Future>::poll")?;
+    Some(symbol)
+}
+
+fn collect_generated_async_poll_stack_root_entries(
+    symbol_index: &ArtifactSymbolIndex,
+    call_graph: &BTreeMap<String, Vec<String>>,
+) -> Vec<(String, String)> {
+    let mut roots = Vec::<(String, String)>::new();
+    for caller in symbol_index.entries.iter().filter(|entry| {
+        entry
+            .normalized_demangled
+            .contains(GENERATED_ASYNC_POLL_STACK_ROOT_SYMBOL_PREFIX)
+    }) {
+        let Some(callees) = call_graph.get(&caller.raw) else {
+            continue;
+        };
+        for callee in callees {
+            let Some(metadata) = symbol_index.metadata_for_raw(callee) else {
+                continue;
+            };
+            let Some(type_name) =
+                extract_async_future_type_from_poll_symbol(&metadata.normalized_demangled)
+            else {
+                continue;
+            };
+            roots.push((type_name.to_owned(), metadata.raw.clone()));
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 #[derive(Debug)]
@@ -796,6 +951,7 @@ fn run_analyzer(
     workspace_root: &Path,
     config: &PipelineConfig,
     roots_path: &Path,
+    async_poll_stack_roots_path: Option<&Path>,
     artifact: &Path,
 ) -> Result<(), String> {
     let mut command = cargo_command(&config.toolchain);
@@ -826,6 +982,15 @@ fn run_analyzer(
             .arg("--red-inline-contracts")
             .arg(red_inline_contracts_path);
     }
+    if let Some(async_poll_stack_roots_path) = async_poll_stack_roots_path {
+        command
+            .arg("--async-poll-stack-roots")
+            .arg(async_poll_stack_roots_path)
+            .arg("--async-poll-stack-output")
+            .arg(&config.async_poll_stack_output_path)
+            .arg("--async-poll-stack-rust")
+            .arg(&config.async_poll_stack_rust_path);
+    }
     run_command(command, "cargo run analyzer")
 }
 
@@ -853,7 +1018,7 @@ fn run_command(mut command: Command, label: &str) -> Result<(), String> {
 
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage: cargo run -p fusion-std --bin fusion_std_fiber_task_pipeline -- [--roots <path>] [--contracts <path>] [--red-inline-contracts <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-rust <path>] [--output <path>] [--toolchain <channel>] [--package <name>] [--crate-name <name>] [--bin <name> | --lib] [--profile <dev|release>] [--target <triple>] [--features <csv>] [--no-default-features]\n\nWhen --roots is omitted, the pipeline merges fusion-std's hidden generated-task root registry (for the fusion-std lib target) with generated closure roots discovered from the analyzed artifact."
+        "{reason}\nusage: cargo run -p fusion-std --bin fusion_std_fiber_task_pipeline -- [--roots <path>] [--contracts <path>] [--red-inline-contracts <path>] [--async-poll-stack-roots <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-rust <path>] [--output <path>] [--async-poll-stack-output <path>] [--async-poll-stack-rust <path>] [--toolchain <channel>] [--package <name>] [--crate-name <name>] [--bin <name> | --lib] [--profile <dev|release>] [--target <triple>] [--features <csv>] [--no-default-features]\n\nWhen --roots is omitted, the pipeline merges fusion-std's hidden generated-task root registry (for the fusion-std lib target) with generated closure roots discovered from the analyzed artifact."
     )
 }
 
@@ -921,6 +1086,78 @@ mod tests {
             vec![(
                 "fusion_example_pico::main::{{closure}}".to_owned(),
                 "_CLOSURE_".to_owned(),
+            )]
+        );
+    }
+
+    #[test]
+    fn extracts_async_future_type_from_poll_symbol() {
+        assert_eq!(
+            extract_async_future_type_from_poll_symbol(
+                "<fusion_example_pico::main::{{closure}} as core::future::future::Future>::poll"
+            ),
+            Some("fusion_example_pico::main::{{closure}}")
+        );
+    }
+
+    #[test]
+    fn collects_generated_async_poll_stack_root_callee_symbols() {
+        let symbol_index = ArtifactSymbolIndex {
+            entries: vec![
+                ArtifactSymbolEntry {
+                    raw: "_ROOT_".to_owned(),
+                    normalized_demangled:
+                        "fusion_std::thread::executor::generated_async_poll_stack_root".to_owned(),
+                },
+                ArtifactSymbolEntry {
+                    raw: "_POLL_".to_owned(),
+                    normalized_demangled:
+                        "<fusion_example_pico::main::{{closure}} as core::future::future::Future>::poll"
+                            .to_owned(),
+                },
+            ],
+        };
+        let mut call_graph = BTreeMap::new();
+        call_graph.insert("_ROOT_".to_owned(), vec!["_POLL_".to_owned()]);
+
+        let roots = collect_generated_async_poll_stack_root_entries(&symbol_index, &call_graph);
+
+        assert_eq!(
+            roots,
+            vec![(
+                "fusion_example_pico::main::{{closure}}".to_owned(),
+                "_POLL_".to_owned(),
+            )]
+        );
+    }
+
+    #[test]
+    fn collects_generated_async_poll_stack_roots_for_external_future_types() {
+        let symbol_index = ArtifactSymbolIndex {
+            entries: vec![
+                ArtifactSymbolEntry {
+                    raw: "_ROOT_".to_owned(),
+                    normalized_demangled:
+                        "fusion_std::thread::executor::generated_async_poll_stack_root".to_owned(),
+                },
+                ArtifactSymbolEntry {
+                    raw: "_EXTERNAL_POLL_".to_owned(),
+                    normalized_demangled:
+                        "<external_crate::task::ExternalFuture as core::future::future::Future>::poll"
+                            .to_owned(),
+                },
+            ],
+        };
+        let mut call_graph = BTreeMap::new();
+        call_graph.insert("_ROOT_".to_owned(), vec!["_EXTERNAL_POLL_".to_owned()]);
+
+        let roots = collect_generated_async_poll_stack_root_entries(&symbol_index, &call_graph);
+
+        assert_eq!(
+            roots,
+            vec![(
+                "external_crate::task::ExternalFuture".to_owned(),
+                "_EXTERNAL_POLL_".to_owned(),
             )]
         );
     }

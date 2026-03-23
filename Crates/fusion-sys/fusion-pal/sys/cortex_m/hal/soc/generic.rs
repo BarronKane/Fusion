@@ -363,6 +363,13 @@ pub fn event_timeout_supported() -> bool {
     board_contract::event_timeout_supported(system_soc())
 }
 
+/// Returns one truthful finite-timeout event source summary for the selected generic Cortex-M
+/// board.
+#[must_use]
+pub fn event_timeout_support() -> Option<board_contract::CortexMEventTimeoutSupport> {
+    board_contract::event_timeout_support(system_soc())
+}
+
 /// Returns the board-reserved IRQ line used by the selected generic Cortex-M board's event
 /// timeout source.
 #[must_use]
@@ -400,10 +407,86 @@ pub fn event_timeout_fired() -> Result<bool, HardwareError> {
     board_contract::event_timeout_fired(system_soc())
 }
 
+/// Returns whether the selected generic Cortex-M board exposes one truthful monotonic timebase.
+#[must_use]
+pub fn monotonic_now_supported() -> bool {
+    board_contract::monotonic_now_supported(system_soc())
+}
+
+/// Returns the current monotonic timebase reading for the selected generic Cortex-M board.
+///
+/// # Errors
+///
+/// Returns an error if the selected generic Cortex-M board cannot surface one truthful monotonic
+/// timebase.
+pub fn monotonic_now() -> Result<Duration, HardwareError> {
+    board_contract::monotonic_now(system_soc())
+}
+
+/// Returns the width in bits of the selected generic Cortex-M board's raw monotonic counter, when
+/// one exists.
+#[must_use]
+pub fn monotonic_raw_bits() -> Option<u32> {
+    board_contract::monotonic_raw_bits(system_soc())
+}
+
+/// Returns the tick rate of the selected generic Cortex-M board's raw monotonic counter, when one
+/// exists.
+#[must_use]
+pub fn monotonic_tick_hz() -> Option<u64> {
+    board_contract::monotonic_tick_hz(system_soc())
+}
+
+/// Returns the selected generic Cortex-M board's raw monotonic counter widened into `u64`.
+///
+/// # Errors
+///
+/// Returns an error if the selected generic Cortex-M board cannot surface one truthful raw
+/// monotonic counter.
+pub fn monotonic_raw_now() -> Result<u64, HardwareError> {
+    board_contract::monotonic_raw_now(system_soc())
+}
+
 /// Returns the selected generic Cortex-M clock descriptors.
 #[must_use]
 pub fn clock_tree() -> &'static [CortexMClockDescriptor] {
     board_contract::clock_tree(system_soc())
+}
+
+/// Returns the selected generic Cortex-M board's overclock or system-clock profile support level.
+#[must_use]
+pub fn overclock_support() -> super::board_contract::CortexMSocOverclockSupport {
+    board_contract::overclock_support(system_soc())
+}
+
+/// Returns the selected generic Cortex-M board's overclock or system-clock profiles.
+#[must_use]
+pub fn overclock_profiles() -> &'static [super::board_contract::CortexMSocOverclockProfile] {
+    board_contract::overclock_profiles(system_soc())
+}
+
+/// Returns the selected generic Cortex-M board's current effective system/core clock frequency,
+/// when it can be surfaced honestly.
+#[must_use]
+pub fn current_sys_clock_hz() -> Option<u64> {
+    board_contract::current_sys_clock_hz(system_soc())
+}
+
+/// Returns the selected generic Cortex-M board's currently active overclock or system-clock
+/// profile, when it can be surfaced honestly.
+#[must_use]
+pub fn active_overclock_profile() -> Option<&'static str> {
+    board_contract::active_overclock_profile(system_soc())
+}
+
+/// Applies one named overclock or system-clock profile on the selected generic Cortex-M target.
+///
+/// # Errors
+///
+/// Returns an error because the generic fallback cannot honestly apply board-specific clock
+/// profiles.
+pub fn apply_overclock_profile(name: &str) -> Result<(), HardwareError> {
+    board_contract::apply_overclock_profile(system_soc(), name)
 }
 
 /// Returns the selected generic Cortex-M DMA controller descriptors.

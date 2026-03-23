@@ -1,8 +1,13 @@
+use core::future::Future;
+use core::pin::Pin;
 use core::sync::atomic::{AtomicU32, Ordering};
+use core::task::{Context, Poll};
 
 use fusion_pal::sys::mem::{MemAdviceCaps, MemBase, system_mem};
 use fusion_std::sync::Mutex as FusionMutex;
 use fusion_std::thread::{
+    AsyncPollStackContract,
+    CurrentAsyncRuntime,
     DeterministicConstraints,
     EventInterest,
     EventNotification,
@@ -137,6 +142,21 @@ impl GeneratedExplicitFiberTask for ExternalGeneratedContractTask {
         Ok(generated_explicit_task_contract_attributes::<Self>())
     }
 }
+
+struct ExternalGeneratedAsyncPollStackFuture;
+
+impl Future for ExternalGeneratedAsyncPollStackFuture {
+    type Output = u8;
+
+    fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Ready(29)
+    }
+}
+
+fusion_std::declare_generated_async_poll_stack_contract!(
+    ExternalGeneratedAsyncPollStackFuture,
+    1792
+);
 
 fusion_std::declare_generated_fiber_task_contract!(
     ExternalGeneratedContractTask,
@@ -333,6 +353,21 @@ fn downstream_generated_contract_first_spawn_works_without_runtime_metadata_over
     carrier
         .shutdown()
         .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn downstream_generated_async_poll_stack_contracts_work_without_runtime_type_lookup() {
+    let _guard = lock_fusion_std_tests();
+
+    let runtime = CurrentAsyncRuntime::new();
+    let handle = runtime
+        .spawn_generated(ExternalGeneratedAsyncPollStackFuture)
+        .expect("external generated async contract should spawn");
+    assert_eq!(
+        handle.admission().poll_stack,
+        AsyncPollStackContract::Explicit { bytes: 1792 }
+    );
+    assert_eq!(handle.join().expect("task should complete"), 29);
 }
 
 #[cfg(feature = "critical-safe-generated-contracts")]
