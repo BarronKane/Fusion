@@ -354,8 +354,7 @@ static RP2350_PIO_ENGINE_CLAIMS: [AtomicBool; RP2350_PIO_ENGINE_COUNT] =
     [const { AtomicBool::new(false) }; RP2350_PIO_ENGINE_COUNT];
 static RP2350_PIO_LANE_CLAIMS: [AtomicU8; RP2350_PIO_ENGINE_COUNT] =
     [const { AtomicU8::new(0) }; RP2350_PIO_ENGINE_COUNT];
-static RP2350_TIMER0_TICK_STATE: AtomicU8 =
-    AtomicU8::new(RP2350_TIMER0_TICK_STATE_UNINITIALIZED);
+static RP2350_TIMER0_TICK_STATE: AtomicU8 = AtomicU8::new(RP2350_TIMER0_TICK_STATE_UNINITIALIZED);
 static RP2350_EVENT_TIMEOUT_FIRED: AtomicBool = AtomicBool::new(false);
 
 const RP2350_PIO0_IRQ_LINES: [u16; 2] = [15, 16];
@@ -2454,10 +2453,8 @@ fn rp2350_ensure_timer0_tick_started() {
                         core::hint::spin_loop();
                     }
 
-                    RP2350_TIMER0_TICK_STATE.store(
-                        RP2350_TIMER0_TICK_STATE_READY,
-                        Ordering::Release,
-                    );
+                    RP2350_TIMER0_TICK_STATE
+                        .store(RP2350_TIMER0_TICK_STATE_READY, Ordering::Release);
                     return;
                 }
             }

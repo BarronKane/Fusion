@@ -7,16 +7,6 @@ members = [
     "Crates/fusion-std",
     "Crates/fusion-kn",
 
-    # Engine stack.
-    "Crates/Engine/Shaders",
-    "Crates/Engine/Shaders/Shared",
-    "Crates/Engine/bin/editor",
-    "Crates/Engine/lib/RuntimeCore/RHI",
-    "Crates/Engine/lib/RuntimeCore/RHI/rhi_core",
-    "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_vulkan",
-    "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_dx12",
-    "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_metal",
-
     # Examples.
     "Examples/Template",
     "Examples/PicoTarget",

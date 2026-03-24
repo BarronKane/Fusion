@@ -41,7 +41,9 @@
 //! memory and pre-existing board memory are different acquisition stories, even when both end
 //! up represented as `MemoryResource`s.
 
-use fusion_pal::sys::mem::{Address, Placement, Protect, Region, RegionInfo};
+use core::num::NonZeroUsize;
+
+use fusion_pal::sys::mem::{Address, CachePolicy, Placement, Protect, Region, RegionInfo};
 
 use super::{
     MemoryDomain,
@@ -57,8 +59,10 @@ use super::{
     ResourceInfo,
     ResourceOpSet,
     ResourcePreferenceSet,
+    ResourceResidencySupport,
     ResourceState,
     ResourceSupport,
+    SharingPolicy,
     StateValue,
     core::ResourceCore,
     infer_resource_hazards,
@@ -155,11 +159,96 @@ impl BoundMemoryResource {
         })
     }
 
+    /// Binds one caller-owned static allocatable region using the canonical deterministic
+    /// bare-metal contract.
+    ///
+    /// This is the board/application-facing path for SRAM-backed runtime slabs that already
+    /// exist and just need to be governed truthfully.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied region is empty or otherwise inconsistent.
+    pub fn static_allocatable_region(region: Region) -> Result<Self, ResourceError> {
+        Self::new(BoundResourceSpec::new(
+            region,
+            MemoryDomain::StaticRegion,
+            ResourceBackingKind::StaticRegion,
+            ResourceAttrs::ALLOCATABLE
+                | ResourceAttrs::STATIC_REGION
+                | ResourceAttrs::CACHEABLE
+                | ResourceAttrs::COHERENT,
+            static_allocatable_geometry(),
+            static_allocatable_contract(),
+            static_allocatable_support(),
+            static_allocatable_state(),
+        ))
+    }
+
+    /// Binds one caller-owned static allocatable byte range using the canonical deterministic
+    /// bare-metal contract.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee the supplied pointer/length pair names one valid writable static
+    /// memory extent for the whole lifetime of the bound resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied range is empty or otherwise inconsistent.
+    pub unsafe fn static_allocatable_bytes(
+        ptr: *mut u8,
+        len: usize,
+    ) -> Result<Self, ResourceError> {
+        Self::static_allocatable_region(Region {
+            base: Address::new(ptr as usize),
+            len,
+        })
+    }
+
     /// Returns the creation-time resolution metadata for the bound resource.
     #[must_use]
     pub const fn resolved(&self) -> ResolvedResource {
         self.core.resolved()
     }
+}
+
+fn static_allocatable_geometry() -> MemoryGeometry {
+    MemoryGeometry {
+        base_granule: NonZeroUsize::new(1).expect("non-zero"),
+        alloc_granule: NonZeroUsize::new(1).expect("non-zero"),
+        protect_granule: None,
+        commit_granule: None,
+        lock_granule: None,
+        large_granule: None,
+    }
+}
+
+fn static_allocatable_contract() -> ResourceContract {
+    ResourceContract {
+        allowed_protect: Protect::READ | Protect::WRITE,
+        write_xor_execute: true,
+        sharing: SharingPolicy::Private,
+        overcommit: super::OvercommitPolicy::Disallow,
+        cache_policy: CachePolicy::Default,
+        integrity: None,
+    }
+}
+
+fn static_allocatable_support() -> ResourceSupport {
+    ResourceSupport {
+        protect: Protect::READ | Protect::WRITE,
+        ops: ResourceOpSet::QUERY,
+        advice: fusion_pal::sys::mem::MemAdviceCaps::empty(),
+        residency: ResourceResidencySupport::BEST_EFFORT,
+    }
+}
+
+fn static_allocatable_state() -> ResourceState {
+    ResourceState::static_state(
+        StateValue::Uniform(Protect::READ | Protect::WRITE),
+        StateValue::Uniform(false),
+        StateValue::Uniform(true),
+    )
 }
 
 impl MemoryResource for BoundMemoryResource {

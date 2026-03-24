@@ -40,7 +40,7 @@ use core::ptr::NonNull;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use core::time::Duration;
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use crate::sync::{Mutex as SyncMutex, Semaphore, SyncError, SyncErrorKind};
 use fusion_sys::alloc::{
@@ -74,9 +74,14 @@ pub use fusion_sys::event::{
 };
 use fusion_sys::fiber::{FiberError, FiberErrorKind};
 use fusion_sys::mem::resource::{
+    BoundMemoryResource,
+    BoundResourceSpec,
+    MemoryResource,
     MemoryResourceHandle,
+    ResourceBackingKind,
     ResourceError,
     ResourceErrorKind,
+    ResourceRange,
     ResourceRequest,
     VirtualMemoryResource,
 };
@@ -100,7 +105,13 @@ use fusion_sys::thread::{
 
 #[cfg(feature = "std")]
 use super::HostedFiberRuntime;
-use super::{GreenPool, ThreadPool, yield_now as green_yield_now};
+use super::{
+    GreenPool,
+    RuntimeSizingStrategy,
+    ThreadPool,
+    default_runtime_sizing_strategy,
+    yield_now as green_yield_now,
+};
 #[cfg(feature = "std")]
 use fusion_pal::sys::fiber::{PlatformFiberWakeSignal, system_fiber_host};
 #[cfg(feature = "std")]
@@ -111,16 +122,6 @@ use std::sync::Arc;
 use std::thread::{Builder as StdThreadBuilder, JoinHandle};
 #[cfg(feature = "std")]
 use std::vec::Vec;
-
-#[cfg(debug_assertions)]
-#[unsafe(no_mangle)]
-pub static FUSION_EXECUTOR_DEBUG_PHASE: AtomicU32 = AtomicU32::new(0);
-
-#[inline(always)]
-fn executor_debug_phase(phase: u32) {
-    #[cfg(debug_assertions)]
-    FUSION_EXECUTOR_DEBUG_PHASE.store(phase, Ordering::Release);
-}
 
 /// Public executor operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -365,12 +366,9 @@ struct ExecutorDomainAllocator {
 
 impl ExecutorDomainAllocator {
     fn from_resource(handle: MemoryResourceHandle) -> Result<Self, ExecutorError> {
-        executor_debug_phase(111);
         let allocator =
             Allocator::<1, 1>::from_resource(handle).map_err(executor_error_from_alloc)?;
-        executor_debug_phase(112);
         let domain = allocator.default_domain().ok_or_else(executor_invalid)?;
-        executor_debug_phase(113);
         Ok(Self { allocator, domain })
     }
 
@@ -423,23 +421,10 @@ impl ExecutorBackingAllocators {
     }
 
     fn from_current_backing(backing: CurrentAsyncRuntimeBacking) -> Result<Self, ExecutorError> {
-        executor_debug_phase(120);
         Ok(Self {
-            control: {
-                let allocator = ExecutorDomainAllocator::from_resource(backing.control)?;
-                executor_debug_phase(121);
-                allocator
-            },
-            reactor: {
-                let allocator = ExecutorDomainAllocator::from_resource(backing.reactor)?;
-                executor_debug_phase(122);
-                allocator
-            },
-            registry: {
-                let allocator = ExecutorDomainAllocator::from_resource(backing.registry)?;
-                executor_debug_phase(123);
-                allocator
-            },
+            control: ExecutorDomainAllocator::from_resource(backing.control)?,
+            reactor: ExecutorDomainAllocator::from_resource(backing.reactor)?,
+            registry: ExecutorDomainAllocator::from_resource(backing.registry)?,
             future_medium: backing
                 .future_medium
                 .map(ExecutorDomainAllocator::from_resource)
@@ -481,6 +466,19 @@ const fn async_storage_class_for_layout(
 
 const fn async_storage_class_slot_align(bytes: usize) -> usize {
     1usize << bytes.trailing_zeros()
+}
+
+fn apply_executor_sizing_strategy(
+    request: ExecutorBackingRequest,
+    strategy: RuntimeSizingStrategy,
+) -> Result<ExecutorBackingRequest, ExecutorError> {
+    let bytes = strategy
+        .apply_bytes(request.bytes)
+        .ok_or_else(executor_overflow)?;
+    Ok(ExecutorBackingRequest {
+        bytes,
+        align: request.align,
+    })
 }
 
 /// Cooperative async yield future for the Fusion executor.
@@ -1021,6 +1019,8 @@ pub struct ExecutorConfig {
     pub reactor: ReactorConfig,
     /// Fixed task-registry capacity admitted by this executor.
     pub capacity: usize,
+    /// Sizing strategy applied to executor-owned backing plans.
+    pub sizing: RuntimeSizingStrategy,
 }
 
 impl ExecutorConfig {
@@ -1031,6 +1031,7 @@ impl ExecutorConfig {
             mode: ExecutorMode::CurrentThread,
             reactor: ReactorConfig::new(),
             capacity: TASK_REGISTRY_CAPACITY,
+            sizing: default_runtime_sizing_strategy(),
         }
     }
 
@@ -1041,6 +1042,7 @@ impl ExecutorConfig {
             mode: ExecutorMode::ThreadPool,
             reactor: ReactorConfig::new(),
             capacity: TASK_REGISTRY_CAPACITY,
+            sizing: default_runtime_sizing_strategy(),
         }
     }
 
@@ -1051,6 +1053,7 @@ impl ExecutorConfig {
             mode: ExecutorMode::GreenPool,
             reactor: ReactorConfig::new(),
             capacity: TASK_REGISTRY_CAPACITY,
+            sizing: default_runtime_sizing_strategy(),
         }
     }
 
@@ -1065,6 +1068,13 @@ impl ExecutorConfig {
     #[must_use]
     pub const fn with_capacity(mut self, capacity: usize) -> Self {
         self.capacity = capacity;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit sizing strategy.
+    #[must_use]
+    pub const fn with_sizing_strategy(mut self, sizing: RuntimeSizingStrategy) -> Self {
+        self.sizing = sizing;
         self
     }
 }
@@ -1117,6 +1127,75 @@ pub struct CurrentAsyncRuntimeBackingPlan {
     pub result_large: ExecutorBackingRequest,
 }
 
+/// Packed one-slab layout for one current-thread async runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CurrentAsyncRuntimeCombinedBackingPlan {
+    /// Total owning slab request for all current-thread async domains.
+    pub slab: ExecutorBackingRequest,
+    /// Executor control/state range inside the slab.
+    pub control: ResourceRange,
+    /// Reactor bookkeeping range inside the slab.
+    pub reactor: ResourceRange,
+    /// Task registry range inside the slab.
+    pub registry: ResourceRange,
+    /// Optional medium future slab range inside the slab.
+    pub future_medium: Option<ResourceRange>,
+    /// Optional large future slab range inside the slab.
+    pub future_large: Option<ResourceRange>,
+    /// Optional medium result slab range inside the slab.
+    pub result_medium: Option<ResourceRange>,
+    /// Optional large result slab range inside the slab.
+    pub result_large: Option<ResourceRange>,
+}
+
+fn executor_align_up_packed(offset: usize, align: usize) -> Result<usize, ExecutorError> {
+    if align == 0 || !align.is_power_of_two() {
+        return Err(executor_invalid());
+    }
+    let mask = align - 1;
+    offset
+        .checked_add(mask)
+        .map(|value| value & !mask)
+        .ok_or_else(executor_overflow)
+}
+
+const fn executor_partition_backing_kind(
+    kind: ResourceBackingKind,
+) -> Result<ResourceBackingKind, ExecutorError> {
+    match kind {
+        ResourceBackingKind::Borrowed
+        | ResourceBackingKind::StaticRegion
+        | ResourceBackingKind::Partition => Ok(ResourceBackingKind::Partition),
+        _ => Err(ExecutorError::Unsupported),
+    }
+}
+
+fn partition_executor_bound_resource(
+    handle: &MemoryResourceHandle,
+    range: ResourceRange,
+) -> Result<MemoryResourceHandle, ExecutorError> {
+    let info = match handle {
+        MemoryResourceHandle::Bound(resource) => resource.info(),
+        MemoryResourceHandle::Virtual(_) => return Err(ExecutorError::Unsupported),
+    };
+    let region = handle
+        .subview(range)
+        .map(|view| unsafe { view.raw_region() })
+        .map_err(executor_error_from_resource)?;
+    let resource = BoundMemoryResource::new(BoundResourceSpec::new(
+        region,
+        info.domain,
+        executor_partition_backing_kind(info.backing)?,
+        info.attrs,
+        info.geometry,
+        info.contract,
+        info.support,
+        handle.state(),
+    ))
+    .map_err(executor_error_from_resource)?;
+    Ok(MemoryResourceHandle::from(resource))
+}
+
 impl CurrentAsyncRuntimeBackingPlan {
     /// Returns the explicit backing plan for one current-thread runtime configuration.
     ///
@@ -1124,46 +1203,69 @@ impl CurrentAsyncRuntimeBackingPlan {
     /// still materialize lazily; explicit-backed callers can reserve them up front so runtime
     /// construction never has to improvise another acquisition story later.
     pub fn for_config(config: ExecutorConfig) -> Result<Self, ExecutorError> {
-        let control = ExecutorBackingRequest::from_extent_request(
-            ControlLease::<ExecutorCore>::extent_request().map_err(executor_error_from_alloc)?,
+        let sizing = config.sizing;
+        let control = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request(
+                ControlLease::<ExecutorCore>::extent_request()
+                    .map_err(executor_error_from_alloc)?,
+            )?,
+            sizing,
         )?;
-        let reactor = ExecutorBackingRequest::from_extent_request(
-            BoundedArena::<fusion_sys::alloc::Mortal>::extent_request(
-                executor_reactor_capacity(config.capacity)?,
-                executor_reactor_align(),
-            )
-            .map_err(executor_error_from_alloc)?,
+        let reactor = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request(
+                BoundedArena::<fusion_sys::alloc::Mortal>::extent_request(
+                    executor_reactor_capacity(config.capacity)?,
+                    executor_reactor_align(),
+                )
+                .map_err(executor_error_from_alloc)?,
+            )?,
+            sizing,
         )?;
-        let registry = ExecutorBackingRequest::from_extent_request(
-            BoundedArena::<fusion_sys::alloc::Mortal>::extent_request(
-                executor_registry_capacity(config.capacity)?,
-                executor_registry_align(),
-            )
-            .map_err(executor_error_from_alloc)?,
+        let registry = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request(
+                BoundedArena::<fusion_sys::alloc::Mortal>::extent_request(
+                    executor_registry_capacity(config.capacity)?,
+                    executor_registry_align(),
+                )
+                .map_err(executor_error_from_alloc)?,
+            )?,
+            sizing,
         )?;
-        let future_medium = ExecutorBackingRequest::from_extent_request(
-            Slab::<ASYNC_FUTURE_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
-                async_storage_class_slot_align(ASYNC_FUTURE_CLASS_MEDIUM_BYTES),
-            )
-            .map_err(executor_error_from_alloc)?,
+        let future_medium = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request(
+                Slab::<ASYNC_FUTURE_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
+                    async_storage_class_slot_align(ASYNC_FUTURE_CLASS_MEDIUM_BYTES),
+                )
+                .map_err(executor_error_from_alloc)?,
+            )?,
+            sizing,
         )?;
-        let future_large = ExecutorBackingRequest::from_extent_request(
-            Slab::<ASYNC_FUTURE_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
-                async_storage_class_slot_align(ASYNC_FUTURE_CLASS_LARGE_BYTES),
-            )
-            .map_err(executor_error_from_alloc)?,
+        let future_large = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request(
+                Slab::<ASYNC_FUTURE_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
+                    async_storage_class_slot_align(ASYNC_FUTURE_CLASS_LARGE_BYTES),
+                )
+                .map_err(executor_error_from_alloc)?,
+            )?,
+            sizing,
         )?;
-        let result_medium = ExecutorBackingRequest::from_extent_request(
-            Slab::<ASYNC_RESULT_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
-                async_storage_class_slot_align(ASYNC_RESULT_CLASS_MEDIUM_BYTES),
-            )
-            .map_err(executor_error_from_alloc)?,
+        let result_medium = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request(
+                Slab::<ASYNC_RESULT_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
+                    async_storage_class_slot_align(ASYNC_RESULT_CLASS_MEDIUM_BYTES),
+                )
+                .map_err(executor_error_from_alloc)?,
+            )?,
+            sizing,
         )?;
-        let result_large = ExecutorBackingRequest::from_extent_request(
-            Slab::<ASYNC_RESULT_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
-                async_storage_class_slot_align(ASYNC_RESULT_CLASS_LARGE_BYTES),
-            )
-            .map_err(executor_error_from_alloc)?,
+        let result_large = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request(
+                Slab::<ASYNC_RESULT_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
+                    async_storage_class_slot_align(ASYNC_RESULT_CLASS_LARGE_BYTES),
+                )
+                .map_err(executor_error_from_alloc)?,
+            )?,
+            sizing,
         )?;
 
         Ok(Self {
@@ -1174,6 +1276,130 @@ impl CurrentAsyncRuntimeBackingPlan {
             future_large,
             result_medium,
             result_large,
+        })
+    }
+
+    /// Packs the per-domain requests into one conservative owning-slab layout.
+    ///
+    /// The total byte count includes worst-case padding for an arbitrarily aligned caller-owned
+    /// slab base.
+    pub fn combined(self) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
+        let mut max_align = self.control.align;
+        if self.reactor.align > max_align {
+            max_align = self.reactor.align;
+        }
+        if self.registry.align > max_align {
+            max_align = self.registry.align;
+        }
+        if self.future_medium.align > max_align {
+            max_align = self.future_medium.align;
+        }
+        if self.future_large.align > max_align {
+            max_align = self.future_large.align;
+        }
+        if self.result_medium.align > max_align {
+            max_align = self.result_medium.align;
+        }
+        if self.result_large.align > max_align {
+            max_align = self.result_large.align;
+        }
+
+        let mut cursor = max_align.saturating_sub(1);
+        let control_offset = executor_align_up_packed(cursor, self.control.align)?;
+        cursor = control_offset
+            .checked_add(self.control.bytes)
+            .ok_or_else(executor_overflow)?;
+        let reactor_offset = executor_align_up_packed(cursor, self.reactor.align)?;
+        cursor = reactor_offset
+            .checked_add(self.reactor.bytes)
+            .ok_or_else(executor_overflow)?;
+        let registry_offset = executor_align_up_packed(cursor, self.registry.align)?;
+        cursor = registry_offset
+            .checked_add(self.registry.bytes)
+            .ok_or_else(executor_overflow)?;
+        let future_medium_offset = executor_align_up_packed(cursor, self.future_medium.align)?;
+        cursor = future_medium_offset
+            .checked_add(self.future_medium.bytes)
+            .ok_or_else(executor_overflow)?;
+        let future_large_offset = executor_align_up_packed(cursor, self.future_large.align)?;
+        cursor = future_large_offset
+            .checked_add(self.future_large.bytes)
+            .ok_or_else(executor_overflow)?;
+        let result_medium_offset = executor_align_up_packed(cursor, self.result_medium.align)?;
+        cursor = result_medium_offset
+            .checked_add(self.result_medium.bytes)
+            .ok_or_else(executor_overflow)?;
+        let result_large_offset = executor_align_up_packed(cursor, self.result_large.align)?;
+        let total_bytes = result_large_offset
+            .checked_add(self.result_large.bytes)
+            .ok_or_else(executor_overflow)?;
+
+        Ok(CurrentAsyncRuntimeCombinedBackingPlan {
+            slab: ExecutorBackingRequest {
+                bytes: total_bytes,
+                align: max_align,
+            },
+            control: ResourceRange::new(control_offset, self.control.bytes),
+            reactor: ResourceRange::new(reactor_offset, self.reactor.bytes),
+            registry: ResourceRange::new(registry_offset, self.registry.bytes),
+            future_medium: Some(ResourceRange::new(
+                future_medium_offset,
+                self.future_medium.bytes,
+            )),
+            future_large: Some(ResourceRange::new(
+                future_large_offset,
+                self.future_large.bytes,
+            )),
+            result_medium: Some(ResourceRange::new(
+                result_medium_offset,
+                self.result_medium.bytes,
+            )),
+            result_large: Some(ResourceRange::new(
+                result_large_offset,
+                self.result_large.bytes,
+            )),
+        })
+    }
+
+    /// Packs only the eagerly required current-thread async domains into one owning slab.
+    ///
+    /// Lazy medium/large future and result slabs stay omitted so explicit-backed bare-metal
+    /// runtimes do not reserve those bytes unless the caller deliberately wants them.
+    pub fn combined_eager(self) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
+        let mut max_align = self.control.align;
+        if self.reactor.align > max_align {
+            max_align = self.reactor.align;
+        }
+        if self.registry.align > max_align {
+            max_align = self.registry.align;
+        }
+
+        let mut cursor = max_align.saturating_sub(1);
+        let control_offset = executor_align_up_packed(cursor, self.control.align)?;
+        cursor = control_offset
+            .checked_add(self.control.bytes)
+            .ok_or_else(executor_overflow)?;
+        let reactor_offset = executor_align_up_packed(cursor, self.reactor.align)?;
+        cursor = reactor_offset
+            .checked_add(self.reactor.bytes)
+            .ok_or_else(executor_overflow)?;
+        let registry_offset = executor_align_up_packed(cursor, self.registry.align)?;
+        let total_bytes = registry_offset
+            .checked_add(self.registry.bytes)
+            .ok_or_else(executor_overflow)?;
+
+        Ok(CurrentAsyncRuntimeCombinedBackingPlan {
+            slab: ExecutorBackingRequest {
+                bytes: total_bytes,
+                align: max_align,
+            },
+            control: ResourceRange::new(control_offset, self.control.bytes),
+            reactor: ResourceRange::new(reactor_offset, self.reactor.bytes),
+            registry: ResourceRange::new(registry_offset, self.registry.bytes),
+            future_medium: None,
+            future_large: None,
+            result_medium: None,
+            result_large: None,
         })
     }
 }
@@ -1595,16 +1821,35 @@ struct CurrentJob {
 
 #[derive(Debug)]
 struct CurrentQueueState {
+    entries: ArenaSlice<Option<CurrentJob>>,
+    head: usize,
+    tail: usize,
+    len: usize,
+}
+
+#[derive(Debug)]
+struct HostedReadyQueueState {
     entries: [Option<CurrentJob>; CURRENT_QUEUE_CAPACITY],
     head: usize,
     tail: usize,
     len: usize,
 }
 impl CurrentQueue {
-    const fn new(fast: bool) -> Self {
-        Self {
-            ready: ExecutorCell::new(fast, CurrentQueueState::new()),
-        }
+    fn new_in(arena: &BoundedArena, capacity: usize, fast: bool) -> Result<Self, ExecutorError> {
+        let entries = arena
+            .alloc_array_with(capacity.max(1), |_| None)
+            .map_err(executor_error_from_alloc)?;
+        Ok(Self {
+            ready: ExecutorCell::new(
+                fast,
+                CurrentQueueState {
+                    entries,
+                    head: 0,
+                    tail: 0,
+                    len: 0,
+                },
+            ),
+        })
     }
 
     fn schedule_slot(
@@ -1640,33 +1885,34 @@ impl ExecutorReactorState {
         capacity: usize,
         fast: bool,
         allocator: &ExecutorDomainAllocator,
-    ) -> Result<Self, ExecutorError> {
-        executor_debug_phase(130);
+    ) -> Result<(Self, CurrentQueue), ExecutorError> {
         let arena_capacity = executor_reactor_capacity(capacity)?;
         let arena = allocator.arena(arena_capacity, executor_reactor_align())?;
-        executor_debug_phase(131);
+        let current_queue = CurrentQueue::new_in(&arena, capacity, fast)?;
         let waits = arena
             .alloc_array_with(capacity, |_| AsyncReactorWaitEntry::EMPTY)
             .map_err(executor_error_from_alloc)?;
         let outcomes = arena
             .alloc_array_with(capacity, |_| None)
             .map_err(executor_error_from_alloc)?;
-        executor_debug_phase(132);
         #[cfg(feature = "std")]
         let pending_deregister = arena
             .alloc_array_with(capacity, |_| None)
             .map_err(executor_error_from_alloc)?;
 
-        Ok(Self {
-            poller: ExecutorCell::new(fast, None),
-            events: ExecutorCell::new(fast, [EMPTY_EVENT_RECORD; REACTOR_EVENT_BATCH]),
-            waits: ExecutorCell::new(fast, waits),
-            outcomes: ExecutorCell::new(fast, outcomes),
-            #[cfg(feature = "std")]
-            pending_deregister: ExecutorCell::new(fast, pending_deregister),
-            #[cfg(feature = "std")]
-            wake: ExecutorCell::new(fast, None),
-        })
+        Ok((
+            Self {
+                poller: ExecutorCell::new(fast, None),
+                events: ExecutorCell::new(fast, [EMPTY_EVENT_RECORD; REACTOR_EVENT_BATCH]),
+                waits: ExecutorCell::new(fast, waits),
+                outcomes: ExecutorCell::new(fast, outcomes),
+                #[cfg(feature = "std")]
+                pending_deregister: ExecutorCell::new(fast, pending_deregister),
+                #[cfg(feature = "std")]
+                wake: ExecutorCell::new(fast, None),
+            },
+            current_queue,
+        ))
     }
 
     #[cfg(feature = "std")]
@@ -2274,16 +2520,7 @@ impl fmt::Debug for CurrentQueue {
 }
 
 impl CurrentQueueState {
-    const fn new() -> Self {
-        Self {
-            entries: [None; CURRENT_QUEUE_CAPACITY],
-            head: 0,
-            tail: 0,
-            len: 0,
-        }
-    }
-
-    const fn enqueue(&mut self, job: CurrentJob) -> Result<(), ExecutorError> {
+    fn enqueue(&mut self, job: CurrentJob) -> Result<(), ExecutorError> {
         if self.len == self.entries.len() {
             return Err(executor_overflow());
         }
@@ -2293,7 +2530,38 @@ impl CurrentQueueState {
         Ok(())
     }
 
-    const fn dequeue(&mut self) -> Option<CurrentJob> {
+    fn dequeue(&mut self) -> Option<CurrentJob> {
+        if self.len == 0 {
+            return None;
+        }
+        let job = self.entries[self.head].take();
+        self.head = (self.head + 1) % self.entries.len();
+        self.len -= 1;
+        job
+    }
+}
+
+impl HostedReadyQueueState {
+    const fn new() -> Self {
+        Self {
+            entries: [None; CURRENT_QUEUE_CAPACITY],
+            head: 0,
+            tail: 0,
+            len: 0,
+        }
+    }
+
+    fn enqueue(&mut self, job: CurrentJob) -> Result<(), ExecutorError> {
+        if self.len == self.entries.len() {
+            return Err(executor_overflow());
+        }
+        self.entries[self.tail] = Some(job);
+        self.tail = (self.tail + 1) % self.entries.len();
+        self.len += 1;
+        Ok(())
+    }
+
+    fn dequeue(&mut self) -> Option<CurrentJob> {
         if self.len == 0 {
             return None;
         }
@@ -2950,7 +3218,6 @@ const SLOT_RUN_RUNNING: u8 = 0b10;
 
 impl AsyncTaskSlot {
     fn new(slot_index: usize, fast: bool) -> Result<Self, ExecutorError> {
-        executor_debug_phase(200_u32.saturating_add(slot_index as u32));
         Ok(Self {
             generation: AtomicUsize::new(0),
             core: ExecutorCell::new(fast, None),
@@ -3425,12 +3692,10 @@ impl AsyncTaskRegistry {
         fast: bool,
         allocators: &mut ExecutorBackingAllocators,
     ) -> Result<Self, ExecutorError> {
-        executor_debug_phase(140);
         let arena_capacity = executor_registry_capacity(capacity)?;
         let arena = allocators
             .registry
             .arena(arena_capacity, executor_registry_align())?;
-        executor_debug_phase(141);
         let slots = match arena
             .try_alloc_array_with(capacity, |slot_index| AsyncTaskSlot::new(slot_index, fast))
         {
@@ -3438,10 +3703,7 @@ impl AsyncTaskRegistry {
             Err(ArenaInitError::Alloc(error)) => return Err(executor_error_from_alloc(error)),
             Err(ArenaInitError::Init(error)) => return Err(error),
         };
-        executor_debug_phase(142);
-        executor_debug_phase(143);
         let free = FixedIndexStack::new_in(&arena, capacity)?;
-        executor_debug_phase(144);
         Ok(Self {
             slots,
             free: ExecutorCell::new(fast, free),
@@ -3517,7 +3779,7 @@ enum AsyncSlotRunDisposition {
 #[cfg(feature = "std")]
 #[derive(Debug)]
 struct HostedThreadScheduler {
-    ready: SyncMutex<CurrentQueueState>,
+    ready: SyncMutex<HostedReadyQueueState>,
     signal: Semaphore,
     shutdown: AtomicBool,
     worker_count: usize,
@@ -3557,7 +3819,7 @@ impl HostedThreadScheduler {
             .max_threads
             .max(1);
         let scheduler = Arc::new(Self {
-            ready: SyncMutex::new(CurrentQueueState::new()),
+            ready: SyncMutex::new(HostedReadyQueueState::new()),
             signal: Semaphore::new(
                 0,
                 u32::try_from(CURRENT_QUEUE_CAPACITY.saturating_add(worker_count))
@@ -3580,7 +3842,7 @@ impl HostedThreadScheduler {
     ) -> Result<HostedThreadWorkers, ExecutorError> {
         let worker_count = config.max_threads.max(1);
         let scheduler = Arc::new(Self {
-            ready: SyncMutex::new(CurrentQueueState::new()),
+            ready: SyncMutex::new(HostedReadyQueueState::new()),
             signal: Semaphore::new(
                 0,
                 u32::try_from(CURRENT_QUEUE_CAPACITY.saturating_add(worker_count))
@@ -4796,6 +5058,56 @@ impl CurrentAsyncRuntime {
         })
     }
 
+    /// Creates one current-thread async runtime from one caller-owned bound slab.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest sizing, partitioning, or bootstrap failure.
+    pub fn from_bound_slab(
+        config: ExecutorConfig,
+        slab: MemoryResourceHandle,
+    ) -> Result<Self, ExecutorError> {
+        let layout = Self::backing_plan(config)?.combined_eager()?;
+        if slab.view().len() < layout.slab.bytes {
+            return Err(ExecutorError::Sync(SyncErrorKind::Overflow));
+        }
+        let backing = CurrentAsyncRuntimeBacking {
+            control: partition_executor_bound_resource(&slab, layout.control)?,
+            reactor: partition_executor_bound_resource(&slab, layout.reactor)?,
+            registry: partition_executor_bound_resource(&slab, layout.registry)?,
+            future_medium: None,
+            future_large: None,
+            result_medium: None,
+            result_large: None,
+        };
+        Self::from_backing(config, backing)
+    }
+
+    /// Creates one current-thread async runtime from one caller-owned static byte slab.
+    ///
+    /// This is the ergonomic deterministic board-facing path above `from_bound_slab(...)` for
+    /// SRAM-backed static runtime storage.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee the supplied pointer/length pair names one valid writable static
+    /// memory extent for the whole lifetime of the runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest binding, sizing, partitioning, or bootstrap failure.
+    pub unsafe fn from_static_slab(
+        config: ExecutorConfig,
+        ptr: *mut u8,
+        len: usize,
+    ) -> Result<Self, ExecutorError> {
+        let slab = MemoryResourceHandle::from(
+            unsafe { BoundMemoryResource::static_allocatable_bytes(ptr, len) }
+                .map_err(executor_error_from_resource)?,
+        );
+        Self::from_bound_slab(config, slab)
+    }
+
     /// Returns the underlying executor.
     #[must_use]
     pub const fn executor(&self) -> &Executor {
@@ -5285,21 +5597,17 @@ impl Executor {
         fast_current: bool,
         backing: CurrentAsyncRuntimeBacking,
     ) -> Self {
-        executor_debug_phase(100);
         let reactor = Reactor::new();
         let inner = match ExecutorBackingAllocators::from_current_backing(backing).and_then(
             |mut allocators| {
-                executor_debug_phase(101);
-                let reactor_state =
+                let (reactor_state, current_queue) =
                     ExecutorReactorState::new(config.capacity, fast_current, &allocators.reactor)?;
-                executor_debug_phase(102);
                 let registry =
                     ExecutorRegistry::new(config.capacity, fast_current, &mut allocators);
-                executor_debug_phase(103);
                 let core = allocators.control.control(ExecutorCore {
                     reactor,
                     reactor_max_events: config.reactor.max_events,
-                    current_queue: CurrentQueue::new(fast_current),
+                    current_queue,
                     reactor_state,
                     reactor_driver_ready: AtomicBool::new(false),
                     #[cfg(feature = "std")]
@@ -5310,7 +5618,6 @@ impl Executor {
                     shutdown_requested: AtomicBool::new(false),
                     external_inflight: AtomicUsize::new(0),
                 })?;
-                executor_debug_phase(104);
                 Ok(core)
             },
         ) {
@@ -5352,8 +5659,10 @@ impl Executor {
         let reactor = Reactor::new();
         let inner = match ControlLease::<ExecutorCore>::extent_request()
             .map_err(executor_error_from_alloc)
+            .and_then(ExecutorBackingRequest::from_extent_request)
+            .and_then(|request| apply_executor_sizing_strategy(request, config.sizing))
             .and_then(|request| {
-                Allocator::<1, 1>::system_default_with_capacity(request.len)
+                Allocator::<1, 1>::system_default_with_capacity(request.bytes)
                     .map_err(executor_error_from_alloc)
             })
             .and_then(|allocator| {
@@ -5363,7 +5672,7 @@ impl Executor {
                     reactor_plan.reactor,
                     "fusion-executor-fallback-reactor",
                 )?;
-                let reactor_state =
+                let (reactor_state, current_queue) =
                     ExecutorReactorState::new(config.capacity, fast_current, &reactor_allocator)?;
                 let mut registry_allocators = ExecutorBackingAllocators::acquire_current(config)?;
                 let registry =
@@ -5374,7 +5683,7 @@ impl Executor {
                         ExecutorCore {
                             reactor,
                             reactor_max_events: config.reactor.max_events,
-                            current_queue: CurrentQueue::new(fast_current),
+                            current_queue,
                             reactor_state,
                             reactor_driver_ready: AtomicBool::new(false),
                             #[cfg(feature = "std")]
@@ -6053,10 +6362,16 @@ fn executor_registry_align() -> usize {
 fn executor_reactor_align() -> usize {
     let waits_align = align_of::<AsyncReactorWaitEntry>();
     let outcomes_align = align_of::<Option<AsyncWaitOutcome>>();
+    let queue_align = align_of::<Option<CurrentJob>>();
     let align = if waits_align >= outcomes_align {
         waits_align
     } else {
         outcomes_align
+    };
+    let align = if queue_align > align {
+        queue_align
+    } else {
+        align
     };
     #[cfg(feature = "std")]
     {
@@ -6084,6 +6399,9 @@ fn executor_reactor_capacity(capacity: usize) -> Result<usize, ExecutorError> {
     let outcomes_bytes = size_of::<Option<AsyncWaitOutcome>>()
         .checked_mul(capacity)
         .ok_or_else(executor_overflow)?;
+    let queue_bytes = size_of::<Option<CurrentJob>>()
+        .checked_mul(capacity)
+        .ok_or_else(executor_overflow)?;
     #[cfg(feature = "std")]
     let pending_bytes = size_of::<Option<EventKey>>()
         .checked_mul(capacity)
@@ -6093,13 +6411,15 @@ fn executor_reactor_capacity(capacity: usize) -> Result<usize, ExecutorError> {
     #[cfg(feature = "std")]
     let bytes = waits_bytes
         .checked_add(outcomes_bytes)
+        .and_then(|total| total.checked_add(queue_bytes))
         .and_then(|total| total.checked_add(pending_bytes))
-        .and_then(|total| total.checked_add(padding.saturating_mul(3)))
+        .and_then(|total| total.checked_add(padding.saturating_mul(4)))
         .ok_or_else(executor_overflow)?;
     #[cfg(not(feature = "std"))]
     let bytes = waits_bytes
         .checked_add(outcomes_bytes)
-        .and_then(|total| total.checked_add(padding.saturating_mul(2)))
+        .and_then(|total| total.checked_add(queue_bytes))
+        .and_then(|total| total.checked_add(padding.saturating_mul(3)))
         .ok_or_else(executor_overflow)?;
 
     Ok(bytes)
@@ -6109,7 +6429,26 @@ fn executor_reactor_capacity(capacity: usize) -> Result<usize, ExecutorError> {
 mod tests {
     use super::*;
     use crate::thread::{PoolPlacement, ThreadPoolConfig};
+    use core::num::NonZeroUsize;
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use fusion_pal::sys::mem::{Address, CachePolicy, MemAdviceCaps, Protect, Region};
+    use fusion_sys::mem::resource::{
+        BoundMemoryResource,
+        BoundResourceSpec,
+        MemoryDomain,
+        MemoryGeometry,
+        MemoryResourceHandle,
+        OvercommitPolicy,
+        ResourceAttrs,
+        ResourceBackingKind,
+        ResourceContract,
+        ResourceOpSet,
+        ResourceResidencySupport,
+        ResourceState,
+        ResourceSupport,
+        SharingPolicy,
+        StateValue,
+    };
     use fusion_sys::thread::{ThreadLogicalCpuId, ThreadProcessorGroupId};
     use std::sync::Arc;
     #[cfg(feature = "std")]
@@ -6120,6 +6459,56 @@ mod tests {
     use std::thread;
     #[cfg(feature = "std")]
     use std::time::Duration;
+
+    fn aligned_bound_resource(len: usize, align: usize) -> MemoryResourceHandle {
+        use std::alloc::{Layout, alloc_zeroed};
+
+        let layout = Layout::from_size_align(len, align).expect("aligned test layout should build");
+        let ptr = unsafe { alloc_zeroed(layout) };
+        assert!(
+            !ptr.is_null(),
+            "aligned test slab allocation should succeed"
+        );
+        MemoryResourceHandle::from(
+            BoundMemoryResource::new(BoundResourceSpec::new(
+                Region {
+                    base: Address::new(ptr as usize),
+                    len,
+                },
+                MemoryDomain::StaticRegion,
+                ResourceBackingKind::Borrowed,
+                ResourceAttrs::ALLOCATABLE | ResourceAttrs::CACHEABLE | ResourceAttrs::COHERENT,
+                MemoryGeometry {
+                    base_granule: NonZeroUsize::new(1).expect("non-zero granule"),
+                    alloc_granule: NonZeroUsize::new(1).expect("non-zero granule"),
+                    protect_granule: None,
+                    commit_granule: None,
+                    lock_granule: None,
+                    large_granule: None,
+                },
+                ResourceContract {
+                    allowed_protect: Protect::READ | Protect::WRITE,
+                    write_xor_execute: true,
+                    sharing: SharingPolicy::Private,
+                    overcommit: OvercommitPolicy::Disallow,
+                    cache_policy: CachePolicy::Default,
+                    integrity: None,
+                },
+                ResourceSupport {
+                    protect: Protect::READ | Protect::WRITE,
+                    ops: ResourceOpSet::QUERY,
+                    advice: MemAdviceCaps::empty(),
+                    residency: ResourceResidencySupport::BEST_EFFORT,
+                },
+                ResourceState::static_state(
+                    StateValue::Uniform(Protect::READ | Protect::WRITE),
+                    StateValue::Uniform(false),
+                    StateValue::Uniform(true),
+                ),
+            ))
+            .expect("aligned bound resource should bind"),
+        )
+    }
 
     struct ExplicitGeneratedPollStackFuture;
 
@@ -6925,6 +7314,85 @@ mod tests {
                 .expect("runtime should drive explicit-backed task")
                 .expect("task should complete"),
             29
+        );
+    }
+
+    #[test]
+    fn global_nearest_round_up_executor_sizing_inflates_backing_requests() {
+        let exact = CurrentAsyncRuntime::backing_plan(ExecutorConfig::new().with_capacity(2))
+            .expect("exact backing plan should build");
+        let rounded = CurrentAsyncRuntime::backing_plan(
+            ExecutorConfig::new()
+                .with_capacity(2)
+                .with_sizing_strategy(RuntimeSizingStrategy::GlobalNearestRoundUp),
+        )
+        .expect("rounded backing plan should build");
+
+        assert!(rounded.control.bytes >= exact.control.bytes);
+        assert!(rounded.reactor.bytes >= exact.reactor.bytes);
+        assert!(rounded.registry.bytes >= exact.registry.bytes);
+        assert!(rounded.future_medium.bytes >= exact.future_medium.bytes);
+        assert!(rounded.future_large.bytes >= exact.future_large.bytes);
+        assert!(rounded.result_medium.bytes >= exact.result_medium.bytes);
+        assert!(rounded.result_large.bytes >= exact.result_large.bytes);
+        assert!(rounded.control.bytes.is_power_of_two());
+        assert!(rounded.reactor.bytes.is_power_of_two());
+        assert!(rounded.registry.bytes.is_power_of_two());
+    }
+
+    #[test]
+    fn global_nearest_round_up_executor_internal_virtual_backing_uses_rounded_sizes() {
+        let exact = current_async_runtime_virtual_backing(ExecutorConfig::new().with_capacity(2))
+            .expect("exact virtual backing should build");
+        let rounded = current_async_runtime_virtual_backing(
+            ExecutorConfig::new()
+                .with_capacity(2)
+                .with_sizing_strategy(RuntimeSizingStrategy::GlobalNearestRoundUp),
+        )
+        .expect("rounded virtual backing should build");
+
+        assert!(rounded.control.view().len() >= exact.control.view().len());
+        assert!(rounded.reactor.view().len() >= exact.reactor.view().len());
+        assert!(rounded.registry.view().len() >= exact.registry.view().len());
+        assert!(
+            rounded
+                .future_medium
+                .as_ref()
+                .expect("medium future backing should exist")
+                .view()
+                .len()
+                >= exact
+                    .future_medium
+                    .as_ref()
+                    .expect("medium future backing should exist")
+                    .view()
+                    .len()
+        );
+    }
+
+    #[test]
+    fn current_runtime_from_bound_slab_runs_task() {
+        let config = ExecutorConfig::new().with_capacity(2);
+        let layout = CurrentAsyncRuntime::backing_plan(config)
+            .expect("backing plan should build")
+            .combined()
+            .expect("combined layout should build");
+        let slab = aligned_bound_resource(layout.slab.bytes, layout.slab.align);
+        let runtime = CurrentAsyncRuntime::from_bound_slab(config, slab)
+            .expect("runtime should build from one bound slab");
+        let handle = runtime
+            .spawn(async {
+                async_yield_now().await;
+                31_u8
+            })
+            .expect("task should spawn");
+
+        assert_eq!(
+            runtime
+                .block_on(handle)
+                .expect("runtime should drive bound-slab task")
+                .expect("task should complete"),
+            31
         );
     }
 

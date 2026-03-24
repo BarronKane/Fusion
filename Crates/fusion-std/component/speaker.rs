@@ -32,11 +32,7 @@ where
     /// # Errors
     ///
     /// Returns one honest GPIO error when the signal pin cannot be configured for output.
-    pub fn new(
-        mut signal: P,
-        impedance_ohms: u8,
-        max_watts: u8,
-    ) -> Result<Self, GpioError> {
+    pub fn new(mut signal: P, impedance_ohms: u8, max_watts: u8) -> Result<Self, GpioError> {
         signal.configure_output(false)?;
         Ok(Self {
             signal,

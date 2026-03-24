@@ -4,7 +4,6 @@ use core::mem::{ManuallyDrop, align_of, size_of};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::slice;
-use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::sync::{Mutex, RetainedHandle};
 
@@ -29,16 +28,6 @@ use super::{
     align_up,
     front_metadata_layout,
 };
-
-#[cfg(debug_assertions)]
-#[unsafe(no_mangle)]
-pub static FUSION_ARENA_DEBUG_PHASE: AtomicU32 = AtomicU32::new(0);
-
-#[inline(always)]
-fn arena_debug_phase(phase: u32) {
-    #[cfg(debug_assertions)]
-    FUSION_ARENA_DEBUG_PHASE.store(phase, Ordering::Release);
-}
 
 #[derive(Debug)]
 struct ArenaState {
@@ -405,27 +394,22 @@ impl<L: LifetimePolicy> BoundedArena<L> {
     where
         F: FnMut(usize) -> Result<T, E>,
     {
-        arena_debug_phase(150);
         let request = typed_request::<T>(len).map_err(ArenaInitError::Alloc)?;
-        arena_debug_phase(151);
         if request.align > self.control().max_align {
             return Err(ArenaInitError::Alloc(AllocError::invalid_request()));
         }
         let base = self.payload_base().map_err(ArenaInitError::Alloc)?;
-        arena_debug_phase(152);
         let mut state = self
             .control()
             .state
             .lock()
             .map_err(|error| ArenaInitError::Alloc(AllocError::synchronization(error.kind)))?;
-        arena_debug_phase(153);
         let start = align_up(
             base.checked_add(state.cursor)
                 .ok_or_else(|| ArenaInitError::Alloc(AllocError::invalid_request()))?,
             request.align,
         )
         .map_err(ArenaInitError::Alloc)?;
-        arena_debug_phase(154);
         let offset = start
             .checked_sub(base)
             .ok_or_else(|| ArenaInitError::Alloc(AllocError::invalid_request()))?;
@@ -437,7 +421,6 @@ impl<L: LifetimePolicy> BoundedArena<L> {
         }
 
         let control = self.control().try_clone().map_err(ArenaInitError::Alloc)?;
-        arena_debug_phase(155);
         state.cursor = end;
         state.live_slices = state
             .live_slices
@@ -446,10 +429,8 @@ impl<L: LifetimePolicy> BoundedArena<L> {
         let ptr = NonNull::new(start as *mut T)
             .ok_or_else(|| ArenaInitError::Alloc(AllocError::invalid_request()))?;
         let mut initialized = 0usize;
-        arena_debug_phase(156);
 
         for index in 0..len {
-            arena_debug_phase(160_u32.saturating_add(index as u32));
             match init(index) {
                 Ok(value) => {
                     // SAFETY: the typed request reserved enough aligned space for `len`
@@ -474,7 +455,6 @@ impl<L: LifetimePolicy> BoundedArena<L> {
         }
 
         drop(state);
-        arena_debug_phase(157);
         Ok(ArenaSlice::new(control, ptr, len))
     }
 }

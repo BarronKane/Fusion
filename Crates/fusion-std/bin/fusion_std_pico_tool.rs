@@ -7,7 +7,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 
-use object::{Object, ObjectSegment};
+use object::{Object, ObjectSegment, ObjectSymbol};
 
 const DEFAULT_MANIFEST_PATH: &str = "Examples/PicoTarget/Cargo.toml";
 const DEFAULT_TARGET: &str = "thumbv8m.main-none-eabihf";
@@ -25,6 +25,10 @@ const DEFAULT_PROBE_CHIP: &str = "RP235x";
 const DEFAULT_GDB_CONNECTION_STRING: &str = "[::1]:2345";
 const PROBE_CHIP_ENV: &str = "FUSION_PICO_PROBE_CHIP";
 const PROBE_SELECTOR_ENV: &str = "FUSION_PICO_PROBE_SELECTOR";
+const PICO_BENCH_OUTPUT_SYMBOL: &str = "FUSION_PICO_BENCH_OUTPUT";
+const PICO_BENCH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
+const PICO_BENCH_RELEASE_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+const PICO_BENCH_DEBUG_TIMEOUT: StdDuration = StdDuration::from_secs(120);
 
 fn main() {
     if let Err(error) = try_main() {
@@ -41,6 +45,10 @@ fn try_main() -> Result<(), String> {
     };
 
     match command.to_string_lossy().as_ref() {
+        "build" => {
+            let options = CommandOptions::parse(args)?;
+            run_build(&options)?;
+        }
         "uf2" => {
             let options = CommandOptions::parse(args)?;
             run_uf2(&options)?;
@@ -56,6 +64,10 @@ fn try_main() -> Result<(), String> {
         "probe-attach" => {
             let options = CommandOptions::parse(args)?;
             run_probe_rs("attach", &options)?;
+        }
+        "benchmark" => {
+            let options = CommandOptions::parse(args)?;
+            run_benchmark(&options)?;
         }
         "debug-server" => {
             let options = CommandOptions::parse(args)?;
@@ -73,10 +85,12 @@ fn try_main() -> Result<(), String> {
 fn usage() -> String {
     format!(
         "usage:\n  \
+         cargo pico-build -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release]\n  \
          cargo pico-uf2 -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--family FAMILY] [--output-dir DIR]\n  \
          cargo pico-flash -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] --chip CHIP [--probe SELECTOR]\n  \
          cargo pico-run -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] --chip CHIP [--probe SELECTOR]\n  \
          cargo pico-attach -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] --chip CHIP [--probe SELECTOR]\n  \
+         cargo pico-benchmark -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--benchmark-timeout-secs SECONDS] --chip CHIP [--probe SELECTOR]\n  \
          cargo pico-debug-server -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--gdb-connection-string HOST:PORT] [--detach] [--output-dir DIR] --chip CHIP [--probe SELECTOR]\n\n\
          defaults:\n  \
          manifest-path = {DEFAULT_MANIFEST_PATH}\n  \
@@ -134,6 +148,7 @@ struct CommandOptions {
     output_dir: Option<PathBuf>,
     chip: Option<String>,
     probe: Option<String>,
+    benchmark_timeout_secs: Option<u64>,
 }
 
 impl Default for CommandOptions {
@@ -149,6 +164,7 @@ impl Default for CommandOptions {
             output_dir: None,
             chip: None,
             probe: None,
+            benchmark_timeout_secs: None,
         }
     }
 }
@@ -184,6 +200,13 @@ impl CommandOptions {
                 }
                 "--chip" => options.chip = Some(next_value(&mut args, "--chip")?),
                 "--probe" => options.probe = Some(next_value(&mut args, "--probe")?),
+                "--benchmark-timeout-secs" => {
+                    let raw = next_value(&mut args, "--benchmark-timeout-secs")?;
+                    options.benchmark_timeout_secs =
+                        Some(raw.parse::<u64>().map_err(|error| {
+                            format!("invalid benchmark timeout `{raw}`: {error}")
+                        })?);
+                }
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unsupported option `{other}`\n\n{}", usage())),
             }
@@ -268,6 +291,17 @@ impl CommandOptions {
             .clone()
             .or_else(|| env::var(PROBE_SELECTOR_ENV).ok())
     }
+
+    const fn benchmark_timeout(&self) -> StdDuration {
+        if let Some(seconds) = self.benchmark_timeout_secs {
+            return StdDuration::from_secs(seconds);
+        }
+        if self.release {
+            PICO_BENCH_RELEASE_TIMEOUT
+        } else {
+            PICO_BENCH_DEBUG_TIMEOUT
+        }
+    }
 }
 
 fn next_value(args: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<String, String> {
@@ -313,6 +347,13 @@ fn run_uf2(options: &CommandOptions) -> Result<(), String> {
     Ok(())
 }
 
+fn run_build(options: &CommandOptions) -> Result<(), String> {
+    build_example_elf(options)?;
+    let elf_path = options.elf_path()?;
+    println!("ELF : {}", elf_path.display());
+    Ok(())
+}
+
 fn run_probe_flash(options: &CommandOptions) -> Result<(), String> {
     let manifest_path = options.manifest_path()?;
     let project_dir = options.project_dir()?;
@@ -348,6 +389,133 @@ fn run_probe_rs(subcommand: &str, options: &CommandOptions) -> Result<(), String
     Ok(())
 }
 
+fn run_benchmark(options: &CommandOptions) -> Result<(), String> {
+    build_example_elf_with_symbols(options)?;
+    let chip = options.resolve_chip();
+    let elf_path = options.elf_path()?;
+    let (output_addr, output_size) = find_symbol_range(&elf_path, PICO_BENCH_OUTPUT_SYMBOL)?;
+
+    let mut download = Command::new("probe-rs");
+    download.arg("download");
+    download.arg("--chip").arg(&chip);
+    if let Some(probe) = options.resolve_probe_selector() {
+        download.arg("--probe").arg(probe);
+    }
+    download.arg(&elf_path);
+    run_command(&mut download, "probe-rs")?;
+
+    let mut reset = Command::new("probe-rs");
+    reset.arg("reset");
+    reset.arg("--chip").arg(&chip);
+    if let Some(probe) = options.resolve_probe_selector() {
+        reset.arg("--probe").arg(probe);
+    }
+    run_command(&mut reset, "probe-rs")?;
+
+    let words = usize::try_from(output_size)
+        .map_err(|_| "benchmark output size does not fit in usize".to_owned())?
+        .div_ceil(4);
+    let deadline = Instant::now() + options.benchmark_timeout();
+    loop {
+        let words_read = probe_read_words(options, output_addr, words)?;
+        if pico_bench_state(&words_read) == Some(2) {
+            print_pico_bench_report(&words_read);
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for Pico benchmark completion at {output_addr:#010x}"
+            ));
+        }
+        thread::sleep(PICO_BENCH_POLL_INTERVAL);
+    }
+}
+
+fn probe_read_words(
+    options: &CommandOptions,
+    address: u64,
+    words: usize,
+) -> Result<Vec<u32>, String> {
+    let chip = options.resolve_chip();
+    let mut command = Command::new("probe-rs");
+    command.arg("read");
+    command.arg("--chip").arg(chip);
+    if let Some(probe) = options.resolve_probe_selector() {
+        command.arg("--probe").arg(probe);
+    }
+    command.arg("b32");
+    command.arg(format!("{address:#x}"));
+    command.arg(words.to_string());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::inherit());
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to launch probe-rs read: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "probe-rs read exited with status {}",
+            output.status
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("probe-rs read returned invalid UTF-8: {error}"))?;
+    stdout
+        .split_whitespace()
+        .map(|word| {
+            u32::from_str_radix(word, 16)
+                .map_err(|error| format!("failed to parse probe-rs read word `{word}`: {error}"))
+        })
+        .collect()
+}
+
+fn pico_bench_state(words: &[u32]) -> Option<u32> {
+    if words.len() < 2 {
+        return None;
+    }
+    if words[0] != 0x4655_4245 {
+        return None;
+    }
+    Some(words[1])
+}
+
+fn print_pico_bench_report(words: &[u32]) {
+    if words.len() < 4 || words[0] != 0x4655_4245 {
+        println!("Pico benchmark output was missing or malformed");
+        return;
+    }
+    let count = usize::try_from(words[2]).unwrap_or(0);
+    println!("pico_benchmark");
+    let mut offset = 4usize;
+    for _ in 0..count {
+        if offset + 4 > words.len() {
+            break;
+        }
+        let bench_id = words[offset];
+        let iterations = words[offset + 1];
+        let total_nanos = words[offset + 2];
+        let average_nanos = words[offset + 3];
+        println!(
+            "  {} iterations={} total_ns={} avg_ns={}",
+            pico_bench_name(bench_id),
+            iterations,
+            total_nanos,
+            average_nanos
+        );
+        offset += 4;
+    }
+}
+
+const fn pico_bench_name(bench_id: u32) -> &'static str {
+    match bench_id {
+        1 => "baseline_direct_noop",
+        2 => "current_fiber_pool_spawn_join_noop",
+        3 => "current_fiber_pool_spawn_join_yield_once",
+        4 => "current_async_runtime_spawn_join_noop",
+        5 => "current_async_runtime_spawn_join_yield_once",
+        _ => "unknown",
+    }
+}
+
 fn run_debug_server(options: &CommandOptions) -> Result<(), String> {
     build_example_elf(options)?;
     let chip = options.resolve_chip();
@@ -371,29 +539,7 @@ fn run_debug_server(options: &CommandOptions) -> Result<(), String> {
             .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
         let log_path = output_dir.join(format!("{}-debug-server.log", options.bin_name));
         let pid_path = output_dir.join(format!("{}-debug-server.pid", options.bin_name));
-        let log_file = fs::File::create(&log_path)
-            .map_err(|error| format!("failed to create {}: {error}", log_path.display()))?;
-        let stderr_file = log_file
-            .try_clone()
-            .map_err(|error| format!("failed to clone {}: {error}", log_path.display()))?;
-
-        let mut command = Command::new("probe-rs");
-        command.arg("gdb");
-        command.arg("--chip").arg(&chip);
-        command
-            .arg("--gdb-connection-string")
-            .arg(&options.gdb_connection_string);
-        command.arg("--reset-halt");
-        if let Some(probe) = options.resolve_probe_selector() {
-            command.arg("--probe").arg(probe);
-        }
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::from(log_file));
-        command.stderr(Stdio::from(stderr_file));
-
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("failed to launch detached probe-rs gdb: {error}"))?;
+        let mut child = spawn_detached_probe_gdb(options, &chip, &log_path)?;
         fs::write(&pid_path, format!("{}\n", child.id()))
             .map_err(|error| format!("failed to write {}: {error}", pid_path.display()))?;
 
@@ -417,6 +563,83 @@ fn run_debug_server(options: &CommandOptions) -> Result<(), String> {
     }
     run_command(&mut command, "probe-rs")?;
     Ok(())
+}
+
+fn spawn_detached_probe_gdb(
+    options: &CommandOptions,
+    chip: &str,
+    log_path: &Path,
+) -> Result<std::process::Child, String> {
+    #[cfg(unix)]
+    {
+        let command_line = shell_escape("probe-rs")
+            + " gdb --chip "
+            + &shell_escape(chip)
+            + " --gdb-connection-string "
+            + &shell_escape(&options.gdb_connection_string)
+            + " --reset-halt";
+        let command_line = if let Some(probe) = options.resolve_probe_selector() {
+            command_line + " --probe " + &shell_escape(&probe)
+        } else {
+            command_line
+        };
+
+        let mut command = Command::new("setsid");
+        command.arg("script");
+        command.arg("-qefc");
+        command.arg(command_line);
+        command.arg(log_path);
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "failed to launch detached probe-rs gdb via script: {error}"
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+
+    let log_file = fs::File::create(log_path)
+        .map_err(|error| format!("failed to create {}: {error}", log_path.display()))?;
+    let stderr_file = log_file
+        .try_clone()
+        .map_err(|error| format!("failed to clone {}: {error}", log_path.display()))?;
+
+    let mut command = Command::new("probe-rs");
+    command.arg("gdb");
+    command.arg("--chip").arg(chip);
+    command
+        .arg("--gdb-connection-string")
+        .arg(&options.gdb_connection_string);
+    command.arg("--reset-halt");
+    if let Some(probe) = options.resolve_probe_selector() {
+        command.arg("--probe").arg(probe);
+    }
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::from(log_file));
+    command.stderr(Stdio::from(stderr_file));
+    command
+        .spawn()
+        .map_err(|error| format!("failed to launch detached probe-rs gdb: {error}"))
+}
+
+fn shell_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            escaped.push_str("'\"'\"'");
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped.push('\'');
+    escaped
 }
 
 fn wait_for_debug_server(
@@ -456,6 +679,14 @@ fn wait_for_debug_server(
 }
 
 fn build_example_elf(options: &CommandOptions) -> Result<(), String> {
+    build_example_elf_impl(options, false)
+}
+
+fn build_example_elf_with_symbols(options: &CommandOptions) -> Result<(), String> {
+    build_example_elf_impl(options, true)
+}
+
+fn build_example_elf_impl(options: &CommandOptions, preserve_symbols: bool) -> Result<(), String> {
     let manifest_path = options.manifest_path()?;
     let project_dir = options.project_dir()?;
     let mut command = Command::new("cargo");
@@ -466,6 +697,10 @@ fn build_example_elf(options: &CommandOptions) -> Result<(), String> {
     command.arg("--bin").arg(&options.bin_name);
     if options.release {
         command.arg("--release");
+        if preserve_symbols {
+            command.arg("--config");
+            command.arg("profile.release.strip=\"none\"");
+        }
     }
     run_command(&mut command, "cargo build")?;
     let elf_path = options.elf_path()?;
@@ -493,6 +728,33 @@ fn run_command(command: &mut Command, tool_name: &str) -> Result<ExitStatus, Str
         return Err(format!("{printable} exited with status {status}"));
     }
     Ok(status)
+}
+
+fn find_symbol_range(elf_path: &Path, symbol_name: &str) -> Result<(u64, u64), String> {
+    let bytes = fs::read(elf_path)
+        .map_err(|error| format!("failed to read {}: {error}", elf_path.display()))?;
+    let file = object::File::parse(&*bytes)
+        .map_err(|error| format!("failed to parse ELF {}: {error}", elf_path.display()))?;
+    for symbol in file.symbols() {
+        let Ok(name) = symbol.name() else {
+            continue;
+        };
+        if name != symbol_name {
+            continue;
+        }
+        let size = symbol.size();
+        if size == 0 {
+            return Err(format!(
+                "symbol `{symbol_name}` in {} had size 0",
+                elf_path.display()
+            ));
+        }
+        return Ok((symbol.address(), size));
+    }
+    Err(format!(
+        "symbol `{symbol_name}` was not found in {}",
+        elf_path.display()
+    ))
 }
 
 #[derive(Debug)]

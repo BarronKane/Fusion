@@ -37,8 +37,19 @@ use super::{
 use crate::sync::{OnceInitError, OnceLock, Semaphore, SyncError, SyncErrorKind, ThinMutex};
 use crate::thread::handle::ThreadHandle;
 
+#[cfg(feature = "sys-cortex-m")]
+const MAX_POOL_SLOTS: usize = 1;
+#[cfg(not(feature = "sys-cortex-m"))]
 const MAX_POOL_SLOTS: usize = 4;
+
+#[cfg(feature = "sys-cortex-m")]
+const MAX_POOL_WORKERS: usize = 1;
+#[cfg(not(feature = "sys-cortex-m"))]
 const MAX_POOL_WORKERS: usize = 32;
+
+#[cfg(feature = "sys-cortex-m")]
+const MAX_POOL_QUEUE_ITEMS: usize = 1;
+#[cfg(not(feature = "sys-cortex-m"))]
 const MAX_POOL_QUEUE_ITEMS: usize = 256;
 const ZERO_LOGICAL_CPU: ThreadLogicalCpuId = ThreadLogicalCpuId {
     group: fusion_pal::sys::thread::ThreadProcessorGroupId(0),

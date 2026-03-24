@@ -1,6 +1,8 @@
 [alias]
+pico-build = ["run", "-p", "fusion-std", "--bin", "fusion_std_pico_tool", "--", "build"]
 pico-uf2 = ["run", "-p", "fusion-std", "--bin", "fusion_std_pico_tool", "--", "uf2"]
 pico-flash = ["run", "-p", "fusion-std", "--bin", "fusion_std_pico_tool", "--", "probe-flash"]
 pico-run = ["run", "-p", "fusion-std", "--bin", "fusion_std_pico_tool", "--", "probe-run"]
 pico-attach = ["run", "-p", "fusion-std", "--bin", "fusion_std_pico_tool", "--", "probe-attach"]
+pico-benchmark = ["run", "-p", "fusion-std", "--bin", "fusion_std_pico_tool", "--", "benchmark", "--bin", "pico_bench"]
 pico-debug-server = ["run", "-p", "fusion-std", "--bin", "fusion_std_pico_tool", "--", "debug-server"]

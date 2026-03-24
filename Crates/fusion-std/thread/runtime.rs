@@ -12,6 +12,46 @@ use super::{
     ThreadPoolConfig,
 };
 
+/// Global sizing strategy for runtime-owned slabs, arenas, and derived envelopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeSizingStrategy {
+    /// Use the exact counted requirement with no extra headroom.
+    Exact,
+    /// Add 20% headroom and round up to the next power-of-two envelope.
+    GlobalNearestRoundUp,
+}
+
+impl RuntimeSizingStrategy {
+    /// Returns the effective byte requirement for one counted backing size under this strategy.
+    #[must_use]
+    pub fn apply_bytes(self, bytes: usize) -> Option<usize> {
+        match self {
+            Self::Exact => Some(bytes),
+            Self::GlobalNearestRoundUp => {
+                if bytes == 0 {
+                    return Some(0);
+                }
+                let extra = bytes.checked_add(4)? / 5;
+                let padded = bytes.checked_add(extra)?;
+                padded.checked_next_power_of_two()
+            }
+        }
+    }
+}
+
+/// Returns the crate-wide default runtime sizing strategy selected by features.
+#[must_use]
+pub const fn default_runtime_sizing_strategy() -> RuntimeSizingStrategy {
+    #[cfg(feature = "sizing-global-nearest-round-up")]
+    {
+        RuntimeSizingStrategy::GlobalNearestRoundUp
+    }
+    #[cfg(not(feature = "sizing-global-nearest-round-up"))]
+    {
+        RuntimeSizingStrategy::Exact
+    }
+}
+
 /// Runtime profile selecting broad safety and elasticity policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeProfile {

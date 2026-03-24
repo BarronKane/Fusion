@@ -140,11 +140,7 @@ where
         tip.configure_output(false)?;
         ring.configure_output(false)?;
         sleeve.configure_output(false)?;
-        Ok(Self {
-            tip,
-            ring,
-            sleeve,
-        })
+        Ok(Self { tip, ring, sleeve })
     }
 
     /// Returns a reference to the tip (left channel) pin.
