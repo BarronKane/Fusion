@@ -3,9 +3,11 @@ extern crate std;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 
+use fusion_sys::event::{EventInterest, EventRegistrationMode};
 use fusion_sys::thread::{
     MonotonicDeadlineWaitKind,
     MonotonicRuntimeTimeCaps,
+    RuntimeBackingPreference,
     SystemThreadPool,
     SystemThreadPoolConfig,
     SystemWorkItem,
@@ -85,6 +87,29 @@ fn support_surface_is_exposed() {
                 .lifecycle
                 .caps
                 .contains(ThreadLifecycleCaps::CURRENT_THREAD_ID)
+        );
+    }
+}
+
+#[test]
+fn runtime_construction_support_matches_platform_truth() {
+    let support = ThreadSystem::new().runtime_construction_support();
+
+    #[cfg(target_os = "linux")]
+    {
+        assert!(support.can_acquire_runtime_backing);
+        assert_eq!(
+            support.preferred_backing,
+            RuntimeBackingPreference::PlatformAcquired
+        );
+    }
+
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    {
+        assert!(!support.can_acquire_runtime_backing);
+        assert_eq!(
+            support.preferred_backing,
+            RuntimeBackingPreference::ExplicitBound
         );
     }
 }
@@ -451,6 +476,35 @@ fn monotonic_runtime_time_deadline_support_is_shaped_honestly() {
                 .contains(MonotonicRuntimeTimeCaps::ONE_SHOT_ALARM),
             false
         );
+    }
+}
+
+#[test]
+fn monotonic_runtime_time_deadline_support_surfaces_event_registration_honestly() {
+    let support = system_monotonic_time().support();
+
+    match support.deadline_wait {
+        Some(deadline_wait) => match deadline_wait.kind {
+            MonotonicDeadlineWaitKind::ReservedOneShotAlarm => {
+                let registration = support
+                    .deadline_wait_registration()
+                    .expect("reserved one-shot alarm should surface one registration");
+                assert_eq!(registration.interest, EventInterest::READABLE);
+                assert_eq!(registration.mode, EventRegistrationMode::LevelAckOnPoll);
+                assert_eq!(
+                    registration.source.0,
+                    usize::from(
+                        deadline_wait
+                            .irqn
+                            .expect("reserved one-shot alarm should name an irq")
+                    )
+                );
+            }
+            MonotonicDeadlineWaitKind::RelativeSleep => {
+                assert_eq!(support.deadline_wait_registration(), None);
+            }
+        },
+        None => assert_eq!(support.deadline_wait_registration(), None),
     }
 }
 

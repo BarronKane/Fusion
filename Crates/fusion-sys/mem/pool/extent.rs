@@ -102,6 +102,17 @@ impl MemoryPoolExtentRequest {
     pub const fn new(len: usize) -> Self {
         Self { len, align: 1 }
     }
+
+    /// Returns the minimum contributor/resource bytes needed to satisfy this request from an
+    /// arbitrarily aligned base address.
+    ///
+    /// This is the honest provisioning length for caller-owned or pre-existing regions when the
+    /// pool must still be free to choose an aligned offset within that region.
+    #[must_use]
+    pub const fn provisioning_len(self) -> Option<usize> {
+        let padding = self.align.saturating_sub(1);
+        self.len.checked_add(padding)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

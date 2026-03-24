@@ -42,6 +42,10 @@ name = "fusion_std_fiber_lifecycle_probe"
 path = "bin/fiber_lifecycle_probe.rs"
 
 [[bin]]
+name = "fusion_std_async_lifecycle_probe"
+path = "bin/async_lifecycle_probe.rs"
+
+[[bin]]
 name = "fusion_std_pico_tool"
 path = "bin/fusion_std_pico_tool.rs"
 

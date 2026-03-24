@@ -71,6 +71,7 @@ use fusion_sys::fiber::{
     current_context as system_fiber_context,
     yield_now as system_yield_now,
 };
+use fusion_sys::mem::resource::MemoryResourceHandle;
 use fusion_sys::sync::Mutex as SysMutex;
 #[cfg(feature = "std")]
 use fusion_sys::thread::{
@@ -2913,9 +2914,19 @@ enum FiberStackBackingState {
 }
 
 #[derive(Debug)]
+enum FiberStackSlabStorage {
+    VirtualCombined(Region),
+    Explicit {
+        stack: MemoryResourceHandle,
+        metadata: MemoryResourceHandle,
+    },
+}
+
+#[derive(Debug)]
 struct FiberStackSlab {
-    mapping: Region,
+    storage: FiberStackSlabStorage,
     region: Region,
+    metadata_bytes: usize,
     slot_stride: usize,
     capacity: usize,
     initial_slots: usize,
@@ -2971,6 +2982,10 @@ unsafe impl Send for FiberStackSlab {}
 unsafe impl Sync for FiberStackSlab {}
 
 impl FiberStackSlab {
+    const fn storage_uses_mem_protect(&self) -> bool {
+        matches!(self.storage, FiberStackSlabStorage::VirtualCombined(_))
+    }
+
     fn new(
         config: &FiberPoolConfig<'_>,
         alignment: usize,
@@ -3042,8 +3057,9 @@ impl FiberStackSlab {
             Self::initialize_metadata(metadata_region, count, slot_stride, initial_slots, elastic)?;
 
         let mut slab = Self {
-            mapping,
+            storage: FiberStackSlabStorage::VirtualCombined(mapping),
             region,
+            metadata_bytes: metadata_len,
             slot_stride,
             capacity: count,
             initial_slots,
@@ -3068,6 +3084,88 @@ impl FiberStackSlab {
         slab.initialize_slots(initial_slots)?;
         slab.apply_huge_page_policy()?;
 
+        Ok(slab)
+    }
+
+    fn from_backing(
+        config: &FiberPoolConfig<'_>,
+        alignment: usize,
+        stack_direction: ContextStackDirection,
+        stack: MemoryResourceHandle,
+        metadata: MemoryResourceHandle,
+    ) -> Result<Self, FiberError> {
+        let backing = config.stack_backing;
+        let guard_pages = config.guard_pages;
+        let count = config.max_fibers_per_carrier;
+        let growth_chunk = config.growth_chunk;
+        let growth = config.growth;
+        let telemetry = config.telemetry;
+        let huge_pages = config.huge_pages;
+        if count == 0
+            || growth_chunk == 0
+            || growth_chunk > count
+            || alignment == 0
+            || !alignment.is_power_of_two()
+        {
+            return Err(FiberError::invalid());
+        }
+        if guard_pages != 0 {
+            return Err(FiberError::unsupported());
+        }
+        if matches!(backing, FiberStackBacking::Elastic { .. }) {
+            return Err(FiberError::unsupported());
+        }
+        if !matches!(huge_pages, HugePagePolicy::Disabled) {
+            return Err(FiberError::unsupported());
+        }
+
+        let stack_region = unsafe { stack.view().raw_region() };
+        let metadata_region = unsafe { metadata.view().raw_region() };
+        let (slot_stride, backing) =
+            Self::build_backing(backing, 0, 1, alignment, stack_direction)?;
+        let total = slot_stride
+            .checked_mul(count)
+            .ok_or_else(FiberError::resource_exhausted)?;
+        if stack_region.len < total {
+            return Err(FiberError::resource_exhausted());
+        }
+        let elastic = matches!(backing, FiberStackBackingState::Elastic { .. });
+        let metadata_len = Self::metadata_bytes(count, elastic, 1)?;
+        if metadata_region.len < metadata_len {
+            return Err(FiberError::resource_exhausted());
+        }
+        let initial_slots = match growth {
+            GreenGrowth::Fixed => count,
+            GreenGrowth::OnDemand => count.min(growth_chunk),
+        };
+        let (header, state, elastic_metadata) =
+            Self::initialize_metadata(metadata_region, count, slot_stride, initial_slots, elastic)?;
+
+        let mut slab = Self {
+            storage: FiberStackSlabStorage::Explicit { stack, metadata },
+            region: stack_region,
+            metadata_bytes: metadata_len,
+            slot_stride,
+            capacity: count,
+            initial_slots,
+            chunk_size: growth_chunk,
+            growth,
+            telemetry,
+            huge_pages,
+            stack_direction,
+            backing: match backing {
+                FiberStackBackingState::Fixed(layout) => FiberStackBackingState::Fixed(layout),
+                FiberStackBackingState::Elastic { layout, .. } => FiberStackBackingState::Elastic {
+                    layout,
+                    metadata: elastic_metadata.ok_or_else(FiberError::invalid)?,
+                },
+            },
+            peak_used_bytes: AtomicUsize::new(0),
+            state: SyncMutex::new(state),
+        };
+        debug_assert_eq!(header.capacity, count);
+        debug_assert_eq!(header.slot_stride, slot_stride);
+        slab.initialize_slots(initial_slots)?;
         Ok(slab)
     }
 
@@ -3233,10 +3331,14 @@ impl FiberStackSlab {
             stack_direction: self.stack_direction,
         };
         let telemetry = self.telemetry;
+        let use_mem_protect = self.storage_uses_mem_protect();
         match &mut self.backing {
-            FiberStackBackingState::Fixed(layout) => {
-                Self::initialize_fixed_slots(region_layout, *layout, committed_slots)
-            }
+            FiberStackBackingState::Fixed(layout) => Self::initialize_fixed_slots(
+                region_layout,
+                use_mem_protect,
+                *layout,
+                committed_slots,
+            ),
             FiberStackBackingState::Elastic { layout, metadata } => Self::initialize_elastic_slots(
                 region_layout,
                 telemetry,
@@ -3276,9 +3378,13 @@ impl FiberStackSlab {
 
     fn initialize_fixed_slots(
         region_layout: FiberStackRegionLayout,
+        use_mem_protect: bool,
         layout: FixedStackLayout,
         committed_slots: usize,
     ) -> Result<(), FiberError> {
+        if !use_mem_protect {
+            return Ok(());
+        }
         let memory = system_mem();
         for slot_index in 0..region_layout.capacity.min(committed_slots) {
             let slot = Self::slot_region_from(
@@ -3626,7 +3732,6 @@ impl FiberStackSlab {
     }
 
     const fn memory_footprint(&self) -> FiberStackMemoryFootprint {
-        let metadata_bytes = self.region.base.get() - self.mapping.base.get();
         let usable_stack_bytes = match &self.backing {
             FiberStackBackingState::Fixed(layout) => {
                 layout.usable_size.saturating_mul(self.capacity)
@@ -3639,7 +3744,7 @@ impl FiberStackSlab {
             total_capacity: self.capacity,
             reserved_stack_bytes: self.region.len,
             usable_stack_bytes,
-            metadata_bytes,
+            metadata_bytes: self.metadata_bytes,
         }
     }
 
@@ -3777,6 +3882,9 @@ impl FiberStackSlab {
     fn initialize_slot(&self, slot_index: usize) -> Result<(), FiberError> {
         match &self.backing {
             FiberStackBackingState::Fixed(layout) => {
+                if !self.storage_uses_mem_protect() {
+                    return Ok(());
+                }
                 let memory = system_mem();
                 let usable = self.fixed_usable_region(slot_index, *layout)?;
                 unsafe { memory.protect(usable, Protect::READ | Protect::WRITE) }
@@ -3966,7 +4074,15 @@ impl Drop for FiberStackSlab {
             }
             let _ = unregister_elastic_stack_metadata(metadata.as_slice());
         }
-        let _ = unsafe { system_mem().unmap(self.mapping) };
+        match &mut self.storage {
+            FiberStackSlabStorage::VirtualCombined(mapping) => {
+                let _ = unsafe { system_mem().unmap(*mapping) };
+            }
+            FiberStackSlabStorage::Explicit { stack, metadata } => {
+                let _ = stack.resolved();
+                let _ = metadata.resolved();
+            }
+        }
     }
 }
 
@@ -6378,9 +6494,20 @@ impl Drop for GreenPoolMetadata {
 }
 
 #[repr(C)]
+#[derive(Debug)]
+enum GreenPoolControlBacking {
+    VirtualCachedRegion(Region),
+    Owned {
+        control: MemoryResourceHandle,
+        metadata: MemoryResourceHandle,
+    },
+}
+
+#[repr(C)]
 struct GreenPoolControlBlock {
     header: SharedHeader,
     region: Region,
+    backing: ManuallyDrop<GreenPoolControlBacking>,
     metadata: ManuallyDrop<GreenPoolMetadata>,
     inner: GreenPoolInner,
 }
@@ -6424,6 +6551,40 @@ impl GreenPoolLease {
             ptr.as_ptr().write(GreenPoolControlBlock {
                 header: SharedHeader::new(),
                 region,
+                backing: ManuallyDrop::new(GreenPoolControlBacking::VirtualCachedRegion(region)),
+                metadata: ManuallyDrop::new(metadata),
+                inner,
+            });
+        }
+        Ok(Self { ptr })
+    }
+
+    fn new_with_backing(
+        control: MemoryResourceHandle,
+        metadata_resource: MemoryResourceHandle,
+        inner: GreenPoolInner,
+        metadata: GreenPoolMetadata,
+    ) -> Result<Self, FiberError> {
+        let region = unsafe { control.view().raw_region() };
+        if region.len < size_of::<GreenPoolControlBlock>()
+            || !region
+                .base
+                .get()
+                .is_multiple_of(align_of::<GreenPoolControlBlock>())
+        {
+            return Err(FiberError::invalid());
+        }
+
+        let ptr = core::ptr::NonNull::new(region.base.cast::<GreenPoolControlBlock>())
+            .ok_or_else(FiberError::invalid)?;
+        unsafe {
+            ptr.as_ptr().write(GreenPoolControlBlock {
+                header: SharedHeader::new(),
+                region,
+                backing: ManuallyDrop::new(GreenPoolControlBacking::Owned {
+                    control,
+                    metadata: metadata_resource,
+                }),
                 metadata: ManuallyDrop::new(metadata),
                 inner,
             });
@@ -6487,10 +6648,20 @@ unsafe fn destroy_green_pool_block(block: *mut GreenPoolControlBlock) {
     unsafe {
         ptr::drop_in_place(addr_of_mut!((*block).inner));
         let metadata = ManuallyDrop::take(&mut (*block).metadata);
+        let backing = ManuallyDrop::take(&mut (*block).backing);
         let region = (*block).region;
         drop(metadata);
-        if !cache_green_runtime_region(region).unwrap_or(false) {
-            let _ = system_mem().unmap(region);
+        match backing {
+            GreenPoolControlBacking::VirtualCachedRegion(cached_region) => {
+                debug_assert_eq!(cached_region, region);
+                if !cache_green_runtime_region(region).unwrap_or(false) {
+                    let _ = system_mem().unmap(region);
+                }
+            }
+            GreenPoolControlBacking::Owned { control, metadata } => {
+                let _ = control.resolved();
+                let _ = metadata.resolved();
+            }
         }
     }
 }
@@ -7497,6 +7668,41 @@ fn drive_current_pool_once(inner: &GreenPoolLease) -> Result<bool, FiberError> {
     Ok(true)
 }
 
+/// Backing request for one current-thread fiber-pool storage domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FiberPoolBackingRequest {
+    /// Minimum bytes the backing resource should expose for this domain.
+    pub bytes: usize,
+    /// Maximum alignment this domain may honestly require.
+    pub align: usize,
+}
+
+/// Explicit backing plan for one current-thread fiber pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CurrentFiberPoolBackingPlan {
+    /// Control block backing.
+    pub control: FiberPoolBackingRequest,
+    /// Green runtime metadata backing.
+    pub runtime_metadata: FiberPoolBackingRequest,
+    /// Fiber stack-slab metadata backing.
+    pub stack_metadata: FiberPoolBackingRequest,
+    /// Fiber stack payload backing.
+    pub stacks: FiberPoolBackingRequest,
+}
+
+/// Explicit backing resources for one current-thread fiber pool.
+#[derive(Debug)]
+pub struct CurrentFiberPoolBacking {
+    /// Control block resource.
+    pub control: MemoryResourceHandle,
+    /// Green runtime metadata resource.
+    pub runtime_metadata: MemoryResourceHandle,
+    /// Fiber stack-slab metadata resource.
+    pub stack_metadata: MemoryResourceHandle,
+    /// Fiber stack payload resource.
+    pub stacks: MemoryResourceHandle,
+}
+
 /// Public current-thread fiber pool wrapper for manual same-thread driving.
 #[derive(Debug)]
 pub struct CurrentFiberPool {
@@ -7505,6 +7711,80 @@ pub struct CurrentFiberPool {
 }
 
 impl CurrentFiberPool {
+    /// Returns the explicit backing plan for one manually-driven current-thread fiber pool.
+    ///
+    /// This plan is currently honest for the legacy single-slab stack configuration. Class-backed
+    /// current-thread pools still use the older hosted-style construction path and are rejected
+    /// here until their backing domains are split out properly.
+    pub fn backing_plan(
+        config: &FiberPoolConfig<'_>,
+    ) -> Result<CurrentFiberPoolBackingPlan, FiberError> {
+        let support = FiberSystem::new().support();
+        if !support.context.caps.contains(ContextCaps::MAKE)
+            || !support.context.caps.contains(ContextCaps::SWAP)
+        {
+            return Err(FiberError::unsupported());
+        }
+        if support.context.guard_required && config.guard_pages == 0 {
+            return Err(FiberError::invalid());
+        }
+        let task_capacity_per_carrier = config.task_capacity_per_carrier()?;
+        if config.growth_chunk == 0 || task_capacity_per_carrier == 0 {
+            return Err(FiberError::invalid());
+        }
+        if !config.uses_classes() && config.growth_chunk > config.max_fibers_per_carrier {
+            return Err(FiberError::invalid());
+        }
+        if matches!(config.scheduling, GreenScheduling::WorkStealing) {
+            return Err(FiberError::unsupported());
+        }
+        if !config.classes.is_empty() {
+            return Err(FiberError::unsupported());
+        }
+        if config.guard_pages != 0 {
+            return Err(FiberError::unsupported());
+        }
+
+        let alignment = support.context.min_stack_alignment.max(16);
+        let (slot_stride, _) = FiberStackSlab::build_backing(
+            config.stack_backing,
+            0,
+            1,
+            alignment,
+            support.context.stack_direction,
+        )?;
+        let stacks = FiberPoolBackingRequest {
+            bytes: slot_stride
+                .checked_mul(config.max_fibers_per_carrier)
+                .ok_or_else(FiberError::resource_exhausted)?,
+            align: alignment,
+        };
+        let stack_metadata = FiberPoolBackingRequest {
+            bytes: FiberStackSlab::metadata_bytes(config.max_fibers_per_carrier, false, 1)?,
+            align: align_of::<FiberStackSlabHeader>(),
+        };
+        let runtime_metadata = FiberPoolBackingRequest {
+            bytes: GreenPoolMetadata::metadata_bytes(
+                1,
+                config.max_fibers_per_carrier,
+                config.scheduling,
+                false,
+                green_pool_metadata_alignment(),
+            )?,
+            align: green_pool_metadata_alignment(),
+        };
+        let control = FiberPoolBackingRequest {
+            bytes: size_of::<GreenPoolControlBlock>(),
+            align: align_of::<GreenPoolControlBlock>(),
+        };
+        Ok(CurrentFiberPoolBackingPlan {
+            control,
+            runtime_metadata,
+            stack_metadata,
+            stacks,
+        })
+    }
+
     /// Creates one manually-driven current-thread fiber pool with one carrier.
     ///
     /// # Errors
@@ -7554,6 +7834,85 @@ impl CurrentFiberPool {
 
         let inner = GreenPoolLease::new(
             runtime_region,
+            GreenPoolInner {
+                support,
+                scheduling: config.scheduling,
+                capacity_policy: config.capacity_policy,
+                yield_budget_supported: yield_budget_enforcement_supported(),
+                #[cfg(feature = "std")]
+                yield_budget_policy: config.yield_budget_policy,
+                shutdown: AtomicBool::new(false),
+                client_refs: AtomicUsize::new(1),
+                active: AtomicUsize::new(0),
+                next_id: AtomicUsize::new(1),
+                next_carrier: AtomicUsize::new(0),
+                carriers,
+                tasks,
+                stacks,
+                #[cfg(feature = "std")]
+                yield_budget_runtime: GreenYieldBudgetRuntime::new(1),
+            },
+            pool_metadata,
+        )?;
+        inner.tasks.initialize_owner(inner.as_ptr());
+        Ok(Self {
+            inner,
+            _not_send_sync: PhantomData,
+        })
+    }
+
+    /// Creates one manually-driven current-thread fiber pool from explicit backing resources.
+    ///
+    /// This path is the bare-metal honest constructor: caller-owned backing comes in from the
+    /// board/application side, and the runtime consumes it without asking the platform for a
+    /// surprise mapping. The current implementation covers the legacy single-slab stack shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest configuration, resource-shape, or bootstrap failure.
+    pub fn from_backing(
+        config: &FiberPoolConfig<'_>,
+        backing: CurrentFiberPoolBacking,
+    ) -> Result<Self, FiberError> {
+        let support = FiberSystem::new().support();
+        if !support.context.caps.contains(ContextCaps::MAKE)
+            || !support.context.caps.contains(ContextCaps::SWAP)
+        {
+            return Err(FiberError::unsupported());
+        }
+        if support.context.guard_required && config.guard_pages == 0 {
+            return Err(FiberError::invalid());
+        }
+        if matches!(config.scheduling, GreenScheduling::WorkStealing) {
+            return Err(FiberError::unsupported());
+        }
+        if !config.classes.is_empty() || config.guard_pages != 0 {
+            return Err(FiberError::unsupported());
+        }
+
+        let alignment = support.context.min_stack_alignment.max(16);
+        let stacks = FiberStackStore::Legacy(FiberStackSlab::from_backing(
+            config,
+            alignment,
+            support.context.stack_direction,
+            backing.stacks,
+            backing.stack_metadata,
+        )?);
+        let task_capacity = stacks.total_capacity();
+        let metadata_region = unsafe { backing.runtime_metadata.view().raw_region() };
+        let (pool_metadata, tasks, carriers) = GreenPoolMetadata::new_in_region(
+            metadata_region,
+            1,
+            task_capacity,
+            config.scheduling,
+            config.priority_age_cap,
+            false,
+            true,
+        )?;
+
+        let inner = GreenPoolLease::new_with_backing(
+            backing.control,
+            backing.runtime_metadata,
             GreenPoolInner {
                 support,
                 scheduling: config.scheduling,
@@ -9620,6 +9979,7 @@ pub type FiberHandle<T = ()> = GreenHandle<T>;
 mod tests {
     use super::*;
     use crate::sync::Mutex as FusionMutex;
+    use fusion_sys::mem::resource::{ResourceRequest, VirtualMemoryResource};
     use std::sync::{Arc, Mutex as StdMutex, OnceLock as StdOnceLock};
     use std::vec::Vec;
 
@@ -11295,6 +11655,60 @@ mod tests {
         fibers
             .shutdown()
             .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn current_fiber_pool_from_explicit_backing_runs_task() {
+        let config =
+            FiberPoolConfig::fixed(NonZeroUsize::new(8 * 1024).expect("non-zero stack"), 2)
+                .with_guard_pages(0);
+        let plan = CurrentFiberPool::backing_plan(&config).expect("backing plan should build");
+        let backing = CurrentFiberPoolBacking {
+            control: MemoryResourceHandle::from(
+                VirtualMemoryResource::create(&ResourceRequest::anonymous_private(
+                    plan.control.bytes,
+                ))
+                .expect("control resource should build"),
+            ),
+            runtime_metadata: MemoryResourceHandle::from(
+                VirtualMemoryResource::create(&ResourceRequest::anonymous_private(
+                    plan.runtime_metadata.bytes,
+                ))
+                .expect("runtime metadata resource should build"),
+            ),
+            stack_metadata: MemoryResourceHandle::from(
+                VirtualMemoryResource::create(&ResourceRequest::anonymous_private(
+                    plan.stack_metadata.bytes,
+                ))
+                .expect("stack metadata resource should build"),
+            ),
+            stacks: MemoryResourceHandle::from(
+                VirtualMemoryResource::create(&ResourceRequest::anonymous_private(
+                    plan.stacks.bytes,
+                ))
+                .expect("stack resource should build"),
+            ),
+        };
+        let fibers = CurrentFiberPool::from_backing(&config, backing)
+            .expect("current fiber pool should build from explicit backing");
+
+        let task = fibers
+            .spawn(|| -> Result<u32, FiberError> {
+                yield_now()?;
+                Ok(11)
+            })
+            .expect("yielding task should spawn");
+
+        assert_eq!(
+            task.join()
+                .expect("current-thread join should drive the explicit-backed pool")
+                .expect("task should complete without runtime failure"),
+            11
+        );
+
+        fibers
+            .shutdown()
+            .expect("explicit-backed current fiber pool should shut down cleanly");
     }
 
     #[test]

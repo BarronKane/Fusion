@@ -23,4 +23,4 @@ log_path = "./logs"
 
 [default.gdb]
 enabled = false
-gdb_connection_string = "127.0.0.1:2345"
+gdb_connection_string = "[::1]:2345"

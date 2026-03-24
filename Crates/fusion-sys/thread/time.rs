@@ -8,6 +8,9 @@ use core::convert::TryFrom;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 
+use crate::event::EventRegistration;
+#[cfg(feature = "sys-cortex-m")]
+use crate::event::{EventInterest, EventRegistrationMode, cortex_m::CortexMIrqSource};
 use bitflags::bitflags;
 
 use super::{
@@ -93,6 +96,38 @@ pub struct MonotonicDeadlineWaitSupport {
     pub tick_hz: Option<u64>,
     /// Maximum truthful relative wait the source can admit, when one finite bound exists.
     pub max_relative_timeout: Option<Duration>,
+}
+
+impl MonotonicDeadlineWaitSupport {
+    /// Returns the typed Cortex-M IRQ source backing this deadline wait when one exists.
+    #[cfg(feature = "sys-cortex-m")]
+    #[must_use]
+    pub const fn cortex_m_irq_source(self) -> Option<CortexMIrqSource> {
+        match self.kind {
+            MonotonicDeadlineWaitKind::ReservedOneShotAlarm => match self.irqn {
+                Some(irqn) => Some(CortexMIrqSource::new(irqn)),
+                None => None,
+            },
+            MonotonicDeadlineWaitKind::RelativeSleep => None,
+        }
+    }
+
+    /// Returns one recommended event registration for this deadline-wait source when the platform
+    /// can surface it honestly as one event source.
+    #[must_use]
+    pub const fn registration(self) -> Option<EventRegistration> {
+        #[cfg(feature = "sys-cortex-m")]
+        {
+            if let Some(source) = self.cortex_m_irq_source() {
+                return Some(source.registration(
+                    EventInterest::READABLE,
+                    EventRegistrationMode::LevelAckOnPoll,
+                ));
+            }
+        }
+
+        None
+    }
 }
 
 /// Internal raw monotonic timestamp used on hot scheduler paths.
@@ -221,6 +256,16 @@ impl MonotonicRuntimeTimeSupport {
             tick_hz,
             canonicalization,
             deadline_wait,
+        }
+    }
+
+    /// Returns one recommended event registration for the selected deadline-wait source when the
+    /// backend can surface that source honestly as one event.
+    #[must_use]
+    pub const fn deadline_wait_registration(self) -> Option<EventRegistration> {
+        match self.deadline_wait {
+            Some(deadline_wait) => deadline_wait.registration(),
+            None => None,
         }
     }
 }

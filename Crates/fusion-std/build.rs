@@ -744,7 +744,20 @@ fn render_generated_async_poll_stack_entries(entries: &[GeneratedAsyncPollStackE
         rendered.push_str(",\n");
         rendered.push_str("    },\n");
     }
-    rendered.push_str("];\n");
+    rendered.push_str("];\n\n");
+
+    for entry in entries {
+        if !generated_contract_type_is_nameable(&entry.type_name) {
+            continue;
+        }
+        rendered.push_str("impl GeneratedExplicitAsyncPollStackContract for ");
+        rendered.push_str(&render_type_path(&entry.type_name));
+        rendered.push_str(" {\n");
+        rendered.push_str("    const POLL_STACK_BYTES: usize = ");
+        rendered.push_str(&entry.poll_stack_bytes.to_string());
+        rendered.push_str(";\n");
+        rendered.push_str("}\n\n");
+    }
     rendered
 }
 
@@ -816,5 +829,30 @@ mod tests {
         assert_eq!(merged[0].poll_stack_bytes, 1024);
         assert_eq!(merged[1].type_name, "crate::future::B");
         assert_eq!(merged[1].poll_stack_bytes, 768);
+    }
+
+    #[test]
+    fn render_generated_async_poll_stack_entries_emits_trait_impls_for_nameable_types() {
+        let rendered = render_generated_async_poll_stack_entries(&[
+            GeneratedAsyncPollStackEntry {
+                type_name:
+                    "fusion_std::thread::executor::GeneratedAsyncPollStackMetadataAnchorFuture"
+                        .to_owned(),
+                poll_stack_bytes: 1536,
+            },
+            GeneratedAsyncPollStackEntry {
+                type_name: "fusion_example_pico::main::{{closure}}".to_owned(),
+                poll_stack_bytes: 1024,
+            },
+        ]);
+
+        assert!(rendered.contains("const GENERATED_ASYNC_POLL_STACK_TASKS"));
+        assert!(rendered.contains(
+            "impl GeneratedExplicitAsyncPollStackContract for crate::thread::executor::GeneratedAsyncPollStackMetadataAnchorFuture"
+        ));
+        assert!(rendered.contains("const POLL_STACK_BYTES: usize = 1536;"));
+        assert!(!rendered.contains(
+            "impl GeneratedExplicitAsyncPollStackContract for ::fusion_example_pico::main::{{closure}}"
+        ));
     }
 }

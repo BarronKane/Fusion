@@ -2,6 +2,8 @@
 
 use core::time::Duration;
 
+use fusion_pal::pal::mem::{MemBase, MemCatalog};
+use fusion_pal::sys::mem::{MemBackingCaps, MemCaps, MemCatalogCaps, system_mem};
 use fusion_pal::sys::thread::{PlatformThread, system_thread as pal_system_thread};
 
 use super::{
@@ -22,6 +24,58 @@ use super::{
 };
 use crate::thread::handle::ThreadHandle;
 
+/// Preferred runtime-backing realization reported by PAL/sys truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeBackingPreference {
+    /// The platform can readily plant runtime backing through its native virtual-memory story.
+    PlatformAcquired,
+    /// The platform should be bootstrapped from explicit caller-owned or board-owned regions.
+    ExplicitBound,
+    /// Both are plausible; higher layers should choose deliberately instead of guessing.
+    Mixed,
+}
+
+/// Coarse runtime-construction truth surfaced from PAL/sys memory capabilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RuntimeConstructionSupport {
+    /// `true` when the platform can actively acquire anonymous/runtime backing on demand.
+    pub can_acquire_runtime_backing: bool,
+    /// `true` when explicit pre-existing/bound regions are a first-class construction story.
+    pub can_bind_explicit_backing: bool,
+    /// `true` when PAL/sys can inventory owned memory regions that already exist on the machine.
+    pub can_inventory_owned_regions: bool,
+    /// Preferred backing realization for truthful runtime bootstrap on this platform.
+    pub preferred_backing: RuntimeBackingPreference,
+}
+
+/// Returns the coarse runtime-construction truth for the active platform.
+#[must_use]
+pub fn system_runtime_construction_support() -> RuntimeConstructionSupport {
+    let mem = system_mem();
+    let support = mem.support();
+    let catalog = mem.catalog_support();
+    let can_acquire_runtime_backing = support.caps.contains(MemCaps::MAP_ANON)
+        && support
+            .backings
+            .intersects(MemBackingCaps::ANON_PRIVATE | MemBackingCaps::ANON_SHARED);
+    let can_inventory_owned_regions = catalog.caps.contains(MemCatalogCaps::RESOURCE_INVENTORY);
+    let can_bind_explicit_backing =
+        can_inventory_owned_regions || support.backings.contains(MemBackingCaps::BORROWED);
+    let preferred_backing = match (can_acquire_runtime_backing, can_bind_explicit_backing) {
+        (true, false) => RuntimeBackingPreference::PlatformAcquired,
+        (false, true) => RuntimeBackingPreference::ExplicitBound,
+        (true, true) => RuntimeBackingPreference::Mixed,
+        (false, false) => RuntimeBackingPreference::ExplicitBound,
+    };
+
+    RuntimeConstructionSupport {
+        can_acquire_runtime_backing,
+        can_bind_explicit_backing,
+        can_inventory_owned_regions,
+        preferred_backing,
+    }
+}
+
 /// fusion-sys thread provider wrapper around the selected fusion-pal backend.
 #[derive(Debug, Clone, Copy)]
 pub struct ThreadSystem {
@@ -41,6 +95,12 @@ impl ThreadSystem {
     #[must_use]
     pub fn support(&self) -> ThreadSupport {
         fusion_pal::sys::thread::ThreadBase::support(&self.inner)
+    }
+
+    /// Returns the coarse runtime-construction truth for the active platform.
+    #[must_use]
+    pub fn runtime_construction_support(&self) -> RuntimeConstructionSupport {
+        system_runtime_construction_support()
     }
 
     /// Spawns a thread using the raw fusion-pal-level entry signature.

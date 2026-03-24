@@ -3,7 +3,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration as StdDuration, Instant};
 
 use object::{Object, ObjectSegment};
 
@@ -20,6 +22,7 @@ const UF2_PAYLOAD_SIZE: usize = 256;
 const UF2_FAMILY_RP2XXX_ABSOLUTE: u32 = 0xe48b_ff57;
 const UF2_FAMILY_RP2350_ARM_S: u32 = 0xe48b_ff59;
 const DEFAULT_PROBE_CHIP: &str = "RP235x";
+const DEFAULT_GDB_CONNECTION_STRING: &str = "[::1]:2345";
 const PROBE_CHIP_ENV: &str = "FUSION_PICO_PROBE_CHIP";
 const PROBE_SELECTOR_ENV: &str = "FUSION_PICO_PROBE_SELECTOR";
 
@@ -54,6 +57,10 @@ fn try_main() -> Result<(), String> {
             let options = CommandOptions::parse(args)?;
             run_probe_rs("attach", &options)?;
         }
+        "debug-server" => {
+            let options = CommandOptions::parse(args)?;
+            run_debug_server(&options)?;
+        }
         "help" | "--help" | "-h" => {
             println!("{}", usage());
         }
@@ -69,12 +76,14 @@ fn usage() -> String {
          cargo pico-uf2 -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--family FAMILY] [--output-dir DIR]\n  \
          cargo pico-flash -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] --chip CHIP [--probe SELECTOR]\n  \
          cargo pico-run -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] --chip CHIP [--probe SELECTOR]\n  \
-         cargo pico-attach -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] --chip CHIP [--probe SELECTOR]\n\n\
+         cargo pico-attach -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] --chip CHIP [--probe SELECTOR]\n  \
+         cargo pico-debug-server -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--gdb-connection-string HOST:PORT] [--detach] [--output-dir DIR] --chip CHIP [--probe SELECTOR]\n\n\
          defaults:\n  \
          manifest-path = {DEFAULT_MANIFEST_PATH}\n  \
          target = {DEFAULT_TARGET}\n  \
          bin = {DEFAULT_BIN}\n  \
-         family = rp2xxx-absolute\n\n\
+         family = rp2xxx-absolute\n  \
+         gdb-connection-string = {DEFAULT_GDB_CONNECTION_STRING}\n\n\
          environment:\n  \
          {PROBE_CHIP_ENV}=chip-name for probe-rs wrappers (defaults to {DEFAULT_PROBE_CHIP})\n  \
          {PROBE_SELECTOR_ENV}=probe selector passed through to probe-rs"
@@ -120,6 +129,8 @@ struct CommandOptions {
     bin_name: String,
     release: bool,
     family: Uf2Family,
+    gdb_connection_string: String,
+    detach: bool,
     output_dir: Option<PathBuf>,
     chip: Option<String>,
     probe: Option<String>,
@@ -133,6 +144,8 @@ impl Default for CommandOptions {
             bin_name: DEFAULT_BIN.to_owned(),
             release: false,
             family: Uf2Family::Rp2xxxAbsolute,
+            gdb_connection_string: DEFAULT_GDB_CONNECTION_STRING.to_owned(),
+            detach: false,
             output_dir: None,
             chip: None,
             probe: None,
@@ -160,6 +173,11 @@ impl CommandOptions {
                 "--family" => {
                     options.family = Uf2Family::from_str(&next_value(&mut args, "--family")?)?;
                 }
+                "--gdb-connection-string" => {
+                    options.gdb_connection_string =
+                        next_value(&mut args, "--gdb-connection-string")?;
+                }
+                "--detach" => options.detach = true,
                 "--output-dir" => {
                     options.output_dir =
                         Some(PathBuf::from(next_value(&mut args, "--output-dir")?));
@@ -328,6 +346,113 @@ fn run_probe_rs(subcommand: &str, options: &CommandOptions) -> Result<(), String
     command.arg(&elf_path);
     run_command(&mut command, "probe-rs")?;
     Ok(())
+}
+
+fn run_debug_server(options: &CommandOptions) -> Result<(), String> {
+    build_example_elf(options)?;
+    let chip = options.resolve_chip();
+    let elf_path = options.elf_path()?;
+
+    let mut flash = Command::new("probe-rs");
+    flash.arg("download");
+    flash.arg("--chip").arg(&chip);
+    if let Some(probe) = options.resolve_probe_selector() {
+        flash.arg("--probe").arg(probe);
+    }
+    flash.arg(&elf_path);
+    run_command(&mut flash, "probe-rs")?;
+
+    println!("ELF : {}", elf_path.display());
+    println!("LLDB: connect://{}", options.gdb_connection_string);
+
+    if options.detach {
+        let output_dir = options.output_dir()?;
+        fs::create_dir_all(&output_dir)
+            .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
+        let log_path = output_dir.join(format!("{}-debug-server.log", options.bin_name));
+        let pid_path = output_dir.join(format!("{}-debug-server.pid", options.bin_name));
+        let log_file = fs::File::create(&log_path)
+            .map_err(|error| format!("failed to create {}: {error}", log_path.display()))?;
+        let stderr_file = log_file
+            .try_clone()
+            .map_err(|error| format!("failed to clone {}: {error}", log_path.display()))?;
+
+        let mut command = Command::new("probe-rs");
+        command.arg("gdb");
+        command.arg("--chip").arg(&chip);
+        command
+            .arg("--gdb-connection-string")
+            .arg(&options.gdb_connection_string);
+        command.arg("--reset-halt");
+        if let Some(probe) = options.resolve_probe_selector() {
+            command.arg("--probe").arg(probe);
+        }
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::from(log_file));
+        command.stderr(Stdio::from(stderr_file));
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("failed to launch detached probe-rs gdb: {error}"))?;
+        fs::write(&pid_path, format!("{}\n", child.id()))
+            .map_err(|error| format!("failed to write {}: {error}", pid_path.display()))?;
+
+        wait_for_debug_server(&options.gdb_connection_string, &mut child, &log_path)?;
+
+        println!("PID : {}", child.id());
+        println!("LOG : {}", log_path.display());
+        println!("PIDF: {}", pid_path.display());
+        return Ok(());
+    }
+
+    let mut command = Command::new("probe-rs");
+    command.arg("gdb");
+    command.arg("--chip").arg(chip);
+    command
+        .arg("--gdb-connection-string")
+        .arg(&options.gdb_connection_string);
+    command.arg("--reset-halt");
+    if let Some(probe) = options.resolve_probe_selector() {
+        command.arg("--probe").arg(probe);
+    }
+    run_command(&mut command, "probe-rs")?;
+    Ok(())
+}
+
+fn wait_for_debug_server(
+    connection_string: &str,
+    child: &mut std::process::Child,
+    log_path: &Path,
+) -> Result<(), String> {
+    let deadline = Instant::now() + StdDuration::from_secs(5);
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("failed to poll detached debug server: {error}"))?
+        {
+            return Err(format!(
+                "detached debug server exited early with {status}; see {}",
+                log_path.display()
+            ));
+        }
+
+        let log_contents = fs::read_to_string(log_path).unwrap_or_default();
+        if log_contents.contains("Firing up GDB stub") {
+            // The probe-rs stub exits if a TCP client connects and disconnects without speaking
+            // GDB remote. Poll the log instead of touching the socket during readiness checks.
+            thread::sleep(StdDuration::from_millis(150));
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for detached debug server at {connection_string}; see {}",
+                log_path.display()
+            ));
+        }
+
+        thread::sleep(StdDuration::from_millis(50));
+    }
 }
 
 fn build_example_elf(options: &CommandOptions) -> Result<(), String> {

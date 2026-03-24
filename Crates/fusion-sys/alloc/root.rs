@@ -8,6 +8,7 @@ use crate::mem::resource::{
     MemoryResource,
     MemoryResourceHandle,
     ResourceInfo,
+    ResourceRange,
     ResourceRequest,
     VirtualMemoryResource,
 };
@@ -28,9 +29,11 @@ use super::{
     Immortal,
     MemoryPool,
     MemoryPoolContributor,
+    MemoryPoolExtentRequest,
     MemoryPoolPolicy,
     PoolHandle,
     Slab,
+    pool_control_backing_request,
 };
 
 #[derive(Debug)]
@@ -177,6 +180,59 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         builder.policy(AllocPolicy::general_purpose());
         builder.add_resource(MemoryResourceHandle::from(resource))?;
         builder.build()
+    }
+
+    /// Creates one allocator root over one already-realized resource with one explicit policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when allocator metadata is exhausted or the supplied resource cannot be
+    /// admitted honestly.
+    pub fn from_resource_with_policy(
+        handle: MemoryResourceHandle,
+        policy: AllocPolicy,
+    ) -> Result<Self, AllocError> {
+        let mut builder = Self::builder();
+        builder.policy(policy);
+        builder.add_resource(handle)?;
+        builder.build()
+    }
+
+    /// Creates one allocator root over one already-realized resource using the general-purpose
+    /// allocator policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when allocator metadata is exhausted or the supplied resource cannot be
+    /// admitted honestly.
+    pub fn from_resource(handle: MemoryResourceHandle) -> Result<Self, AllocError> {
+        Self::from_resource_with_policy(handle, AllocPolicy::general_purpose())
+    }
+
+    /// Returns the minimum resource request needed to host one allocator-managed pool extent on
+    /// one owned resource, including allocator control metadata stored in-band on that resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied extent request or the allocator control shape cannot be
+    /// represented honestly.
+    pub fn resource_request_for_extent_request(
+        request: MemoryPoolExtentRequest,
+    ) -> Result<MemoryPoolExtentRequest, AllocError> {
+        let control = pool_control_backing_request::<RESOURCES, EXTENTS>()?;
+        let bytes = control
+            .provisioning_len()
+            .ok_or_else(AllocError::invalid_request)?
+            .checked_add(
+                request
+                    .provisioning_len()
+                    .ok_or_else(AllocError::invalid_request)?,
+            )
+            .ok_or_else(AllocError::invalid_request)?;
+        Ok(MemoryPoolExtentRequest {
+            len: bytes,
+            align: control.align.max(request.align),
+        })
     }
 
     /// Returns the allocator-wide policy.
@@ -622,6 +678,7 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             let mut pool_builder =
                 MemoryPool::<RESOURCES, EXTENTS>::builder(MemoryPoolPolicy::ready_only());
             let mut contributor_count = 0;
+            let mut control_region = None;
 
             for (resource_slot, binding) in staged_resources.iter_mut().enumerate() {
                 let Some(binding_ref) = binding.as_ref() else {
@@ -638,15 +695,30 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
                     binding.domain,
                     *binding.handle.info(),
                 ));
-                pool_builder
-                    .add_contributor(MemoryPoolContributor::explicit_ready(binding.handle))?;
+                let mut contributor = MemoryPoolContributor::explicit_ready(binding.handle);
+                if control_region.is_none() {
+                    if let Some((region, usable_range)) =
+                        reserve_pool_control_region::<RESOURCES, EXTENTS>(
+                            &contributor.handle,
+                            contributor.usable_range,
+                        )?
+                    {
+                        control_region = Some(region);
+                        contributor.usable_range = usable_range;
+                    }
+                }
+                pool_builder.add_contributor(contributor)?;
                 contributor_count += 1;
             }
 
             let pool = if contributor_count == 0 {
                 None
             } else {
-                Some(PoolHandle::new(pool_builder.build()?)?)
+                let control_region = control_region.ok_or_else(AllocError::capacity_exhausted)?;
+                Some(PoolHandle::new_in_region(
+                    pool_builder.build()?,
+                    control_region,
+                )?)
             };
             domain_records[slot] = Some(AllocatorDomainRecord::new(info, pool));
         }
@@ -709,6 +781,54 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize> Default
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn reserve_pool_control_region<const RESOURCES: usize, const EXTENTS: usize>(
+    handle: &MemoryResourceHandle,
+    usable_range: ResourceRange,
+) -> Result<Option<(fusion_pal::sys::mem::Region, ResourceRange)>, AllocError> {
+    let request = pool_control_backing_request::<RESOURCES, EXTENTS>()?;
+    let reserved_len = request
+        .provisioning_len()
+        .ok_or_else(AllocError::invalid_request)?;
+    if usable_range.len <= reserved_len {
+        return Ok(None);
+    }
+
+    let view = handle
+        .subview(usable_range)
+        .map_err(|_| AllocError::invalid_request())?;
+    let start = view.base_addr().get();
+    let aligned = super::align_up(start, request.align)?;
+    let padding = aligned
+        .checked_sub(start)
+        .ok_or_else(AllocError::invalid_request)?;
+    let control_range = ResourceRange::new(
+        usable_range
+            .offset
+            .checked_add(padding)
+            .ok_or_else(AllocError::invalid_request)?,
+        request.len,
+    );
+    let control_region = handle
+        .subview(control_range)
+        .map_err(|_| AllocError::invalid_request())
+        .and_then(|view| {
+            // SAFETY: the control block lives inside the contributor resource, which remains owned
+            // by the pool for at least as long as the control block itself.
+            Ok(unsafe { view.raw_region() })
+        })?;
+    let remaining = ResourceRange::new(
+        usable_range
+            .offset
+            .checked_add(reserved_len)
+            .ok_or_else(AllocError::invalid_request)?,
+        usable_range
+            .len
+            .checked_sub(reserved_len)
+            .ok_or_else(AllocError::invalid_request)?,
+    );
+    Ok(Some((control_region, remaining)))
 }
 
 fn allocator_capabilities_for_domains<

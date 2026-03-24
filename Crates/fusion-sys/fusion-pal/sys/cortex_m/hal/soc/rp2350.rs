@@ -128,6 +128,7 @@ const CORTEX_M_NVIC_ICER: *mut u32 = 0xE000_E180 as *mut u32;
 const CORTEX_M_NVIC_ISPR: *mut u32 = 0xE000_E200 as *mut u32;
 const CORTEX_M_NVIC_ICPR: *mut u32 = 0xE000_E280 as *mut u32;
 const CORTEX_M_NVIC_IPR: *mut u8 = 0xE000_E400 as *mut u8;
+const RP2350_TICKS_BASE: usize = 0x4010_8000;
 const RP2350_TIMER0_BASE: usize = 0x400b_0000;
 const RP2350_TIMER1_BASE: usize = 0x400b_8000;
 const RP2350_IO_BANK0_BASE: usize = 0x4002_8000;
@@ -170,6 +171,12 @@ const RP2350_EVENT_TIMEOUT_IRQN: u16 = 3;
 const RP2350_EVENT_TIMEOUT_TICK_HZ: u64 = 1_000_000;
 const RP2350_EVENT_TIMEOUT_COUNTER_BITS: u32 = 32;
 const RP2350_EVENT_TIMEOUT_MAX_RELATIVE_TIMEOUT: Duration = Duration::from_micros(u32::MAX as u64);
+const RP2350_CLK_REF_HZ: u32 = 12_000_000;
+const RP2350_TIMER_TICK_CYCLES: u32 = RP2350_CLK_REF_HZ / RP2350_EVENT_TIMEOUT_TICK_HZ as u32;
+const RP2350_TICKS_TIMER0_CTRL_OFFSET: usize = 0x18;
+const RP2350_TICKS_TIMER0_CYCLES_OFFSET: usize = 0x1c;
+const RP2350_TICKS_CTRL_ENABLE: u32 = 1 << 0;
+const RP2350_TICKS_CTRL_RUNNING: u32 = 1 << 1;
 
 const RP2350_EVENT_TIMEOUT_SUPPORT: CortexMEventTimeoutSupport = CortexMEventTimeoutSupport {
     implementation: CortexMEventTimeoutImplementation::ReservedOneShotAlarm,
@@ -204,6 +211,9 @@ const RP2350_I2C_IC_CLR_INTR_OFFSET: usize = 0x40;
 const RP2350_PIO_IRQ_OFFSET: usize = 0x30;
 const RP2350_PIO_IRQ0_INTS_OFFSET: usize = 0x178;
 const RP2350_PIO_IRQ1_INTS_OFFSET: usize = 0x184;
+const RP2350_TIMER0_TICK_STATE_UNINITIALIZED: u8 = 0;
+const RP2350_TIMER0_TICK_STATE_INITIALIZING: u8 = 1;
+const RP2350_TIMER0_TICK_STATE_READY: u8 = 2;
 
 unsafe extern "C" {
     static __sheap: u8;
@@ -344,6 +354,9 @@ static RP2350_PIO_ENGINE_CLAIMS: [AtomicBool; RP2350_PIO_ENGINE_COUNT] =
     [const { AtomicBool::new(false) }; RP2350_PIO_ENGINE_COUNT];
 static RP2350_PIO_LANE_CLAIMS: [AtomicU8; RP2350_PIO_ENGINE_COUNT] =
     [const { AtomicU8::new(0) }; RP2350_PIO_ENGINE_COUNT];
+static RP2350_TIMER0_TICK_STATE: AtomicU8 =
+    AtomicU8::new(RP2350_TIMER0_TICK_STATE_UNINITIALIZED);
+static RP2350_EVENT_TIMEOUT_FIRED: AtomicBool = AtomicBool::new(false);
 
 const RP2350_PIO0_IRQ_LINES: [u16; 2] = [15, 16];
 const RP2350_PIO1_IRQ_LINES: [u16; 2] = [17, 18];
@@ -2409,7 +2422,53 @@ fn rp2350_event_timeout_deadline(timeout: Duration) -> u32 {
     now.wrapping_add(delta.max(1))
 }
 
+fn rp2350_ensure_timer0_tick_started() {
+    loop {
+        match RP2350_TIMER0_TICK_STATE.load(Ordering::Acquire) {
+            RP2350_TIMER0_TICK_STATE_READY => return,
+            RP2350_TIMER0_TICK_STATE_INITIALIZING => core::hint::spin_loop(),
+            RP2350_TIMER0_TICK_STATE_UNINITIALIZED => {
+                if RP2350_TIMER0_TICK_STATE
+                    .compare_exchange(
+                        RP2350_TIMER0_TICK_STATE_UNINITIALIZED,
+                        RP2350_TIMER0_TICK_STATE_INITIALIZING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    let timer0_ctrl =
+                        (RP2350_TICKS_BASE + RP2350_TICKS_TIMER0_CTRL_OFFSET) as *mut u32;
+                    let timer0_cycles =
+                        (RP2350_TICKS_BASE + RP2350_TICKS_TIMER0_CYCLES_OFFSET) as *mut u32;
+
+                    unsafe {
+                        ptr::write_volatile(timer0_ctrl, 0);
+                        ptr::write_volatile(timer0_cycles, RP2350_TIMER_TICK_CYCLES);
+                        ptr::write_volatile(timer0_ctrl, RP2350_TICKS_CTRL_ENABLE);
+                    }
+
+                    while unsafe { ptr::read_volatile(timer0_ctrl) } & RP2350_TICKS_CTRL_RUNNING
+                        == 0
+                    {
+                        core::hint::spin_loop();
+                    }
+
+                    RP2350_TIMER0_TICK_STATE.store(
+                        RP2350_TIMER0_TICK_STATE_READY,
+                        Ordering::Release,
+                    );
+                    return;
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 fn rp2350_monotonic_now_ticks() -> u64 {
+    rp2350_ensure_timer0_tick_started();
+
     let timer_base = RP2350_EVENT_TIMEOUT_TIMER_BASE;
     let timerawh = (timer_base + RP2350_TIMER_TIMERAWH_OFFSET) as *const u32;
     let timerawl = (timer_base + RP2350_TIMER_TIMERAWL_OFFSET) as *const u32;
@@ -2432,6 +2491,9 @@ fn rp2350_monotonic_now() -> Duration {
 }
 
 fn rp2350_arm_event_timeout(timeout: Duration) -> Result<(), HardwareError> {
+    rp2350_ensure_timer0_tick_started();
+    RP2350_EVENT_TIMEOUT_FIRED.store(false, Ordering::Release);
+
     let deadline = rp2350_event_timeout_deadline(timeout);
     let alarm_bit = 1_u32 << u32::from(RP2350_EVENT_TIMEOUT_ALARM_INDEX);
     let timer_base = RP2350_EVENT_TIMEOUT_TIMER_BASE;
@@ -2455,6 +2517,8 @@ fn rp2350_arm_event_timeout(timeout: Duration) -> Result<(), HardwareError> {
 }
 
 fn rp2350_cancel_event_timeout_alarm() -> Result<(), HardwareError> {
+    RP2350_EVENT_TIMEOUT_FIRED.store(false, Ordering::Release);
+
     let alarm_bit = 1_u32 << u32::from(RP2350_EVENT_TIMEOUT_ALARM_INDEX);
     let timer_base = RP2350_EVENT_TIMEOUT_TIMER_BASE;
     let armed = (timer_base + RP2350_TIMER_ARMED_OFFSET) as *mut u32;
@@ -2473,12 +2537,21 @@ fn rp2350_cancel_event_timeout_alarm() -> Result<(), HardwareError> {
 }
 
 fn rp2350_event_timeout_fired_now() -> bool {
+    if RP2350_EVENT_TIMEOUT_FIRED.load(Ordering::Acquire) {
+        return true;
+    }
+
     let alarm_bit = 1_u32 << u32::from(RP2350_EVENT_TIMEOUT_ALARM_INDEX);
     let ints = (RP2350_EVENT_TIMEOUT_TIMER_BASE + RP2350_TIMER_INTS_OFFSET) as *const u32;
     // SAFETY: TIMERx_INTS is a side-effect-free masked status register for the reserved backend
     // timeout alarm.
     let masked_status = unsafe { ptr::read_volatile(ints) };
     (masked_status & alarm_bit) != 0
+}
+
+fn rp2350_service_event_timeout_irq() -> Result<(), HardwareError> {
+    RP2350_EVENT_TIMEOUT_FIRED.store(true, Ordering::Release);
+    rp2350_irq_acknowledge_line(RP2350_EVENT_TIMEOUT_IRQN)
 }
 
 fn rp2350_enter_power_action(action: Rp2350PowerModeAction) {
@@ -3372,6 +3445,18 @@ pub fn cancel_event_timeout() -> Result<(), HardwareError> {
 /// Returns an error if the selected board cannot surface finite event timeouts honestly.
 pub fn event_timeout_fired() -> Result<bool, HardwareError> {
     board_contract::event_timeout_fired(system_soc())
+}
+
+/// Records and acknowledges one serviced RP2350 event-timeout interrupt.
+///
+/// This is intended for one board-owned timer IRQ handler which wakes thread-context waiters
+/// without leaving the alarm latched forever.
+///
+/// # Errors
+///
+/// Returns an error if the selected timer IRQ cannot be acknowledged on this SoC.
+pub fn service_event_timeout_irq() -> Result<(), HardwareError> {
+    rp2350_service_event_timeout_irq()
 }
 
 /// Returns whether the selected RP2350 board exposes one truthful monotonic timebase.

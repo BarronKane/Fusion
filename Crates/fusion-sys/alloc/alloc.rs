@@ -10,7 +10,7 @@
 //! while allocator surfaces are still being built so callers migrate toward the right public
 //! namespace instead of wiring themselves directly into lower plumbing.
 
-use core::mem::{ManuallyDrop, size_of};
+use core::mem::{ManuallyDrop, align_of, size_of};
 use core::ptr::NonNull;
 use fusion_pal::sys::mem::{
     Backing,
@@ -191,9 +191,15 @@ struct PoolHandleVTable {
     release: unsafe fn(NonNull<()>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PoolControlStorage {
+    DedicatedRegion(Region),
+    InBandResource,
+}
+
 struct PoolControlBlock<const MEMBERS: usize, const EXTENTS: usize> {
     header: SharedHeader,
-    region: Region,
+    storage: PoolControlStorage,
     pool: ManuallyDrop<MemoryPool<MEMBERS, EXTENTS>>,
 }
 
@@ -218,13 +224,30 @@ impl PoolHandle {
         pool: MemoryPool<MEMBERS, EXTENTS>,
     ) -> Result<Self, AllocError> {
         let region = pool_control_region::<MEMBERS, EXTENTS>()?;
+        Self::new_in_storage(pool, region, PoolControlStorage::DedicatedRegion(region))
+    }
+
+    pub(crate) fn new_in_region<const MEMBERS: usize, const EXTENTS: usize>(
+        pool: MemoryPool<MEMBERS, EXTENTS>,
+        region: Region,
+    ) -> Result<Self, AllocError> {
+        Self::new_in_storage(pool, region, PoolControlStorage::InBandResource)
+    }
+
+    fn new_in_storage<const MEMBERS: usize, const EXTENTS: usize>(
+        pool: MemoryPool<MEMBERS, EXTENTS>,
+        region: Region,
+        storage: PoolControlStorage,
+    ) -> Result<Self, AllocError> {
         if region.len < size_of::<PoolControlBlock<MEMBERS, EXTENTS>>()
             || !region
                 .base
                 .get()
                 .is_multiple_of(core::mem::align_of::<PoolControlBlock<MEMBERS, EXTENTS>>())
         {
-            let _ = unsafe { system_mem().unmap(region) };
+            if let PoolControlStorage::DedicatedRegion(region) = storage {
+                let _ = unsafe { system_mem().unmap(region) };
+            }
             return Err(AllocError::invalid_request());
         }
 
@@ -235,7 +258,7 @@ impl PoolHandle {
         unsafe {
             ptr.as_ptr().write(PoolControlBlock {
                 header: SharedHeader::new(),
-                region,
+                storage,
                 pool: ManuallyDrop::new(pool),
             });
         }
@@ -363,11 +386,14 @@ unsafe fn release_impl<const MEMBERS: usize, const EXTENTS: usize>(ptr: NonNull<
         return;
     }
     let block = ptr.cast::<PoolControlBlock<MEMBERS, EXTENTS>>().as_ptr();
+    let storage = unsafe { (*block).storage };
     // SAFETY: the final reference exclusively owns the control mapping. The pool must be dropped
     // before unmapping because its storage resides inside that mapping.
     unsafe {
         ManuallyDrop::drop(&mut (*block).pool);
-        let _ = system_mem().unmap((*block).region);
+        if let PoolControlStorage::DedicatedRegion(region) = storage {
+            let _ = system_mem().unmap(region);
+        }
     }
 }
 
@@ -451,6 +477,18 @@ fn pool_control_region<const MEMBERS: usize, const EXTENTS: usize>() -> Result<R
         })
     }
     .map_err(alloc_error_from_mem)
+}
+
+pub(crate) const fn pool_control_backing_request<const MEMBERS: usize, const EXTENTS: usize>()
+-> Result<MemoryPoolExtentRequest, AllocError> {
+    let len = size_of::<PoolControlBlock<MEMBERS, EXTENTS>>();
+    if len == 0 {
+        return Err(AllocError::invalid_request());
+    }
+    Ok(MemoryPoolExtentRequest {
+        len,
+        align: align_of::<PoolControlBlock<MEMBERS, EXTENTS>>(),
+    })
 }
 
 const fn alloc_error_from_mem(error: MemError) -> AllocError {

@@ -107,9 +107,12 @@ impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> fmt::Debug for Sl
 }
 
 impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> Slab<SIZE, COUNT, L> {
-    pub(super) fn extent_request(
-        slot_align: usize,
-    ) -> Result<super::MemoryPoolExtentRequest, AllocError> {
+    /// Returns the exact pool-extent request needed to host one slab of this shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the slab shape or alignment cannot be represented honestly.
+    pub fn extent_request(slot_align: usize) -> Result<super::MemoryPoolExtentRequest, AllocError> {
         if SIZE == 0 || COUNT == 0 {
             return Err(AllocError::invalid_request());
         }

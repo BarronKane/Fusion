@@ -12,6 +12,7 @@ use std::hint::black_box;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
+use std::task::Wake;
 use std::thread::{self, JoinHandle};
 use std::vec;
 
@@ -226,6 +227,44 @@ unsafe fn low_level_yield_loop(context: *mut ()) -> FiberReturn {
     loop {
         progress.fetch_add(1, Ordering::Relaxed);
         fiber_yield_now().expect("benchmark fiber should yield back to caller");
+    }
+}
+
+#[derive(Debug)]
+struct BenchThreadNotify {
+    thread: thread::Thread,
+    notified: AtomicBool,
+}
+
+impl Wake for BenchThreadNotify {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notified.store(true, Ordering::Release);
+        self.thread.unpark();
+    }
+}
+
+fn bench_block_on<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    let notify = Arc::new(BenchThreadNotify {
+        thread: thread::current(),
+        notified: AtomicBool::new(false),
+    });
+    let waker = Waker::from(Arc::clone(&notify));
+    let mut cx = Context::from_waker(&waker);
+    let mut future = core::pin::pin!(future);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+        while !notify.notified.swap(false, Ordering::AcqRel) {
+            thread::park();
+        }
     }
 }
 
@@ -1222,10 +1261,12 @@ pub fn bench_thread_async_runtime_lifecycle_throughput<F, Fut>(
                     .expect("throughput task should spawn"),
             );
         }
-        while let Some(handle) = handles.pop() {
-            let (): () = handle.join().expect("throughput task should join");
-            black_box(());
-        }
+        bench_block_on(async move {
+            while let Some(handle) = handles.pop() {
+                let (): () = handle.await.expect("throughput task should join");
+                black_box(());
+            }
+        });
         drop(runtime);
     });
 }
@@ -1243,11 +1284,11 @@ pub fn bench_tokio_multi_thread_lifecycle_throughput<F, Fut>(
             .worker_threads(worker_count)
             .build()
             .expect("tokio multi-thread runtime should build for benches");
-        runtime.block_on(async {
-            let mut handles = Vec::with_capacity(THROUGHPUT_BATCH_SIZE);
-            for _ in 0..THROUGHPUT_BATCH_SIZE {
-                handles.push(tokio::spawn(future_factory()));
-            }
+        let mut handles = Vec::with_capacity(THROUGHPUT_BATCH_SIZE);
+        for _ in 0..THROUGHPUT_BATCH_SIZE {
+            handles.push(runtime.spawn(future_factory()));
+        }
+        bench_block_on(async move {
             while let Some(handle) = handles.pop() {
                 handle.await.expect("throughput task should join");
                 black_box(());
