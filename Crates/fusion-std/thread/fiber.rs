@@ -313,6 +313,83 @@ pub struct FiberTaskAdmission {
     pub execution: FiberTaskExecution,
 }
 
+/// Planning-time context-switch surface used for exact current-thread fiber backing analysis.
+///
+/// This stays narrower than the full runtime `FiberSupport` contract on purpose: build-time slab
+/// sizing only needs the stack-shape truth that affects backing size, not the whole live runtime
+/// capability surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FiberPlanningSupport {
+    /// Whether the platform can create fresh contexts honestly.
+    pub can_make: bool,
+    /// Whether the platform can swap into a saved context honestly.
+    pub can_swap: bool,
+    /// Minimum required stack alignment in bytes.
+    pub min_stack_alignment: usize,
+    /// Architectural red-zone size below the live stack pointer in bytes.
+    pub red_zone_bytes: usize,
+    /// Architectural stack growth direction.
+    pub stack_direction: ContextStackDirection,
+    /// Whether the platform requires guard pages or equivalent stack limits.
+    pub guard_required: bool,
+}
+
+impl FiberPlanningSupport {
+    /// Returns one unsupported planning surface.
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self {
+            can_make: false,
+            can_swap: false,
+            min_stack_alignment: 1,
+            red_zone_bytes: 0,
+            stack_direction: ContextStackDirection::Unknown,
+            guard_required: false,
+        }
+    }
+
+    /// Returns one supported same-carrier planning surface with explicit stack-shape truth.
+    #[must_use]
+    pub const fn same_carrier(
+        min_stack_alignment: usize,
+        red_zone_bytes: usize,
+        stack_direction: ContextStackDirection,
+        guard_required: bool,
+    ) -> Self {
+        Self {
+            can_make: true,
+            can_swap: true,
+            min_stack_alignment,
+            red_zone_bytes,
+            stack_direction,
+            guard_required,
+        }
+    }
+
+    /// Returns the truthful Cortex-M same-carrier planning surface.
+    #[must_use]
+    pub const fn cortex_m() -> Self {
+        Self::same_carrier(8, 0, ContextStackDirection::Down, false)
+    }
+
+    /// Returns one planning surface derived from the live low-level fiber support.
+    #[must_use]
+    pub const fn from_fiber_support(support: FiberSupport) -> Self {
+        Self {
+            can_make: support.context.caps.contains(ContextCaps::MAKE),
+            can_swap: support.context.caps.contains(ContextCaps::SWAP),
+            min_stack_alignment: support.context.min_stack_alignment,
+            red_zone_bytes: support.context.red_zone_bytes,
+            stack_direction: support.context.stack_direction,
+            guard_required: support.context.guard_required,
+        }
+    }
+
+    const fn supports_current_thread(self) -> bool {
+        self.can_make && self.can_swap
+    }
+}
+
 /// Memory-footprint summary for the stack-backing side of one fiber pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FiberStackMemoryFootprint {
@@ -7925,6 +8002,7 @@ fn partition_bound_resource(
         bound_partition_backing_kind(info.backing)?,
         info.attrs,
         info.geometry,
+        info.layout,
         info.contract,
         info.support,
         handle.state(),
@@ -7933,12 +8011,23 @@ fn partition_bound_resource(
     Ok(MemoryResourceHandle::from(resource))
 }
 
+const fn fiber_resource_base_alignment_from_addr(addr: usize) -> usize {
+    if addr == 0 {
+        1
+    } else {
+        1usize << addr.trailing_zeros()
+    }
+}
+
+fn fiber_resource_base_alignment(handle: &MemoryResourceHandle) -> usize {
+    fiber_resource_base_alignment_from_addr(handle.view().base_addr().get())
+}
+
 impl CurrentFiberPoolBackingPlan {
-    /// Packs the per-domain requests into one conservative owning-slab layout.
-    ///
-    /// The total byte count includes worst-case padding for an arbitrarily aligned caller-owned
-    /// slab base.
-    pub fn combined(self) -> Result<CurrentFiberPoolCombinedBackingPlan, FiberError> {
+    fn combined_with_base_alignment(
+        self,
+        base_align: usize,
+    ) -> Result<CurrentFiberPoolCombinedBackingPlan, FiberError> {
         let mut max_align = self.control.align;
         if self.runtime_metadata.align > max_align {
             max_align = self.runtime_metadata.align;
@@ -7950,7 +8039,11 @@ impl CurrentFiberPoolBackingPlan {
             max_align = self.stacks.align;
         }
 
-        let mut cursor = max_align.saturating_sub(1);
+        let mut cursor = if base_align >= max_align {
+            0
+        } else {
+            max_align.saturating_sub(1)
+        };
         let control_offset = align_up_packed(cursor, self.control.align)?;
         cursor = control_offset
             .checked_add(self.control.bytes)
@@ -7981,6 +8074,26 @@ impl CurrentFiberPoolBackingPlan {
             stack_metadata: ResourceRange::new(stack_metadata_offset, self.stack_metadata.bytes),
             stacks: ResourceRange::new(stacks_offset, self.stacks.bytes),
         })
+    }
+
+    /// Packs the per-domain requests into one conservative owning-slab layout.
+    ///
+    /// The total byte count includes worst-case padding for an arbitrarily aligned caller-owned
+    /// slab base.
+    pub fn combined(self) -> Result<CurrentFiberPoolCombinedBackingPlan, FiberError> {
+        self.combined_with_base_alignment(1)
+    }
+
+    /// Packs the per-domain requests into one owning slab for a caller that can guarantee the
+    /// slab base is aligned to at least `base_align`.
+    ///
+    /// When `base_align` satisfies the slab alignment, the layout becomes exact instead of
+    /// reserving worst-case arbitrary-base padding.
+    pub fn combined_for_base_alignment(
+        self,
+        base_align: usize,
+    ) -> Result<CurrentFiberPoolCombinedBackingPlan, FiberError> {
+        self.combined_with_base_alignment(base_align)
     }
 }
 
@@ -8013,15 +8126,27 @@ impl CurrentFiberPool {
     pub fn backing_plan(
         config: &FiberPoolConfig<'_>,
     ) -> Result<CurrentFiberPoolBackingPlan, FiberError> {
+        Self::backing_plan_with_planning_support(
+            config,
+            FiberPlanningSupport::from_fiber_support(FiberSystem::new().support()),
+        )
+    }
+
+    /// Returns the explicit backing plan for one manually-driven current-thread fiber pool under
+    /// one explicit planning-time context surface.
+    ///
+    /// This is the build-time honest path for targets like bare metal, where slab sizing should
+    /// reflect the target context ABI instead of whatever host happened to run `build.rs`.
+    pub fn backing_plan_with_planning_support(
+        config: &FiberPoolConfig<'_>,
+        planning: FiberPlanningSupport,
+    ) -> Result<CurrentFiberPoolBackingPlan, FiberError> {
         let effective_backing =
             apply_fiber_sizing_strategy_backing(config.stack_backing, config.sizing)?;
-        let support = FiberSystem::new().support();
-        if !support.context.caps.contains(ContextCaps::MAKE)
-            || !support.context.caps.contains(ContextCaps::SWAP)
-        {
+        if !planning.supports_current_thread() {
             return Err(FiberError::unsupported());
         }
-        if support.context.guard_required && config.guard_pages == 0 {
+        if planning.guard_required && config.guard_pages == 0 {
             return Err(FiberError::invalid());
         }
         let task_capacity_per_carrier = config.task_capacity_per_carrier()?;
@@ -8041,13 +8166,13 @@ impl CurrentFiberPool {
             return Err(FiberError::unsupported());
         }
 
-        let alignment = support.context.min_stack_alignment.max(16);
+        let alignment = planning.min_stack_alignment.max(1);
         let (slot_stride, _) = FiberStackSlab::build_backing(
             effective_backing,
             0,
             1,
             alignment,
-            support.context.stack_direction,
+            planning.stack_direction,
         )?;
         let stacks = apply_fiber_backing_request(
             FiberPoolBackingRequest {
@@ -8260,7 +8385,8 @@ impl CurrentFiberPool {
         config: &FiberPoolConfig<'_>,
         slab: MemoryResourceHandle,
     ) -> Result<Self, FiberError> {
-        let layout = Self::backing_plan(config)?.combined()?;
+        let layout = Self::backing_plan(config)?
+            .combined_for_base_alignment(fiber_resource_base_alignment(&slab))?;
         if slab.view().len() < layout.slab.bytes {
             return Err(FiberError::resource_exhausted());
         }
@@ -10387,6 +10513,7 @@ mod tests {
                     lock_granule: None,
                     large_granule: None,
                 },
+                fusion_sys::mem::resource::AllocatorLayoutPolicy::exact_static(),
                 ResourceContract {
                     allowed_protect: Protect::READ | Protect::WRITE,
                     write_xor_execute: true,
@@ -12226,6 +12353,42 @@ mod tests {
         fibers
             .shutdown()
             .expect("bound-slab current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn current_fiber_pool_from_exact_aligned_bound_slab_runs_task() {
+        let config =
+            FiberPoolConfig::fixed(NonZeroUsize::new(8 * 1024).expect("non-zero stack"), 2)
+                .with_guard_pages(0);
+        let conservative = CurrentFiberPool::backing_plan(&config)
+            .expect("backing plan should build")
+            .combined()
+            .expect("conservative layout should build");
+        let exact = CurrentFiberPool::backing_plan(&config)
+            .expect("backing plan should build")
+            .combined_for_base_alignment(conservative.slab.align)
+            .expect("exact-aligned layout should build");
+        let slab = aligned_bound_resource(exact.slab.bytes, exact.slab.align);
+        let fibers = CurrentFiberPool::from_bound_slab(&config, slab)
+            .expect("current fiber pool should build from exact-aligned slab");
+
+        let task = fibers
+            .spawn(|| -> Result<u32, FiberError> {
+                yield_now()?;
+                Ok(19)
+            })
+            .expect("yielding task should spawn");
+
+        assert_eq!(
+            task.join()
+                .expect("current-thread join should drive the exact-aligned bound-slab pool")
+                .expect("task should complete without runtime failure"),
+            19
+        );
+
+        fibers
+            .shutdown()
+            .expect("exact-aligned bound-slab current fiber pool should shut down cleanly");
     }
 
     #[test]

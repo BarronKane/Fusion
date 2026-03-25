@@ -9,9 +9,9 @@ use std::time::{Duration as StdDuration, Instant};
 
 use object::{Object, ObjectSegment, ObjectSymbol};
 
-const DEFAULT_MANIFEST_PATH: &str = "Examples/PicoTarget/Cargo.toml";
+const DEFAULT_MANIFEST_PATH: &str = "Examples/Cortex-M/RP2350/MinimalLed/Cargo.toml";
 const DEFAULT_TARGET: &str = "thumbv8m.main-none-eabihf";
-const DEFAULT_BIN: &str = "pico";
+const DEFAULT_BIN: &str = "rp2350_minimal_led";
 const RP2350_FLASH_BASE: u64 = 0x1000_0000;
 const RP2350_FLASH_LEN: usize = 4 * 1024 * 1024;
 const UF2_MAGIC_START0: u32 = 0x0a32_4655;
@@ -25,7 +25,7 @@ const DEFAULT_PROBE_CHIP: &str = "RP235x";
 const DEFAULT_GDB_CONNECTION_STRING: &str = "[::1]:2345";
 const PROBE_CHIP_ENV: &str = "FUSION_PICO_PROBE_CHIP";
 const PROBE_SELECTOR_ENV: &str = "FUSION_PICO_PROBE_SELECTOR";
-const PICO_BENCH_OUTPUT_SYMBOL: &str = "FUSION_PICO_BENCH_OUTPUT";
+const PICO_BENCH_OUTPUT_SYMBOL: &str = "FUSION_RP2350_BENCH_OUTPUT";
 const PICO_BENCH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
 const PICO_BENCH_RELEASE_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const PICO_BENCH_DEBUG_TIMEOUT: StdDuration = StdDuration::from_secs(120);
@@ -484,7 +484,7 @@ fn print_pico_bench_report(words: &[u32]) {
         return;
     }
     let count = usize::try_from(words[2]).unwrap_or(0);
-    println!("pico_benchmark");
+    println!("rp2350_benchmark");
     let mut offset = 4usize;
     for _ in 0..count {
         if offset + 4 > words.len() {

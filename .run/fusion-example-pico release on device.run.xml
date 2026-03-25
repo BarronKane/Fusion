@@ -1,18 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration
-    default="false"
-    name="fusion-example-pico release on device"
-    type="RsRemoteRunConfiguration"
-    factoryName="Remote Debug"
-    kind="RIDER_LLDB"
-    remoteCommand="[::1]:2345"
-    symbolFile="$PROJECT_DIR$/target/thumbv8m.main-none-eabihf/release/pico">
-    <method v="2">
-      <option
-        name="RunConfigurationTask"
-        enabled="true"
-        run_configuration_name="helper fusion-example-pico release on device launch"
-        run_configuration_type="CargoCommandRunConfiguration" />
-    </method>
+  <configuration default="false" name="fusion-example-pico release on device" type="RsRemoteRunConfiguration" debuggerKind="GDB" remoteCommand="[::1]:2345" symbolFile="$PROJECT_DIR$/target/thumbv8m.main-none-eabihf/release/pico" sysroot="">
+    <method v="2" />
   </configuration>
 </component>

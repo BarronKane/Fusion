@@ -1,7 +1,5 @@
-use fusion_pal::pal::mem::MemBase;
-use fusion_pal::sys::mem::system_mem;
-
 use super::{AllocError, align_up};
+use crate::mem::resource::AllocatorLayoutPolicy;
 
 /// Allocator-managed subsystem kind that owns one front-loaded metadata region.
 #[repr(u16)]
@@ -54,15 +52,14 @@ pub struct FrontMetadataLayout {
     pub request_align: usize,
 }
 
-/// Computes the root extent layout for one allocator subsystem with front-loaded metadata pages.
-///
-/// Metadata is rounded up to the platform allocation granule so subsystems can reserve whole
-/// metadata pages before the payload region begins.
-pub fn front_metadata_layout(
+/// Computes the root extent layout for one allocator subsystem with one explicit allocator layout
+/// policy.
+pub fn front_metadata_layout_with_policy(
     header_bytes: usize,
     header_align: usize,
     payload_len: usize,
     payload_align: usize,
+    layout_policy: AllocatorLayoutPolicy,
 ) -> Result<FrontMetadataLayout, AllocError> {
     if header_bytes == 0
         || header_align == 0
@@ -74,9 +71,13 @@ pub fn front_metadata_layout(
         return Err(AllocError::invalid_request());
     }
 
-    let page = system_mem().page_info().alloc_granule.get();
-    let request_align = page.max(header_align).max(payload_align);
-    let metadata_len = align_up(header_bytes, page)?;
+    let metadata_granule = layout_policy.metadata_granule.get();
+    let request_align = layout_policy
+        .min_extent_align
+        .get()
+        .max(header_align)
+        .max(payload_align);
+    let metadata_len = align_up(header_bytes, metadata_granule)?;
     let payload_offset = align_up(metadata_len, payload_align)?;
     let total_len = payload_offset
         .checked_add(payload_len)

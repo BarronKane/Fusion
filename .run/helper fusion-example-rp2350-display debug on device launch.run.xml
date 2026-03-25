@@ -1,6 +1,6 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="helper fusion-example-pico release on device launch" type="CargoCommandRunConfiguration" factoryName="Cargo Command" folderName="fusion-example-pico helpers">
-    <option name="command" value="pico-debug-server -- --detach --release" />
+  <configuration default="false" name="helper fusion-example-rp2350-display debug on device launch" type="CargoCommandRunConfiguration" factoryName="Cargo Command" folderName="fusion-example-rp2350-display helpers">
+    <option name="command" value="pico-display-debug-server -- --detach" />
     <envs />
     <option name="emulateTerminal" value="true" />
     <option name="channel" value="DEFAULT" />

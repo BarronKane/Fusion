@@ -5,7 +5,9 @@ use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::slice;
 
+use crate::mem::resource::AllocatorLayoutPolicy;
 use crate::sync::{Mutex, RetainedHandle};
+use fusion_pal::pal::mem::MemBase;
 
 use super::{
     AllocCapabilities,
@@ -26,7 +28,7 @@ use super::{
     MetadataPageHeader,
     Mortal,
     align_up,
-    front_metadata_layout,
+    front_metadata_layout_with_policy,
 };
 
 #[derive(Debug)]
@@ -180,6 +182,12 @@ impl<L: LifetimePolicy> fmt::Debug for BoundedArena<L> {
 }
 
 impl<L: LifetimePolicy> BoundedArena<L> {
+    fn hosted_layout_policy() -> AllocatorLayoutPolicy {
+        AllocatorLayoutPolicy::hosted_vm(
+            fusion_pal::sys::mem::system_mem().page_info().alloc_granule,
+        )
+    }
+
     /// Returns the exact pool-extent request needed to host one bounded arena with the selected
     /// payload capacity and maximum alignment.
     ///
@@ -190,14 +198,25 @@ impl<L: LifetimePolicy> BoundedArena<L> {
         capacity: usize,
         max_align: usize,
     ) -> Result<super::MemoryPoolExtentRequest, AllocError> {
+        Self::extent_request_with_layout_policy(capacity, max_align, Self::hosted_layout_policy())
+    }
+
+    /// Returns the exact pool-extent request needed to host one bounded arena under one explicit
+    /// allocator layout policy.
+    pub fn extent_request_with_layout_policy(
+        capacity: usize,
+        max_align: usize,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<super::MemoryPoolExtentRequest, AllocError> {
         if capacity == 0 || max_align == 0 || !max_align.is_power_of_two() {
             return Err(AllocError::invalid_request());
         }
-        let layout = front_metadata_layout(
+        let layout = front_metadata_layout_with_policy(
             ControlLease::<ArenaControl>::backing_size(),
             ControlLease::<ArenaControl>::backing_align(),
             capacity,
             max_align,
+            layout_policy,
         )?;
         Ok(super::MemoryPoolExtentRequest {
             len: layout.total_len,
@@ -205,12 +224,13 @@ impl<L: LifetimePolicy> BoundedArena<L> {
         })
     }
 
-    pub(super) fn from_assigned_extent(
+    pub(super) fn from_assigned_extent_with_layout_policy(
         domain: AllocatorDomainId,
         capacity: usize,
         max_align: usize,
         policy: AllocPolicy,
         extent: AssignedPoolExtent,
+        layout_policy: AllocatorLayoutPolicy,
     ) -> Result<Self, AllocError> {
         if capacity == 0 || max_align == 0 || !max_align.is_power_of_two() {
             return Err(AllocError::invalid_request());
@@ -218,11 +238,12 @@ impl<L: LifetimePolicy> BoundedArena<L> {
         if !policy.allows(AllocModeSet::ARENA) {
             return Err(AllocError::policy_denied());
         }
-        let layout = front_metadata_layout(
+        let layout = front_metadata_layout_with_policy(
             ControlLease::<ArenaControl>::backing_size(),
             ControlLease::<ArenaControl>::backing_align(),
             capacity,
             max_align,
+            layout_policy,
         )?;
         let region = extent.region();
         let usable_base = region

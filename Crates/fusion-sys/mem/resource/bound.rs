@@ -46,6 +46,7 @@ use core::num::NonZeroUsize;
 use fusion_pal::sys::mem::{Address, CachePolicy, Placement, Protect, Region, RegionInfo};
 
 use super::{
+    AllocatorLayoutPolicy,
     MemoryDomain,
     MemoryGeometry,
     MemoryResource,
@@ -82,6 +83,8 @@ pub struct BoundResourceSpec {
     pub attrs: ResourceAttrs,
     /// Operation granularity metadata for the range.
     pub geometry: MemoryGeometry,
+    /// Allocator-facing metadata and extent layout policy for the range.
+    pub layout: AllocatorLayoutPolicy,
     /// Immutable contract that higher layers must continue to honor.
     pub contract: ResourceContract,
     /// Runtime support surface the bound resource may expose.
@@ -105,6 +108,7 @@ impl BoundResourceSpec {
         backing: ResourceBackingKind,
         attrs: ResourceAttrs,
         geometry: MemoryGeometry,
+        layout: AllocatorLayoutPolicy,
         contract: ResourceContract,
         support: ResourceSupport,
         initial_state: ResourceState,
@@ -115,6 +119,7 @@ impl BoundResourceSpec {
             backing,
             attrs,
             geometry,
+            layout,
             contract,
             support,
             additional_hazards: ResourceHazardSet::empty(),
@@ -146,6 +151,7 @@ impl BoundMemoryResource {
                 backing: spec.backing,
                 attrs: spec.attrs,
                 geometry: spec.geometry,
+                layout: spec.layout,
                 contract: spec.contract,
                 support: spec.support,
                 hazards,
@@ -178,6 +184,7 @@ impl BoundMemoryResource {
                 | ResourceAttrs::CACHEABLE
                 | ResourceAttrs::COHERENT,
             static_allocatable_geometry(),
+            static_allocatable_layout(),
             static_allocatable_contract(),
             static_allocatable_support(),
             static_allocatable_state(),
@@ -210,6 +217,10 @@ impl BoundMemoryResource {
     pub const fn resolved(&self) -> ResolvedResource {
         self.core.resolved()
     }
+}
+
+const fn static_allocatable_layout() -> AllocatorLayoutPolicy {
+    AllocatorLayoutPolicy::exact_static()
 }
 
 fn static_allocatable_geometry() -> MemoryGeometry {

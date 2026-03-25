@@ -19,6 +19,7 @@ use fusion_sys::mem::provider::{
     MemoryTopologyNodeId,
 };
 use fusion_sys::mem::resource::{
+    AllocatorLayoutPolicy,
     BoundMemoryResource,
     BoundResourceSpec,
     MemoryDomain,
@@ -99,6 +100,7 @@ fn bound_resource_with_shape(
         backing,
         attrs,
         general_geometry(),
+        AllocatorLayoutPolicy::hosted_vm(NonZeroUsize::new(4096).expect("nonzero")),
         general_contract(),
         general_support(),
         ResourceState::static_state(

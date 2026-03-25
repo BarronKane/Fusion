@@ -8,8 +8,10 @@ members = [
     "Crates/fusion-kn",
 
     # Examples.
-    "Examples/Template",
-    "Examples/PicoTarget",
+    "Examples/Hosted/Template",
+    "Examples/Cortex-M/RP2350/MinimalLed",
+    "Examples/Cortex-M/RP2350/Benchmark",
+    "Examples/Cortex-M/RP2350/Display",
 ]
 
 [workspace.package]

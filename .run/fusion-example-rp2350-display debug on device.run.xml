@@ -1,0 +1,18 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration
+    default="false"
+    name="fusion-example-rp2350-display debug on device"
+    type="RsRemoteRunConfiguration"
+    factoryName="Remote Debug"
+    kind="RIDER_LLDB"
+    remoteCommand="[::1]:2345"
+    symbolFile="$PROJECT_DIR$/target/thumbv8m.main-none-eabihf/debug/rp2350_display">
+    <method v="2">
+      <option
+        name="RunConfigurationTask"
+        enabled="true"
+        run_configuration_name="helper fusion-example-rp2350-display debug on device launch"
+        run_configuration_type="CargoCommandRunConfiguration" />
+    </method>
+  </configuration>
+</component>

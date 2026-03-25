@@ -4,7 +4,9 @@ use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, align_of, size_of};
 use core::ptr::{self, NonNull};
 
+use crate::mem::resource::AllocatorLayoutPolicy;
 use crate::sync::{Mutex, RetainedHandle};
+use fusion_pal::pal::mem::MemBase;
 
 use super::{
     AllocCapabilities,
@@ -23,7 +25,7 @@ use super::{
     LifetimePolicy,
     MetadataPageHeader,
     Mortal,
-    front_metadata_layout,
+    front_metadata_layout_with_policy,
 };
 
 #[derive(Debug)]
@@ -107,23 +109,39 @@ impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> fmt::Debug for Sl
 }
 
 impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> Slab<SIZE, COUNT, L> {
+    fn hosted_layout_policy() -> AllocatorLayoutPolicy {
+        AllocatorLayoutPolicy::hosted_vm(
+            fusion_pal::sys::mem::system_mem().page_info().alloc_granule,
+        )
+    }
+
     /// Returns the exact pool-extent request needed to host one slab of this shape.
     ///
     /// # Errors
     ///
     /// Returns an error when the slab shape or alignment cannot be represented honestly.
     pub fn extent_request(slot_align: usize) -> Result<super::MemoryPoolExtentRequest, AllocError> {
+        Self::extent_request_with_layout_policy(slot_align, Self::hosted_layout_policy())
+    }
+
+    /// Returns the exact pool-extent request needed to host one slab of this shape under one
+    /// explicit allocator layout policy.
+    pub fn extent_request_with_layout_policy(
+        slot_align: usize,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<super::MemoryPoolExtentRequest, AllocError> {
         if SIZE == 0 || COUNT == 0 {
             return Err(AllocError::invalid_request());
         }
         let Some(payload_len) = SIZE.checked_mul(COUNT) else {
             return Err(AllocError::invalid_request());
         };
-        let layout = front_metadata_layout(
+        let layout = front_metadata_layout_with_policy(
             size_of::<SlabMetadata<COUNT>>(),
             align_of::<SlabMetadata<COUNT>>(),
             payload_len,
             slot_align,
+            layout_policy,
         )?;
         Ok(super::MemoryPoolExtentRequest {
             len: layout.total_len,
@@ -135,10 +153,11 @@ impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> Slab<SIZE, COUNT,
         slab_slot_align::<SIZE>()
     }
 
-    pub(super) fn from_assigned_extent(
+    pub(super) fn from_assigned_extent_with_layout_policy(
         domain: AllocatorDomainId,
         policy: AllocPolicy,
         extent: AssignedPoolExtent,
+        layout_policy: AllocatorLayoutPolicy,
     ) -> Result<Self, AllocError> {
         if SIZE == 0 || COUNT == 0 {
             return Err(AllocError::invalid_request());
@@ -147,12 +166,13 @@ impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> Slab<SIZE, COUNT,
             return Err(AllocError::policy_denied());
         }
         let slot_align = slab_slot_align::<SIZE>()?;
-        let layout = front_metadata_layout(
+        let layout = front_metadata_layout_with_policy(
             size_of::<SlabMetadata<COUNT>>(),
             align_of::<SlabMetadata<COUNT>>(),
             SIZE.checked_mul(COUNT)
                 .ok_or_else(AllocError::invalid_request)?,
             slot_align,
+            layout_policy,
         )?;
         let region = extent.region();
         if region.len < layout.total_len

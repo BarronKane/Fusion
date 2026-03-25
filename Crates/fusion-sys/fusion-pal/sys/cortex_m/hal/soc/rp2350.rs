@@ -1749,7 +1749,7 @@ const PAL_POWER_MODES: [PowerModeDescriptor; 2] = [
 ];
 
 // NOTE: the current selected RP2350 board contract follows the open Pico 2 W schematic and the
-// local PicoTarget linker layout, both of which assume a 32 Mbit / 4 MiB external flash
+// local RP2350 example linker layout, both of which assume a 32 Mbit / 4 MiB external flash
 // population. Raspberry Pi's Pico 2 W prose datasheet currently disagrees and mentions a
 // W25Q16JV instead, so this must split into a truly board-specific module if that ambiguity ever
 // becomes more than documentation slop.

@@ -45,7 +45,7 @@ fn main() {
     if let Some(ref green) = green {
         let handle = green.spawn(|| 42u32);
         if let Ok(handle) = handle {
-            core::hint::black_box(handle.join());
+            let _ = core::hint::black_box(handle.join());
         }
     }
 

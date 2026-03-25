@@ -26,7 +26,10 @@ use super::{
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
 use fusion_pal::sys::cortex_m::hal::soc::board as cortex_m_soc_board;
 
+#[cfg(not(feature = "sys-cortex-m"))]
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
+#[cfg(feature = "sys-cortex-m")]
+const NANOS_PER_SECOND_U64: u64 = 1_000_000_000;
 const U32_WRAP_HALF_RANGE: u32 = u32::MAX / 2;
 
 static MONOTONIC_EXTENDED32_HIGH: AtomicU32 = AtomicU32::new(0);
@@ -738,27 +741,81 @@ fn one_shot_alarm_timeout_for_remaining(
 }
 
 fn duration_to_ticks_floor(duration: Duration, tick_hz: u64) -> Result<u64, ThreadError> {
+    #[cfg(feature = "sys-cortex-m")]
+    {
+        let whole = duration
+            .as_secs()
+            .checked_mul(tick_hz)
+            .ok_or_else(ThreadError::invalid)?;
+        let fractional = (u64::from(duration.subsec_nanos()))
+            .checked_mul(tick_hz)
+            .ok_or_else(ThreadError::invalid)?
+            / NANOS_PER_SECOND_U64;
+        return whole
+            .checked_add(fractional)
+            .ok_or_else(ThreadError::invalid);
+    }
+
+    #[cfg(not(feature = "sys-cortex-m"))]
     let whole = (duration.as_secs() as u128)
         .checked_mul(tick_hz as u128)
         .ok_or_else(ThreadError::invalid)?;
+    #[cfg(not(feature = "sys-cortex-m"))]
     let fractional = ((duration.subsec_nanos() as u128) * (tick_hz as u128)) / NANOS_PER_SECOND;
+    #[cfg(not(feature = "sys-cortex-m"))]
     u64::try_from(whole + fractional).map_err(|_| ThreadError::invalid())
 }
 
 fn duration_to_ticks_ceil(duration: Duration, tick_hz: u64) -> Result<u64, ThreadError> {
+    #[cfg(feature = "sys-cortex-m")]
+    {
+        let whole = duration
+            .as_secs()
+            .checked_mul(tick_hz)
+            .ok_or_else(ThreadError::invalid)?;
+        let numerator = (u64::from(duration.subsec_nanos()))
+            .checked_mul(tick_hz)
+            .ok_or_else(ThreadError::invalid)?;
+        let fractional = numerator.div_ceil(NANOS_PER_SECOND_U64);
+        return whole
+            .checked_add(fractional)
+            .ok_or_else(ThreadError::invalid);
+    }
+
+    #[cfg(not(feature = "sys-cortex-m"))]
     let whole = (duration.as_secs() as u128)
         .checked_mul(tick_hz as u128)
         .ok_or_else(ThreadError::invalid)?;
+    #[cfg(not(feature = "sys-cortex-m"))]
     let fractional_numerator = (duration.subsec_nanos() as u128) * (tick_hz as u128);
+    #[cfg(not(feature = "sys-cortex-m"))]
     let fractional = fractional_numerator.div_ceil(NANOS_PER_SECOND);
+    #[cfg(not(feature = "sys-cortex-m"))]
     u64::try_from(whole + fractional).map_err(|_| ThreadError::invalid())
 }
 
 fn ticks_to_duration_floor(ticks: u64, tick_hz: u64) -> Result<Duration, ThreadError> {
+    #[cfg(feature = "sys-cortex-m")]
+    {
+        let secs = ticks / tick_hz;
+        let rem_ticks = ticks % tick_hz;
+        let nanos = rem_ticks
+            .checked_mul(NANOS_PER_SECOND_U64)
+            .ok_or_else(ThreadError::invalid)?
+            / tick_hz;
+        let nanos = u32::try_from(nanos).map_err(|_| ThreadError::invalid())?;
+        return Ok(Duration::new(secs, nanos));
+    }
+
+    #[cfg(not(feature = "sys-cortex-m"))]
     let secs = ticks / tick_hz;
+    #[cfg(not(feature = "sys-cortex-m"))]
     let rem_ticks = ticks % tick_hz;
+    #[cfg(not(feature = "sys-cortex-m"))]
     let nanos = ((rem_ticks as u128) * NANOS_PER_SECOND) / (tick_hz as u128);
+    #[cfg(not(feature = "sys-cortex-m"))]
     let nanos = u32::try_from(nanos).map_err(|_| ThreadError::invalid())?;
+    #[cfg(not(feature = "sys-cortex-m"))]
     Ok(Duration::new(secs, nanos))
 }
 
@@ -771,13 +828,32 @@ fn ticks_to_duration_ceil(ticks: u64, tick_hz: u64) -> Result<Duration, ThreadEr
     if rem_ticks == 0 {
         return Ok(Duration::new(secs, 0));
     }
+
+    #[cfg(feature = "sys-cortex-m")]
+    {
+        let nanos = rem_ticks
+            .checked_mul(NANOS_PER_SECOND_U64)
+            .ok_or_else(ThreadError::invalid)?
+            .div_ceil(tick_hz);
+        let (secs, nanos) = if nanos >= NANOS_PER_SECOND_U64 {
+            (secs.checked_add(1).ok_or_else(ThreadError::invalid)?, 0_u32)
+        } else {
+            (secs, nanos as u32)
+        };
+        return Ok(Duration::new(secs, nanos));
+    }
+
+    #[cfg(not(feature = "sys-cortex-m"))]
     let nanos = ((rem_ticks as u128) * NANOS_PER_SECOND).div_ceil(tick_hz as u128);
+    #[cfg(not(feature = "sys-cortex-m"))]
     let nanos = u64::try_from(nanos).map_err(|_| ThreadError::invalid())?;
+    #[cfg(not(feature = "sys-cortex-m"))]
     let (secs, nanos) = if nanos >= 1_000_000_000 {
         (secs.checked_add(1).ok_or_else(ThreadError::invalid)?, 0_u32)
     } else {
         (secs, nanos as u32)
     };
+    #[cfg(not(feature = "sys-cortex-m"))]
     Ok(Duration::new(secs, nanos))
 }
 

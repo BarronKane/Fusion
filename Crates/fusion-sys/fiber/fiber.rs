@@ -32,7 +32,13 @@ pub use fusion_pal::sys::context::{
 use crate::sync::{OnceLock, SyncError, SyncErrorKind, ThinMutex};
 use crate::thread::{ThreadErrorKind, ThreadId, ThreadSystem};
 
+#[cfg(feature = "sys-cortex-m")]
+const MAX_ACTIVE_FIBERS: usize = 8;
+#[cfg(not(feature = "sys-cortex-m"))]
 const MAX_ACTIVE_FIBERS: usize = 64;
+#[cfg(feature = "sys-cortex-m")]
+const MAX_FIBER_BOOTSTRAPS: usize = 32;
+#[cfg(not(feature = "sys-cortex-m"))]
 const MAX_FIBER_BOOTSTRAPS: usize = 256;
 
 /// Low-level fiber support derived from the selected fusion-pal context backend.

@@ -8,6 +8,7 @@ use crate::mem::provider::{
     MemoryTopologyNodeId,
 };
 use crate::mem::resource::{
+    AllocatorLayoutPolicy,
     MemoryDomain,
     MemoryGeometry,
     ResourceAcquireSupport,
@@ -83,6 +84,8 @@ pub struct MemoryCompatibilityEnvelope {
     pub attrs: crate::mem::resource::ResourceAttrs,
     /// Operation granularity shared by compatible resources.
     pub geometry: MemoryGeometry,
+    /// Allocator-facing metadata and extent layout policy shared by compatible resources.
+    pub layout: AllocatorLayoutPolicy,
     /// Immutable contract shared by compatible resources.
     pub contract: crate::mem::resource::ResourceContract,
     /// Runtime support surface shared by compatible resources.
@@ -100,6 +103,7 @@ impl MemoryCompatibilityEnvelope {
             backing: info.backing,
             attrs: info.attrs,
             geometry: info.geometry,
+            layout: info.layout,
             contract: info.contract,
             support: info.support,
             hazards: info.hazards,
@@ -113,6 +117,7 @@ impl MemoryCompatibilityEnvelope {
             domain: self.domain,
             backing: self.backing,
             attrs: self.attrs,
+            layout: self.layout,
             contract: self.contract,
             support: self.support,
             hazards: self.hazards,

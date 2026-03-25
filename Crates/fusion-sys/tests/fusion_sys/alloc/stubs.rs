@@ -9,8 +9,10 @@ use fusion_sys::alloc::{
     AllocationStrategy,
     Allocator,
     CriticalSafetyRequirements,
+    MemoryPoolExtentRequest,
 };
 use fusion_sys::mem::resource::{
+    AllocatorLayoutPolicy,
     BoundMemoryResource,
     BoundResourceSpec,
     MemoryDomain,
@@ -105,8 +107,15 @@ fn bound_resource(
     backing: ResourceBackingKind,
     attrs: ResourceAttrs,
 ) -> MemoryResourceHandle {
+    let total_len = Allocator::<4, 4>::resource_request_for_extent_request_with_layout_policy(
+        MemoryPoolExtentRequest::new(len),
+        AllocatorLayoutPolicy::exact_static(),
+    )
+    .expect("allocator-backed test resource request should build")
+    .provisioning_len()
+    .expect("allocator-backed test resource length should fit");
     bound_resource_with_region(
-        aligned_region(len, 4096),
+        aligned_region(total_len, 4096),
         general_geometry(),
         domain,
         backing,
@@ -128,6 +137,7 @@ fn bound_resource_with_region(
             backing,
             attrs,
             geometry,
+            AllocatorLayoutPolicy::exact_static(),
             general_contract(),
             general_support(),
             ResourceState::static_state(

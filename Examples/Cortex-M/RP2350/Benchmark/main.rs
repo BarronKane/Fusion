@@ -9,7 +9,7 @@ use fusion_std::thread::{async_yield_now, yield_now as fiber_yield_now};
 use fusion_sys::thread::system_monotonic_time;
 
 mod support;
-use support::{AlignedBacking, BENCH_SLAB_BYTES, bench_async_runtime, bench_fiber_pool};
+use support::benchmark_runtime;
 
 const ITERATIONS: u32 = 512;
 
@@ -23,9 +23,6 @@ const BENCH_CURRENT_FIBER_SPAWN_JOIN_NOOP: u32 = 2;
 const BENCH_CURRENT_FIBER_SPAWN_JOIN_YIELD_ONCE: u32 = 3;
 const BENCH_CURRENT_ASYNC_SPAWN_JOIN_NOOP: u32 = 4;
 const BENCH_CURRENT_ASYNC_SPAWN_JOIN_YIELD_ONCE: u32 = 5;
-static mut BENCH_SLAB_BACKING: AlignedBacking<BENCH_SLAB_BYTES> =
-    AlignedBacking([0; BENCH_SLAB_BYTES]);
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct BenchRecord {
@@ -54,7 +51,7 @@ struct BenchOutput {
 }
 
 #[unsafe(no_mangle)]
-static mut FUSION_PICO_BENCH_OUTPUT: BenchOutput = BenchOutput {
+static mut FUSION_RP2350_BENCH_OUTPUT: BenchOutput = BenchOutput {
     magic: OUTPUT_MAGIC,
     state: OUTPUT_STATE_EMPTY,
     count: 0,
@@ -79,22 +76,22 @@ fn measure_nanos(mut job: impl FnMut()) -> u32 {
 fn write_record(index: usize, bench_id: u32, total_nanos: u32) {
     let average_nanos = total_nanos / ITERATIONS.max(1);
     unsafe {
-        FUSION_PICO_BENCH_OUTPUT.records[index] = BenchRecord {
+        FUSION_RP2350_BENCH_OUTPUT.records[index] = BenchRecord {
             bench_id,
             iterations: ITERATIONS,
             total_nanos,
             average_nanos,
         };
-        FUSION_PICO_BENCH_OUTPUT.count = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        FUSION_RP2350_BENCH_OUTPUT.count = u32::try_from(index + 1).unwrap_or(u32::MAX);
     }
 }
 
 fn run_benchmarks() {
     unsafe {
-        FUSION_PICO_BENCH_OUTPUT.state = OUTPUT_STATE_RUNNING;
-        FUSION_PICO_BENCH_OUTPUT.count = 0;
-        FUSION_PICO_BENCH_OUTPUT.records = [BenchRecord::EMPTY; 8];
-        FUSION_PICO_BENCH_OUTPUT.reserved = 1;
+        FUSION_RP2350_BENCH_OUTPUT.state = OUTPUT_STATE_RUNNING;
+        FUSION_RP2350_BENCH_OUTPUT.count = 0;
+        FUSION_RP2350_BENCH_OUTPUT.records = [BenchRecord::EMPTY; 8];
+        FUSION_RP2350_BENCH_OUTPUT.reserved = 1;
     }
 
     let total = measure_nanos(|| {
@@ -104,39 +101,40 @@ fn run_benchmarks() {
     });
     write_record(0, BENCH_BASELINE_DIRECT_NOOP, total);
     unsafe {
-        FUSION_PICO_BENCH_OUTPUT.reserved = 2;
+        FUSION_RP2350_BENCH_OUTPUT.reserved = 2;
     }
 
-    let fibers = unsafe { bench_fiber_pool(&raw mut BENCH_SLAB_BACKING) };
+    let runtime = benchmark_runtime();
+    let (fibers, runtime) = runtime.into_parts();
     unsafe {
-        FUSION_PICO_BENCH_OUTPUT.reserved = 3;
+        FUSION_RP2350_BENCH_OUTPUT.reserved = 3;
     }
     let total = measure_nanos(|| {
         for iteration in 0..ITERATIONS {
             unsafe {
-                FUSION_PICO_BENCH_OUTPUT.reserved = 0x1000 + iteration;
+                FUSION_RP2350_BENCH_OUTPUT.reserved = 0x1000 + iteration;
             }
             let handle = fibers
                 .spawn(|| black_box(1_u32))
                 .expect("noop fiber should spawn");
             unsafe {
-                FUSION_PICO_BENCH_OUTPUT.reserved = 0x2000 + iteration;
+                FUSION_RP2350_BENCH_OUTPUT.reserved = 0x2000 + iteration;
             }
             let _ = handle.join().expect("noop fiber should join");
             unsafe {
-                FUSION_PICO_BENCH_OUTPUT.reserved = 0x3000 + iteration;
+                FUSION_RP2350_BENCH_OUTPUT.reserved = 0x3000 + iteration;
             }
         }
     });
     write_record(1, BENCH_CURRENT_FIBER_SPAWN_JOIN_NOOP, total);
     unsafe {
-        FUSION_PICO_BENCH_OUTPUT.reserved = 4;
+        FUSION_RP2350_BENCH_OUTPUT.reserved = 4;
     }
 
     let total = measure_nanos(|| {
         for iteration in 0..ITERATIONS {
             unsafe {
-                FUSION_PICO_BENCH_OUTPUT.reserved = 0x4000 + iteration;
+                FUSION_RP2350_BENCH_OUTPUT.reserved = 0x4000 + iteration;
             }
             let handle = fibers
                 .spawn(|| {
@@ -145,26 +143,26 @@ fn run_benchmarks() {
                 })
                 .expect("yielding fiber should spawn");
             unsafe {
-                FUSION_PICO_BENCH_OUTPUT.reserved = 0x5000 + iteration;
+                FUSION_RP2350_BENCH_OUTPUT.reserved = 0x5000 + iteration;
             }
             let _ = handle.join().expect("yielding fiber should join");
             unsafe {
-                FUSION_PICO_BENCH_OUTPUT.reserved = 0x6000 + iteration;
+                FUSION_RP2350_BENCH_OUTPUT.reserved = 0x6000 + iteration;
             }
         }
     });
     write_record(2, BENCH_CURRENT_FIBER_SPAWN_JOIN_YIELD_ONCE, total);
     unsafe {
-        FUSION_PICO_BENCH_OUTPUT.reserved = 5;
+        FUSION_RP2350_BENCH_OUTPUT.reserved = 5;
     }
     fibers
         .shutdown()
         .expect("benchmark fiber pool should shut down cleanly");
-
-    let runtime = unsafe { bench_async_runtime(&raw mut BENCH_SLAB_BACKING) }
+    let runtime = runtime
+        .build_explicit()
         .expect("benchmark async runtime should build from one owning slab");
     unsafe {
-        FUSION_PICO_BENCH_OUTPUT.reserved = 6;
+        FUSION_RP2350_BENCH_OUTPUT.reserved = 6;
     }
     let total = measure_nanos(|| {
         for _ in 0..ITERATIONS {
@@ -179,7 +177,7 @@ fn run_benchmarks() {
     });
     write_record(3, BENCH_CURRENT_ASYNC_SPAWN_JOIN_NOOP, total);
     unsafe {
-        FUSION_PICO_BENCH_OUTPUT.reserved = 7;
+        FUSION_RP2350_BENCH_OUTPUT.reserved = 7;
     }
 
     let total = measure_nanos(|| {
@@ -199,8 +197,8 @@ fn run_benchmarks() {
     write_record(4, BENCH_CURRENT_ASYNC_SPAWN_JOIN_YIELD_ONCE, total);
 
     unsafe {
-        FUSION_PICO_BENCH_OUTPUT.reserved = 8;
-        FUSION_PICO_BENCH_OUTPUT.state = OUTPUT_STATE_DONE;
+        FUSION_RP2350_BENCH_OUTPUT.reserved = 8;
+        FUSION_RP2350_BENCH_OUTPUT.state = OUTPUT_STATE_DONE;
     }
 }
 

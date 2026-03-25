@@ -5,6 +5,7 @@ use fusion_pal::pal::mem::MemBase;
 use fusion_pal::sys::mem::system_mem;
 
 use crate::mem::resource::{
+    AllocatorLayoutPolicy,
     MemoryResource,
     MemoryResourceHandle,
     ResourceInfo,
@@ -163,14 +164,14 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             return Err(AllocError::invalid_request());
         }
 
-        let page = system_mem().page_info().alloc_granule.get();
-        let requested_len = super::align_up(
-            min_capacity
-                .max(page)
-                .checked_add(page)
-                .ok_or_else(AllocError::invalid_request)?,
-            page,
-        )?;
+        let page = system_mem().page_info().alloc_granule;
+        let layout_policy = AllocatorLayoutPolicy::hosted_vm(page);
+        let requested_len = Self::resource_request_for_extent_request_with_layout_policy(
+            MemoryPoolExtentRequest::new(min_capacity.max(page.get())),
+            layout_policy,
+        )?
+        .provisioning_len()
+        .ok_or_else(AllocError::invalid_request)?;
 
         let mut request = ResourceRequest::anonymous_private(requested_len);
         request.name = Some("fusion-alloc-system-default");
@@ -219,6 +220,18 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
     pub fn resource_request_for_extent_request(
         request: MemoryPoolExtentRequest,
     ) -> Result<MemoryPoolExtentRequest, AllocError> {
+        Self::resource_request_for_extent_request_with_layout_policy(
+            request,
+            AllocatorLayoutPolicy::hosted_vm(system_mem().page_info().alloc_granule),
+        )
+    }
+
+    /// Returns the minimum resource request needed to host one allocator-managed pool extent on
+    /// one owned resource under one explicit allocator layout policy.
+    pub fn resource_request_for_extent_request_with_layout_policy(
+        request: MemoryPoolExtentRequest,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<MemoryPoolExtentRequest, AllocError> {
         let control = pool_control_backing_request::<RESOURCES, EXTENTS>()?;
         let bytes = control
             .provisioning_len()
@@ -231,7 +244,10 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             .ok_or_else(AllocError::invalid_request)?;
         Ok(MemoryPoolExtentRequest {
             len: bytes,
-            align: control.align.max(request.align),
+            align: control
+                .align
+                .max(request.align)
+                .max(layout_policy.min_extent_align.get()),
         })
     }
 
@@ -315,10 +331,20 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         if !domain.info.policy.allows(AllocModeSet::SLAB) {
             return Err(AllocError::policy_denied());
         }
+        if domain.pool.is_none() {
+            return Err(AllocError::capacity_exhausted());
+        }
+        let layout_policy = self.primary_layout_policy_for_domain(domain.info.id)?;
         let slot_align = Slab::<SIZE, COUNT>::slot_align_for_domain()?;
-        let request = Slab::<SIZE, COUNT>::extent_request(slot_align)?;
+        let request =
+            Slab::<SIZE, COUNT>::extent_request_with_layout_policy(slot_align, layout_policy)?;
         let extent = domain.assign_extent(&request)?;
-        Slab::from_assigned_extent(domain.info.id, domain.info.policy, extent)
+        Slab::from_assigned_extent_with_layout_policy(
+            domain.info.id,
+            domain.info.policy,
+            extent,
+            layout_policy,
+        )
     }
 
     /// Returns an immortal slab strategy view for `domain`.
@@ -339,13 +365,21 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         if !domain.info.policy.allows(AllocModeSet::SLAB) {
             return Err(AllocError::policy_denied());
         }
+        if domain.pool.is_none() {
+            return Err(AllocError::capacity_exhausted());
+        }
+        let layout_policy = self.primary_layout_policy_for_domain(domain.info.id)?;
         let slot_align = Slab::<SIZE, COUNT, Immortal>::slot_align_for_domain()?;
-        let request = Slab::<SIZE, COUNT, Immortal>::extent_request(slot_align)?;
+        let request = Slab::<SIZE, COUNT, Immortal>::extent_request_with_layout_policy(
+            slot_align,
+            layout_policy,
+        )?;
         let extent = domain.assign_extent(&request)?;
-        Slab::<SIZE, COUNT, Immortal>::from_assigned_extent(
+        Slab::<SIZE, COUNT, Immortal>::from_assigned_extent_with_layout_policy(
             domain.info.id,
             domain.info.policy,
             extent,
+            layout_policy,
         )
     }
 
@@ -360,8 +394,20 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         domain: AllocatorDomainId,
         capacity: usize,
     ) -> Result<BoundedArena, AllocError> {
-        let max_align = 64;
-        self.arena_with_alignment(domain, capacity, max_align)
+        let domain = self
+            .domain_record(domain)
+            .ok_or_else(AllocError::invalid_domain)?;
+        if !domain.info.policy.allows(AllocModeSet::ARENA) {
+            return Err(AllocError::policy_denied());
+        }
+        if domain.pool.is_none() {
+            return Err(AllocError::capacity_exhausted());
+        }
+        let max_align = self
+            .primary_layout_policy_for_domain(domain.info.id)?
+            .default_arena_align
+            .get();
+        self.arena_with_alignment(domain.info.id, capacity, max_align)
     }
 
     /// Returns an immortal bounded-arena strategy view for `domain`.
@@ -378,8 +424,20 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         domain: AllocatorDomainId,
         capacity: usize,
     ) -> Result<BoundedArena<Immortal>, AllocError> {
-        let max_align = 64;
-        self.immortal_arena_with_alignment(domain, capacity, max_align)
+        let domain = self
+            .domain_record(domain)
+            .ok_or_else(AllocError::invalid_domain)?;
+        if !domain.info.policy.allows(AllocModeSet::ARENA) {
+            return Err(AllocError::policy_denied());
+        }
+        if domain.pool.is_none() {
+            return Err(AllocError::capacity_exhausted());
+        }
+        let max_align = self
+            .primary_layout_policy_for_domain(domain.info.id)?
+            .default_arena_align
+            .get();
+        self.immortal_arena_with_alignment(domain.info.id, capacity, max_align)
     }
 
     /// Returns a bounded-arena strategy view for `domain` with explicit maximum alignment.
@@ -400,14 +458,23 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         if !domain.info.policy.allows(AllocModeSet::ARENA) {
             return Err(AllocError::policy_denied());
         }
-        let request = BoundedArena::<super::Mortal>::extent_request(capacity, max_align)?;
+        if domain.pool.is_none() {
+            return Err(AllocError::capacity_exhausted());
+        }
+        let layout_policy = self.primary_layout_policy_for_domain(domain.info.id)?;
+        let request = BoundedArena::<super::Mortal>::extent_request_with_layout_policy(
+            capacity,
+            max_align,
+            layout_policy,
+        )?;
         let extent = domain.assign_extent(&request)?;
-        BoundedArena::from_assigned_extent(
+        BoundedArena::from_assigned_extent_with_layout_policy(
             domain.info.id,
             capacity,
             max_align,
             domain.info.policy,
             extent,
+            layout_policy,
         )
     }
 
@@ -430,14 +497,23 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         if !domain.info.policy.allows(AllocModeSet::ARENA) {
             return Err(AllocError::policy_denied());
         }
-        let request = BoundedArena::<Immortal>::extent_request(capacity, max_align)?;
+        if domain.pool.is_none() {
+            return Err(AllocError::capacity_exhausted());
+        }
+        let layout_policy = self.primary_layout_policy_for_domain(domain.info.id)?;
+        let request = BoundedArena::<Immortal>::extent_request_with_layout_policy(
+            capacity,
+            max_align,
+            layout_policy,
+        )?;
         let extent = domain.assign_extent(&request)?;
-        BoundedArena::<Immortal>::from_assigned_extent(
+        BoundedArena::<Immortal>::from_assigned_extent_with_layout_policy(
             domain.info.id,
             capacity,
             max_align,
             domain.info.policy,
             extent,
+            layout_policy,
         )
     }
 
@@ -557,6 +633,18 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             .iter()
             .flatten()
             .find(|domain| domain.info.id == id)
+    }
+
+    fn primary_layout_policy_for_domain(
+        &self,
+        id: AllocatorDomainId,
+    ) -> Result<AllocatorLayoutPolicy, AllocError> {
+        self.resources
+            .iter()
+            .flatten()
+            .find(|binding| binding.domain == id)
+            .map(|binding| binding.info.layout)
+            .ok_or_else(AllocError::invalid_domain)
     }
 }
 

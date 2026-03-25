@@ -86,6 +86,7 @@ mod domain;
 mod error;
 mod geometry;
 mod handle;
+mod layout;
 mod ops;
 mod range;
 mod request;
@@ -101,6 +102,7 @@ pub use domain::{MemoryDomain, MemoryDomainSet, ResourceBackingKind};
 pub use error::{ResourceError, ResourceErrorKind};
 pub use geometry::MemoryGeometry;
 pub use handle::MemoryResourceHandle;
+pub use layout::{AllocatorLayoutPolicy, AllocatorLayoutRealization};
 pub use ops::{ResourceHazardSet, ResourceOpSet, ResourcePreferenceSet};
 pub use range::ResourceRange;
 pub use request::{
@@ -180,6 +182,11 @@ pub trait MemoryResource {
     /// Returns operation granularity information for the resource.
     fn geometry(&self) -> MemoryGeometry {
         self.info().geometry
+    }
+
+    /// Returns allocator-facing metadata and extent layout policy for the resource.
+    fn layout(&self) -> AllocatorLayoutPolicy {
+        self.info().layout
     }
 
     /// Returns the immutable lifetime contract of the resource.
@@ -477,6 +484,7 @@ impl VirtualMemoryResource {
                 backing_kind,
                 resource_attrs_from_request(request),
                 geometry_from_page_info(page_info, resource_support.ops),
+                allocator_layout_from_page_info(page_info),
                 unmet,
                 initial_state,
             ),
@@ -1252,6 +1260,7 @@ pub(super) fn build_resolved_resource(
     backing: ResourceBackingKind,
     attrs: ResourceAttrs,
     geometry: MemoryGeometry,
+    layout: AllocatorLayoutPolicy,
     unmet_preferences: ResourcePreferenceSet,
     initial_state: ResourceState,
 ) -> ResolvedResource {
@@ -1262,6 +1271,7 @@ pub(super) fn build_resolved_resource(
             backing,
             attrs,
             geometry,
+            layout,
             contract: request.contract,
             support,
             hazards: infer_resource_hazards(request.contract, attrs),
@@ -1269,6 +1279,10 @@ pub(super) fn build_resolved_resource(
         initial_state,
         unmet_preferences,
     }
+}
+
+pub(super) const fn allocator_layout_from_page_info(page_info: PageInfo) -> AllocatorLayoutPolicy {
+    AllocatorLayoutPolicy::hosted_vm(page_info.alloc_granule)
 }
 
 pub(super) fn infer_resource_hazards(
@@ -1570,6 +1584,7 @@ mod tests {
             ResourceBackingKind::StaticRegion,
             ResourceAttrs::ALLOCATABLE | ResourceAttrs::STATIC_REGION | ResourceAttrs::DMA_VISIBLE,
             resource.geometry(),
+            resource.layout(),
             contract,
             support,
             ResourceState::static_state(
@@ -1622,6 +1637,7 @@ mod tests {
             ResourceBackingKind::StaticRegion,
             ResourceAttrs::ALLOCATABLE | ResourceAttrs::STATIC_REGION,
             resource.geometry(),
+            resource.layout(),
             contract,
             support,
             ResourceState::static_state(
@@ -1659,6 +1675,7 @@ mod tests {
             ResourceBackingKind::StaticRegion,
             ResourceAttrs::ALLOCATABLE | ResourceAttrs::STATIC_REGION,
             resource.geometry(),
+            resource.layout(),
             contract,
             support,
             ResourceState::static_state(
@@ -1696,6 +1713,7 @@ mod tests {
             ResourceBackingKind::AnonymousPrivate,
             ResourceAttrs::ALLOCATABLE | ResourceAttrs::STATIC_REGION,
             resource.geometry(),
+            resource.layout(),
             contract,
             support,
             ResourceState::static_state(

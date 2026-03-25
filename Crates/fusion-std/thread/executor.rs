@@ -74,6 +74,7 @@ pub use fusion_sys::event::{
 };
 use fusion_sys::fiber::{FiberError, FiberErrorKind};
 use fusion_sys::mem::resource::{
+    AllocatorLayoutPolicy,
     BoundMemoryResource,
     BoundResourceSpec,
     MemoryResource,
@@ -112,6 +113,7 @@ use super::{
     default_runtime_sizing_strategy,
     yield_now as green_yield_now,
 };
+use fusion_pal::pal::mem::MemBase;
 #[cfg(feature = "std")]
 use fusion_pal::sys::fiber::{PlatformFiberWakeSignal, system_fiber_host};
 #[cfg(feature = "std")]
@@ -1099,8 +1101,23 @@ impl ExecutorBackingRequest {
     fn from_extent_request(
         request: fusion_sys::alloc::MemoryPoolExtentRequest,
     ) -> Result<Self, ExecutorError> {
-        let request = Allocator::<1, 1>::resource_request_for_extent_request(request)
-            .map_err(executor_error_from_alloc)?;
+        Self::from_extent_request_with_layout_policy(
+            request,
+            AllocatorLayoutPolicy::hosted_vm(
+                fusion_pal::sys::mem::system_mem().page_info().alloc_granule,
+            ),
+        )
+    }
+
+    fn from_extent_request_with_layout_policy(
+        request: fusion_sys::alloc::MemoryPoolExtentRequest,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<Self, ExecutorError> {
+        let request = Allocator::<1, 1>::resource_request_for_extent_request_with_layout_policy(
+            request,
+            layout_policy,
+        )
+        .map_err(executor_error_from_alloc)?;
         Ok(Self {
             bytes: request.provisioning_len().ok_or_else(executor_overflow)?,
             align: request.align,
@@ -1188,6 +1205,7 @@ fn partition_executor_bound_resource(
         executor_partition_backing_kind(info.backing)?,
         info.attrs,
         info.geometry,
+        info.layout,
         info.contract,
         info.support,
         handle.state(),
@@ -1196,94 +1214,23 @@ fn partition_executor_bound_resource(
     Ok(MemoryResourceHandle::from(resource))
 }
 
-impl CurrentAsyncRuntimeBackingPlan {
-    /// Returns the explicit backing plan for one current-thread runtime configuration.
-    ///
-    /// The medium/large future/result slab requests are part of the plan even though those slabs
-    /// still materialize lazily; explicit-backed callers can reserve them up front so runtime
-    /// construction never has to improvise another acquisition story later.
-    pub fn for_config(config: ExecutorConfig) -> Result<Self, ExecutorError> {
-        let sizing = config.sizing;
-        let control = apply_executor_sizing_strategy(
-            ExecutorBackingRequest::from_extent_request(
-                ControlLease::<ExecutorCore>::extent_request()
-                    .map_err(executor_error_from_alloc)?,
-            )?,
-            sizing,
-        )?;
-        let reactor = apply_executor_sizing_strategy(
-            ExecutorBackingRequest::from_extent_request(
-                BoundedArena::<fusion_sys::alloc::Mortal>::extent_request(
-                    executor_reactor_capacity(config.capacity)?,
-                    executor_reactor_align(),
-                )
-                .map_err(executor_error_from_alloc)?,
-            )?,
-            sizing,
-        )?;
-        let registry = apply_executor_sizing_strategy(
-            ExecutorBackingRequest::from_extent_request(
-                BoundedArena::<fusion_sys::alloc::Mortal>::extent_request(
-                    executor_registry_capacity(config.capacity)?,
-                    executor_registry_align(),
-                )
-                .map_err(executor_error_from_alloc)?,
-            )?,
-            sizing,
-        )?;
-        let future_medium = apply_executor_sizing_strategy(
-            ExecutorBackingRequest::from_extent_request(
-                Slab::<ASYNC_FUTURE_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
-                    async_storage_class_slot_align(ASYNC_FUTURE_CLASS_MEDIUM_BYTES),
-                )
-                .map_err(executor_error_from_alloc)?,
-            )?,
-            sizing,
-        )?;
-        let future_large = apply_executor_sizing_strategy(
-            ExecutorBackingRequest::from_extent_request(
-                Slab::<ASYNC_FUTURE_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
-                    async_storage_class_slot_align(ASYNC_FUTURE_CLASS_LARGE_BYTES),
-                )
-                .map_err(executor_error_from_alloc)?,
-            )?,
-            sizing,
-        )?;
-        let result_medium = apply_executor_sizing_strategy(
-            ExecutorBackingRequest::from_extent_request(
-                Slab::<ASYNC_RESULT_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
-                    async_storage_class_slot_align(ASYNC_RESULT_CLASS_MEDIUM_BYTES),
-                )
-                .map_err(executor_error_from_alloc)?,
-            )?,
-            sizing,
-        )?;
-        let result_large = apply_executor_sizing_strategy(
-            ExecutorBackingRequest::from_extent_request(
-                Slab::<ASYNC_RESULT_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>::extent_request(
-                    async_storage_class_slot_align(ASYNC_RESULT_CLASS_LARGE_BYTES),
-                )
-                .map_err(executor_error_from_alloc)?,
-            )?,
-            sizing,
-        )?;
-
-        Ok(Self {
-            control,
-            reactor,
-            registry,
-            future_medium,
-            future_large,
-            result_medium,
-            result_large,
-        })
+const fn executor_resource_base_alignment_from_addr(addr: usize) -> usize {
+    if addr == 0 {
+        1
+    } else {
+        1usize << addr.trailing_zeros()
     }
+}
 
-    /// Packs the per-domain requests into one conservative owning-slab layout.
-    ///
-    /// The total byte count includes worst-case padding for an arbitrarily aligned caller-owned
-    /// slab base.
-    pub fn combined(self) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
+fn executor_resource_base_alignment(handle: &MemoryResourceHandle) -> usize {
+    executor_resource_base_alignment_from_addr(handle.view().base_addr().get())
+}
+
+impl CurrentAsyncRuntimeBackingPlan {
+    fn combined_with_base_alignment(
+        self,
+        base_align: usize,
+    ) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
         let mut max_align = self.control.align;
         if self.reactor.align > max_align {
             max_align = self.reactor.align;
@@ -1304,7 +1251,11 @@ impl CurrentAsyncRuntimeBackingPlan {
             max_align = self.result_large.align;
         }
 
-        let mut cursor = max_align.saturating_sub(1);
+        let mut cursor = if base_align >= max_align {
+            0
+        } else {
+            max_align.saturating_sub(1)
+        };
         let control_offset = executor_align_up_packed(cursor, self.control.align)?;
         cursor = control_offset
             .checked_add(self.control.bytes)
@@ -1361,11 +1312,10 @@ impl CurrentAsyncRuntimeBackingPlan {
         })
     }
 
-    /// Packs only the eagerly required current-thread async domains into one owning slab.
-    ///
-    /// Lazy medium/large future and result slabs stay omitted so explicit-backed bare-metal
-    /// runtimes do not reserve those bytes unless the caller deliberately wants them.
-    pub fn combined_eager(self) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
+    fn combined_eager_with_base_alignment(
+        self,
+        base_align: usize,
+    ) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
         let mut max_align = self.control.align;
         if self.reactor.align > max_align {
             max_align = self.reactor.align;
@@ -1374,7 +1324,11 @@ impl CurrentAsyncRuntimeBackingPlan {
             max_align = self.registry.align;
         }
 
-        let mut cursor = max_align.saturating_sub(1);
+        let mut cursor = if base_align >= max_align {
+            0
+        } else {
+            max_align.saturating_sub(1)
+        };
         let control_offset = executor_align_up_packed(cursor, self.control.align)?;
         cursor = control_offset
             .checked_add(self.control.bytes)
@@ -1401,6 +1355,149 @@ impl CurrentAsyncRuntimeBackingPlan {
             result_medium: None,
             result_large: None,
         })
+    }
+
+    /// Returns the explicit backing plan for one current-thread runtime configuration.
+    ///
+    /// The medium/large future/result slab requests are part of the plan even though those slabs
+    /// still materialize lazily; explicit-backed callers can reserve them up front so runtime
+    /// construction never has to improvise another acquisition story later.
+    pub fn for_config(config: ExecutorConfig) -> Result<Self, ExecutorError> {
+        Self::for_config_with_layout_policy(
+            config,
+            AllocatorLayoutPolicy::hosted_vm(
+                fusion_pal::sys::mem::system_mem().page_info().alloc_granule,
+            ),
+        )
+    }
+
+    /// Returns the explicit backing plan for one current-thread runtime configuration under one
+    /// explicit allocator layout policy.
+    pub fn for_config_with_layout_policy(
+        config: ExecutorConfig,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<Self, ExecutorError> {
+        let sizing = config.sizing;
+        let control = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request_with_layout_policy(
+                ControlLease::<ExecutorCore>::extent_request()
+                    .map_err(executor_error_from_alloc)?,
+                layout_policy,
+            )?,
+            sizing,
+        )?;
+        let reactor = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request_with_layout_policy(
+                BoundedArena::<fusion_sys::alloc::Mortal>::extent_request_with_layout_policy(
+                    executor_reactor_capacity(config.capacity)?,
+                    executor_reactor_align(),
+                    layout_policy,
+                )
+                .map_err(executor_error_from_alloc)?,
+                layout_policy,
+            )?,
+            sizing,
+        )?;
+        let registry = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request_with_layout_policy(
+                BoundedArena::<fusion_sys::alloc::Mortal>::extent_request_with_layout_policy(
+                    executor_registry_capacity(config.capacity)?,
+                    executor_registry_align(),
+                    layout_policy,
+                )
+                .map_err(executor_error_from_alloc)?,
+                layout_policy,
+            )?,
+            sizing,
+        )?;
+        let future_medium = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request_with_layout_policy(
+                Slab::<ASYNC_FUTURE_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>::extent_request_with_layout_policy(
+                    async_storage_class_slot_align(ASYNC_FUTURE_CLASS_MEDIUM_BYTES),
+                    layout_policy,
+                )
+                .map_err(executor_error_from_alloc)?,
+                layout_policy,
+            )?,
+            sizing,
+        )?;
+        let future_large = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request_with_layout_policy(
+                Slab::<ASYNC_FUTURE_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>::extent_request_with_layout_policy(
+                    async_storage_class_slot_align(ASYNC_FUTURE_CLASS_LARGE_BYTES),
+                    layout_policy,
+                )
+                .map_err(executor_error_from_alloc)?,
+                layout_policy,
+            )?,
+            sizing,
+        )?;
+        let result_medium = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request_with_layout_policy(
+                Slab::<ASYNC_RESULT_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>::extent_request_with_layout_policy(
+                    async_storage_class_slot_align(ASYNC_RESULT_CLASS_MEDIUM_BYTES),
+                    layout_policy,
+                )
+                .map_err(executor_error_from_alloc)?,
+                layout_policy,
+            )?,
+            sizing,
+        )?;
+        let result_large = apply_executor_sizing_strategy(
+            ExecutorBackingRequest::from_extent_request_with_layout_policy(
+                Slab::<ASYNC_RESULT_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>::extent_request_with_layout_policy(
+                    async_storage_class_slot_align(ASYNC_RESULT_CLASS_LARGE_BYTES),
+                    layout_policy,
+                )
+                .map_err(executor_error_from_alloc)?,
+                layout_policy,
+            )?,
+            sizing,
+        )?;
+
+        Ok(Self {
+            control,
+            reactor,
+            registry,
+            future_medium,
+            future_large,
+            result_medium,
+            result_large,
+        })
+    }
+
+    /// Packs the per-domain requests into one conservative owning-slab layout.
+    ///
+    /// The total byte count includes worst-case padding for an arbitrarily aligned caller-owned
+    /// slab base.
+    pub fn combined(self) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
+        self.combined_with_base_alignment(1)
+    }
+
+    /// Packs the per-domain requests into one owning slab for a caller that can guarantee the
+    /// slab base is aligned to at least `base_align`.
+    pub fn combined_for_base_alignment(
+        self,
+        base_align: usize,
+    ) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
+        self.combined_with_base_alignment(base_align)
+    }
+
+    /// Packs only the eagerly required current-thread async domains into one owning slab.
+    ///
+    /// Lazy medium/large future and result slabs stay omitted so explicit-backed bare-metal
+    /// runtimes do not reserve those bytes unless the caller deliberately wants them.
+    pub fn combined_eager(self) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
+        self.combined_eager_with_base_alignment(1)
+    }
+
+    /// Packs only the eagerly required domains into one owning slab for a caller that can
+    /// guarantee the slab base is aligned to at least `base_align`.
+    pub fn combined_eager_for_base_alignment(
+        self,
+        base_align: usize,
+    ) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
+        self.combined_eager_with_base_alignment(base_align)
     }
 }
 
@@ -1652,7 +1749,6 @@ const INLINE_ASYNC_RESULT_BYTES: usize = 256;
 const ASYNC_RESULT_CLASS_MEDIUM_BYTES: usize = 512;
 const ASYNC_RESULT_CLASS_LARGE_BYTES: usize = 1024;
 const REACTOR_EVENT_BATCH: usize = 16;
-const REACTOR_WAIT_BATCH: usize = TASK_REGISTRY_CAPACITY;
 
 const SLOT_EMPTY: u8 = 0;
 const SLOT_PENDING: u8 = 1;
@@ -2204,13 +2300,15 @@ impl ExecutorReactorState {
 
     #[cfg(feature = "std")]
     fn flush_pending_deregistrations(&self, reactor: Reactor) -> Result<(), ExecutorError> {
-        let mut pending = [None; TASK_REGISTRY_CAPACITY];
-        self.pending_deregister.with(|queue| {
-            for (dst, src) in pending.iter_mut().zip(queue.iter_mut()) {
-                *dst = src.take();
-            }
-        })?;
-        for key in pending.into_iter().flatten() {
+        loop {
+            let key = self.pending_deregister.with(|queue| {
+                Ok::<Option<EventKey>, ExecutorError>(
+                    queue.iter_mut().find_map(|entry| entry.take()),
+                )
+            })??;
+            let Some(key) = key else {
+                break;
+            };
             self.best_effort_deregister(reactor, key)?;
         }
         Ok(())
@@ -2222,24 +2320,18 @@ impl ExecutorReactorState {
         core: &ExecutorCore,
         reactor: Reactor,
     ) -> Result<bool, ExecutorError> {
-        let mut pending = [None; TASK_REGISTRY_CAPACITY];
-        self.waits.with(|waits| {
-            for (slot_index, entry) in waits.iter().enumerate() {
-                let AsyncReactorWaitKind::ReadinessPending {
+        let mut progressed = false;
+        let slot_count = self.waits.with_ref(|waits| waits.len())?;
+        for slot_index in 0..slot_count {
+            let pending = self.waits.with_ref(|waits| match waits[slot_index].kind {
+                AsyncReactorWaitKind::ReadinessPending {
                     generation,
                     source,
                     interest,
-                } = entry.kind
-                else {
-                    continue;
-                };
-                pending[slot_index] = Some((generation, source, interest));
-            }
-        })?;
-
-        let mut progressed = false;
-        for (slot_index, pending_entry) in pending.into_iter().enumerate() {
-            let Some((generation, source, interest)) = pending_entry else {
+                } => Some((generation, source, interest)),
+                _ => None,
+            })?;
+            let Some((generation, source, interest)) = pending else {
                 continue;
             };
 
@@ -2294,34 +2386,31 @@ impl ExecutorReactorState {
         now: CanonicalInstant,
         now_raw: Option<MonotonicRawInstant>,
     ) -> Result<bool, ExecutorError> {
-        let mut ready = [None; REACTOR_WAIT_BATCH];
-        self.waits.with(|waits| {
-            let mut count = 0_usize;
-            for (slot_index, entry) in waits.iter_mut().enumerate() {
+        let mut progressed = false;
+        let slot_count = self.waits.with_ref(|waits| waits.len())?;
+        for slot_index in 0..slot_count {
+            let generation = self.waits.with(|waits| {
                 let AsyncReactorWaitKind::Sleep {
                     generation,
                     deadline,
                     raw_deadline,
-                } = entry.kind
+                } = waits[slot_index].kind
                 else {
-                    continue;
+                    return Ok::<Option<u64>, ExecutorError>(None);
                 };
                 let due = match (now_raw, raw_deadline) {
                     (Some(now_raw), Some(raw_deadline)) => now_raw.deadline_reached(raw_deadline),
                     _ => now >= deadline,
                 };
-                if !due || count == ready.len() {
-                    continue;
+                if !due {
+                    return Ok(None);
                 }
-                entry.kind = AsyncReactorWaitKind::None;
-                ready[count] = Some((slot_index, generation));
-                count += 1;
-            }
-        })?;
-        let mut progressed = false;
-        for ready_entry in ready.into_iter().flatten() {
-            let (slot_index, generation) = ready_entry;
-            let _ = generation;
+                waits[slot_index] = AsyncReactorWaitEntry::EMPTY;
+                Ok(Some(generation))
+            })??;
+            let Some(generation) = generation else {
+                continue;
+            };
             self.store_wait_outcome(slot_index, AsyncWaitOutcome::Timer)?;
             core.schedule_slot(slot_index, generation)?;
             progressed = true;
@@ -2340,48 +2429,46 @@ impl ExecutorReactorState {
         }
         #[cfg(feature = "std")]
         let mut wake_event = false;
-        let mut ready = [None; REACTOR_WAIT_BATCH];
-        let mut deregister = [None; REACTOR_EVENT_BATCH];
-        self.events.with_ref(|events| {
-            self.waits.with(|waits| {
-                let mut ready_count = 0_usize;
-                let mut deregister_count = 0_usize;
-                for event in events.iter().take(count) {
-                    #[cfg(feature = "std")]
-                    {
-                        let wake_key = self
-                            .wake
-                            .with_ref(|wake| wake.as_ref().and_then(|wake| wake.key))?;
-                        if Some(event.key) == wake_key {
-                            wake_event = true;
-                            continue;
-                        }
-                    }
-                    let EventNotification::Readiness(readiness) = event.notification else {
+        #[cfg(feature = "std")]
+        let wake_key = self
+            .wake
+            .with_ref(|wake| wake.as_ref().and_then(|wake| wake.key))?;
+
+        let mut progressed = false;
+        for event_index in 0..count {
+            let event = self.events.with_ref(|events| events[event_index])?;
+            #[cfg(feature = "std")]
+            if Some(event.key) == wake_key {
+                wake_event = true;
+                continue;
+            }
+            let EventNotification::Readiness(readiness) = event.notification else {
+                continue;
+            };
+            let ready = self.waits.with(|waits| {
+                for (slot_index, entry) in waits.iter_mut().enumerate() {
+                    let AsyncReactorWaitKind::ReadinessRegistered { generation, key } = entry.kind
+                    else {
                         continue;
                     };
-                    for (slot_index, entry) in waits.iter_mut().enumerate() {
-                        let AsyncReactorWaitKind::ReadinessRegistered { generation, key } =
-                            entry.kind
-                        else {
-                            continue;
-                        };
-                        if key != event.key || ready_count == ready.len() {
-                            continue;
-                        }
-                        entry.kind = AsyncReactorWaitKind::None;
-                        ready[ready_count] = Some((slot_index, generation, readiness));
-                        ready_count += 1;
-                        if deregister_count < deregister.len() {
-                            deregister[deregister_count] = Some(key);
-                            deregister_count += 1;
-                        }
-                        break;
+                    if key != event.key {
+                        continue;
                     }
+                    entry.kind = AsyncReactorWaitKind::None;
+                    return Ok::<Option<(usize, u64)>, ExecutorError>(Some((
+                        slot_index, generation,
+                    )));
                 }
-                Ok::<(), ExecutorError>(())
-            })?
-        })??;
+                Ok(None)
+            })??;
+            let Some((slot_index, generation)) = ready else {
+                continue;
+            };
+            self.best_effort_deregister(reactor, event.key)?;
+            self.store_wait_outcome(slot_index, AsyncWaitOutcome::Readiness(readiness))?;
+            core.schedule_slot(slot_index, generation)?;
+            progressed = true;
+        }
 
         #[cfg(feature = "std")]
         if wake_event {
@@ -2392,19 +2479,6 @@ impl ExecutorReactorState {
                     Ok(())
                 }
             })??;
-        }
-
-        for key in deregister.into_iter().flatten() {
-            self.best_effort_deregister(reactor, key)?;
-        }
-
-        let mut progressed = false;
-        for ready_entry in ready.into_iter().flatten() {
-            let (slot_index, generation, readiness) = ready_entry;
-            let _ = generation;
-            self.store_wait_outcome(slot_index, AsyncWaitOutcome::Readiness(readiness))?;
-            core.schedule_slot(slot_index, generation)?;
-            progressed = true;
         }
         Ok(progressed)
     }
@@ -5015,6 +5089,18 @@ impl CurrentAsyncRuntime {
         CurrentAsyncRuntimeBackingPlan::for_config(config.with_mode(ExecutorMode::CurrentThread))
     }
 
+    /// Returns the explicit current-thread runtime backing plan under one explicit allocator
+    /// layout policy.
+    pub fn backing_plan_with_layout_policy(
+        config: ExecutorConfig,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<CurrentAsyncRuntimeBackingPlan, ExecutorError> {
+        CurrentAsyncRuntimeBackingPlan::for_config_with_layout_policy(
+            config.with_mode(ExecutorMode::CurrentThread),
+            layout_policy,
+        )
+    }
+
     /// Creates one current-thread async runtime.
     #[must_use]
     pub fn new() -> Self {
@@ -5067,7 +5153,8 @@ impl CurrentAsyncRuntime {
         config: ExecutorConfig,
         slab: MemoryResourceHandle,
     ) -> Result<Self, ExecutorError> {
-        let layout = Self::backing_plan(config)?.combined_eager()?;
+        let layout = Self::backing_plan_with_layout_policy(config, slab.info().layout)?
+            .combined_eager_for_base_alignment(executor_resource_base_alignment(&slab))?;
         if slab.view().len() < layout.slab.bytes {
             return Err(ExecutorError::Sync(SyncErrorKind::Overflow));
         }
@@ -6486,6 +6573,7 @@ mod tests {
                     lock_granule: None,
                     large_granule: None,
                 },
+                AllocatorLayoutPolicy::exact_static(),
                 ResourceContract {
                     allowed_protect: Protect::READ | Protect::WRITE,
                     write_xor_execute: true,
@@ -7393,6 +7481,36 @@ mod tests {
                 .expect("runtime should drive bound-slab task")
                 .expect("task should complete"),
             31
+        );
+    }
+
+    #[test]
+    fn current_runtime_from_exact_aligned_bound_slab_runs_task() {
+        let config = ExecutorConfig::new().with_capacity(2);
+        let conservative = CurrentAsyncRuntime::backing_plan(config)
+            .expect("backing plan should build")
+            .combined_eager()
+            .expect("conservative layout should build");
+        let exact = CurrentAsyncRuntime::backing_plan(config)
+            .expect("backing plan should build")
+            .combined_eager_for_base_alignment(conservative.slab.align)
+            .expect("exact-aligned layout should build");
+        let slab = aligned_bound_resource(exact.slab.bytes, exact.slab.align);
+        let runtime = CurrentAsyncRuntime::from_bound_slab(config, slab)
+            .expect("runtime should build from exact-aligned slab");
+        let handle = runtime
+            .spawn(async {
+                async_yield_now().await;
+                37_u8
+            })
+            .expect("task should spawn");
+
+        assert_eq!(
+            runtime
+                .block_on(handle)
+                .expect("runtime should drive exact-aligned bound-slab task")
+                .expect("task should complete"),
+            37
         );
     }
 

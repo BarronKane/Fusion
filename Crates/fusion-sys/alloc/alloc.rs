@@ -12,21 +12,7 @@
 
 use core::mem::{ManuallyDrop, align_of, size_of};
 use core::ptr::NonNull;
-use fusion_pal::sys::mem::{
-    Backing,
-    CachePolicy,
-    MapFlags,
-    MapRequest,
-    MemBase,
-    MemError,
-    MemErrorKind,
-    MemMap,
-    Placement,
-    Protect,
-    Region,
-    RegionAttrs,
-    system_mem,
-};
+use fusion_pal::sys::mem::Region;
 
 use crate::sync::{SharedHeader, SharedRelease};
 
@@ -48,7 +34,11 @@ pub use domain::{AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind};
 pub use error::{AllocError, AllocErrorKind};
 pub use heap::HeapAllocator;
 pub use lifetime::{Immortal, LifetimePolicy, Mortal};
-pub(crate) use metadata::{AllocSubsystemKind, MetadataPageHeader, front_metadata_layout};
+pub(crate) use metadata::{
+    AllocSubsystemKind,
+    MetadataPageHeader,
+    front_metadata_layout_with_policy,
+};
 pub use policy::{AllocCapabilities, AllocHazards, AllocModeSet, AllocPolicy};
 #[allow(unused_imports)]
 pub use root::{Allocator, AllocatorBuilder};
@@ -193,7 +183,6 @@ struct PoolHandleVTable {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PoolControlStorage {
-    DedicatedRegion(Region),
     InBandResource,
 }
 
@@ -220,13 +209,6 @@ unsafe impl Send for PoolHandle {}
 unsafe impl Sync for PoolHandle {}
 
 impl PoolHandle {
-    pub(crate) fn new<const MEMBERS: usize, const EXTENTS: usize>(
-        pool: MemoryPool<MEMBERS, EXTENTS>,
-    ) -> Result<Self, AllocError> {
-        let region = pool_control_region::<MEMBERS, EXTENTS>()?;
-        Self::new_in_storage(pool, region, PoolControlStorage::DedicatedRegion(region))
-    }
-
     pub(crate) fn new_in_region<const MEMBERS: usize, const EXTENTS: usize>(
         pool: MemoryPool<MEMBERS, EXTENTS>,
         region: Region,
@@ -245,9 +227,6 @@ impl PoolHandle {
                 .get()
                 .is_multiple_of(core::mem::align_of::<PoolControlBlock<MEMBERS, EXTENTS>>())
         {
-            if let PoolControlStorage::DedicatedRegion(region) = storage {
-                let _ = unsafe { system_mem().unmap(region) };
-            }
             return Err(AllocError::invalid_request());
         }
 
@@ -387,13 +366,13 @@ unsafe fn release_impl<const MEMBERS: usize, const EXTENTS: usize>(ptr: NonNull<
     }
     let block = ptr.cast::<PoolControlBlock<MEMBERS, EXTENTS>>().as_ptr();
     let storage = unsafe { (*block).storage };
-    // SAFETY: the final reference exclusively owns the control mapping. The pool must be dropped
-    // before unmapping because its storage resides inside that mapping.
+    // SAFETY: the final reference exclusively owns the control mapping. Move the pool out of the
+    // control block before dropping it so in-band contributors can tear their own backing down
+    // without invalidating the pool value mid-drop.
     unsafe {
-        ManuallyDrop::drop(&mut (*block).pool);
-        if let PoolControlStorage::DedicatedRegion(region) = storage {
-            let _ = system_mem().unmap(region);
-        }
+        let pool = ManuallyDrop::take(&mut (*block).pool);
+        drop(pool);
+        let _ = storage;
     }
 }
 
@@ -461,24 +440,6 @@ impl Drop for AssignedPoolExtent {
     }
 }
 
-fn pool_control_region<const MEMBERS: usize, const EXTENTS: usize>() -> Result<Region, AllocError> {
-    let page = system_mem().page_info().alloc_granule.get();
-    let len = align_up(size_of::<PoolControlBlock<MEMBERS, EXTENTS>>(), page)?;
-    unsafe {
-        system_mem().map(&MapRequest {
-            len,
-            align: page,
-            protect: Protect::READ | Protect::WRITE,
-            flags: MapFlags::PRIVATE,
-            attrs: RegionAttrs::VIRTUAL_ONLY,
-            cache: CachePolicy::Default,
-            placement: Placement::Anywhere,
-            backing: Backing::Anonymous,
-        })
-    }
-    .map_err(alloc_error_from_mem)
-}
-
 pub(crate) const fn pool_control_backing_request<const MEMBERS: usize, const EXTENTS: usize>()
 -> Result<MemoryPoolExtentRequest, AllocError> {
     let len = size_of::<PoolControlBlock<MEMBERS, EXTENTS>>();
@@ -489,21 +450,6 @@ pub(crate) const fn pool_control_backing_request<const MEMBERS: usize, const EXT
         len,
         align: align_of::<PoolControlBlock<MEMBERS, EXTENTS>>(),
     })
-}
-
-const fn alloc_error_from_mem(error: MemError) -> AllocError {
-    match error.kind {
-        MemErrorKind::Unsupported => AllocError::unsupported(),
-        MemErrorKind::InvalidInput
-        | MemErrorKind::InvalidAddress
-        | MemErrorKind::Misaligned
-        | MemErrorKind::OutOfBounds
-        | MemErrorKind::Overflow => AllocError::invalid_request(),
-        MemErrorKind::OutOfMemory => AllocError::out_of_memory(),
-        MemErrorKind::Busy | MemErrorKind::PermissionDenied | MemErrorKind::Platform(_) => {
-            AllocError::capacity_exhausted()
-        }
-    }
 }
 
 pub(crate) fn align_up(value: usize, align: usize) -> Result<usize, AllocError> {

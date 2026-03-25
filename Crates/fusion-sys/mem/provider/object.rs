@@ -1,6 +1,7 @@
 use fusion_pal::sys::mem::Region;
 
 use crate::mem::resource::{
+    AllocatorLayoutPolicy,
     MemoryDomain,
     ResourceAttrs,
     ResourceBackingKind,
@@ -38,6 +39,8 @@ pub struct MemoryObjectEnvelope {
     pub backing: ResourceBackingKind,
     /// Intrinsic attributes of the object.
     pub attrs: ResourceAttrs,
+    /// Allocator-facing metadata and extent layout policy.
+    pub layout: AllocatorLayoutPolicy,
     /// Immutable lifetime contract of the object.
     pub contract: ResourceContract,
     /// Runtime support surface of the object.
@@ -54,6 +57,7 @@ impl MemoryObjectEnvelope {
             domain: info.domain,
             backing: info.backing,
             attrs: info.attrs,
+            layout: info.layout,
             contract: info.contract,
             support: info.support,
             hazards: info.hazards,

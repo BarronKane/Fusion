@@ -3,6 +3,7 @@ use fusion_pal::sys::mem::Region;
 use super::attrs::ResourceAttrs;
 use super::domain::{MemoryDomain, ResourceBackingKind};
 use super::geometry::MemoryGeometry;
+use super::layout::AllocatorLayoutPolicy;
 use super::ops::{ResourceHazardSet, ResourcePreferenceSet};
 use super::request::ResourceContract;
 use super::state::ResourceState;
@@ -21,6 +22,8 @@ pub struct ResourceInfo {
     pub attrs: ResourceAttrs,
     /// Operation granularity information.
     pub geometry: MemoryGeometry,
+    /// Allocator-facing metadata and extent layout policy.
+    pub layout: AllocatorLayoutPolicy,
     /// Immutable lifetime contract the resource must continue to satisfy.
     pub contract: ResourceContract,
     /// Runtime support surface of this instance.
@@ -39,6 +42,7 @@ impl ResourceInfo {
         backing: ResourceBackingKind,
         attrs: ResourceAttrs,
         geometry: MemoryGeometry,
+        layout: AllocatorLayoutPolicy,
         contract: ResourceContract,
         support: ResourceSupport,
         hazards: ResourceHazardSet,
@@ -49,6 +53,7 @@ impl ResourceInfo {
             backing,
             attrs,
             geometry,
+            layout,
             contract,
             support,
             hazards,

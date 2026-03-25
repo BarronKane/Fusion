@@ -1,6 +1,6 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="helper fusion-example-pico rtt" type="CargoCommandRunConfiguration" factoryName="Cargo Command" folderName="fusion-example-pico helpers">
-    <option name="command" value="pico-attach" />
+  <configuration default="false" name="helper fusion-example-rp2350-minimal-led debug on device launch" type="CargoCommandRunConfiguration" factoryName="Cargo Command" folderName="fusion-example-rp2350-minimal-led helpers">
+    <option name="command" value="pico-debug-server -- --detach" />
     <envs />
     <option name="emulateTerminal" value="true" />
     <option name="channel" value="DEFAULT" />

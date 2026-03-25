@@ -14,6 +14,8 @@ use crate::pal::mem::{
     MapRequest,
     MemAdviceCaps,
     MemAdvise,
+    MemAllocatorLayoutPolicy,
+    MemAllocatorLayoutRealization,
     MemBackingCaps,
     MemBase,
     MemCaps,
@@ -223,6 +225,7 @@ impl MemCatalog for CortexMMem {
                 backing: descriptor.backing,
                 attrs: resource_attrs_from_descriptor(descriptor),
                 geometry: geometry_from_descriptor(descriptor),
+                layout: layout_from_descriptor(descriptor),
                 contract: MemResourceContract {
                     allowed_protect: descriptor.protect,
                     write_xor_execute: false,
@@ -319,6 +322,18 @@ const fn geometry_from_descriptor(descriptor: CortexMMemoryRegionDescriptor) -> 
         commit_granule: None,
         lock_granule: None,
         large_granule: None,
+    }
+}
+
+const fn layout_from_descriptor(
+    _descriptor: CortexMMemoryRegionDescriptor,
+) -> MemAllocatorLayoutPolicy {
+    MemAllocatorLayoutPolicy {
+        metadata_granule: CORTEX_M_GRANULE,
+        min_extent_align: CORTEX_M_GRANULE,
+        default_arena_align: CORTEX_M_GRANULE,
+        default_slab_align: CORTEX_M_GRANULE,
+        realization: MemAllocatorLayoutRealization::EagerPhysical,
     }
 }
 

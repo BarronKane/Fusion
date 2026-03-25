@@ -1,8 +1,14 @@
 //! Domain 5: public runtime orchestration surface.
 
 use super::{
+    CurrentAsyncRuntime,
+    CurrentAsyncRuntimeCombinedBackingPlan,
+    CurrentFiberPool,
+    CurrentFiberPoolCombinedBackingPlan,
     Executor,
     ExecutorConfig,
+    FiberPlanningSupport,
+    FiberPoolBootstrap,
     FiberStackBacking,
     GreenGrowth,
     GreenPool,
@@ -10,6 +16,17 @@ use super::{
     GreenScheduling,
     ThreadPool,
     ThreadPoolConfig,
+};
+use core::num::NonZeroUsize;
+use fusion_pal::pal::mem::MemBase;
+pub use fusion_sys::mem::resource::AllocatorLayoutPolicy;
+use fusion_sys::mem::resource::{
+    BoundMemoryResource,
+    BoundResourceSpec,
+    MemoryResource,
+    MemoryResourceHandle,
+    ResourceBackingKind,
+    ResourceRange,
 };
 
 /// Global sizing strategy for runtime-owned slabs, arenas, and derived envelopes.
@@ -49,6 +66,560 @@ pub const fn default_runtime_sizing_strategy() -> RuntimeSizingStrategy {
     #[cfg(not(feature = "sizing-global-nearest-round-up"))]
     {
         RuntimeSizingStrategy::Exact
+    }
+}
+
+/// Unified backing request for one combined runtime-owned slab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RuntimeBackingRequest {
+    /// Requested byte count.
+    pub bytes: usize,
+    /// Required slab alignment.
+    pub align: usize,
+}
+
+/// Explicit one-slab backing plan for one current-thread fiber + async runtime bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CurrentFiberAsyncRuntimeBackingPlan {
+    /// Total owning slab request for the combined runtime bundle.
+    pub slab: RuntimeBackingRequest,
+    /// Fiber-runtime sub-slab range inside the owning slab.
+    pub fibers: ResourceRange,
+    /// Async-runtime sub-slab range inside the owning slab.
+    pub executor: ResourceRange,
+    /// Nested current-thread fiber plan for the fiber sub-slab.
+    pub fiber_plan: CurrentFiberPoolCombinedBackingPlan,
+    /// Nested current-thread async plan for the async sub-slab.
+    pub executor_plan: CurrentAsyncRuntimeCombinedBackingPlan,
+}
+
+/// Error for combined current-thread fiber + async bootstrap work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CurrentFiberAsyncRuntimeError {
+    /// Fiber bootstrap failed honestly.
+    Fiber(fusion_sys::fiber::FiberError),
+    /// Async runtime bootstrap failed honestly.
+    Executor(super::ExecutorError),
+}
+
+/// Ergonomic current-thread bootstrap for one fiber pool plus one async runtime.
+#[derive(Debug, Clone, Copy)]
+pub struct CurrentFiberAsyncBootstrap<'a> {
+    fibers: FiberPoolBootstrap<'a>,
+    executor: ExecutorConfig,
+}
+
+/// One current-thread runtime bundle containing both fibers and async.
+#[derive(Debug)]
+pub struct CurrentFiberAsyncRuntime {
+    fibers: CurrentFiberPool,
+    executor: CurrentAsyncRuntime,
+}
+
+/// One deferred current-thread async runtime builder.
+#[derive(Debug)]
+pub struct CurrentAsyncRuntimeBuilder {
+    config: ExecutorConfig,
+    slab: Option<MemoryResourceHandle>,
+}
+
+/// Split current-thread fiber + async bootstrap result.
+#[derive(Debug)]
+pub struct CurrentFiberAsyncParts {
+    fibers: CurrentFiberPool,
+    executor: CurrentAsyncRuntimeBuilder,
+}
+
+impl CurrentFiberAsyncRuntime {
+    /// Returns the current-thread fiber pool.
+    #[must_use]
+    pub const fn fibers(&self) -> &CurrentFiberPool {
+        &self.fibers
+    }
+
+    /// Returns the current-thread async runtime.
+    #[must_use]
+    pub const fn executor(&self) -> &CurrentAsyncRuntime {
+        &self.executor
+    }
+
+    /// Consumes the bundle into its component runtimes.
+    #[must_use]
+    pub fn into_parts(self) -> (CurrentFiberPool, CurrentAsyncRuntime) {
+        (self.fibers, self.executor)
+    }
+}
+
+impl CurrentAsyncRuntimeBuilder {
+    /// Builds the current-thread async runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest current-thread async bootstrap failure.
+    pub fn build(self) -> Result<CurrentAsyncRuntime, CurrentFiberAsyncRuntimeError> {
+        match self.slab {
+            Some(slab) => Ok(CurrentAsyncRuntime::from_bound_slab(self.config, slab)?),
+            None => Ok(CurrentAsyncRuntime::with_executor_config(self.config)),
+        }
+    }
+
+    /// Builds the current-thread async runtime from one explicit owning slab.
+    ///
+    /// This is the bare-metal honest path for callers that already know they are on the
+    /// explicit-backed lane and do not want the platform-acquired fallback path retained in the
+    /// resulting image.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unsupported` if this builder does not carry one explicit backing slab, or any
+    /// honest explicit-backed current-thread async bootstrap failure.
+    pub fn build_explicit(self) -> Result<CurrentAsyncRuntime, CurrentFiberAsyncRuntimeError> {
+        let Some(slab) = self.slab else {
+            return Err(CurrentFiberAsyncRuntimeError::Executor(
+                super::ExecutorError::Unsupported,
+            ));
+        };
+        Ok(CurrentAsyncRuntime::from_bound_slab(self.config, slab)?)
+    }
+}
+
+impl CurrentFiberAsyncParts {
+    /// Returns the current-thread fiber pool.
+    #[must_use]
+    pub const fn fibers(&self) -> &CurrentFiberPool {
+        &self.fibers
+    }
+
+    /// Returns the deferred async runtime builder.
+    #[must_use]
+    pub const fn executor(&self) -> &CurrentAsyncRuntimeBuilder {
+        &self.executor
+    }
+
+    /// Consumes the split bootstrap result into its component parts.
+    #[must_use]
+    pub fn into_parts(self) -> (CurrentFiberPool, CurrentAsyncRuntimeBuilder) {
+        (self.fibers, self.executor)
+    }
+}
+
+impl From<fusion_sys::fiber::FiberError> for CurrentFiberAsyncRuntimeError {
+    fn from(value: fusion_sys::fiber::FiberError) -> Self {
+        Self::Fiber(value)
+    }
+}
+
+impl From<super::ExecutorError> for CurrentFiberAsyncRuntimeError {
+    fn from(value: super::ExecutorError) -> Self {
+        Self::Executor(value)
+    }
+}
+
+fn runtime_align_up_packed(
+    offset: usize,
+    align: usize,
+) -> Result<usize, CurrentFiberAsyncRuntimeError> {
+    if align == 0 || !align.is_power_of_two() {
+        return Err(CurrentFiberAsyncRuntimeError::Fiber(
+            fusion_sys::fiber::FiberError::invalid(),
+        ));
+    }
+    let mask = align - 1;
+    offset
+        .checked_add(mask)
+        .map(|value| value & !mask)
+        .ok_or(CurrentFiberAsyncRuntimeError::Fiber(
+            fusion_sys::fiber::FiberError::resource_exhausted(),
+        ))
+}
+
+const fn runtime_base_alignment_from_addr(addr: usize) -> usize {
+    if addr == 0 {
+        1
+    } else {
+        1usize << addr.trailing_zeros()
+    }
+}
+
+fn runtime_resource_base_alignment(handle: &MemoryResourceHandle) -> usize {
+    runtime_base_alignment_from_addr(handle.view().base_addr().get())
+}
+
+const fn runtime_partition_backing_kind(
+    kind: ResourceBackingKind,
+) -> Result<ResourceBackingKind, CurrentFiberAsyncRuntimeError> {
+    match kind {
+        ResourceBackingKind::Borrowed
+        | ResourceBackingKind::StaticRegion
+        | ResourceBackingKind::Partition => Ok(ResourceBackingKind::Partition),
+        _ => Err(CurrentFiberAsyncRuntimeError::Executor(
+            super::ExecutorError::Unsupported,
+        )),
+    }
+}
+
+fn partition_runtime_bound_resource(
+    handle: &MemoryResourceHandle,
+    range: ResourceRange,
+) -> Result<MemoryResourceHandle, CurrentFiberAsyncRuntimeError> {
+    let info = match handle {
+        MemoryResourceHandle::Bound(resource) => resource.info(),
+        MemoryResourceHandle::Virtual(_) => {
+            return Err(CurrentFiberAsyncRuntimeError::Executor(
+                super::ExecutorError::Unsupported,
+            ));
+        }
+    };
+    let region = handle
+        .subview(range)
+        .map(|view| unsafe { view.raw_region() })
+        .map_err(|_| CurrentFiberAsyncRuntimeError::Executor(super::ExecutorError::Unsupported))?;
+    let resource = BoundMemoryResource::new(BoundResourceSpec::new(
+        region,
+        info.domain,
+        runtime_partition_backing_kind(info.backing)?,
+        info.attrs,
+        info.geometry,
+        info.layout,
+        info.contract,
+        info.support,
+        handle.state(),
+    ))
+    .map_err(|_| CurrentFiberAsyncRuntimeError::Executor(super::ExecutorError::Unsupported))?;
+    Ok(MemoryResourceHandle::from(resource))
+}
+
+impl CurrentFiberAsyncBootstrap<'static> {
+    /// Returns one deterministic bootstrap using the largest generated fiber stack contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when generated fiber stack metadata is unavailable.
+    pub fn auto(
+        max_fibers: usize,
+        async_capacity: usize,
+    ) -> Result<Self, CurrentFiberAsyncRuntimeError> {
+        let fibers = FiberPoolBootstrap::auto(max_fibers)?;
+        Ok(Self::from_parts(
+            fibers,
+            ExecutorConfig::new().with_capacity(async_capacity),
+        ))
+    }
+
+    /// Returns one deterministic bootstrap with one explicit uniform fiber stack size.
+    #[must_use]
+    pub const fn uniform(
+        max_fibers: usize,
+        stack_size: NonZeroUsize,
+        async_capacity: usize,
+    ) -> Self {
+        Self::from_parts(
+            FiberPoolBootstrap::uniform(max_fibers, stack_size),
+            ExecutorConfig::new().with_capacity(async_capacity),
+        )
+    }
+}
+
+impl<'a> CurrentFiberAsyncBootstrap<'a> {
+    /// Returns one bootstrap from already-built fiber and executor configurations.
+    #[must_use]
+    pub const fn from_parts(fibers: FiberPoolBootstrap<'a>, executor: ExecutorConfig) -> Self {
+        Self { fibers, executor }
+    }
+
+    /// Returns the fiber bootstrap half.
+    #[must_use]
+    pub const fn fibers(&self) -> &FiberPoolBootstrap<'a> {
+        &self.fibers
+    }
+
+    /// Returns the async executor configuration half.
+    #[must_use]
+    pub const fn executor_config(&self) -> ExecutorConfig {
+        self.executor
+    }
+
+    /// Applies one sizing strategy to both fiber and async sizing lanes.
+    #[must_use]
+    pub const fn with_sizing_strategy(mut self, sizing: RuntimeSizingStrategy) -> Self {
+        self.fibers =
+            FiberPoolBootstrap::from_config(self.fibers.config().with_sizing_strategy(sizing));
+        self.executor = self.executor.with_sizing_strategy(sizing);
+        self
+    }
+
+    /// Applies one sizing strategy only to the fiber half.
+    #[must_use]
+    pub const fn with_fiber_sizing_strategy(mut self, sizing: RuntimeSizingStrategy) -> Self {
+        self.fibers =
+            FiberPoolBootstrap::from_config(self.fibers.config().with_sizing_strategy(sizing));
+        self
+    }
+
+    /// Applies one sizing strategy only to the async half.
+    #[must_use]
+    pub const fn with_async_sizing_strategy(mut self, sizing: RuntimeSizingStrategy) -> Self {
+        self.executor = self.executor.with_sizing_strategy(sizing);
+        self
+    }
+
+    /// Applies one explicit fiber guard-page count.
+    #[must_use]
+    pub const fn with_guard_pages(mut self, guard_pages: usize) -> Self {
+        self.fibers =
+            FiberPoolBootstrap::from_config(self.fibers.config().with_guard_pages(guard_pages));
+        self
+    }
+
+    /// Returns the one-slab backing plan for this combined current-thread runtime bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest fiber/async sizing or partitioning failure.
+    pub fn backing_plan(
+        self,
+    ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
+        self.backing_plan_with_allocator_layout_policy(AllocatorLayoutPolicy::hosted_vm(
+            fusion_pal::sys::mem::system_mem().page_info().alloc_granule,
+        ))
+    }
+
+    /// Returns the one-slab backing plan for a caller that can guarantee at least
+    /// `base_align` alignment for the owning slab base.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest fiber/async sizing or partitioning failure.
+    pub fn backing_plan_for_base_alignment(
+        self,
+        base_align: usize,
+    ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
+        self.backing_plan_for_base_alignment_with_allocator_layout_policy(
+            base_align,
+            AllocatorLayoutPolicy::hosted_vm(
+                fusion_pal::sys::mem::system_mem().page_info().alloc_granule,
+            ),
+        )
+    }
+
+    /// Returns the one-slab backing plan under one explicit allocator layout policy.
+    pub fn backing_plan_with_allocator_layout_policy(
+        self,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
+        self.backing_plan_for_base_alignment_with_allocator_layout_policy(1, layout_policy)
+    }
+
+    /// Returns the one-slab backing plan under one explicit fiber-planning surface and allocator
+    /// layout policy.
+    pub fn backing_plan_with_fiber_planning_support_and_allocator_layout_policy(
+        self,
+        fiber_planning: FiberPlanningSupport,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
+        self.backing_plan_for_base_alignment_with_fiber_planning_support_and_allocator_layout_policy(
+            1,
+            fiber_planning,
+            layout_policy,
+        )
+    }
+
+    /// Returns the one-slab backing plan for a caller that can guarantee at least `base_align`
+    /// alignment under one explicit allocator layout policy.
+    pub fn backing_plan_for_base_alignment_with_allocator_layout_policy(
+        self,
+        base_align: usize,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
+        self.backing_plan_for_base_alignment_with_fiber_planning_support_and_allocator_layout_policy(
+            base_align,
+            FiberPlanningSupport::from_fiber_support(fusion_sys::fiber::FiberSystem::new().support()),
+            layout_policy,
+        )
+    }
+
+    /// Returns the one-slab backing plan for a caller that can guarantee at least `base_align`
+    /// alignment under one explicit fiber-planning surface and allocator layout policy.
+    pub fn backing_plan_for_base_alignment_with_fiber_planning_support_and_allocator_layout_policy(
+        self,
+        base_align: usize,
+        fiber_planning: FiberPlanningSupport,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
+        let fiber_plan = CurrentFiberPool::backing_plan_with_planning_support(
+            self.fibers.config(),
+            fiber_planning,
+        )?
+        .combined_for_base_alignment(base_align)?;
+        let executor_plan =
+            CurrentAsyncRuntime::backing_plan_with_layout_policy(self.executor, layout_policy)?
+                .combined_eager_for_base_alignment(base_align)?;
+
+        let mut max_align = fiber_plan.slab.align;
+        if executor_plan.slab.align > max_align {
+            max_align = executor_plan.slab.align;
+        }
+
+        let mut cursor = if base_align >= max_align {
+            0
+        } else {
+            max_align.saturating_sub(1)
+        };
+        let fiber_offset = runtime_align_up_packed(cursor, fiber_plan.slab.align)?;
+        cursor = fiber_offset.checked_add(fiber_plan.slab.bytes).ok_or(
+            CurrentFiberAsyncRuntimeError::Fiber(
+                fusion_sys::fiber::FiberError::resource_exhausted(),
+            ),
+        )?;
+        let executor_offset = runtime_align_up_packed(cursor, executor_plan.slab.align)?;
+        let total_bytes = executor_offset
+            .checked_add(executor_plan.slab.bytes)
+            .ok_or(CurrentFiberAsyncRuntimeError::Fiber(
+                fusion_sys::fiber::FiberError::resource_exhausted(),
+            ))?;
+
+        Ok(CurrentFiberAsyncRuntimeBackingPlan {
+            slab: RuntimeBackingRequest {
+                bytes: total_bytes,
+                align: max_align,
+            },
+            fibers: ResourceRange::new(fiber_offset, fiber_plan.slab.bytes),
+            executor: ResourceRange::new(executor_offset, executor_plan.slab.bytes),
+            fiber_plan,
+            executor_plan,
+        })
+    }
+
+    /// Builds one current-thread fiber + async runtime bundle through platform acquisition.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest current-thread fiber or async bootstrap failure.
+    pub fn build_current(self) -> Result<CurrentFiberAsyncRuntime, CurrentFiberAsyncRuntimeError> {
+        let parts = self.build_current_parts()?;
+        let (fibers, executor) = parts.into_parts();
+        Ok(CurrentFiberAsyncRuntime {
+            fibers,
+            executor: executor.build()?,
+        })
+    }
+
+    /// Builds one split current-thread fiber + async bootstrap through platform acquisition.
+    ///
+    /// The async runtime stays deferred so callers can realize it inside one spawned current-thread
+    /// fiber without forcing `CurrentAsyncRuntime` itself to become `Send`.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest current-thread fiber bootstrap failure.
+    pub fn build_current_parts(
+        self,
+    ) -> Result<CurrentFiberAsyncParts, CurrentFiberAsyncRuntimeError> {
+        let fibers = self.fibers.build_current()?;
+        Ok(CurrentFiberAsyncParts {
+            fibers,
+            executor: CurrentAsyncRuntimeBuilder {
+                config: self.executor,
+                slab: None,
+            },
+        })
+    }
+
+    /// Builds one current-thread fiber + async runtime bundle from one caller-owned bound slab.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest sizing, partitioning, or bootstrap failure.
+    pub fn from_bound_slab(
+        self,
+        slab: MemoryResourceHandle,
+    ) -> Result<CurrentFiberAsyncRuntime, CurrentFiberAsyncRuntimeError> {
+        let parts = self.from_bound_slab_parts(slab)?;
+        let (fibers, executor) = parts.into_parts();
+        Ok(CurrentFiberAsyncRuntime {
+            fibers,
+            executor: executor.build()?,
+        })
+    }
+
+    /// Builds one split current-thread fiber + async bundle from one caller-owned bound slab.
+    ///
+    /// The async runtime stays deferred so callers can realize it inside a spawned current-thread
+    /// fiber while still consuming one combined owning slab.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest sizing, partitioning, or bootstrap failure.
+    pub fn from_bound_slab_parts(
+        self,
+        slab: MemoryResourceHandle,
+    ) -> Result<CurrentFiberAsyncParts, CurrentFiberAsyncRuntimeError> {
+        let layout = self.backing_plan_for_base_alignment_with_allocator_layout_policy(
+            runtime_resource_base_alignment(&slab),
+            slab.info().layout,
+        )?;
+        if slab.view().len() < layout.slab.bytes {
+            return Err(CurrentFiberAsyncRuntimeError::Fiber(
+                fusion_sys::fiber::FiberError::resource_exhausted(),
+            ));
+        }
+        let fibers = CurrentFiberPool::from_bound_slab(
+            self.fibers.config(),
+            partition_runtime_bound_resource(&slab, layout.fibers)?,
+        )?;
+        Ok(CurrentFiberAsyncParts {
+            fibers,
+            executor: CurrentAsyncRuntimeBuilder {
+                config: self.executor,
+                slab: Some(partition_runtime_bound_resource(&slab, layout.executor)?),
+            },
+        })
+    }
+
+    /// Builds one current-thread fiber + async runtime bundle from one caller-owned static slab.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee the supplied pointer/length pair names one valid writable static
+    /// extent for the whole lifetime of the bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest binding, sizing, partitioning, or bootstrap failure.
+    pub unsafe fn from_static_slab(
+        self,
+        ptr: *mut u8,
+        len: usize,
+    ) -> Result<CurrentFiberAsyncRuntime, CurrentFiberAsyncRuntimeError> {
+        let slab = MemoryResourceHandle::from(
+            unsafe { BoundMemoryResource::static_allocatable_bytes(ptr, len) }.map_err(|_| {
+                CurrentFiberAsyncRuntimeError::Executor(super::ExecutorError::Unsupported)
+            })?,
+        );
+        self.from_bound_slab(slab)
+    }
+
+    /// Builds one split current-thread fiber + async bundle from one caller-owned static slab.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee the supplied pointer/length pair names one valid writable static
+    /// extent for the whole lifetime of the split bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest binding, sizing, partitioning, or bootstrap failure.
+    pub unsafe fn from_static_slab_parts(
+        self,
+        ptr: *mut u8,
+        len: usize,
+    ) -> Result<CurrentFiberAsyncParts, CurrentFiberAsyncRuntimeError> {
+        let slab = MemoryResourceHandle::from(
+            unsafe { BoundMemoryResource::static_allocatable_bytes(ptr, len) }.map_err(|_| {
+                CurrentFiberAsyncRuntimeError::Executor(super::ExecutorError::Unsupported)
+            })?,
+        );
+        self.from_bound_slab_parts(slab)
     }
 }
 
@@ -306,4 +877,229 @@ fn validate_runtime_config(config: &RuntimeConfig<'_>) -> Result<(), RuntimeErro
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::thread::async_yield_now;
+    use fusion_pal::sys::mem::{Address, CachePolicy, MemAdviceCaps, Protect, Region};
+    use fusion_sys::mem::resource::{
+        BoundResourceSpec,
+        MemoryDomain,
+        MemoryGeometry,
+        OvercommitPolicy,
+        ResourceAttrs,
+        ResourceContract,
+        ResourceOpSet,
+        ResourceResidencySupport,
+        ResourceState,
+        ResourceSupport,
+        SharingPolicy,
+        StateValue,
+    };
+    use std::alloc::{Layout, alloc_zeroed};
+
+    fn aligned_bound_resource(len: usize, align: usize) -> MemoryResourceHandle {
+        let layout = Layout::from_size_align(len, align).expect("aligned test layout should build");
+        let ptr = unsafe { alloc_zeroed(layout) };
+        assert!(
+            !ptr.is_null(),
+            "aligned test slab allocation should succeed"
+        );
+        MemoryResourceHandle::from(
+            BoundMemoryResource::new(BoundResourceSpec::new(
+                Region {
+                    base: Address::new(ptr as usize),
+                    len,
+                },
+                MemoryDomain::StaticRegion,
+                ResourceBackingKind::Borrowed,
+                ResourceAttrs::ALLOCATABLE | ResourceAttrs::CACHEABLE | ResourceAttrs::COHERENT,
+                MemoryGeometry {
+                    base_granule: NonZeroUsize::new(1).expect("non-zero granule"),
+                    alloc_granule: NonZeroUsize::new(1).expect("non-zero granule"),
+                    protect_granule: None,
+                    commit_granule: None,
+                    lock_granule: None,
+                    large_granule: None,
+                },
+                AllocatorLayoutPolicy::exact_static(),
+                ResourceContract {
+                    allowed_protect: Protect::READ | Protect::WRITE,
+                    write_xor_execute: true,
+                    sharing: SharingPolicy::Private,
+                    overcommit: OvercommitPolicy::Disallow,
+                    cache_policy: CachePolicy::Default,
+                    integrity: None,
+                },
+                ResourceSupport {
+                    protect: Protect::READ | Protect::WRITE,
+                    ops: ResourceOpSet::QUERY,
+                    advice: MemAdviceCaps::empty(),
+                    residency: ResourceResidencySupport::BEST_EFFORT,
+                },
+                ResourceState::static_state(
+                    StateValue::Uniform(Protect::READ | Protect::WRITE),
+                    StateValue::Uniform(false),
+                    StateValue::Uniform(true),
+                ),
+            ))
+            .expect("aligned bound resource should bind"),
+        )
+    }
+
+    #[test]
+    fn combined_current_runtime_backing_plan_rounds_up_when_requested() {
+        let exact = CurrentFiberAsyncBootstrap::uniform(
+            1,
+            NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
+            1,
+        )
+        .with_guard_pages(0)
+        .with_sizing_strategy(RuntimeSizingStrategy::Exact)
+        .backing_plan()
+        .expect("exact plan should build");
+        let rounded = CurrentFiberAsyncBootstrap::uniform(
+            1,
+            NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
+            1,
+        )
+        .with_guard_pages(0)
+        .with_sizing_strategy(RuntimeSizingStrategy::GlobalNearestRoundUp)
+        .backing_plan()
+        .expect("rounded plan should build");
+
+        assert!(rounded.slab.bytes >= exact.slab.bytes);
+        assert!(rounded.slab.align >= exact.slab.align);
+    }
+
+    #[test]
+    fn combined_current_runtime_exact_aligned_plan_reduces_padding() {
+        let bootstrap = CurrentFiberAsyncBootstrap::uniform(
+            1,
+            NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
+            2,
+        )
+        .with_guard_pages(0);
+        let conservative = bootstrap
+            .backing_plan()
+            .expect("conservative plan should build");
+        let exact = bootstrap
+            .backing_plan_for_base_alignment(conservative.slab.align)
+            .expect("exact-aligned plan should build");
+
+        assert!(exact.slab.bytes <= conservative.slab.bytes);
+        assert_eq!(exact.slab.align, conservative.slab.align);
+    }
+
+    #[test]
+    fn combined_current_runtime_target_planning_support_can_shrink_fiber_backing() {
+        let bootstrap = CurrentFiberAsyncBootstrap::uniform(
+            1,
+            NonZeroUsize::new((12 * 1024) + 8).expect("non-zero stack"),
+            1,
+        )
+        .with_guard_pages(0)
+        .with_sizing_strategy(RuntimeSizingStrategy::Exact);
+        let hosted_like = bootstrap
+            .backing_plan_with_fiber_planning_support_and_allocator_layout_policy(
+                FiberPlanningSupport::same_carrier(
+                    16,
+                    128,
+                    fusion_sys::fiber::ContextStackDirection::Down,
+                    false,
+                ),
+                AllocatorLayoutPolicy::exact_static(),
+            )
+            .expect("hosted-like plan should build");
+        let cortex_m = bootstrap
+            .backing_plan_with_fiber_planning_support_and_allocator_layout_policy(
+                FiberPlanningSupport::cortex_m(),
+                AllocatorLayoutPolicy::exact_static(),
+            )
+            .expect("cortex-m plan should build");
+
+        assert!(cortex_m.fiber_plan.stacks.len < hosted_like.fiber_plan.stacks.len);
+        assert!(cortex_m.slab.bytes <= hosted_like.slab.bytes);
+    }
+
+    #[test]
+    fn current_runtime_from_bound_slab_parts_build_both_runtimes() {
+        let bootstrap = CurrentFiberAsyncBootstrap::uniform(
+            1,
+            NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
+            2,
+        )
+        .with_guard_pages(0);
+        let layout = bootstrap.backing_plan().expect("backing plan should build");
+        let slab = aligned_bound_resource(layout.slab.bytes, layout.slab.align);
+        let runtime = bootstrap
+            .from_bound_slab_parts(slab)
+            .expect("combined runtime should build from one bound slab");
+        let (fibers, executor) = runtime.into_parts();
+
+        let handle = fibers.spawn(|| 7_u8).expect("fiber should spawn");
+        assert_eq!(handle.join().expect("fiber join should complete"), 7);
+        let executor = executor
+            .build_explicit()
+            .expect("executor should build from split backing");
+        let task = executor
+            .spawn(async {
+                async_yield_now().await;
+                41_u8
+            })
+            .expect("async task should spawn");
+
+        assert_eq!(
+            executor
+                .block_on(task)
+                .expect("runtime should drive async task")
+                .expect("async task should complete"),
+            41
+        );
+
+        fibers
+            .shutdown()
+            .expect("combined current runtime should shut down fibers");
+    }
+
+    #[test]
+    fn current_runtime_from_exact_aligned_bound_slab_parts_builds() {
+        let bootstrap = CurrentFiberAsyncBootstrap::uniform(
+            1,
+            NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
+            2,
+        )
+        .with_guard_pages(0);
+        let conservative = bootstrap.backing_plan().expect("plan should build");
+        let exact = bootstrap
+            .backing_plan_for_base_alignment(conservative.slab.align)
+            .expect("exact-aligned plan should build");
+        let slab = aligned_bound_resource(exact.slab.bytes, exact.slab.align);
+        let runtime = bootstrap
+            .from_bound_slab_parts(slab)
+            .expect("combined runtime should build from exact-aligned slab");
+        let (fibers, executor) = runtime.into_parts();
+
+        let handle = fibers.spawn(|| 9_u8).expect("fiber should spawn");
+        assert_eq!(handle.join().expect("fiber join should complete"), 9);
+        let executor = executor
+            .build_explicit()
+            .expect("executor should build from exact-aligned split backing");
+        let task = executor
+            .spawn(async { 43_u8 })
+            .expect("async task should spawn");
+        assert_eq!(
+            executor
+                .block_on(task)
+                .expect("runtime should drive task")
+                .expect("task should complete"),
+            43
+        );
+
+        fibers
+            .shutdown()
+            .expect("combined current runtime should shut down fibers");
+    }
 }

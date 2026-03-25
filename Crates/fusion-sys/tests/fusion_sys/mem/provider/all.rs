@@ -9,6 +9,8 @@ use fusion_pal::sys::mem::{
     Address,
     CachePolicy,
     MemAdviceCaps,
+    MemAllocatorLayoutPolicy,
+    MemAllocatorLayoutRealization,
     MemBackingCaps,
     MemCatalogResource,
     MemCatalogResourceId,
@@ -77,6 +79,7 @@ use fusion_sys::mem::provider::{
     memory_strategy_from_catalog_strategy,
 };
 use fusion_sys::mem::resource::{
+    AllocatorLayoutPolicy,
     MemoryDomain,
     MemoryDomainSet,
     MemoryGeometry,
@@ -149,6 +152,7 @@ fn general_resource_info(len: usize) -> ResourceInfo {
             lock_granule: Some(NonZeroUsize::new(4096).unwrap()),
             large_granule: None,
         },
+        AllocatorLayoutPolicy::hosted_vm(NonZeroUsize::new(4096).unwrap()),
         ResourceContract {
             allowed_protect: Protect::READ | Protect::WRITE,
             write_xor_execute: true,
@@ -1124,6 +1128,13 @@ fn pal_catalog_adapters_preserve_object_resource_and_strategy_truth() {
                 commit_granule: Some(NonZeroUsize::new(4096).unwrap()),
                 lock_granule: Some(NonZeroUsize::new(4096).unwrap()),
                 large_granule: None,
+            },
+            layout: MemAllocatorLayoutPolicy {
+                metadata_granule: NonZeroUsize::new(4096).unwrap(),
+                min_extent_align: NonZeroUsize::new(4096).unwrap(),
+                default_arena_align: NonZeroUsize::new(64).unwrap(),
+                default_slab_align: NonZeroUsize::new(64).unwrap(),
+                realization: MemAllocatorLayoutRealization::LazyVirtual,
             },
             contract: MemResourceContract {
                 allowed_protect: Protect::READ | Protect::WRITE,

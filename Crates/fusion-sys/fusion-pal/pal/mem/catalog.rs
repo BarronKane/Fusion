@@ -248,6 +248,30 @@ pub struct MemGeometry {
     pub large_granule: Option<NonZeroUsize>,
 }
 
+/// Coarse realization regime the allocator layout policy is shaped for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MemAllocatorLayoutRealization {
+    /// Backing is virtual or reservation-backed and only materializes lazily as needed.
+    LazyVirtual,
+    /// Backing is immediate physical or statically bound memory and should stay thin.
+    EagerPhysical,
+}
+
+/// Allocator-facing metadata and extent packing policy for one cataloged resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemAllocatorLayoutPolicy {
+    /// Granule used when allocator metadata needs rounding.
+    pub metadata_granule: NonZeroUsize,
+    /// Minimum alignment allocator-managed extents should request.
+    pub min_extent_align: NonZeroUsize,
+    /// Default maximum alignment to assume for general bounded arenas.
+    pub default_arena_align: NonZeroUsize,
+    /// Default maximum alignment to assume for slab payloads.
+    pub default_slab_align: NonZeroUsize,
+    /// Broad realization regime this policy is shaped for.
+    pub realization: MemAllocatorLayoutRealization,
+}
+
 /// Per-property summary for a resource-wide catalog state value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemStateValue<T> {
@@ -326,6 +350,8 @@ pub struct MemResourceEnvelope {
     pub attrs: MemResourceAttrs,
     /// Operation granularity information.
     pub geometry: MemGeometry,
+    /// Allocator-facing metadata and extent layout policy.
+    pub layout: MemAllocatorLayoutPolicy,
     /// Immutable contract of the object.
     pub contract: MemResourceContract,
     /// Runtime support surface of the object.

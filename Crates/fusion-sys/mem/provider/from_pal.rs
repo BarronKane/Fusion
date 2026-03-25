@@ -46,6 +46,8 @@ use super::{
     MemoryTopologyNodeKind,
 };
 use crate::mem::resource::{
+    AllocatorLayoutPolicy,
+    AllocatorLayoutRealization,
     IntegrityConstraints,
     MemoryDomain,
     MemoryGeometry,
@@ -94,6 +96,7 @@ pub fn memory_resource_from_catalog_resource(
         backing_from_catalog(resource.envelope.backing),
         ResourceAttrs::from_bits_retain(resource.envelope.attrs.bits()),
         geometry_from_catalog(resource.envelope.geometry),
+        layout_from_catalog(resource.envelope.layout),
         contract_from_catalog(resource.envelope.contract),
         support_from_catalog(resource.envelope.support),
         ResourceHazardSet::from_bits_retain(resource.envelope.hazards.bits()),
@@ -210,6 +213,7 @@ fn object_envelope_from_catalog(envelope: MemResourceEnvelope) -> MemoryObjectEn
         domain: domain_from_catalog(envelope.domain),
         backing: backing_from_catalog(envelope.backing),
         attrs: ResourceAttrs::from_bits_retain(envelope.attrs.bits()),
+        layout: layout_from_catalog(envelope.layout),
         contract: contract_from_catalog(envelope.contract),
         support: support_from_catalog(envelope.support),
         hazards: ResourceHazardSet::from_bits_retain(envelope.hazards.bits()),
@@ -224,6 +228,7 @@ fn compatibility_envelope_from_catalog(
         backing: backing_from_catalog(envelope.backing),
         attrs: ResourceAttrs::from_bits_retain(envelope.attrs.bits()),
         geometry: geometry_from_catalog(envelope.geometry),
+        layout: layout_from_catalog(envelope.layout),
         contract: contract_from_catalog(envelope.contract),
         support: support_from_catalog(envelope.support),
         hazards: ResourceHazardSet::from_bits_retain(envelope.hazards.bits()),
@@ -263,6 +268,25 @@ const fn geometry_from_catalog(geometry: MemGeometry) -> MemoryGeometry {
         commit_granule: geometry.commit_granule,
         lock_granule: geometry.lock_granule,
         large_granule: geometry.large_granule,
+    }
+}
+
+const fn layout_from_catalog(
+    layout: fusion_pal::sys::mem::MemAllocatorLayoutPolicy,
+) -> AllocatorLayoutPolicy {
+    AllocatorLayoutPolicy {
+        metadata_granule: layout.metadata_granule,
+        min_extent_align: layout.min_extent_align,
+        default_arena_align: layout.default_arena_align,
+        default_slab_align: layout.default_slab_align,
+        realization: match layout.realization {
+            fusion_pal::sys::mem::MemAllocatorLayoutRealization::LazyVirtual => {
+                AllocatorLayoutRealization::LazyVirtual
+            }
+            fusion_pal::sys::mem::MemAllocatorLayoutRealization::EagerPhysical => {
+                AllocatorLayoutRealization::EagerPhysical
+            }
+        },
     }
 }
 
