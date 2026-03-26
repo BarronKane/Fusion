@@ -64,6 +64,7 @@ struct AnalyzerConfig {
     stack_sizes_path: PathBuf,
     output_path: PathBuf,
     call_graph_path: Option<PathBuf>,
+    aux_artifact_paths: Vec<PathBuf>,
     contracts_path: Option<PathBuf>,
     report_path: Option<PathBuf>,
     rust_contracts_path: Option<PathBuf>,
@@ -92,6 +93,7 @@ impl AnalyzerConfig {
                 .ok_or_else(|| usage("missing output manifest argument"))?,
         );
         let mut call_graph_path = None;
+        let mut aux_artifact_paths = Vec::new();
         let mut contracts_path = None;
         let mut report_path = None;
         let mut rust_contracts_path = None;
@@ -107,6 +109,12 @@ impl AnalyzerConfig {
                     contracts_path = Some(PathBuf::from(
                         args.next()
                             .ok_or_else(|| usage("missing value for --contracts"))?,
+                    ));
+                }
+                "--aux-artifact" => {
+                    aux_artifact_paths.push(PathBuf::from(
+                        args.next()
+                            .ok_or_else(|| usage("missing value for --aux-artifact"))?,
                     ));
                 }
                 "--report" => {
@@ -198,6 +206,7 @@ impl AnalyzerConfig {
             stack_sizes_path,
             output_path,
             call_graph_path,
+            aux_artifact_paths,
             contracts_path,
             report_path,
             rust_contracts_path,
@@ -346,14 +355,21 @@ fn generate_outputs(config: &AnalyzerConfig) -> Result<GeneratedOutputs, String>
         .map(load_roots)
         .transpose()?
         .unwrap_or_default();
-    let stack_size_input = load_stack_sizes(&config.stack_sizes_path)?;
+    let mut stack_size_input = load_stack_sizes(&config.stack_sizes_path)?;
+    let mut artifact_paths = Vec::new();
+    if stack_size_input.artifact_source {
+        artifact_paths.push(config.stack_sizes_path.clone());
+    }
+    for path in &config.aux_artifact_paths {
+        let auxiliary_input = load_stack_sizes(path)?;
+        let auxiliary_is_artifact = auxiliary_input.artifact_source;
+        merge_stack_size_inputs(&mut stack_size_input, auxiliary_input);
+        if auxiliary_is_artifact {
+            artifact_paths.push(path.clone());
+        }
+    }
     let call_graph = config.call_graph_path.as_ref().map_or_else(
-        || {
-            stack_size_input
-                .artifact_source
-                .then(|| load_artifact_call_graph(&config.stack_sizes_path))
-                .transpose()
-        },
+        || load_merged_artifact_call_graph(&artifact_paths),
         |path| load_call_graph(path).map(Some),
     )?;
     let contracts = config
@@ -634,10 +650,8 @@ fn resolve_symbol_execution(
     if !stack_sizes.contains_key(symbol) || symbol_requires_fiber(symbol, symbol_index) {
         return Ok(GeneratedTaskExecution::Fiber);
     }
-    if let Some(cycle_start) = visiting.iter().position(|entry| entry == symbol) {
-        let mut cycle = visiting[cycle_start..].to_vec();
-        cycle.push(symbol.to_owned());
-        return Err(format!("call-graph cycle detected: {}", cycle.join(" -> ")));
+    if visiting.iter().any(|entry| entry == symbol) {
+        return Ok(GeneratedTaskExecution::Fiber);
     }
 
     visiting.push(symbol.to_owned());
@@ -760,6 +774,56 @@ fn load_stack_sizes(path: &PathBuf) -> Result<StackSizeInput, String> {
             artifact_source: true,
             symbol_index: Some(load_artifact_symbol_index(path)?),
         }),
+    }
+}
+
+fn merge_stack_size_inputs(primary: &mut StackSizeInput, auxiliary: StackSizeInput) {
+    for (symbol, bytes) in auxiliary.stack_sizes {
+        primary
+            .stack_sizes
+            .entry(symbol)
+            .and_modify(|existing| {
+                if bytes > *existing {
+                    *existing = bytes;
+                }
+            })
+            .or_insert(bytes);
+    }
+    primary.artifact_source |= auxiliary.artifact_source;
+    if let Some(auxiliary_index) = auxiliary.symbol_index {
+        primary
+            .symbol_index
+            .get_or_insert_with(|| ArtifactSymbolIndex {
+                entries: Vec::new(),
+            })
+            .merge(auxiliary_index);
+    }
+}
+
+fn load_merged_artifact_call_graph(
+    artifact_paths: &[PathBuf],
+) -> Result<Option<BTreeMap<String, Vec<String>>>, String> {
+    if artifact_paths.is_empty() {
+        return Ok(None);
+    }
+    let mut merged = BTreeMap::<String, Vec<String>>::new();
+    for path in artifact_paths {
+        merge_call_graph(&mut merged, load_artifact_call_graph(path)?);
+    }
+    Ok(Some(merged))
+}
+
+fn merge_call_graph(
+    primary: &mut BTreeMap<String, Vec<String>>,
+    auxiliary: BTreeMap<String, Vec<String>>,
+) {
+    for (caller, callees) in auxiliary {
+        let entry = primary.entry(caller).or_default();
+        for callee in callees {
+            if !entry.iter().any(|existing| existing == &callee) {
+                entry.push(callee);
+            }
+        }
     }
 }
 
@@ -1180,6 +1244,19 @@ fn normalize_demangled_symbol(symbol: &str) -> &str {
 }
 
 impl ArtifactSymbolIndex {
+    fn merge(&mut self, other: ArtifactSymbolIndex) {
+        for entry in other.entries {
+            if self
+                .entries
+                .iter()
+                .any(|existing| existing.raw == entry.raw)
+            {
+                continue;
+            }
+            self.entries.push(entry);
+        }
+    }
+
     fn resolve(
         &self,
         requested: &str,
@@ -1325,15 +1402,12 @@ impl SymbolResolutionContext<'_> {
             return Ok(stack_bytes);
         }
 
-        if let Some(cycle_start) = visiting.iter().position(|entry| entry == symbol) {
-            let mut cycle = visiting[cycle_start..].to_vec();
-            cycle.push(symbol.to_owned());
-            return Err(format!("call-graph cycle detected: {}", cycle.join(" -> ")));
-        }
-
         let frame_stack = self
             .resolve_symbol_frame_stack(symbol, caller)
             .ok_or_else(|| format!("missing stack-size entry for symbol `{symbol}`"))?;
+        if visiting.iter().any(|entry| entry == symbol) {
+            return Ok(0);
+        }
         visiting.push(symbol.to_owned());
 
         let max_callee_stack = if let Some(callees) = self.call_graph.get(symbol) {
@@ -1860,7 +1934,7 @@ fn parse_stack_size_value(raw: &str) -> Result<usize, String> {
 
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage: cargo run -p fusion-std --bin fiber_task_analyzer -- <roots> <stack-sizes|artifact> <output> [call-graph|artifact] [--contracts <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-contracts <path>] [--red-inline-rust <path>] [--async-poll-stack-roots <path> [--async-poll-stack-output <path>] [--async-poll-stack-rust <path>]] [--crate-name <name>]"
+        "{reason}\nusage: cargo run -p fusion-std --bin fiber_task_analyzer -- <roots> <stack-sizes|artifact> <output> [call-graph|artifact] [--aux-artifact <path>]... [--contracts <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-contracts <path>] [--red-inline-rust <path>] [--async-poll-stack-roots <path> [--async-poll-stack-output <path>] [--async-poll-stack-rust <path>]] [--crate-name <name>]"
     )
 }
 

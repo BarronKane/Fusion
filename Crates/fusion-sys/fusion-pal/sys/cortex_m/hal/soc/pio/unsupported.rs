@@ -1,4 +1,4 @@
-//! Backend-neutral unsupported programmable-IO implementation.
+//! Cortex-M unsupported programmable-IO implementation.
 
 use super::{
     PcuBase,

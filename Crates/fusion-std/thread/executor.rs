@@ -1125,6 +1125,209 @@ impl ExecutorBackingRequest {
     }
 }
 
+/// Planning-time layout surface for executor-owned current-thread slabs.
+///
+/// This exists for the same reason `FiberPlanningSupport` exists: exact build-time slab planning
+/// must be able to use target/runtime layout truth without pretending the host binary's `size_of`
+/// answers are universal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExecutorPlanningSupport {
+    /// Concrete control-block extent bytes for the executor core lease.
+    pub control_bytes: usize,
+    /// Concrete control-block extent alignment for the executor core lease.
+    pub control_align: usize,
+    /// Concrete reactor wait-entry bytes.
+    pub reactor_wait_entry_bytes: usize,
+    /// Concrete reactor wait-entry alignment.
+    pub reactor_wait_entry_align: usize,
+    /// Concrete reactor outcome-entry bytes.
+    pub reactor_outcome_entry_bytes: usize,
+    /// Concrete reactor outcome-entry alignment.
+    pub reactor_outcome_entry_align: usize,
+    /// Concrete current-queue entry bytes.
+    pub reactor_queue_entry_bytes: usize,
+    /// Concrete current-queue entry alignment.
+    pub reactor_queue_entry_align: usize,
+    /// Concrete pending-deregister entry bytes.
+    pub reactor_pending_entry_bytes: usize,
+    /// Concrete pending-deregister entry alignment.
+    pub reactor_pending_entry_align: usize,
+    /// Concrete registry free-index entry bytes.
+    pub registry_free_entry_bytes: usize,
+    /// Concrete registry free-index entry alignment.
+    pub registry_free_entry_align: usize,
+    /// Concrete async task-slot bytes.
+    pub registry_slot_bytes: usize,
+    /// Concrete async task-slot alignment.
+    pub registry_slot_align: usize,
+}
+
+impl ExecutorPlanningSupport {
+    /// Returns executor planning support for the currently compiled binary.
+    #[must_use]
+    pub const fn compiled_binary() -> Self {
+        let control = match ControlLease::<ExecutorCore>::extent_request() {
+            Ok(request) => request,
+            Err(_) => fusion_sys::alloc::MemoryPoolExtentRequest { len: 0, align: 1 },
+        };
+        Self {
+            control_bytes: control.len,
+            control_align: control.align,
+            reactor_wait_entry_bytes: size_of::<AsyncReactorWaitEntry>(),
+            reactor_wait_entry_align: align_of::<AsyncReactorWaitEntry>(),
+            reactor_outcome_entry_bytes: size_of::<Option<AsyncWaitOutcome>>(),
+            reactor_outcome_entry_align: align_of::<Option<AsyncWaitOutcome>>(),
+            reactor_queue_entry_bytes: size_of::<Option<CurrentJob>>(),
+            reactor_queue_entry_align: align_of::<Option<CurrentJob>>(),
+            #[cfg(feature = "std")]
+            reactor_pending_entry_bytes: size_of::<Option<EventKey>>(),
+            #[cfg(feature = "std")]
+            reactor_pending_entry_align: align_of::<Option<EventKey>>(),
+            #[cfg(not(feature = "std"))]
+            reactor_pending_entry_bytes: 0,
+            #[cfg(not(feature = "std"))]
+            reactor_pending_entry_align: 1,
+            registry_free_entry_bytes: size_of::<usize>(),
+            registry_free_entry_align: align_of::<usize>(),
+            registry_slot_bytes: size_of::<AsyncTaskSlot>(),
+            registry_slot_align: align_of::<AsyncTaskSlot>(),
+        }
+    }
+
+    /// Returns the truthful Cortex-M no-std executor planning support.
+    ///
+    /// These values are intentionally explicit so host-side build planning can use target truth
+    /// instead of laundering host/std layout through a fake “exact” path. Target Cortex-M builds
+    /// validate this descriptor below so it cannot quietly rot.
+    #[must_use]
+    pub const fn cortex_m() -> Self {
+        Self {
+            control_bytes: 5016,
+            control_align: 8,
+            reactor_wait_entry_bytes: 32,
+            reactor_wait_entry_align: 8,
+            reactor_outcome_entry_bytes: 8,
+            reactor_outcome_entry_align: 4,
+            reactor_queue_entry_bytes: 24,
+            reactor_queue_entry_align: 8,
+            reactor_pending_entry_bytes: 0,
+            reactor_pending_entry_align: 1,
+            registry_free_entry_bytes: 4,
+            registry_free_entry_align: 4,
+            registry_slot_bytes: 1024,
+            registry_slot_align: 64,
+        }
+    }
+
+    const fn reactor_align(self) -> usize {
+        let mut align = self.reactor_wait_entry_align;
+        if self.reactor_outcome_entry_align > align {
+            align = self.reactor_outcome_entry_align;
+        }
+        if self.reactor_queue_entry_align > align {
+            align = self.reactor_queue_entry_align;
+        }
+        if self.reactor_pending_entry_align > align {
+            align = self.reactor_pending_entry_align;
+        }
+        align
+    }
+
+    fn reactor_capacity(self, capacity: usize) -> Result<usize, ExecutorError> {
+        if capacity == 0 {
+            return Err(executor_invalid());
+        }
+
+        let waits_bytes = self
+            .reactor_wait_entry_bytes
+            .checked_mul(capacity)
+            .ok_or_else(executor_overflow)?;
+        let outcomes_bytes = self
+            .reactor_outcome_entry_bytes
+            .checked_mul(capacity)
+            .ok_or_else(executor_overflow)?;
+        let queue_bytes = self
+            .reactor_queue_entry_bytes
+            .checked_mul(capacity)
+            .ok_or_else(executor_overflow)?;
+        let pending_bytes = self
+            .reactor_pending_entry_bytes
+            .checked_mul(capacity)
+            .ok_or_else(executor_overflow)?;
+        let padding = self.reactor_align();
+        let segments = if self.reactor_pending_entry_bytes == 0 {
+            3
+        } else {
+            4
+        };
+        waits_bytes
+            .checked_add(outcomes_bytes)
+            .and_then(|total| total.checked_add(queue_bytes))
+            .and_then(|total| total.checked_add(pending_bytes))
+            .and_then(|total| total.checked_add(padding.saturating_mul(segments)))
+            .ok_or_else(executor_overflow)
+    }
+
+    const fn registry_align(self) -> usize {
+        if self.registry_free_entry_align > self.registry_slot_align {
+            self.registry_free_entry_align
+        } else {
+            self.registry_slot_align
+        }
+    }
+
+    fn registry_capacity(self, capacity: usize) -> Result<usize, ExecutorError> {
+        if capacity == 0 {
+            return Err(executor_invalid());
+        }
+
+        let free_bytes = self
+            .registry_free_entry_bytes
+            .checked_mul(capacity)
+            .ok_or_else(executor_overflow)?;
+        let slot_bytes = self
+            .registry_slot_bytes
+            .checked_mul(capacity)
+            .ok_or_else(executor_overflow)?;
+        let padding = self.registry_align();
+        free_bytes
+            .checked_add(slot_bytes)
+            .and_then(|total| total.checked_add(padding.saturating_mul(2)))
+            .ok_or_else(executor_overflow)
+    }
+}
+
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 5016] = [(); match ControlLease::<ExecutorCore>::extent_request() {
+    Ok(request) => request.len,
+    Err(_) => 0,
+}];
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 8] = [(); match ControlLease::<ExecutorCore>::extent_request() {
+    Ok(request) => request.align,
+    Err(_) => 0,
+}];
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 32] = [(); size_of::<AsyncReactorWaitEntry>()];
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 8] = [(); align_of::<AsyncReactorWaitEntry>()];
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 8] = [(); size_of::<Option<AsyncWaitOutcome>>()];
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 4] = [(); align_of::<Option<AsyncWaitOutcome>>()];
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 24] = [(); size_of::<Option<CurrentJob>>()];
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 8] = [(); align_of::<Option<CurrentJob>>()];
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 4] = [(); size_of::<usize>()];
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 4] = [(); align_of::<usize>()];
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 1024] = [(); size_of::<AsyncTaskSlot>()];
+#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+const _: [(); 64] = [(); align_of::<AsyncTaskSlot>()];
+
 /// Compile-time/backing-time footprint plan for one current-thread async runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CurrentAsyncRuntimeBackingPlan {
@@ -1377,11 +1580,27 @@ impl CurrentAsyncRuntimeBackingPlan {
         config: ExecutorConfig,
         layout_policy: AllocatorLayoutPolicy,
     ) -> Result<Self, ExecutorError> {
+        Self::for_config_with_layout_policy_and_planning_support(
+            config,
+            layout_policy,
+            ExecutorPlanningSupport::compiled_binary(),
+        )
+    }
+
+    /// Returns the explicit backing plan for one current-thread runtime configuration under one
+    /// explicit allocator layout policy and one explicit executor-planning surface.
+    pub fn for_config_with_layout_policy_and_planning_support(
+        config: ExecutorConfig,
+        layout_policy: AllocatorLayoutPolicy,
+        planning: ExecutorPlanningSupport,
+    ) -> Result<Self, ExecutorError> {
         let sizing = config.sizing;
         let control = apply_executor_sizing_strategy(
             ExecutorBackingRequest::from_extent_request_with_layout_policy(
-                ControlLease::<ExecutorCore>::extent_request()
-                    .map_err(executor_error_from_alloc)?,
+                fusion_sys::alloc::MemoryPoolExtentRequest {
+                    len: planning.control_bytes,
+                    align: planning.control_align,
+                },
                 layout_policy,
             )?,
             sizing,
@@ -1389,8 +1608,8 @@ impl CurrentAsyncRuntimeBackingPlan {
         let reactor = apply_executor_sizing_strategy(
             ExecutorBackingRequest::from_extent_request_with_layout_policy(
                 BoundedArena::<fusion_sys::alloc::Mortal>::extent_request_with_layout_policy(
-                    executor_reactor_capacity(config.capacity)?,
-                    executor_reactor_align(),
+                    executor_reactor_capacity_with_planning_support(config.capacity, planning)?,
+                    executor_reactor_align_with_planning_support(planning),
                     layout_policy,
                 )
                 .map_err(executor_error_from_alloc)?,
@@ -1401,8 +1620,8 @@ impl CurrentAsyncRuntimeBackingPlan {
         let registry = apply_executor_sizing_strategy(
             ExecutorBackingRequest::from_extent_request_with_layout_policy(
                 BoundedArena::<fusion_sys::alloc::Mortal>::extent_request_with_layout_policy(
-                    executor_registry_capacity(config.capacity)?,
-                    executor_registry_align(),
+                    executor_registry_capacity_with_planning_support(config.capacity, planning)?,
+                    executor_registry_align_with_planning_support(planning),
                     layout_policy,
                 )
                 .map_err(executor_error_from_alloc)?,
@@ -5101,6 +5320,20 @@ impl CurrentAsyncRuntime {
         )
     }
 
+    /// Returns the explicit current-thread runtime backing plan under one explicit allocator
+    /// layout policy and one explicit executor-planning surface.
+    pub fn backing_plan_with_layout_policy_and_planning_support(
+        config: ExecutorConfig,
+        layout_policy: AllocatorLayoutPolicy,
+        planning: ExecutorPlanningSupport,
+    ) -> Result<CurrentAsyncRuntimeBackingPlan, ExecutorError> {
+        CurrentAsyncRuntimeBackingPlan::for_config_with_layout_policy_and_planning_support(
+            config.with_mode(ExecutorMode::CurrentThread),
+            layout_policy,
+            planning,
+        )
+    }
+
     /// Creates one current-thread async runtime.
     #[must_use]
     pub fn new() -> Self {
@@ -6425,91 +6658,47 @@ const fn executor_error_from_fiber(error: FiberError) -> ExecutorError {
 }
 
 fn executor_registry_capacity(capacity: usize) -> Result<usize, ExecutorError> {
-    if capacity == 0 {
-        return Err(executor_invalid());
-    }
-
-    let free_bytes = size_of::<usize>()
-        .checked_mul(capacity)
-        .ok_or_else(executor_overflow)?;
-    let slot_bytes = size_of::<AsyncTaskSlot>()
-        .checked_mul(capacity)
-        .ok_or_else(executor_overflow)?;
-    let padding = align_of::<usize>().max(align_of::<AsyncTaskSlot>());
-    free_bytes
-        .checked_add(slot_bytes)
-        .and_then(|total| total.checked_add(padding.saturating_mul(2)))
-        .ok_or_else(executor_overflow)
+    executor_registry_capacity_with_planning_support(
+        capacity,
+        ExecutorPlanningSupport::compiled_binary(),
+    )
 }
 
 fn executor_registry_align() -> usize {
-    align_of::<usize>().max(align_of::<AsyncTaskSlot>())
+    executor_registry_align_with_planning_support(ExecutorPlanningSupport::compiled_binary())
+}
+
+fn executor_registry_capacity_with_planning_support(
+    capacity: usize,
+    planning: ExecutorPlanningSupport,
+) -> Result<usize, ExecutorError> {
+    planning.registry_capacity(capacity)
+}
+
+fn executor_registry_align_with_planning_support(planning: ExecutorPlanningSupport) -> usize {
+    planning.registry_align()
 }
 
 fn executor_reactor_align() -> usize {
-    let waits_align = align_of::<AsyncReactorWaitEntry>();
-    let outcomes_align = align_of::<Option<AsyncWaitOutcome>>();
-    let queue_align = align_of::<Option<CurrentJob>>();
-    let align = if waits_align >= outcomes_align {
-        waits_align
-    } else {
-        outcomes_align
-    };
-    let align = if queue_align > align {
-        queue_align
-    } else {
-        align
-    };
-    #[cfg(feature = "std")]
-    {
-        let pending_align = align_of::<Option<EventKey>>();
-        if pending_align > align {
-            pending_align
-        } else {
-            align
-        }
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        align
-    }
+    executor_reactor_align_with_planning_support(ExecutorPlanningSupport::compiled_binary())
+}
+
+fn executor_reactor_align_with_planning_support(planning: ExecutorPlanningSupport) -> usize {
+    planning.reactor_align()
+}
+
+fn executor_reactor_capacity_with_planning_support(
+    capacity: usize,
+    planning: ExecutorPlanningSupport,
+) -> Result<usize, ExecutorError> {
+    planning.reactor_capacity(capacity)
 }
 
 fn executor_reactor_capacity(capacity: usize) -> Result<usize, ExecutorError> {
-    if capacity == 0 {
-        return Err(executor_invalid());
-    }
-
-    let waits_bytes = size_of::<AsyncReactorWaitEntry>()
-        .checked_mul(capacity)
-        .ok_or_else(executor_overflow)?;
-    let outcomes_bytes = size_of::<Option<AsyncWaitOutcome>>()
-        .checked_mul(capacity)
-        .ok_or_else(executor_overflow)?;
-    let queue_bytes = size_of::<Option<CurrentJob>>()
-        .checked_mul(capacity)
-        .ok_or_else(executor_overflow)?;
-    #[cfg(feature = "std")]
-    let pending_bytes = size_of::<Option<EventKey>>()
-        .checked_mul(capacity)
-        .ok_or_else(executor_overflow)?;
-
-    let padding = executor_reactor_align();
-    #[cfg(feature = "std")]
-    let bytes = waits_bytes
-        .checked_add(outcomes_bytes)
-        .and_then(|total| total.checked_add(queue_bytes))
-        .and_then(|total| total.checked_add(pending_bytes))
-        .and_then(|total| total.checked_add(padding.saturating_mul(4)))
-        .ok_or_else(executor_overflow)?;
-    #[cfg(not(feature = "std"))]
-    let bytes = waits_bytes
-        .checked_add(outcomes_bytes)
-        .and_then(|total| total.checked_add(queue_bytes))
-        .and_then(|total| total.checked_add(padding.saturating_mul(3)))
-        .ok_or_else(executor_overflow)?;
-
-    Ok(bytes)
+    executor_reactor_capacity_with_planning_support(
+        capacity,
+        ExecutorPlanningSupport::compiled_binary(),
+    )
 }
 
 #[cfg(test)]
@@ -6596,6 +6785,82 @@ mod tests {
             ))
             .expect("aligned bound resource should bind"),
         )
+    }
+
+    #[test]
+    fn compiled_executor_planning_support_matches_compiled_layout() {
+        let support = ExecutorPlanningSupport::compiled_binary();
+        let control = ControlLease::<ExecutorCore>::extent_request()
+            .expect("executor control extent request should build");
+        assert_eq!(support.control_bytes, control.len);
+        assert_eq!(support.control_align, control.align);
+        assert_eq!(
+            support.reactor_wait_entry_bytes,
+            size_of::<AsyncReactorWaitEntry>()
+        );
+        assert_eq!(
+            support.reactor_wait_entry_align,
+            align_of::<AsyncReactorWaitEntry>()
+        );
+        assert_eq!(
+            support.reactor_outcome_entry_bytes,
+            size_of::<Option<AsyncWaitOutcome>>()
+        );
+        assert_eq!(
+            support.reactor_outcome_entry_align,
+            align_of::<Option<AsyncWaitOutcome>>()
+        );
+        assert_eq!(
+            support.reactor_queue_entry_bytes,
+            size_of::<Option<CurrentJob>>()
+        );
+        assert_eq!(
+            support.reactor_queue_entry_align,
+            align_of::<Option<CurrentJob>>()
+        );
+        #[cfg(feature = "std")]
+        {
+            assert_eq!(
+                support.reactor_pending_entry_bytes,
+                size_of::<Option<EventKey>>()
+            );
+            assert_eq!(
+                support.reactor_pending_entry_align,
+                align_of::<Option<EventKey>>()
+            );
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            assert_eq!(support.reactor_pending_entry_bytes, 0);
+            assert_eq!(support.reactor_pending_entry_align, 1);
+        }
+        assert_eq!(support.registry_free_entry_bytes, size_of::<usize>());
+        assert_eq!(support.registry_free_entry_align, align_of::<usize>());
+        assert_eq!(support.registry_slot_bytes, size_of::<AsyncTaskSlot>());
+        assert_eq!(support.registry_slot_align, align_of::<AsyncTaskSlot>());
+    }
+
+    #[test]
+    fn explicit_executor_planning_support_shapes_current_runtime_backing() {
+        let config = ExecutorConfig::new().with_capacity(1);
+        let compiled = CurrentAsyncRuntime::backing_plan_with_layout_policy_and_planning_support(
+            config,
+            AllocatorLayoutPolicy::exact_static(),
+            ExecutorPlanningSupport::compiled_binary(),
+        )
+        .expect("compiled planning support should shape a current runtime");
+        let custom_support = ExecutorPlanningSupport {
+            control_bytes: 8192,
+            ..ExecutorPlanningSupport::compiled_binary()
+        };
+        let custom = CurrentAsyncRuntime::backing_plan_with_layout_policy_and_planning_support(
+            config,
+            AllocatorLayoutPolicy::exact_static(),
+            custom_support,
+        )
+        .expect("custom planning support should shape a current runtime");
+        assert!(custom.control.bytes >= compiled.control.bytes);
+        assert!(custom.control.bytes > compiled.control.bytes);
     }
 
     struct ExplicitGeneratedPollStackFuture;

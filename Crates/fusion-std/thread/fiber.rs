@@ -1146,6 +1146,18 @@ fn generated_default_fiber_stack_size() -> Result<NonZeroUsize, FiberError> {
     Ok(FiberStackClass::from_stack_bytes(bytes)?.size_bytes())
 }
 
+/// Returns the default generated fiber stack size admitted for the current crate.
+///
+/// This is the rounded stack-class size selected from the largest generated fiber-task contract
+/// visible to the current build.
+///
+/// # Errors
+///
+/// Returns an error when generated fiber-task metadata is unavailable.
+pub fn generated_default_fiber_stack_bytes() -> Result<usize, FiberError> {
+    Ok(generated_default_fiber_stack_size()?.get())
+}
+
 fn generated_task_attributes<T: 'static>() -> Result<FiberTaskAttributes, FiberError> {
     generated_task_attributes_by_type_name(type_name::<T>())
 }

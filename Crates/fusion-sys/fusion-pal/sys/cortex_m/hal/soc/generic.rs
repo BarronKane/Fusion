@@ -2,6 +2,19 @@
 
 //! Generic Cortex-M SoC fallback used when no board feature is selected.
 
+use super::pio::{
+    PioEngineClaim as PcuEngineClaim,
+    PioEngineDescriptor as PcuEngineDescriptor,
+    PioEngineId as PcuEngineId,
+    PioError as PcuError,
+    PioLaneClaim as PcuLaneClaim,
+    PioLaneDescriptor as PcuLaneDescriptor,
+    PioLaneId as PcuLaneId,
+    PioLaneMask as PcuLaneMask,
+    PioProgramImage as PcuProgramImage,
+    PioProgramLease as PcuProgramLease,
+    PioSupport as PcuSupport,
+};
 use crate::pal::hal::{
     HardwareAuthoritySet,
     HardwareError,
@@ -12,19 +25,6 @@ use crate::pal::thread::{ThreadCoreId, ThreadError, ThreadId, ThreadLogicalCpuId
 use crate::pal::{
     hal::HardwareTopologyNodeId,
     thread::{ThreadClusterId, ThreadCoreClassId},
-};
-use crate::pcu::{
-    PcuEngineClaim,
-    PcuEngineDescriptor,
-    PcuEngineId,
-    PcuError,
-    PcuLaneClaim,
-    PcuLaneDescriptor,
-    PcuLaneId,
-    PcuLaneMask,
-    PcuProgramImage,
-    PcuProgramLease,
-    PcuSupport,
 };
 use core::time::Duration;
 

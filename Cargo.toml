@@ -4,6 +4,7 @@ members = [
     # fusion-sys stack: safe facade over a compile-time-selected fusion-pal.
     "Crates/fusion-sys",
     "Crates/fusion-sys/fusion-pal",
+    "Crates/fusion-std/pcu/macros",
     "Crates/fusion-std",
     "Crates/fusion-kn",
 
@@ -27,6 +28,7 @@ repository = ""
 # `fusion-pal` exposes contract modules and compile-time-selected system modules.
 fusion-sys = { path = "Crates/fusion-sys" }
 fusion-pal = { path = "Crates/fusion-sys/fusion-pal" }
+fusion-std-pcu-macros = { path = "Crates/fusion-std/pcu/macros" }
 fusion-std = { path = "Crates/fusion-std" }
 fusion-kn = { path = "Crates/fusion-kn" }
 

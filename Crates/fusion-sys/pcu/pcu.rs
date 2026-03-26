@@ -1,41 +1,31 @@
-//! fusion-sys programmable-IO wrappers, planning vocabulary, and portable IR.
+//! fusion-sys generic coprocessor wrappers, semantic IR, and dispatch vocabulary.
 //!
-//! `fusion-sys::pcu` sits one layer above the raw fusion-pal PCU contract. It keeps backend
-//! capabilities honest, adds engine-level pipeline planning vocabulary, and defines a small
-//! deterministic IO-kernel IR without pretending every programmable-IO engine shares one ISA.
+//! `fusion-sys::pcu` sits one layer above the raw fusion-pal PCU contract. The generic surface is
+//! intentionally thin but finally honest: device enumeration/claiming, semantic kernel IR,
+//! planning/preparation/dispatch handles, and backend-specific lanes such as Cortex-M PIO that do
+//! not pretend every coprocessor is one ISA with different lighting.
 
+mod dispatch;
 mod ir;
-mod kernels;
-mod plan;
 mod system;
 
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+pub mod cortex_m;
+
+pub use dispatch::*;
 pub use ir::*;
-pub use kernels::*;
-pub use plan::*;
 pub use system::*;
 
 pub use fusion_pal::sys::pcu::{
     PcuBase,
     PcuCaps,
-    PcuClockDescriptor,
     PcuControl,
-    PcuEngineClaim,
-    PcuEngineDescriptor,
-    PcuEngineId,
+    PcuDeviceClaim,
+    PcuDeviceClass,
+    PcuDeviceDescriptor,
+    PcuDeviceId,
     PcuError,
     PcuErrorKind,
-    PcuFifoDescriptor,
-    PcuFifoDirection,
-    PcuFifoId,
     PcuImplementationKind,
-    PcuInstructionMemoryDescriptor,
-    PcuLaneClaim,
-    PcuLaneDescriptor,
-    PcuLaneId,
-    PcuLaneMask,
-    PcuPinMappingCaps,
-    PcuProgramId,
-    PcuProgramImage,
-    PcuProgramLease,
     PcuSupport,
 };

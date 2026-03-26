@@ -15,6 +15,7 @@ default = []
 sizing-global-nearest-round-up = []
 
 [dependencies]
+fusion-example-rp2350-on-device = { path = "../OnDevice" }
 fusion-pal = { workspace = true }
 fusion-std = { path = "../../../../Crates/fusion-std", default-features = false, features = ["sys-cortex-m", "soc-rp2350"] }
 fusion-sys = { path = "../../../../Crates/fusion-sys", default-features = false, features = ["sys-cortex-m", "soc-rp2350"] }

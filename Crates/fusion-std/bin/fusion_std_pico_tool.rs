@@ -25,10 +25,18 @@ const DEFAULT_PROBE_CHIP: &str = "RP235x";
 const DEFAULT_GDB_CONNECTION_STRING: &str = "[::1]:2345";
 const PROBE_CHIP_ENV: &str = "FUSION_PICO_PROBE_CHIP";
 const PROBE_SELECTOR_ENV: &str = "FUSION_PICO_PROBE_SELECTOR";
+const FIBER_TASK_METADATA_ENV: &str = "FUSION_FIBER_TASK_METADATA";
+const FIBER_TASK_REPORT_ENV: &str = "FUSION_FIBER_TASK_REPORT";
+const ASYNC_POLL_STACK_METADATA_ENV: &str = "FUSION_ASYNC_POLL_STACK_METADATA";
+const ANALYZER_BOOTSTRAP_STACK_BYTES_ENV: &str = "FUSION_FIBER_ANALYZER_BOOTSTRAP_STACK_BYTES";
+const FIBER_TASK_METADATA_NAME: &str = "fusion-std-fiber-task.generated";
+const FIBER_TASK_REPORT_NAME: &str = "fusion-std-fiber-task.report";
+const ASYNC_POLL_STACK_METADATA_NAME: &str = "fusion-std-async-poll-stack.generated";
 const PICO_BENCH_OUTPUT_SYMBOL: &str = "FUSION_RP2350_BENCH_OUTPUT";
 const PICO_BENCH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
 const PICO_BENCH_RELEASE_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const PICO_BENCH_DEBUG_TIMEOUT: StdDuration = StdDuration::from_secs(120);
+const ANALYZER_BOOTSTRAP_STACK_BYTES: usize = 64 * 1024;
 
 fn main() {
     if let Err(error) = try_main() {
@@ -85,13 +93,13 @@ fn try_main() -> Result<(), String> {
 fn usage() -> String {
     format!(
         "usage:\n  \
-         cargo pico-build -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release]\n  \
-         cargo pico-uf2 -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--family FAMILY] [--output-dir DIR]\n  \
-         cargo pico-flash -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] --chip CHIP [--probe SELECTOR]\n  \
-         cargo pico-run -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] --chip CHIP [--probe SELECTOR]\n  \
-         cargo pico-attach -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] --chip CHIP [--probe SELECTOR]\n  \
-         cargo pico-benchmark -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--benchmark-timeout-secs SECONDS] --chip CHIP [--probe SELECTOR]\n  \
-         cargo pico-debug-server -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--gdb-connection-string HOST:PORT] [--detach] [--output-dir DIR] --chip CHIP [--probe SELECTOR]\n\n\
+         cargo pico-build -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--features CSV] [--no-default-features]\n  \
+         cargo pico-uf2 -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--features CSV] [--no-default-features] [--family FAMILY] [--output-dir DIR]\n  \
+         cargo pico-flash -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--features CSV] [--no-default-features] --chip CHIP [--probe SELECTOR]\n  \
+         cargo pico-run -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--features CSV] [--no-default-features] --chip CHIP [--probe SELECTOR]\n  \
+         cargo pico-attach -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--features CSV] [--no-default-features] --chip CHIP [--probe SELECTOR]\n  \
+         cargo pico-benchmark -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--features CSV] [--no-default-features] [--benchmark-timeout-secs SECONDS] --chip CHIP [--probe SELECTOR]\n  \
+         cargo pico-debug-server -- [--manifest-path PATH] [--target TRIPLE] [--bin NAME] [--release] [--features CSV] [--no-default-features] [--gdb-connection-string HOST:PORT] [--detach] [--output-dir DIR] --chip CHIP [--probe SELECTOR]\n\n\
          defaults:\n  \
          manifest-path = {DEFAULT_MANIFEST_PATH}\n  \
          target = {DEFAULT_TARGET}\n  \
@@ -142,6 +150,8 @@ struct CommandOptions {
     target: String,
     bin_name: String,
     release: bool,
+    features: Option<String>,
+    no_default_features: bool,
     family: Uf2Family,
     gdb_connection_string: String,
     detach: bool,
@@ -151,6 +161,14 @@ struct CommandOptions {
     benchmark_timeout_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+struct GeneratedRuntimeMetadata {
+    output_dir: PathBuf,
+    fiber_task_metadata: PathBuf,
+    fiber_task_report: PathBuf,
+    async_poll_stack_metadata: Option<PathBuf>,
+}
+
 impl Default for CommandOptions {
     fn default() -> Self {
         Self {
@@ -158,6 +176,8 @@ impl Default for CommandOptions {
             target: DEFAULT_TARGET.to_owned(),
             bin_name: DEFAULT_BIN.to_owned(),
             release: false,
+            features: None,
+            no_default_features: false,
             family: Uf2Family::Rp2xxxAbsolute,
             gdb_connection_string: DEFAULT_GDB_CONNECTION_STRING.to_owned(),
             detach: false,
@@ -186,6 +206,8 @@ impl CommandOptions {
                 "--target" => options.target = next_value(&mut args, "--target")?,
                 "--bin" => options.bin_name = next_value(&mut args, "--bin")?,
                 "--release" => options.release = true,
+                "--features" => options.features = Some(next_value(&mut args, "--features")?),
+                "--no-default-features" => options.no_default_features = true,
                 "--family" => {
                     options.family = Uf2Family::from_str(&next_value(&mut args, "--family")?)?;
                 }
@@ -355,17 +377,25 @@ fn run_build(options: &CommandOptions) -> Result<(), String> {
 }
 
 fn run_probe_flash(options: &CommandOptions) -> Result<(), String> {
+    let metadata = generate_runtime_metadata(options)?;
     let manifest_path = options.manifest_path()?;
     let project_dir = options.project_dir()?;
     let chip = options.resolve_chip();
     let mut command = Command::new("cargo-flash");
     command.current_dir(project_dir);
+    apply_generated_runtime_metadata_env(&mut command, &metadata);
     command.arg("--manifest-path").arg(manifest_path);
     command.arg("--target").arg(&options.target);
     command.arg("--bin").arg(&options.bin_name);
     command.arg("--chip").arg(chip);
     if options.release {
         command.arg("--release");
+    }
+    if let Some(features) = &options.features {
+        command.arg("--features").arg(features);
+    }
+    if options.no_default_features {
+        command.arg("--no-default-features");
     }
     if let Some(probe) = options.resolve_probe_selector() {
         command.arg("--probe").arg(probe);
@@ -687,10 +717,12 @@ fn build_example_elf_with_symbols(options: &CommandOptions) -> Result<(), String
 }
 
 fn build_example_elf_impl(options: &CommandOptions, preserve_symbols: bool) -> Result<(), String> {
+    let metadata = generate_runtime_metadata(options)?;
     let manifest_path = options.manifest_path()?;
     let project_dir = options.project_dir()?;
     let mut command = Command::new("cargo");
     command.current_dir(project_dir);
+    apply_generated_runtime_metadata_env(&mut command, &metadata);
     command.arg("build");
     command.arg("--manifest-path").arg(manifest_path);
     command.arg("--target").arg(&options.target);
@@ -702,6 +734,12 @@ fn build_example_elf_impl(options: &CommandOptions, preserve_symbols: bool) -> R
             command.arg("profile.release.strip=\"none\"");
         }
     }
+    if let Some(features) = &options.features {
+        command.arg("--features").arg(features);
+    }
+    if options.no_default_features {
+        command.arg("--no-default-features");
+    }
     run_command(&mut command, "cargo build")?;
     let elf_path = options.elf_path()?;
     if !elf_path.is_file() {
@@ -711,6 +749,179 @@ fn build_example_elf_impl(options: &CommandOptions, preserve_symbols: bool) -> R
         ));
     }
     Ok(())
+}
+
+fn generate_runtime_metadata(options: &CommandOptions) -> Result<GeneratedRuntimeMetadata, String> {
+    let manifest_path = options.manifest_path()?;
+    let workspace_root = options.workspace_root()?;
+    let package = parse_manifest_package_name(&manifest_path)?;
+    let output_dir = generated_runtime_metadata_dir(&workspace_root, options, &package);
+    fs::create_dir_all(&output_dir)
+        .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
+    let metadata = GeneratedRuntimeMetadata {
+        output_dir: output_dir.clone(),
+        fiber_task_metadata: output_dir.join(FIBER_TASK_METADATA_NAME),
+        fiber_task_report: output_dir.join(FIBER_TASK_REPORT_NAME),
+        async_poll_stack_metadata: output_dir
+            .join(ASYNC_POLL_STACK_METADATA_NAME)
+            .is_file()
+            .then(|| output_dir.join(ASYNC_POLL_STACK_METADATA_NAME)),
+    };
+
+    let mut command = Command::new("cargo");
+    command.current_dir(&workspace_root);
+    command.arg("run");
+    command.arg("-p").arg("fusion-std");
+    command.arg("--bin").arg("fusion_std_fiber_task_pipeline");
+    command.arg("--");
+    command.arg("--package").arg(package);
+    command.arg("--bin").arg(&options.bin_name);
+    command.arg("--target").arg(&options.target);
+    command.arg("--output").arg(&metadata.fiber_task_metadata);
+    command.arg("--report").arg(&metadata.fiber_task_report);
+    command.arg("--rust-contracts").arg(
+        metadata
+            .output_dir
+            .join("fusion-std-fiber-task.contracts.rs"),
+    );
+    command.arg("--red-inline-rust").arg(
+        metadata
+            .output_dir
+            .join("fusion-std-red-inline.contracts.rs"),
+    );
+    command
+        .arg("--async-poll-stack-output")
+        .arg(metadata.output_dir.join(ASYNC_POLL_STACK_METADATA_NAME));
+    command.arg("--async-poll-stack-rust").arg(
+        metadata
+            .output_dir
+            .join("fusion-std-async-poll-stack.contracts.rs"),
+    );
+    command.env(
+        ANALYZER_BOOTSTRAP_STACK_BYTES_ENV,
+        ANALYZER_BOOTSTRAP_STACK_BYTES.to_string(),
+    );
+    command
+        .arg("--profile")
+        .arg(if options.release { "release" } else { "dev" });
+    if let Some(features) = &options.features {
+        command.arg("--features").arg(features);
+    }
+    if options.no_default_features {
+        command.arg("--no-default-features");
+    }
+    run_command(&mut command, "fusion_std_fiber_task_pipeline")?;
+
+    ensure_generated_runtime_metadata_file(
+        &metadata.fiber_task_metadata,
+        FIBER_TASK_METADATA_NAME,
+    )?;
+    let async_poll_stack_path = metadata.output_dir.join(ASYNC_POLL_STACK_METADATA_NAME);
+    let async_poll_stack_metadata = async_poll_stack_path
+        .is_file()
+        .then_some(async_poll_stack_path);
+    Ok(GeneratedRuntimeMetadata {
+        async_poll_stack_metadata,
+        ..metadata
+    })
+}
+
+fn generated_runtime_metadata_dir(
+    workspace_root: &Path,
+    options: &CommandOptions,
+    package: &str,
+) -> PathBuf {
+    let mut dir = workspace_root
+        .join("target")
+        .join("generated-runtime-metadata")
+        .join(sanitize_path_component(package))
+        .join(sanitize_path_component(&options.bin_name))
+        .join(sanitize_path_component(&options.target))
+        .join(options.build_profile());
+    if options.no_default_features {
+        dir = dir.join("no-default-features");
+    } else {
+        dir = dir.join("default-features");
+    }
+    if let Some(features) = options.features.as_ref() {
+        dir.join(sanitize_path_component(features))
+    } else {
+        dir.join("default")
+    }
+}
+
+fn sanitize_path_component(raw: &str) -> String {
+    let mut sanitized = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if sanitized.is_empty() {
+        "_".to_owned()
+    } else {
+        sanitized
+    }
+}
+
+fn parse_manifest_package_name(manifest_path: &Path) -> Result<String, String> {
+    let contents = fs::read_to_string(manifest_path)
+        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
+    let mut in_package = false;
+    for raw_line in contents.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "name" {
+            continue;
+        }
+        let package = value.trim().trim_matches('"');
+        if package.is_empty() {
+            return Err(format!(
+                "manifest {} had an empty [package].name",
+                manifest_path.display()
+            ));
+        }
+        return Ok(package.to_owned());
+    }
+    Err(format!(
+        "manifest {} is missing [package].name",
+        manifest_path.display()
+    ))
+}
+
+fn ensure_generated_runtime_metadata_file(path: &Path, label: &str) -> Result<(), String> {
+    if path.is_file() {
+        return Ok(());
+    }
+    Err(format!(
+        "generated runtime metadata `{label}` was not produced at {}",
+        path.display()
+    ))
+}
+
+fn apply_generated_runtime_metadata_env(
+    command: &mut Command,
+    metadata: &GeneratedRuntimeMetadata,
+) {
+    command.env(FIBER_TASK_METADATA_ENV, &metadata.fiber_task_metadata);
+    command.env(FIBER_TASK_REPORT_ENV, &metadata.fiber_task_report);
+    if let Some(async_poll_stack_metadata) = metadata.async_poll_stack_metadata.as_ref() {
+        command.env(ASYNC_POLL_STACK_METADATA_ENV, async_poll_stack_metadata);
+    }
 }
 
 fn run_command(command: &mut Command, tool_name: &str) -> Result<ExitStatus, String> {

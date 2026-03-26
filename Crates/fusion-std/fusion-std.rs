@@ -18,6 +18,9 @@ compile_error!("fusion-std without feature `std` requires panic = \"abort\".");
 pub mod component;
 /// Public GPIO surface re-exported from `fusion-sys`.
 pub use fusion_sys::gpio;
+/// Public coprocessor sugar layered over the truthful `fusion-sys::pcu` substrate.
+#[path = "pcu/pcu.rs"]
+pub mod pcu;
 /// Public synchronization facade layered over the canonical `fusion-sys` primitives.
 #[path = "sync/sync.rs"]
 pub mod sync;

@@ -7,6 +7,7 @@ use super::{
     CurrentFiberPoolCombinedBackingPlan,
     Executor,
     ExecutorConfig,
+    ExecutorPlanningSupport,
     FiberPlanningSupport,
     FiberPoolBootstrap,
     FiberStackBacking,
@@ -417,9 +418,25 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
         fiber_planning: FiberPlanningSupport,
         layout_policy: AllocatorLayoutPolicy,
     ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
-        self.backing_plan_for_base_alignment_with_fiber_planning_support_and_allocator_layout_policy(
+        self.backing_plan_with_planning_support_and_allocator_layout_policy(
+            fiber_planning,
+            ExecutorPlanningSupport::compiled_binary(),
+            layout_policy,
+        )
+    }
+
+    /// Returns the one-slab backing plan under explicit fiber/executor planning surfaces and one
+    /// explicit allocator layout policy.
+    pub fn backing_plan_with_planning_support_and_allocator_layout_policy(
+        self,
+        fiber_planning: FiberPlanningSupport,
+        executor_planning: ExecutorPlanningSupport,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
+        self.backing_plan_for_base_alignment_with_planning_support_and_allocator_layout_policy(
             1,
             fiber_planning,
+            executor_planning,
             layout_policy,
         )
     }
@@ -431,9 +448,12 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
         base_align: usize,
         layout_policy: AllocatorLayoutPolicy,
     ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
-        self.backing_plan_for_base_alignment_with_fiber_planning_support_and_allocator_layout_policy(
+        self.backing_plan_for_base_alignment_with_planning_support_and_allocator_layout_policy(
             base_align,
-            FiberPlanningSupport::from_fiber_support(fusion_sys::fiber::FiberSystem::new().support()),
+            FiberPlanningSupport::from_fiber_support(
+                fusion_sys::fiber::FiberSystem::new().support(),
+            ),
+            ExecutorPlanningSupport::compiled_binary(),
             layout_policy,
         )
     }
@@ -446,14 +466,35 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
         fiber_planning: FiberPlanningSupport,
         layout_policy: AllocatorLayoutPolicy,
     ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
+        self.backing_plan_for_base_alignment_with_planning_support_and_allocator_layout_policy(
+            base_align,
+            fiber_planning,
+            ExecutorPlanningSupport::compiled_binary(),
+            layout_policy,
+        )
+    }
+
+    /// Returns the one-slab backing plan for a caller that can guarantee at least `base_align`
+    /// alignment under explicit fiber/executor planning surfaces and one allocator layout policy.
+    pub fn backing_plan_for_base_alignment_with_planning_support_and_allocator_layout_policy(
+        self,
+        base_align: usize,
+        fiber_planning: FiberPlanningSupport,
+        executor_planning: ExecutorPlanningSupport,
+        layout_policy: AllocatorLayoutPolicy,
+    ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
         let fiber_plan = CurrentFiberPool::backing_plan_with_planning_support(
             self.fibers.config(),
             fiber_planning,
         )?
         .combined_for_base_alignment(base_align)?;
         let executor_plan =
-            CurrentAsyncRuntime::backing_plan_with_layout_policy(self.executor, layout_policy)?
-                .combined_eager_for_base_alignment(base_align)?;
+            CurrentAsyncRuntime::backing_plan_with_layout_policy_and_planning_support(
+                self.executor,
+                layout_policy,
+                executor_planning,
+            )?
+            .combined_eager_for_base_alignment(base_align)?;
 
         let mut max_align = fiber_plan.slab.align;
         if executor_plan.slab.align > max_align {

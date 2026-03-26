@@ -14,7 +14,7 @@ pub mod hal;
 /// Cortex-M bare-metal memory backend implementation.
 pub mod mem;
 #[path = "pcu/pcu.rs"]
-/// Cortex-M bare-metal programmable-IO backend implementation.
+/// Cortex-M bare-metal coprocessor backend implementation, including PIO-specific lanes.
 pub mod pcu;
 #[path = "power/power.rs"]
 /// Cortex-M bare-metal power backend implementation.

@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-use core::num::NonZeroUsize;
-
 use fusion_std::thread::{
     CurrentFiberAsyncBootstrap,
     CurrentFiberAsyncParts,
@@ -23,14 +21,11 @@ const RP2350_ASYNC_SIZING: RuntimeSizingStrategy = RuntimeSizingStrategy::Global
 const RP2350_ASYNC_SIZING: RuntimeSizingStrategy = RuntimeSizingStrategy::Exact;
 
 fn runtime_bootstrap() -> CurrentFiberAsyncBootstrap<'static> {
-    CurrentFiberAsyncBootstrap::uniform(
-        BENCH_FIBER_COUNT,
-        NonZeroUsize::new(BENCH_FIBER_STACK_BYTES).expect("fiber stack must be non-zero"),
-        BENCH_ASYNC_CAPACITY,
-    )
-    .with_guard_pages(0)
-    .with_fiber_sizing_strategy(RP2350_FIBER_SIZING)
-    .with_async_sizing_strategy(RP2350_ASYNC_SIZING)
+    CurrentFiberAsyncBootstrap::auto(BENCH_FIBER_COUNT, BENCH_ASYNC_CAPACITY)
+        .expect("generated benchmark fiber stack metadata should exist")
+        .with_guard_pages(0)
+        .with_fiber_sizing_strategy(RP2350_FIBER_SIZING)
+        .with_async_sizing_strategy(RP2350_ASYNC_SIZING)
 }
 
 pub fn benchmark_runtime() -> CurrentFiberAsyncParts {

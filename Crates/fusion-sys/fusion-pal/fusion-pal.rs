@@ -14,7 +14,7 @@ pub mod hal;
 /// Backend-neutral fusion-pal contracts.
 pub mod pal;
 #[path = "pcu/pcu.rs"]
-/// Backend-neutral programmable-IO vocabulary and low-level fusion-pal traits.
+/// Backend-neutral coprocessor vocabulary and low-level fusion-pal traits.
 pub mod pcu;
 #[path = "sys/sys.rs"]
 /// Selected platform backend and public syscall-facing exports.
@@ -32,7 +32,7 @@ pub enum Platform {
     Ios,
     /// Linux and Linux-compatible userspace environments.
     Linux,
-    /// Apple macOS and closely related desktop Darwin targets.
+    /// Apple MacOS and closely related desktop Darwin targets.
     MacOs,
     /// Microsoft Windows targets.
     Windows,

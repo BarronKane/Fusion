@@ -1,0 +1,17 @@
+[package]
+name = "fusion-example-rp2350-on-device"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "fusion_example_rp2350_on_device"
+path = "lib.rs"
+
+[dependencies]
+fusion-std = { path = "../../../../Crates/fusion-std", default-features = false, features = ["sys-cortex-m", "soc-rp2350"] }
+
+[lints]
+workspace = true

@@ -6,13 +6,20 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
-use cortex_m_rt::{entry, exception};
+use cortex_m_rt::{ExceptionFrame, entry, exception};
+use fusion_example_rp2350_on_device::pcu::{
+    PcuPioOnDeviceEvent,
+    PcuPioOnDeviceFailure,
+    run_pcu_pio_smoke_suite,
+    suite_pass_display_code,
+};
 use fusion_std::component::{
     SevenSegmentGlyph,
     SevenSegmentPolarity,
     ShiftedFourDigitSevenSegmentDisplay,
 };
 use fusion_std::gpio::{Gpio, GpioDriveStrength, GpioPin};
+use fusion_std::pcu::PCU;
 use fusion_std::thread::async_sleep_for;
 use fusion_sys::thread::system_monotonic_time;
 
@@ -26,6 +33,7 @@ const DISPLAY_SHIFT_CLOCK_PIN: u8 = 15;
 
 const FIZZBUZZ_PERIOD: Duration = Duration::from_millis(300);
 const STARTUP_PHASE_PERIOD: Duration = Duration::from_millis(500);
+const TEST_PHASE_PERIOD: Duration = Duration::from_millis(250);
 const PANIC_PHASE_PERIOD: Duration = Duration::from_millis(500);
 const DISPLAY_REFRESH_PERIOD: Duration = Duration::from_millis(2);
 
@@ -112,6 +120,50 @@ fn startup_sequence(display: &mut PicoDisplay) {
     }
 }
 
+fn display_code(display: &mut PicoDisplay, code: u16, duration: Duration) {
+    display.set_hex(code);
+    blocking_display_pause(display, duration);
+}
+
+fn display_failure_loop(display: &mut PicoDisplay, failure: PcuPioOnDeviceFailure) -> ! {
+    loop {
+        display.set_hex(failure.display_code());
+        blocking_display_pause(display, PANIC_PHASE_PERIOD);
+        display.clear();
+        blocking_display_pause(display, PANIC_PHASE_PERIOD);
+    }
+}
+
+fn startup_pcu_self_test(display: &mut PicoDisplay) {
+    let result = run_pcu_pio_smoke_suite(|event| match event {
+        PcuPioOnDeviceEvent::Starting { code } => {
+            display_code(display, 0x1000 | code, TEST_PHASE_PERIOD)
+        }
+        PcuPioOnDeviceEvent::Passed { code } => {
+            display_code(display, 0xA000 | code, TEST_PHASE_PERIOD)
+        }
+        PcuPioOnDeviceEvent::Failed { failure } => display_failure_loop(display, failure),
+    });
+
+    if let Err(failure) = result {
+        display_failure_loop(display, failure);
+    }
+    display_code(display, suite_pass_display_code(), STARTUP_PHASE_PERIOD);
+}
+
+fn display_exception_loop(code: u16) -> ! {
+    loop {
+        if let Some(display) = panic_display() {
+            display.set_hex(code);
+            panic_display_pause(display, PANIC_PHASE_PERIOD);
+            display.clear();
+            panic_display_pause(display, PANIC_PHASE_PERIOD);
+            continue;
+        }
+        cortex_m::asm::wfi();
+    }
+}
+
 fn panic_glyphs() -> [SevenSegmentGlyph; 4] {
     [
         SevenSegmentGlyph::from_hex(0xD).expect("D"),
@@ -146,12 +198,17 @@ async fn display_async_pause(display: &mut PicoDisplay, duration: Duration) {
     }
 }
 
-async fn fizzbuzz_loop(display: &mut PicoDisplay) -> ! {
+#[PCU]
+fn pcu_increment_word(value: u32) -> u32 {
+    value.wrapping_add(1)
+}
+
+async fn run_fizzbuzz(display: &mut PicoDisplay) -> ! {
     let mut step = 3_u32;
     loop {
         display.set_glyphs(step_glyphs(step));
         display_async_pause(display, FIZZBUZZ_PERIOD).await;
-        step = step.wrapping_add(1);
+        step = pcu_increment_word(step);
     }
 }
 
@@ -163,6 +220,7 @@ fn main() -> ! {
         .disable()
         .expect("display should accept initial blanking");
     startup_sequence(display);
+    startup_pcu_self_test(display);
 
     let runtime = main_runtime();
     let (fibers, runtime) = runtime.into_parts();
@@ -173,7 +231,7 @@ fn main() -> ! {
                 .build_explicit()
                 .expect("fiber-owned async runtime should build");
             runtime
-                .block_on(fizzbuzz_loop(display))
+                .block_on(run_fizzbuzz(display))
                 .expect("fiber-owned async runtime should drive fizzbuzz loop");
         })
         .expect("fiber-owned async loop should spawn");
@@ -194,9 +252,12 @@ unsafe fn DefaultHandler(irqn: i16) {
             .expect("event-timeout irq should service");
         return;
     }
-    loop {
-        cortex_m::asm::wfi();
-    }
+    display_exception_loop(0xD000 | (irqn as u16 & 0x0fff));
+}
+
+#[exception]
+unsafe fn HardFault(_frame: &ExceptionFrame) -> ! {
+    display_exception_loop(0xBADF);
 }
 
 #[panic_handler]

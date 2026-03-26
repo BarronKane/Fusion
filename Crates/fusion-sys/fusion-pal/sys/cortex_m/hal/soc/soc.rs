@@ -11,3 +11,6 @@ pub mod board;
 #[cfg(feature = "soc-rp2350")]
 #[path = "rp2350.rs"]
 pub mod board;
+
+#[path = "pio/pio.rs"]
+pub mod pio;

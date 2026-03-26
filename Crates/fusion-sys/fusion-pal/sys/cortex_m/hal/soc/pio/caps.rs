@@ -1,4 +1,4 @@
-//! Capability vocabulary for programmable-IO backends.
+//! Capability vocabulary for Cortex-M programmable-IO backends.
 
 use bitflags::bitflags;
 

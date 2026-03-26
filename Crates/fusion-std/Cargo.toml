@@ -63,6 +63,7 @@ sizing-global-nearest-round-up = []
 [dependencies]
 fusion-pal = { workspace = true }
 fusion-sys = { workspace = true }
+fusion-std-pcu-macros = { workspace = true }
 
 [target.'cfg(not(target_os = "none"))'.dependencies]
 object = { version = "0.36.7", default-features = false, features = ["read"] }

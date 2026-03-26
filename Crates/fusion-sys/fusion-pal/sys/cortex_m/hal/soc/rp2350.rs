@@ -12,6 +12,27 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering, compiler_fence};
 use core::time::Duration;
 
+use super::pio::{
+    PioCaps as PcuCaps,
+    PioClockDescriptor as PcuClockDescriptor,
+    PioEngineClaim as PcuEngineClaim,
+    PioEngineDescriptor as PcuEngineDescriptor,
+    PioEngineId as PcuEngineId,
+    PioError as PcuError,
+    PioFifoDescriptor as PcuFifoDescriptor,
+    PioFifoDirection as PcuFifoDirection,
+    PioFifoId as PcuFifoId,
+    PioImplementationKind as PcuImplementationKind,
+    PioInstructionMemoryDescriptor as PcuInstructionMemoryDescriptor,
+    PioLaneClaim as PcuLaneClaim,
+    PioLaneDescriptor as PcuLaneDescriptor,
+    PioLaneId as PcuLaneId,
+    PioLaneMask as PcuLaneMask,
+    PioPinMappingCaps as PcuPinMappingCaps,
+    PioProgramImage as PcuProgramImage,
+    PioProgramLease as PcuProgramLease,
+    PioSupport as PcuSupport,
+};
 use crate::pal::hal::{
     HardwareAuthoritySet,
     HardwareError,
@@ -31,27 +52,6 @@ use crate::pal::thread::{
     ThreadId,
     ThreadLogicalCpuId,
     ThreadProcessorGroupId,
-};
-use crate::pcu::{
-    PcuCaps,
-    PcuClockDescriptor,
-    PcuEngineClaim,
-    PcuEngineDescriptor,
-    PcuEngineId,
-    PcuError,
-    PcuFifoDescriptor,
-    PcuFifoDirection,
-    PcuFifoId,
-    PcuImplementationKind,
-    PcuInstructionMemoryDescriptor,
-    PcuLaneClaim,
-    PcuLaneDescriptor,
-    PcuLaneId,
-    PcuLaneMask,
-    PcuPinMappingCaps,
-    PcuProgramImage,
-    PcuProgramLease,
-    PcuSupport,
 };
 
 use super::board_contract::{self, CortexMSocBoard};
@@ -131,6 +131,7 @@ const CORTEX_M_NVIC_IPR: *mut u8 = 0xE000_E400 as *mut u8;
 const RP2350_TICKS_BASE: usize = 0x4010_8000;
 const RP2350_TIMER0_BASE: usize = 0x400b_0000;
 const RP2350_TIMER1_BASE: usize = 0x400b_8000;
+const RP2350_RESETS_BASE: usize = 0x4002_0000;
 const RP2350_IO_BANK0_BASE: usize = 0x4002_8000;
 const RP2350_IO_QSPI_BASE: usize = 0x4003_0000;
 const RP2350_DMA_BASE: usize = 0x5000_0000;
@@ -151,20 +152,32 @@ const RP2350_REG_ALIAS_SET_OFFSET: usize = 0x2000;
 const RP2350_REG_ALIAS_CLR_OFFSET: usize = 0x3000;
 const RP2350_PIO_CTRL_OFFSET: usize = 0x00;
 const RP2350_PIO_FSTAT_OFFSET: usize = 0x04;
+const RP2350_PIO_FDEBUG_OFFSET: usize = 0x08;
 const RP2350_PIO_TXF0_OFFSET: usize = 0x10;
 const RP2350_PIO_RXF0_OFFSET: usize = 0x20;
 const RP2350_PIO_INSTR_MEM0_OFFSET: usize = 0x48;
-const RP2350_PIO_SM_STRIDE: usize = 0x14;
+const RP2350_PIO_SM_STRIDE: usize = 0x18;
 const RP2350_PIO_SM0_CLKDIV_OFFSET: usize = 0xc8;
 const RP2350_PIO_SM0_EXECCTRL_OFFSET: usize = 0xcc;
 const RP2350_PIO_SM0_SHIFTCTRL_OFFSET: usize = 0xd0;
+const RP2350_PIO_SM0_INSTR_OFFSET: usize = 0xd8;
 const RP2350_PIO_SM0_PINCTRL_OFFSET: usize = 0xdc;
 const RP2350_PIO_CTRL_SM_ENABLE_MASK: u32 = 0x0000_000f;
 const RP2350_PIO_CTRL_SM_RESTART_SHIFT: u32 = 4;
 const RP2350_PIO_CTRL_CLKDIV_RESTART_SHIFT: u32 = 8;
 const RP2350_PIO_FSTAT_TXFULL_SHIFT: u32 = 16;
 const RP2350_PIO_FSTAT_RXEMPTY_SHIFT: u32 = 8;
+const RP2350_PIO_FDEBUG_TXSTALL_SHIFT: u32 = 24;
+const RP2350_PIO_FDEBUG_TXOVER_SHIFT: u32 = 16;
+const RP2350_PIO_FDEBUG_RXUNDER_SHIFT: u32 = 8;
+const RP2350_PIO_FDEBUG_RXSTALL_SHIFT: u32 = 0;
+const RP2350_PIO_SM_SHIFTCTRL_FJOIN_RX_BIT: u32 = 1 << 31;
 const RP2350_PIO_VALID_LANE_MASK: u8 = 0x0f;
+const RP2350_RESETS_RESET_OFFSET: usize = 0x00;
+const RP2350_RESETS_RESET_DONE_OFFSET: usize = 0x08;
+const RP2350_RESETS_PIO0_BIT: u32 = 0x0000_0800;
+const RP2350_RESETS_PIO1_BIT: u32 = 0x0000_1000;
+const RP2350_RESETS_PIO2_BIT: u32 = 0x0000_2000;
 const RP2350_EVENT_TIMEOUT_TIMER_BASE: usize = RP2350_TIMER0_BASE;
 const RP2350_EVENT_TIMEOUT_ALARM_INDEX: u16 = 3;
 const RP2350_EVENT_TIMEOUT_IRQN: u16 = 3;
@@ -2222,6 +2235,31 @@ const fn rp2350_pio_base(engine: PcuEngineId) -> Option<usize> {
     }
 }
 
+const fn rp2350_pio_reset_bit(engine: PcuEngineId) -> Option<u32> {
+    match engine.0 {
+        0 => Some(RP2350_RESETS_PIO0_BIT),
+        1 => Some(RP2350_RESETS_PIO1_BIT),
+        2 => Some(RP2350_RESETS_PIO2_BIT),
+        _ => None,
+    }
+}
+
+fn rp2350_unreset_pio_engine(engine: PcuEngineId) -> Result<(), PcuError> {
+    let bit = rp2350_pio_reset_bit(engine).ok_or_else(PcuError::invalid)?;
+    let reset_register = RP2350_RESETS_BASE + RP2350_RESETS_RESET_OFFSET;
+    let reset_done_register = (RP2350_RESETS_BASE + RP2350_RESETS_RESET_DONE_OFFSET) as *const u32;
+    rp2350_atomic_register_clear(reset_register, bit);
+    for _ in 0..1024 {
+        // SAFETY: RESET_DONE is a read-only reset-controller summary register.
+        let state = unsafe { ptr::read_volatile(reset_done_register) };
+        if state & bit != 0 {
+            return Ok(());
+        }
+        compiler_fence(Ordering::SeqCst);
+    }
+    Err(PcuError::busy())
+}
+
 const fn rp2350_pio_lane_descriptors(engine: PcuEngineId) -> &'static [PcuLaneDescriptor] {
     match engine.0 {
         0 => &PIO0_LANES,
@@ -2854,6 +2892,10 @@ pub fn claim_pcu_engine(engine: PcuEngineId) -> Result<PcuEngineClaim, PcuError>
     RP2350_PIO_ENGINE_CLAIMS[engine_index]
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .map_err(|_| PcuError::busy())?;
+    if let Err(error) = rp2350_unreset_pio_engine(engine) {
+        RP2350_PIO_ENGINE_CLAIMS[engine_index].store(false, Ordering::Release);
+        return Err(error);
+    }
     Ok(PcuEngineClaim { engine })
 }
 
@@ -3039,6 +3081,72 @@ pub fn read_pcu_rx_fifo(claim: &PcuLaneClaim, lane: PcuLaneId) -> Result<u32, Pc
 
 const fn rp2350_pio_sm_register(base: usize, lane_index: u8, offset: usize) -> usize {
     base + offset + (lane_index as usize * RP2350_PIO_SM_STRIDE)
+}
+
+const fn rp2350_encode_pcu_jmp(target: u8) -> u16 {
+    target as u16
+}
+
+fn rp2350_clear_pcu_fifos(base: usize, bits: u8) {
+    for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE as u8 {
+        if bits & (1u8 << lane_index) == 0 {
+            continue;
+        }
+        let shiftctrl_register =
+            rp2350_pio_sm_register(base, lane_index, RP2350_PIO_SM0_SHIFTCTRL_OFFSET) as *mut u32;
+        // SAFETY: the lane claim serializes access to one concrete state machine's control
+        // register block. Toggling FJOIN_RX and then restoring the original value is the
+        // documented FIFO flush sequence for RP2350 PIO state machines.
+        unsafe {
+            let original = ptr::read_volatile(shiftctrl_register);
+            ptr::write_volatile(
+                shiftctrl_register,
+                original ^ RP2350_PIO_SM_SHIFTCTRL_FJOIN_RX_BIT,
+            );
+            ptr::write_volatile(shiftctrl_register, original);
+        }
+    }
+}
+
+fn rp2350_clear_pcu_fifo_debug(base: usize, bits: u8) {
+    let register = (base + RP2350_PIO_FDEBUG_OFFSET) as *mut u32;
+    let bit_mask = u32::from(bits);
+    let clear_mask = (bit_mask << RP2350_PIO_FDEBUG_TXSTALL_SHIFT)
+        | (bit_mask << RP2350_PIO_FDEBUG_TXOVER_SHIFT)
+        | (bit_mask << RP2350_PIO_FDEBUG_RXUNDER_SHIFT)
+        | (bit_mask << RP2350_PIO_FDEBUG_RXSTALL_SHIFT);
+    // SAFETY: FDEBUG is a write-clear register. Writing a lane mask only clears sticky FIFO
+    // debug bits for the selected state machines.
+    unsafe { ptr::write_volatile(register, clear_mask) };
+}
+
+fn rp2350_prime_pcu_program_counter(base: usize, bits: u8, initial_pc: u8) {
+    let jmp = u32::from(rp2350_encode_pcu_jmp(initial_pc));
+    for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE as u8 {
+        if bits & (1u8 << lane_index) == 0 {
+            continue;
+        }
+        let instr_register =
+            rp2350_pio_sm_register(base, lane_index, RP2350_PIO_SM0_INSTR_OFFSET) as *mut u32;
+        // SAFETY: writing to SMx_INSTR executes one instruction immediately for the selected
+        // state machine. A single unconditional JMP establishes a known entry PC before enable.
+        unsafe { ptr::write_volatile(instr_register, jmp) };
+    }
+}
+
+/// Applies the RP2350-equivalent `pio_sm_init()` sequence to one claimed lane set.
+pub fn initialize_pcu_lanes(claim: &PcuLaneClaim, initial_pc: u8) -> Result<(), PcuError> {
+    if initial_pc >= RP2350_PIO_INSTRUCTION_WORDS as u8 {
+        return Err(PcuError::invalid());
+    }
+    let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
+    let base = rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)?;
+    stop_pcu_lanes(claim)?;
+    rp2350_clear_pcu_fifos(base, bits);
+    rp2350_clear_pcu_fifo_debug(base, bits);
+    restart_pcu_lanes(claim)?;
+    rp2350_prime_pcu_program_counter(base, bits, initial_pc);
+    Ok(())
 }
 
 /// Applies one RP2350 PIO execution-state bundle to all lanes in the supplied claim.

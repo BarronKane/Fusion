@@ -1,4 +1,4 @@
-//! Shared programmable-IO identifiers and descriptor vocabulary.
+//! Shared Cortex-M programmable-IO identifiers and descriptor vocabulary.
 
 use super::caps::PcuCaps;
 use super::error::PcuError;

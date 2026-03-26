@@ -1,36 +1,45 @@
-//! Cortex-M programmable-IO backend.
+//! Cortex-M coprocessor backend.
+
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::pcu::{
     PcuBase,
+    PcuCaps,
     PcuControl,
-    PcuEngineClaim,
-    PcuEngineDescriptor,
-    PcuEngineId,
+    PcuDeviceClaim,
+    PcuDeviceClass,
+    PcuDeviceDescriptor,
+    PcuDeviceId,
     PcuError,
-    PcuLaneClaim,
-    PcuLaneDescriptor,
-    PcuLaneId,
-    PcuLaneMask,
-    PcuProgramImage,
-    PcuProgramLease,
     PcuSupport,
 };
 
-/// Cortex-M programmable-IO provider type.
+use crate::sys::cortex_m::hal::soc::pio::{PioBase, system_pio};
+
+const CORTEX_M_PIO_DEVICE_ID: PcuDeviceId = PcuDeviceId(0);
+
+static CORTEX_M_PIO_DEVICES: [PcuDeviceDescriptor; 1] = [PcuDeviceDescriptor {
+    id: CORTEX_M_PIO_DEVICE_ID,
+    name: "cortex-m-pio",
+    class: PcuDeviceClass::Io,
+}];
+static CORTEX_M_PIO_DEVICE_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// Cortex-M coprocessor provider type.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CortexMPcu;
 
 /// Selected Cortex-M programmable-IO provider type.
 pub type PlatformPcu = CortexMPcu;
 
-/// Returns the selected Cortex-M programmable-IO provider.
+/// Returns the selected Cortex-M coprocessor provider.
 #[must_use]
 pub const fn system_pcu() -> PlatformPcu {
     PlatformPcu::new()
 }
 
 impl CortexMPcu {
-    /// Creates a new Cortex-M programmable-IO provider handle.
+    /// Creates a new Cortex-M coprocessor provider handle.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -39,77 +48,49 @@ impl CortexMPcu {
 
 impl PcuBase for CortexMPcu {
     fn support(&self) -> PcuSupport {
-        super::super::hal::soc::board::pcu_support()
+        let support = system_pio().support();
+        if support.engine_count == 0 {
+            return PcuSupport::unsupported();
+        }
+
+        PcuSupport {
+            caps: PcuCaps::ENUMERATE
+                | PcuCaps::CLAIM_DEVICE
+                | PcuCaps::DISPATCH
+                | PcuCaps::COMPLETION_STATUS
+                | PcuCaps::EXTERNAL_RESOURCES,
+            implementation: support.implementation,
+            device_count: 1,
+        }
     }
 
-    fn engines(&self) -> &'static [PcuEngineDescriptor] {
-        super::super::hal::soc::board::pcu_engines()
-    }
-
-    fn lanes(&self, engine: PcuEngineId) -> &'static [PcuLaneDescriptor] {
-        super::super::hal::soc::board::pcu_lanes(engine)
+    fn devices(&self) -> &'static [PcuDeviceDescriptor] {
+        if system_pio().support().engine_count == 0 {
+            &[]
+        } else {
+            &CORTEX_M_PIO_DEVICES
+        }
     }
 }
 
 impl PcuControl for CortexMPcu {
-    fn claim_engine(&self, engine: PcuEngineId) -> Result<PcuEngineClaim, PcuError> {
-        super::super::hal::soc::board::claim_pcu_engine(engine)
+    fn claim_device(&self, device: PcuDeviceId) -> Result<PcuDeviceClaim, PcuError> {
+        if device != CORTEX_M_PIO_DEVICE_ID || system_pio().support().engine_count == 0 {
+            return Err(PcuError::invalid());
+        }
+        CORTEX_M_PIO_DEVICE_CLAIMED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| PcuError::busy())?;
+        Ok(PcuDeviceClaim { device })
     }
 
-    fn release_engine(&self, claim: PcuEngineClaim) -> Result<(), PcuError> {
-        super::super::hal::soc::board::release_pcu_engine(claim)
-    }
-
-    fn claim_lanes(
-        &self,
-        engine: PcuEngineId,
-        lanes: PcuLaneMask,
-    ) -> Result<PcuLaneClaim, PcuError> {
-        super::super::hal::soc::board::claim_pcu_lanes(engine, lanes)
-    }
-
-    fn release_lanes(&self, claim: PcuLaneClaim) -> Result<(), PcuError> {
-        super::super::hal::soc::board::release_pcu_lanes(claim)
-    }
-
-    fn load_program(
-        &self,
-        claim: &PcuEngineClaim,
-        image: &PcuProgramImage<'_>,
-    ) -> Result<PcuProgramLease, PcuError> {
-        super::super::hal::soc::board::load_pcu_program(claim, image)
-    }
-
-    fn unload_program(
-        &self,
-        claim: &PcuEngineClaim,
-        lease: PcuProgramLease,
-    ) -> Result<(), PcuError> {
-        super::super::hal::soc::board::unload_pcu_program(claim, lease)
-    }
-
-    fn start_lanes(&self, claim: &PcuLaneClaim) -> Result<(), PcuError> {
-        super::super::hal::soc::board::start_pcu_lanes(claim)
-    }
-
-    fn stop_lanes(&self, claim: &PcuLaneClaim) -> Result<(), PcuError> {
-        super::super::hal::soc::board::stop_pcu_lanes(claim)
-    }
-
-    fn restart_lanes(&self, claim: &PcuLaneClaim) -> Result<(), PcuError> {
-        super::super::hal::soc::board::restart_pcu_lanes(claim)
-    }
-
-    fn write_tx_fifo(
-        &self,
-        claim: &PcuLaneClaim,
-        lane: PcuLaneId,
-        word: u32,
-    ) -> Result<(), PcuError> {
-        super::super::hal::soc::board::write_pcu_tx_fifo(claim, lane, word)
-    }
-
-    fn read_rx_fifo(&self, claim: &PcuLaneClaim, lane: PcuLaneId) -> Result<u32, PcuError> {
-        super::super::hal::soc::board::read_pcu_rx_fifo(claim, lane)
+    fn release_device(&self, claim: PcuDeviceClaim) -> Result<(), PcuError> {
+        if claim.device() != CORTEX_M_PIO_DEVICE_ID {
+            return Err(PcuError::invalid());
+        }
+        if !CORTEX_M_PIO_DEVICE_CLAIMED.swap(false, Ordering::AcqRel) {
+            return Err(PcuError::state_conflict());
+        }
+        Ok(())
     }
 }

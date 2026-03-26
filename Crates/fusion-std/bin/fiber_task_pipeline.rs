@@ -37,9 +37,10 @@ fn run() -> Result<(), String> {
     let current_dir =
         env::current_dir().map_err(|error| format!("failed to read current directory: {error}"))?;
     let config = PipelineConfig::parse(&current_dir, &manifest_dir, &workspace_root)?;
-    let target_dir = workspace_root.join("target").join("fiber-task-pipeline");
+    let target_dir = pipeline_target_dir(&workspace_root, &config);
     build_target_artifact(&workspace_root, &target_dir, &config)?;
     let artifact = find_target_artifact(&target_dir, &config)?;
+    let auxiliary_artifacts = collect_auxiliary_runtime_artifacts(&target_dir, &config, &artifact)?;
     let roots_path = materialize_roots(&workspace_root, &target_dir, &config, &artifact)?;
     let async_poll_stack_roots_path =
         materialize_async_poll_stack_roots(&target_dir, &config, &artifact)?;
@@ -49,8 +50,52 @@ fn run() -> Result<(), String> {
         &roots_path,
         async_poll_stack_roots_path.as_deref(),
         &artifact,
+        &auxiliary_artifacts,
     )?;
     Ok(())
+}
+
+fn pipeline_target_dir(workspace_root: &Path, config: &PipelineConfig) -> PathBuf {
+    let mut dir = workspace_root
+        .join("target")
+        .join("fiber-task-pipeline")
+        .join(sanitize_path_component(&config.package))
+        .join(match &config.target_artifact {
+            TargetArtifact::Lib => "lib".to_owned(),
+            TargetArtifact::Bin(name) => sanitize_path_component(name),
+        })
+        .join(config.profile.dir_name());
+    if let Some(target) = config.target.as_ref() {
+        dir = dir.join(sanitize_path_component(target));
+    } else {
+        dir = dir.join("host");
+    }
+    if config.no_default_features {
+        dir = dir.join("no-default-features");
+    } else {
+        dir = dir.join("default-features");
+    }
+    if let Some(features) = config.features.as_ref() {
+        dir.join(sanitize_path_component(features))
+    } else {
+        dir.join("default")
+    }
+}
+
+fn sanitize_path_component(raw: &str) -> String {
+    let mut sanitized = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if sanitized.is_empty() {
+        "_".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +468,7 @@ fn build_target_artifact(
     config: &PipelineConfig,
 ) -> Result<(), String> {
     let mut command = cargo_command(&config.toolchain);
+    append_rustflags_env(&mut command, "-Z emit-stack-sizes");
     command
         .current_dir(workspace_root)
         .env("CARGO_INCREMENTAL", "0")
@@ -454,12 +500,18 @@ fn build_target_artifact(
         command.arg("--no-default-features");
     }
 
-    command
-        .arg("--")
-        .arg("-Z")
-        .arg("emit-stack-sizes")
-        .arg("--emit=obj");
+    command.arg("--").arg("--emit=obj");
     run_command(command, "cargo rustc")
+}
+
+fn append_rustflags_env(command: &mut Command, extra_flags: &str) {
+    let existing = env::var("RUSTFLAGS").unwrap_or_default();
+    let combined = if existing.trim().is_empty() {
+        extra_flags.to_owned()
+    } else {
+        format!("{existing} {extra_flags}")
+    };
+    command.env("RUSTFLAGS", combined);
 }
 
 fn materialize_roots(
@@ -571,13 +623,91 @@ fn find_target_artifact(target_dir: &Path, config: &PipelineConfig) -> Result<Pa
     }
 }
 
-fn find_library_object(
+fn collect_auxiliary_runtime_artifacts(
     target_dir: &Path,
-    profile: BuildProfile,
-    target: Option<&str>,
-    crate_name: &str,
-) -> Result<PathBuf, String> {
-    let deps_dir = target.map_or_else(
+    config: &PipelineConfig,
+    primary_artifact: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    if !matches!(config.target_artifact, TargetArtifact::Bin(_)) {
+        return Ok(Vec::new());
+    }
+    let deps_dir = artifact_deps_dir(target_dir, config.profile, config.target.as_deref());
+    let entries = fs::read_dir(&deps_dir)
+        .map_err(|error| format!("failed to read {}: {error}", deps_dir.display()))?;
+    let mut artifacts = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("failed to scan {}: {error}", deps_dir.display()))?;
+        let path = entry.path();
+        let is_runtime_archive = path.extension().is_some_and(|ext| ext == "rlib")
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("libfusion_"));
+        if !is_runtime_archive || path == primary_artifact {
+            continue;
+        }
+        artifacts.push(path);
+    }
+    artifacts.extend(collect_target_sysroot_artifacts(config)?);
+    artifacts.sort();
+    artifacts.dedup();
+    Ok(artifacts)
+}
+
+fn collect_target_sysroot_artifacts(config: &PipelineConfig) -> Result<Vec<PathBuf>, String> {
+    let Some(target) = config.target.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let sysroot = rustc_sysroot(&config.toolchain)?;
+    let target_lib_dir = sysroot.join("lib").join("rustlib").join(target).join("lib");
+    let entries = fs::read_dir(&target_lib_dir)
+        .map_err(|error| format!("failed to read {}: {error}", target_lib_dir.display()))?;
+    let mut artifacts = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("failed to scan {}: {error}", target_lib_dir.display()))?;
+        let path = entry.path();
+        let is_runtime_archive = path.extension().is_some_and(|ext| ext == "rlib")
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("libcore-")
+                        || name.starts_with("liballoc-")
+                        || name.starts_with("libcompiler_builtins-")
+                        || name.starts_with("libpanic_abort-")
+                });
+        if is_runtime_archive {
+            artifacts.push(path);
+        }
+    }
+    Ok(artifacts)
+}
+
+fn rustc_sysroot(toolchain: &str) -> Result<PathBuf, String> {
+    let output = Command::new("rustup")
+        .arg("run")
+        .arg(toolchain)
+        .arg("rustc")
+        .arg("--print")
+        .arg("sysroot")
+        .output()
+        .map_err(|error| format!("failed to run rustc --print sysroot: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "rustc --print sysroot exited with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let sysroot = String::from_utf8(output.stdout)
+        .map_err(|error| format!("rustc --print sysroot produced non-utf8 output: {error}"))?;
+    Ok(PathBuf::from(sysroot.trim()))
+}
+
+fn artifact_deps_dir(target_dir: &Path, profile: BuildProfile, target: Option<&str>) -> PathBuf {
+    target.map_or_else(
         || target_dir.join(profile.dir_name()).join("deps"),
         |triple| {
             target_dir
@@ -585,7 +715,16 @@ fn find_library_object(
                 .join(profile.dir_name())
                 .join("deps")
         },
-    );
+    )
+}
+
+fn find_library_object(
+    target_dir: &Path,
+    profile: BuildProfile,
+    target: Option<&str>,
+    crate_name: &str,
+) -> Result<PathBuf, String> {
+    let deps_dir = artifact_deps_dir(target_dir, profile, target);
     let entries = fs::read_dir(&deps_dir)
         .map_err(|error| format!("failed to read {}: {error}", deps_dir.display()))?;
     let mut newest = None::<(SystemTime, PathBuf)>;
@@ -633,8 +772,13 @@ fn collect_generated_closure_roots(artifact: &Path, crate_name: &str) -> Result<
             .contains(GENERATED_CLOSURE_ROOT_SYMBOL_PREFIX)
     }) {
         let Some(callees) = call_graph.get(&caller.raw) else {
+            roots.push((
+                synthetic_generated_closure_root_type_name(crate_name, &caller.raw),
+                caller.raw.clone(),
+            ));
             continue;
         };
+        let mut discovered = false;
         for callee in callees {
             let Some(metadata) = symbol_index.metadata_for_raw(callee) else {
                 continue;
@@ -646,6 +790,13 @@ fn collect_generated_closure_roots(artifact: &Path, crate_name: &str) -> Result<
                 continue;
             }
             roots.push((metadata.normalized_demangled.clone(), metadata.raw.clone()));
+            discovered = true;
+        }
+        if !discovered {
+            roots.push((
+                synthetic_generated_closure_root_type_name(crate_name, &caller.raw),
+                caller.raw.clone(),
+            ));
         }
     }
     roots.sort();
@@ -659,6 +810,17 @@ fn collect_generated_closure_roots(artifact: &Path, crate_name: &str) -> Result<
         rendered.push('\n');
     }
     Ok(rendered)
+}
+
+fn synthetic_generated_closure_root_type_name(crate_name: &str, raw_symbol: &str) -> String {
+    let suffix = raw_symbol
+        .rsplit_once("::h")
+        .map(|(_, hash)| hash)
+        .or_else(|| raw_symbol.rsplit_once("17h").map(|(_, hash)| hash))
+        .map(|hash| hash.trim_end_matches('E'))
+        .filter(|hash| !hash.is_empty())
+        .unwrap_or("unknown");
+    format!("{crate_name}::__generated_closure_root__{suffix}::{{{{closure}}}}")
 }
 
 fn collect_generated_async_poll_stack_roots(artifact: &Path) -> Result<String, String> {
@@ -953,6 +1115,7 @@ fn run_analyzer(
     roots_path: &Path,
     async_poll_stack_roots_path: Option<&Path>,
     artifact: &Path,
+    auxiliary_artifacts: &[PathBuf],
 ) -> Result<(), String> {
     let mut command = cargo_command(&config.toolchain);
     command
@@ -974,6 +1137,9 @@ fn run_analyzer(
         .arg(&config.red_inline_rust_path)
         .arg("--crate-name")
         .arg(&config.crate_name);
+    for path in auxiliary_artifacts {
+        command.arg("--aux-artifact").arg(path);
+    }
     if let Some(contracts_path) = config.contracts_path.as_ref() {
         command.arg("--contracts").arg(contracts_path);
     }
