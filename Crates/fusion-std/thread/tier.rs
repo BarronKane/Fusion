@@ -3,7 +3,8 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::sync::{Mutex as SyncMutex, SyncError};
-use fusion_pal::hal::{HardwareTopologyQuery as _, system_hardware};
+use fusion_pal::contract::hal::HardwareTopologyQuery as _;
+use fusion_pal::sys::cpu::system_cpu;
 use fusion_sys::fiber::FiberError;
 use fusion_sys::thread::ThreadGuarantee;
 use fusion_sys::vector::{
@@ -291,7 +292,7 @@ impl TieredGreenPool {
     #[must_use]
     pub fn support() -> CarrierTierSupport {
         let thread = ThreadPool::support();
-        let summary = system_hardware().topology_summary().ok();
+        let summary = system_cpu().topology_summary().ok();
         let asymmetric_core_classes = summary
             .and_then(|summary| summary.core_class_count)
             .is_some_and(|count| count > 1);
@@ -525,7 +526,7 @@ impl TieredGreenPool {
     /// # Errors
     ///
     /// Returns any honest lower-tier spawn failure.
-    #[cfg(not(feature = "critical-safe-generated-contracts"))]
+    #[cfg(not(feature = "critical-safe"))]
     pub fn spawn_generated<T>(
         &self,
         task: T,
@@ -739,7 +740,7 @@ impl TieredGreenPool {
     /// # Errors
     ///
     /// Returns any honest lower-tier spawn failure.
-    #[cfg(feature = "critical-safe-generated-contracts")]
+    #[cfg(feature = "critical-safe")]
     pub fn spawn_generated<T>(
         &self,
         task: T,
@@ -861,7 +862,7 @@ fn tiered_vector_dispatch_callback(cookie: VectorDispatchCookie) {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     extern crate std;
 

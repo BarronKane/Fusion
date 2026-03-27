@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use fusion_pal::pal::thread::ThreadCoreId;
+use fusion_pal::sys::thread::ThreadCoreId;
 pub use fusion_pal::sys::vector::{
     IrqSlot,
     SlotState,

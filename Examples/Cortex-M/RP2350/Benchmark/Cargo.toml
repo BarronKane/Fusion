@@ -15,14 +15,14 @@ default = []
 sizing-global-nearest-round-up = []
 
 [dependencies]
-fusion-pal = { workspace = true }
-fusion-std = { path = "../../../../Crates/fusion-std", default-features = false, features = ["sys-cortex-m", "soc-rp2350"] }
-fusion-sys = { path = "../../../../Crates/fusion-sys", default-features = false, features = ["sys-cortex-m", "soc-rp2350"] }
-cortex-m = { version = "0.7.7", default-features = false }
-cortex-m-rt = { version = "0.7.5", default-features = false }
+fusion-pal = { workspace = true, features = ["soc-rp2350"] }
+fusion-std = { workspace = true, features = ["soc-rp2350"] }
+fusion-sys = { workspace = true, features = ["soc-rp2350"] }
+cortex-m = { workspace = true }
+cortex-m-rt = { workspace = true }
 
 [build-dependencies]
-fusion-std = { path = "../../../../Crates/fusion-std" }
+fusion-std = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true

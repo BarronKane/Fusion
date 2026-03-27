@@ -77,7 +77,7 @@ impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     use super::*;
     extern crate std;

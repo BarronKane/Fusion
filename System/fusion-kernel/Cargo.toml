@@ -1,0 +1,16 @@
+[package]
+name = "fusion-kernel"
+version = "0.1.0"
+edition = "2024"
+authors = ["Lance Wallis <walance@pvas.me>"]
+license = ""
+repository = ""
+
+[workspace]
+
+[[bin]]
+name = "fusion-kernel"
+path = "fusion-kernel.rs"
+
+[features]
+default = []

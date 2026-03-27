@@ -3,7 +3,7 @@
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
 /// Cortex-M DMA helpers over the selected board descriptor tables.
 pub mod cortex_m {
-    pub use fusion_pal::sys::cortex_m::hal::soc::board::{
+    pub use fusion_pal::sys::soc::cortex_m::hal::soc::board::{
         CortexMDmaControllerDescriptor,
         CortexMDmaRequestClass,
         CortexMDmaRequestDescriptor,

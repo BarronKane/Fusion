@@ -4,7 +4,7 @@
 //! resource-oriented contracts that higher layers can compose without guessing about the
 //! operating system.
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 /// Target platform discriminator re-exported from `fusion-pal`.
 pub use fusion_pal::{Platform, TARGET_PLATFORM};

@@ -1,0 +1,9 @@
+pub mod caps;
+#[path = "firmware/firmware.rs"]
+pub mod firmware;
+#[path = "hal/hal.rs"]
+pub mod hal;
+#[path = "hardware/hardware.rs"]
+pub mod hardware;
+#[path = "runtime/runtime.rs"]
+pub mod runtime;

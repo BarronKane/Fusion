@@ -169,7 +169,7 @@ impl Default for EventSystem {
 pub mod cortex_m {
     use super::{EventInterest, EventRegistration, EventRegistrationMode, EventSourceHandle};
     #[cfg(feature = "soc-rp2350")]
-    use fusion_pal::sys::cortex_m::hal::soc::board::{
+    use fusion_pal::sys::soc::cortex_m::hal::soc::board::{
         CortexMDmaRequestClass,
         CortexMDmaRequestDescriptor,
         CortexMDmaTransferCaps,
@@ -182,7 +182,7 @@ pub mod cortex_m {
         spi_irq_summary as rp2350_spi_irq_summary,
     };
     #[cfg(feature = "soc-rp2350")]
-    pub use fusion_pal::sys::cortex_m::hal::soc::board::{
+    pub use fusion_pal::sys::soc::cortex_m::hal::soc::board::{
         Rp2350GpioIrqSummary,
         Rp2350PioIrqSummary,
         Rp2350SpiIrqSummary,
@@ -670,9 +670,9 @@ pub mod cortex_m {
 
     #[cfg(feature = "soc-rp2350")]
     const fn map_rp2350_hardware_error(
-        error: fusion_pal::sys::hal::HardwareError,
+        error: fusion_pal::contract::hal::HardwareError,
     ) -> super::EventError {
-        use fusion_pal::sys::hal::HardwareErrorKind;
+        use fusion_pal::contract::hal::HardwareErrorKind;
 
         match error.kind() {
             HardwareErrorKind::Unsupported => super::EventError::unsupported(),

@@ -1,3 +1,5 @@
+#![cfg(all(feature = "std", not(target_os = "none")))]
+
 use fusion_std::sync::Mutex;
 use std::sync::OnceLock as StdOnceLock;
 

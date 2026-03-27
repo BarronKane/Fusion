@@ -19,7 +19,7 @@ use super::{
     ThreadPoolConfig,
 };
 use core::num::NonZeroUsize;
-use fusion_pal::pal::mem::MemBase;
+use fusion_pal::sys::mem::MemBase;
 pub use fusion_sys::mem::resource::AllocatorLayoutPolicy;
 use fusion_sys::mem::resource::{
     BoundMemoryResource,

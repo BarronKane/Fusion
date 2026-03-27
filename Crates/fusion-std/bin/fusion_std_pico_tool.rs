@@ -754,6 +754,8 @@ fn build_example_elf_impl(options: &CommandOptions, preserve_symbols: bool) -> R
 fn generate_runtime_metadata(options: &CommandOptions) -> Result<GeneratedRuntimeMetadata, String> {
     let manifest_path = options.manifest_path()?;
     let workspace_root = options.workspace_root()?;
+    let workspace_manifest_path = workspace_root.join("Cargo.toml");
+    let tool_workspace_root = fusion_workspace_root()?;
     let package = parse_manifest_package_name(&manifest_path)?;
     let output_dir = generated_runtime_metadata_dir(&workspace_root, options, &package);
     fs::create_dir_all(&output_dir)
@@ -769,11 +771,12 @@ fn generate_runtime_metadata(options: &CommandOptions) -> Result<GeneratedRuntim
     };
 
     let mut command = Command::new("cargo");
-    command.current_dir(&workspace_root);
+    command.current_dir(&tool_workspace_root);
     command.arg("run");
     command.arg("-p").arg("fusion-std");
     command.arg("--bin").arg("fusion_std_fiber_task_pipeline");
     command.arg("--");
+    command.arg("--manifest-path").arg(workspace_manifest_path);
     command.arg("--package").arg(package);
     command.arg("--bin").arg(&options.bin_name);
     command.arg("--target").arg(&options.target);
@@ -824,6 +827,20 @@ fn generate_runtime_metadata(options: &CommandOptions) -> Result<GeneratedRuntim
         async_poll_stack_metadata,
         ..metadata
     })
+}
+
+fn fusion_workspace_root() -> Result<PathBuf, String> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            format!(
+                "failed to locate fusion workspace root above {}",
+                manifest_dir.display()
+            )
+        })
 }
 
 fn generated_runtime_metadata_dir(

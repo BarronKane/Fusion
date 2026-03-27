@@ -7,7 +7,7 @@
 #![cfg_attr(feature = "std", feature(thread_local))]
 #![no_std]
 
-#[cfg(any(test, feature = "std"))]
+#[cfg(feature = "std")]
 extern crate std;
 
 #[cfg(all(not(feature = "std"), panic = "unwind"))]

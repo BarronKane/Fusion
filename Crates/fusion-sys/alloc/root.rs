@@ -1,7 +1,7 @@
 use core::array;
 use core::fmt;
 
-use fusion_pal::pal::mem::MemBase;
+use fusion_pal::sys::mem::MemBase;
 use fusion_pal::sys::mem::system_mem;
 
 use crate::mem::resource::{

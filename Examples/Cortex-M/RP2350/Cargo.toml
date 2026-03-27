@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "OnDevice",
+    "MinimalLed",
+    "Benchmark",
+    "Display",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Lance Wallis <walance@pvas.me>"]
+license = ""
+repository = ""
+
+[workspace.dependencies]
+fusion-example-rp2350-on-device = { path = "OnDevice" }
+fusion-pal = { path = "../../../Crates/fusion-pal", default-features = false }
+fusion-std = { path = "../../../Crates/fusion-std", default-features = false }
+fusion-sys = { path = "../../../Crates/fusion-sys", default-features = false }
+cortex-m = { version = "0.7.7", default-features = false }
+cortex-m-rt = { version = "0.7.5", default-features = false }
+
+[workspace.lints.clippy]
+pedantic = "warn"
+nursery = "warn"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "z"
+panic = "abort"
+strip = "symbols"

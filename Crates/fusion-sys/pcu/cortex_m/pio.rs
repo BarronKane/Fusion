@@ -5,9 +5,9 @@ mod plan_impl;
 #[path = "pio/system.rs"]
 mod system_impl;
 
-pub use fusion_pal::sys::cortex_m::hal::soc::pio::*;
+pub use fusion_pal::sys::soc::cortex_m::hal::soc::pio::*;
 #[doc(hidden)]
-pub use fusion_pal::sys::cortex_m::hal::soc::pio::{
+pub use fusion_pal::sys::soc::cortex_m::hal::soc::pio::{
     PioError as PcuError,
     PioErrorKind as PcuErrorKind,
 };

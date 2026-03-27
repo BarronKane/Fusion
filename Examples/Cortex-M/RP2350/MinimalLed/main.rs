@@ -132,7 +132,7 @@ fn main() -> ! {
 #[exception]
 unsafe fn DefaultHandler(irqn: i16) {
     if irqn == 3 {
-        fusion_pal::sys::cortex_m::hal::soc::board::service_event_timeout_irq()
+        fusion_pal::sys::soc::cortex_m::rp2350::service_event_timeout_irq()
             .expect("event-timeout irq should service");
         return;
     }

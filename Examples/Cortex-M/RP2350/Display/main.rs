@@ -3,7 +3,9 @@
 
 use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::pin::pin;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use core::time::Duration;
 
 use cortex_m_rt::{ExceptionFrame, entry, exception};
@@ -20,22 +22,24 @@ use fusion_std::component::{
 };
 use fusion_std::gpio::{Gpio, GpioDriveStrength, GpioPin};
 use fusion_std::pcu::PCU;
-use fusion_std::thread::async_sleep_for;
+use fusion_std::thread::yield_now;
 use fusion_sys::thread::system_monotonic_time;
 
 mod support;
-use support::main_runtime;
+use support::main_fibers;
 
 const DISPLAY_DATA_PIN: u8 = 12;
 const DISPLAY_ENABLE_PIN: u8 = 13;
 const DISPLAY_LATCH_PIN: u8 = 14;
 const DISPLAY_SHIFT_CLOCK_PIN: u8 = 15;
 
-const FIZZBUZZ_PERIOD: Duration = Duration::from_millis(300);
+const LEFT_FIZZBUZZ_PERIOD: Duration = Duration::from_millis(200);
+const RIGHT_FIZZBUZZ_PERIOD: Duration = Duration::from_millis(300);
 const STARTUP_PHASE_PERIOD: Duration = Duration::from_millis(500);
 const TEST_PHASE_PERIOD: Duration = Duration::from_millis(250);
 const PANIC_PHASE_PERIOD: Duration = Duration::from_millis(500);
 const DISPLAY_REFRESH_PERIOD: Duration = Duration::from_millis(2);
+const QUIESCE_IRQS: &[u16] = &[10, 11, 12, 13, 15, 16, 17, 18, 19, 20];
 
 // Flip this if your module turns out to be the opposite electrical contract. The pinout is the
 // same on both variants because apparently the universe enjoys cheap practical jokes.
@@ -45,6 +49,8 @@ type PicoDisplay = ShiftedFourDigitSevenSegmentDisplay<GpioPin, GpioPin, GpioPin
 
 static mut DISPLAY_STORAGE: MaybeUninit<PicoDisplay> = MaybeUninit::uninit();
 static DISPLAY_READY: AtomicBool = AtomicBool::new(false);
+static DISPLAY_GLYPHS: [AtomicU8; 4] = [const { AtomicU8::new(0) }; 4];
+static PANIC_DISPLAY_CODE: AtomicU16 = AtomicU16::new(0xDEAD);
 
 fn configure_output_pin(pin: u8) -> GpioPin {
     let mut gpio = Gpio::take(pin).expect("gpio pin should be claimable");
@@ -151,6 +157,16 @@ fn startup_pcu_self_test(display: &mut PicoDisplay) {
     display_code(display, suite_pass_display_code(), STARTUP_PHASE_PERIOD);
 }
 
+fn quiesce_nonessential_irqs() {
+    for &irqn in QUIESCE_IRQS {
+        let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_disable(irqn);
+        let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_clear_pending(irqn);
+        if fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge_supported(irqn) {
+            let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge(irqn);
+        }
+    }
+}
+
 fn display_exception_loop(code: u16) -> ! {
     loop {
         if let Some(display) = panic_display() {
@@ -164,6 +180,34 @@ fn display_exception_loop(code: u16) -> ! {
     }
 }
 
+fn repeated_nibble_code(nibble: u8) -> u16 {
+    let digit = u16::from(nibble & 0x0f);
+    digit | (digit << 4) | (digit << 8) | (digit << 12)
+}
+
+fn display_irq_exception_loop(irqn: u16) -> ! {
+    let high = ((irqn >> 4) & 0x0f) as u8;
+    let low = (irqn & 0x0f) as u8;
+    loop {
+        if let Some(display) = panic_display() {
+            display.set_hex(0xDDDD);
+            panic_display_pause(display, PANIC_PHASE_PERIOD);
+            display.set_hex(repeated_nibble_code(high));
+            panic_display_pause(display, PANIC_PHASE_PERIOD);
+            display.set_hex(repeated_nibble_code(low));
+            panic_display_pause(display, PANIC_PHASE_PERIOD);
+            display.clear();
+            panic_display_pause(display, PANIC_PHASE_PERIOD);
+            continue;
+        }
+        cortex_m::asm::wfi();
+    }
+}
+
+fn set_panic_display_code(code: u16) {
+    PANIC_DISPLAY_CODE.store(code, Ordering::Release);
+}
+
 fn panic_glyphs() -> [SevenSegmentGlyph; 4] {
     [
         SevenSegmentGlyph::from_hex(0xD).expect("D"),
@@ -173,42 +217,134 @@ fn panic_glyphs() -> [SevenSegmentGlyph; 4] {
     ]
 }
 
-fn step_glyphs(step: u32) -> [SevenSegmentGlyph; 4] {
+fn half_step_glyphs(step: u8) -> [SevenSegmentGlyph; 2] {
     let mut glyphs = [
-        SevenSegmentGlyph::from_hex(((step >> 12) & 0x0f) as u8).expect("hex nibble"),
-        SevenSegmentGlyph::from_hex(((step >> 8) & 0x0f) as u8).expect("hex nibble"),
-        SevenSegmentGlyph::from_hex(((step >> 4) & 0x0f) as u8).expect("hex nibble"),
-        SevenSegmentGlyph::from_hex((step & 0x0f) as u8).expect("hex nibble"),
+        SevenSegmentGlyph::from_hex((step >> 4) & 0x0f).expect("upper nibble should be valid"),
+        SevenSegmentGlyph::from_hex(step & 0x0f).expect("lower nibble should be valid"),
     ];
     if step.is_multiple_of(3) {
         glyphs[0] = glyphs[0].with_decimal_point(true);
     }
     if step.is_multiple_of(5) {
-        glyphs[3] = glyphs[3].with_decimal_point(true);
+        glyphs[1] = glyphs[1].with_decimal_point(true);
     }
     glyphs
 }
 
-async fn display_async_pause(display: &mut PicoDisplay, duration: Duration) {
-    for _ in 0..refresh_cycles(duration) {
-        display.refresh_next().expect("display scan should refresh");
-        async_sleep_for(DISPLAY_REFRESH_PERIOD)
-            .await
-            .expect("async display pause should complete");
-    }
+fn store_half_glyphs(offset: usize, glyphs: [SevenSegmentGlyph; 2]) {
+    DISPLAY_GLYPHS[offset].store(glyphs[0].raw(), Ordering::Relaxed);
+    DISPLAY_GLYPHS[offset + 1].store(glyphs[1].raw(), Ordering::Relaxed);
+}
+
+fn load_framebuffer_glyphs() -> [SevenSegmentGlyph; 4] {
+    [
+        SevenSegmentGlyph::from_raw(DISPLAY_GLYPHS[0].load(Ordering::Relaxed)),
+        SevenSegmentGlyph::from_raw(DISPLAY_GLYPHS[1].load(Ordering::Relaxed)),
+        SevenSegmentGlyph::from_raw(DISPLAY_GLYPHS[2].load(Ordering::Relaxed)),
+        SevenSegmentGlyph::from_raw(DISPLAY_GLYPHS[3].load(Ordering::Relaxed)),
+    ]
+}
+
+fn publish_counter_display(offset: usize, step: u8) {
+    store_half_glyphs(offset, half_step_glyphs(step));
 }
 
 #[PCU]
-fn pcu_increment_word(value: u32) -> u32 {
+fn pcu_increment_counter(value: u8) -> u8 {
     value.wrapping_add(1)
 }
 
-async fn run_fizzbuzz(display: &mut PicoDisplay) -> ! {
-    let mut step = 3_u32;
+async fn run_half_fizzbuzz(slot: usize, offset: usize, period: Duration) -> ! {
+    let mut step = 0_u8;
     loop {
-        display.set_glyphs(step_glyphs(step));
-        display_async_pause(display, FIZZBUZZ_PERIOD).await;
-        step = pcu_increment_word(step);
+        set_panic_display_code(0x2100 | slot as u16);
+        publish_counter_display(offset, step);
+        set_panic_display_code(0x2200 | slot as u16);
+        MonotonicDelay::new(period).await;
+        set_panic_display_code(0x2300 | slot as u16);
+        step = pcu_increment_counter(step);
+        set_panic_display_code(0x2400 | slot as u16);
+    }
+}
+
+struct MonotonicDelay {
+    period: Duration,
+    deadline: Option<Duration>,
+}
+
+impl MonotonicDelay {
+    const fn new(period: Duration) -> Self {
+        Self {
+            period,
+            deadline: None,
+        }
+    }
+}
+
+impl core::future::Future for MonotonicDelay {
+    type Output = ();
+
+    fn poll(mut self: core::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let monotonic = system_monotonic_time();
+        let now = monotonic
+            .now()
+            .expect("counter delay should observe monotonic time");
+        let deadline = match self.deadline {
+            Some(deadline) => deadline,
+            None => {
+                let deadline = now
+                    .checked_add(self.period)
+                    .expect("counter delay deadline should remain representable");
+                self.deadline = Some(deadline);
+                deadline
+            }
+        };
+
+        if now >= deadline {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+const NOOP_RAW_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    noop_raw_waker_clone,
+    noop_raw_waker_wake,
+    noop_raw_waker_wake,
+    noop_raw_waker_drop,
+);
+
+const fn noop_raw_waker() -> RawWaker {
+    RawWaker::new(core::ptr::null(), &NOOP_RAW_WAKER_VTABLE)
+}
+
+unsafe fn noop_raw_waker_clone(_data: *const ()) -> RawWaker {
+    noop_raw_waker()
+}
+
+unsafe fn noop_raw_waker_wake(_data: *const ()) {}
+
+unsafe fn noop_raw_waker_drop(_data: *const ()) {}
+
+fn noop_waker() -> Waker {
+    unsafe { Waker::from_raw(noop_raw_waker()) }
+}
+
+fn run_counter_fiber(slot: usize, offset: usize, period: Duration) -> ! {
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut future = pin!(run_half_fizzbuzz(slot, offset, period));
+
+    loop {
+        set_panic_display_code(0x1100 | slot as u16);
+        if matches!(future.as_mut().poll(&mut context), Poll::Ready(_)) {
+            display_exception_loop(0xE100 | slot as u16);
+        }
+        set_panic_display_code(0x1200 | slot as u16);
+        if yield_now().is_err() {
+            display_exception_loop(0xE101 | slot as u16);
+        }
     }
 }
 
@@ -221,38 +357,57 @@ fn main() -> ! {
         .expect("display should accept initial blanking");
     startup_sequence(display);
     startup_pcu_self_test(display);
+    quiesce_nonessential_irqs();
+    publish_counter_display(0, 0);
+    publish_counter_display(2, 0);
 
-    let runtime = main_runtime();
-    let (fibers, runtime) = runtime.into_parts();
+    let fibers = main_fibers();
 
-    let runner = fibers
-        .spawn(move || {
-            let runtime = runtime
-                .build_explicit()
-                .expect("fiber-owned async runtime should build");
-            runtime
-                .block_on(run_fizzbuzz(display))
-                .expect("fiber-owned async runtime should drive fizzbuzz loop");
-        })
-        .expect("fiber-owned async loop should spawn");
-
-    let _: () = runner
-        .join()
-        .expect("current-thread fiber join should drive the async loop");
+    let _left = fibers
+        .spawn(move || run_counter_fiber(0, 0, LEFT_FIZZBUZZ_PERIOD))
+        .expect("left counter fiber should spawn");
+    let _right = fibers
+        .spawn(move || run_counter_fiber(1, 2, RIGHT_FIZZBUZZ_PERIOD))
+        .expect("right counter fiber should spawn");
 
     loop {
-        cortex_m::asm::wfi();
+        set_panic_display_code(0x3100);
+        display.set_glyphs(load_framebuffer_glyphs());
+        if display.refresh_next().is_err() {
+            display_exception_loop(0xE400);
+        }
+        set_panic_display_code(0x3200);
+        if fibers.drive_once().is_err() {
+            display_exception_loop(0xE401);
+        }
+        set_panic_display_code(0x3300);
+        if system_monotonic_time()
+            .sleep_for(DISPLAY_REFRESH_PERIOD)
+            .is_err()
+        {
+            display_exception_loop(0xE402);
+        }
     }
 }
 
 #[exception]
 unsafe fn DefaultHandler(irqn: i16) {
     if irqn == 3 {
-        fusion_pal::sys::cortex_m::hal::soc::board::service_event_timeout_irq()
+        fusion_pal::sys::soc::cortex_m::rp2350::service_event_timeout_irq()
             .expect("event-timeout irq should service");
         return;
     }
-    display_exception_loop(0xD000 | (irqn as u16 & 0x0fff));
+    let irqn = irqn as u16;
+    if fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge_supported(irqn)
+        && fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge(irqn).is_ok()
+    {
+        if QUIESCE_IRQS.contains(&irqn) {
+            let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_disable(irqn);
+            let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_clear_pending(irqn);
+        }
+        return;
+    }
+    display_irq_exception_loop(irqn);
 }
 
 #[exception]
@@ -264,7 +419,12 @@ unsafe fn HardFault(_frame: &ExceptionFrame) -> ! {
 fn panic(_info: &PanicInfo) -> ! {
     loop {
         if let Some(display) = panic_display() {
-            display.set_glyphs(panic_glyphs());
+            let code = PANIC_DISPLAY_CODE.load(Ordering::Acquire);
+            if code == 0xDEAD {
+                display.set_glyphs(panic_glyphs());
+            } else {
+                display.set_hex(code);
+            }
             panic_display_pause(display, PANIC_PHASE_PERIOD);
             display.clear();
             panic_display_pause(display, PANIC_PHASE_PERIOD);

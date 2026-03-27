@@ -11,11 +11,12 @@ name = "template"
 path = "main.rs"
 
 [features]
-default = ["std"]
+default = ["std", "hosted"]
+hosted = ["fusion-std/hosted"]
 std = ["fusion-std/std"]
 
 [dependencies]
-fusion-std = { path = "../../../Crates/fusion-std" }
+fusion-std.workspace = true
 
 [lints]
 workspace = true

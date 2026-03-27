@@ -43,6 +43,7 @@ use core::time::Duration;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use crate::sync::{Mutex as SyncMutex, Semaphore, SyncError, SyncErrorKind};
+use fusion_pal::sys::mem::MemBase;
 use fusion_sys::alloc::{
     AllocError,
     AllocErrorKind,
@@ -113,7 +114,6 @@ use super::{
     default_runtime_sizing_strategy,
     yield_now as green_yield_now,
 };
-use fusion_pal::pal::mem::MemBase;
 #[cfg(feature = "std")]
 use fusion_pal::sys::fiber::{PlatformFiberWakeSignal, system_fiber_host};
 #[cfg(feature = "std")]

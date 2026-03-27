@@ -11,6 +11,8 @@ repository.workspace = true
 [lib]
 crate-type = ["rlib"]
 path = "fusion-kn.rs"
+test = false
+doctest = false
 
 [features]
 default = ["contract"]

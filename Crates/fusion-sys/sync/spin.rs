@@ -3,7 +3,7 @@
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use fusion_pal::pal::sync::{
+use fusion_pal::sys::sync::{
     MutexCaps,
     MutexSupport,
     PriorityInheritanceSupport,
@@ -91,7 +91,7 @@ unsafe impl RawMutex for SpinMutex {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     use super::*;
     use core::sync::atomic::{AtomicU32, Ordering};

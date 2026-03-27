@@ -107,7 +107,9 @@ use super::{RuntimeSizingStrategy, default_runtime_sizing_strategy};
 #[cfg(feature = "std")]
 use core::sync::atomic::AtomicU64;
 #[cfg(feature = "std")]
-use fusion_pal::hal::{HardwareTopologyQuery as _, system_hardware};
+use fusion_pal::contract::hal::{HardwareTopologyQuery as _, HardwareTopologySummary};
+#[cfg(feature = "std")]
+use fusion_pal::sys::cpu::system_cpu;
 
 const INLINE_GREEN_JOB_BYTES: usize = 256;
 const INLINE_GREEN_RESULT_BYTES: usize = 256;
@@ -1782,7 +1784,7 @@ impl<'a> FiberPoolConfig<'a> {
     ///
     /// Returns an error when generated metadata is missing or invalid for the task, or when the
     /// resulting stack class is not provisioned by this configuration.
-    #[cfg(not(feature = "critical-safe-generated-contracts"))]
+    #[cfg(not(feature = "critical-safe"))]
     pub fn validate_generated_task<T: GeneratedExplicitFiberTask>(&self) -> Result<(), FiberError> {
         self.validate_task_attributes(T::task_attributes()?)
     }
@@ -1811,7 +1813,7 @@ impl<'a> FiberPoolConfig<'a> {
     /// # Errors
     ///
     /// Returns an error when the generated contract is not provisioned by this configuration.
-    #[cfg(feature = "critical-safe-generated-contracts")]
+    #[cfg(feature = "critical-safe")]
     pub const fn validate_generated_task<T>(&self) -> Result<(), FiberError>
     where
         T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
@@ -8497,7 +8499,7 @@ impl CurrentFiberPool {
     /// # Errors
     ///
     /// Returns an error when generated metadata is missing or the resolved class is unsupported.
-    #[cfg(not(feature = "critical-safe-generated-contracts"))]
+    #[cfg(not(feature = "critical-safe"))]
     pub fn validate_generated_task<T: GeneratedExplicitFiberTask>(&self) -> Result<(), FiberError> {
         self.validate_task_attributes(T::task_attributes()?)
     }
@@ -8523,7 +8525,7 @@ impl CurrentFiberPool {
     /// # Errors
     ///
     /// Returns an error when the generated contract is not provisioned by the current pool.
-    #[cfg(feature = "critical-safe-generated-contracts")]
+    #[cfg(feature = "critical-safe")]
     pub fn validate_generated_task<T>(&self) -> Result<(), FiberError>
     where
         T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
@@ -8610,7 +8612,7 @@ impl CurrentFiberPool {
     /// # Errors
     ///
     /// Returns an error when generated metadata is missing or the task cannot be admitted.
-    #[cfg(not(feature = "critical-safe-generated-contracts"))]
+    #[cfg(not(feature = "critical-safe"))]
     pub fn spawn_generated<T>(&self, task: T) -> Result<CurrentFiberHandle<T::Output>, FiberError>
     where
         T: GeneratedExplicitFiberTask,
@@ -8625,7 +8627,7 @@ impl CurrentFiberPool {
     /// # Errors
     ///
     /// Returns an error when the generated contract is not provisioned by the current pool.
-    #[cfg(feature = "critical-safe-generated-contracts")]
+    #[cfg(feature = "critical-safe")]
     pub fn spawn_generated<T>(&self, task: T) -> Result<CurrentFiberHandle<T::Output>, FiberError>
     where
         T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
@@ -8998,7 +9000,7 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
     /// Returns one honest runtime error when the platform cannot truthfully report the visible
     /// logical CPU count.
     pub fn visible_logical_cpus() -> Result<Self, FiberError> {
-        let summary = system_hardware()
+        let summary = system_cpu()
             .topology_summary()
             .map_err(|_| FiberError::unsupported())?;
         let carrier_count = hosted_carrier_count_from_summary(
@@ -9026,7 +9028,7 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
     /// Returns one honest runtime error when the platform cannot truthfully report the visible
     /// core count.
     pub fn visible_cores() -> Result<Self, FiberError> {
-        let summary = system_hardware()
+        let summary = system_cpu()
             .topology_summary()
             .map_err(|_| FiberError::unsupported())?;
         let carrier_count =
@@ -9051,7 +9053,7 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
     /// Returns one honest runtime error when the platform cannot truthfully report the visible
     /// package count.
     pub fn visible_packages() -> Result<Self, FiberError> {
-        let summary = system_hardware()
+        let summary = system_cpu()
             .topology_summary()
             .map_err(|_| FiberError::unsupported())?;
         let carrier_count =
@@ -9129,7 +9131,7 @@ fn resolve_hosted_direct_placement(
         }
         PoolPlacement::PerCore => {
             let mut resolved = [ZERO_LOGICAL_CPU; 32];
-            let summary = system_hardware()
+            let summary = system_cpu()
                 .write_logical_cpus(&mut resolved[..runtime.carrier_count])
                 .map_err(|_| FiberError::unsupported())?;
             if summary.total < runtime.carrier_count {
@@ -9636,7 +9638,7 @@ impl GreenPool {
     ///
     /// Returns an error when generated metadata is missing or invalid for the task, or when the
     /// resulting stack class is not provisioned by the current pool.
-    #[cfg(not(feature = "critical-safe-generated-contracts"))]
+    #[cfg(not(feature = "critical-safe"))]
     pub fn validate_generated_task<T: GeneratedExplicitFiberTask>(&self) -> Result<(), FiberError> {
         self.validate_task_attributes(T::task_attributes()?)
     }
@@ -9668,7 +9670,7 @@ impl GreenPool {
     /// # Errors
     ///
     /// Returns an error when the generated contract is not provisioned by the current pool.
-    #[cfg(feature = "critical-safe-generated-contracts")]
+    #[cfg(feature = "critical-safe")]
     pub fn validate_generated_task<T>(&self) -> Result<(), FiberError>
     where
         T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
@@ -9747,7 +9749,7 @@ impl GreenPool {
     ///
     /// Returns an error when generated metadata is missing or invalid for the task type, or when
     /// ordinary green-task admission fails.
-    #[cfg(not(feature = "critical-safe-generated-contracts"))]
+    #[cfg(not(feature = "critical-safe"))]
     pub fn spawn_generated<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
     where
         T: GeneratedExplicitFiberTask,
@@ -9766,7 +9768,7 @@ impl GreenPool {
     ///
     /// Returns an error when the generated contract is not provisioned by the current pool, or
     /// when ordinary green-task admission fails.
-    #[cfg(feature = "critical-safe-generated-contracts")]
+    #[cfg(feature = "critical-safe")]
     pub fn spawn_generated<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
     where
         T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
@@ -9918,7 +9920,7 @@ fn distribute_hosted_class_configs(
 
 #[cfg(feature = "std")]
 fn hal_visible_carrier_count() -> Option<usize> {
-    system_hardware()
+    system_cpu()
         .topology_summary()
         .ok()
         .and_then(select_automatic_carrier_count)
@@ -9926,15 +9928,13 @@ fn hal_visible_carrier_count() -> Option<usize> {
 }
 
 #[cfg(feature = "std")]
-const fn select_automatic_carrier_count(
-    summary: fusion_pal::hal::HardwareTopologySummary,
-) -> Option<usize> {
+const fn select_automatic_carrier_count(summary: HardwareTopologySummary) -> Option<usize> {
     hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::Automatic)
 }
 
 #[cfg(feature = "std")]
 const fn hosted_carrier_count_from_summary(
-    summary: fusion_pal::hal::HardwareTopologySummary,
+    summary: HardwareTopologySummary,
     policy: HostedCarrierCountPolicy,
 ) -> Option<usize> {
     match policy {
@@ -12095,7 +12095,7 @@ mod tests {
 
     #[test]
     fn automatic_carrier_selection_prefers_visible_core_count() {
-        let summary = fusion_pal::hal::HardwareTopologySummary {
+        let summary = HardwareTopologySummary {
             logical_cpu_count: Some(8),
             core_count: Some(4),
             cluster_count: None,
@@ -12105,7 +12105,7 @@ mod tests {
         };
         assert_eq!(select_automatic_carrier_count(summary), Some(4));
 
-        let no_cores = fusion_pal::hal::HardwareTopologySummary {
+        let no_cores = HardwareTopologySummary {
             core_count: None,
             ..summary
         };
@@ -12115,7 +12115,7 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn hosted_carrier_count_policy_reads_requested_topology_count() {
-        let summary = fusion_pal::hal::HardwareTopologySummary {
+        let summary = HardwareTopologySummary {
             logical_cpu_count: Some(12),
             core_count: Some(6),
             cluster_count: Some(3),

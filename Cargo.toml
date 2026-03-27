@@ -1,18 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-    # fusion-sys stack: safe facade over a compile-time-selected fusion-pal.
+    "Crates/fusion-pal",
     "Crates/fusion-sys",
-    "Crates/fusion-sys/fusion-pal",
     "Crates/fusion-std/pcu/macros",
     "Crates/fusion-std",
     "Crates/fusion-kn",
-
-    # Examples.
     "Examples/Hosted/Template",
-    "Examples/Cortex-M/RP2350/MinimalLed",
-    "Examples/Cortex-M/RP2350/Benchmark",
-    "Examples/Cortex-M/RP2350/Display",
 ]
 
 [workspace.package]
@@ -23,26 +17,25 @@ license = ""
 repository = ""
 
 [workspace.dependencies]
-# fusion-sys stack:
-# `fusion-sys` is the consumer-facing facade.
-# `fusion-pal` exposes contract modules and compile-time-selected system modules.
-fusion-sys = { path = "Crates/fusion-sys" }
-fusion-pal = { path = "Crates/fusion-sys/fusion-pal" }
+fusion-pal = { path = "Crates/fusion-pal", default-features = false }
+fusion-sys = { path = "Crates/fusion-sys", default-features = false }
 fusion-std-pcu-macros = { path = "Crates/fusion-std/pcu/macros" }
-fusion-std = { path = "Crates/fusion-std" }
-fusion-kn = { path = "Crates/fusion-kn" }
-
-# RHI stack:
-# `fusion-rhi` presents a unified API while selecting backends at runtime.
-fusion-rhi = { path = "Crates/Engine/lib/RuntimeCore/RHI" }
-fusion-rhi-core = { path = "Crates/Engine/lib/RuntimeCore/RHI/rhi_core" }
-fusion-rhi-vulkan = { path = "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_vulkan" }
-fusion-rhi-dx12 = { path = "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_dx12" }
-fusion-rhi-metal = { path = "Crates/Engine/lib/RuntimeCore/RHI/rhi_core/rhi_metal" }
+fusion-std = { path = "Crates/fusion-std", default-features = false }
+fusion-kn = { path = "Crates/fusion-kn", default-features = false }
 
 ash = { version = "0.38.0", default-features = false, features = ["linked"] }
 bitflags = "2.11.0"
+proc-macro2 = "1.0.95"
+quote = "1.0.40"
+syn = { version = "2.0.101", features = ["full"] }
 escargot = "0.5.15"
+libc = { version = "0.2.183", default-features = false }
+rustix = { version = "1.1.4", default-features = false, features = ["fs", "mm", "param", "process", "system", "thread"] }
+object = { version = "0.36.7", default-features = false, features = ["read"] }
+tokio = { version = "1.44", features = ["rt", "rt-multi-thread"] }
+context = "3.0.0"
+cortex-m = { version = "0.7.7", default-features = false }
+cortex-m-rt = { version = "0.7.5", default-features = false }
 spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu.git", branch = "main" }
 windows = "0.62.2"
 

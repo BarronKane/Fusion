@@ -50,12 +50,16 @@ name = "fusion_std_pico_tool"
 path = "bin/fusion_std_pico_tool.rs"
 
 [features]
-default = ["std"]
+default = ["std", "hosted"]
 std = []
-sys-cortex-m = ["fusion-sys/sys-cortex-m"]
+soc = ["fusion-sys/soc"]
+hosted = ["std", "fusion-sys/hosted"]
+hal = ["fusion-sys/hal"]
+critical-safe = ["fusion-sys/critical-safe"]
+debug-profile = ["fusion-sys/debug-profile"]
+sys-cortex-m = ["soc", "fusion-sys/sys-cortex-m"]
 soc-rp2350 = ["sys-cortex-m", "fusion-sys/soc-rp2350"]
-sys-fusion-kn = ["fusion-sys/sys-fusion-kn"]
-critical-safe-generated-contracts = []
+sys-fusion-kn = ["hosted", "fusion-sys/sys-fusion-kn"]
 cortex-m-vector-secure-world = ["fusion-sys/cortex-m-vector-secure-world"]
 cortex-m-vector-nonsecure-world = ["fusion-sys/cortex-m-vector-nonsecure-world"]
 sizing-global-nearest-round-up = []
@@ -66,13 +70,13 @@ fusion-sys = { workspace = true }
 fusion-std-pcu-macros = { workspace = true }
 
 [target.'cfg(not(target_os = "none"))'.dependencies]
-object = { version = "0.36.7", default-features = false, features = ["read"] }
+object.workspace = true
 
 [dev-dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [target.'cfg(not(target_os = "none"))'.dev-dependencies]
-tokio = { version = "1.44", features = ["rt", "rt-multi-thread"] }
+tokio.workspace = true
 
 [lints]
 workspace = true

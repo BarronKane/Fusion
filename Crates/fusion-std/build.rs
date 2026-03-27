@@ -12,7 +12,7 @@ const MEMORY_LAYOUT_OUTPUT_NAME: &str = "memory.x";
 const GENERATED_METADATA_ENV: &str = "FUSION_FIBER_TASK_METADATA";
 const GENERATED_REPORT_ENV: &str = "FUSION_FIBER_TASK_REPORT";
 const GENERATED_ASYNC_POLL_STACK_METADATA_ENV: &str = "FUSION_ASYNC_POLL_STACK_METADATA";
-const STRICT_CONTRACTS_FEATURE_ENV: &str = "CARGO_FEATURE_CRITICAL_SAFE_GENERATED_CONTRACTS";
+const STRICT_CONTRACTS_FEATURE_ENV: &str = "CARGO_FEATURE_CRITICAL_SAFE";
 const SYS_CORTEX_M_FEATURE_ENV: &str = "CARGO_FEATURE_SYS_CORTEX_M";
 const SOC_RP2350_FEATURE_ENV: &str = "CARGO_FEATURE_SOC_RP2350";
 const CORTEX_M_VECTOR_NONSECURE_WORLD_FEATURE_ENV: &str =
@@ -213,9 +213,7 @@ fn selected_platform_memory_layout_spec_path() -> Option<PathBuf> {
             PathBuf::from(
                 env::var("CARGO_MANIFEST_DIR").expect("Cargo should provide CARGO_MANIFEST_DIR"),
             )
-            .join(
-                "../fusion-sys/fusion-pal/sys/cortex_m/hal/soc/board/rp2350-pico2w.memory.layout",
-            ),
+            .join("../fusion-pal/pal/soc/cortex_m/hal/soc/board/rp2350-pico2w.memory.layout"),
         );
     }
     None

@@ -1,3 +1,5 @@
+#![cfg(all(feature = "std", not(target_os = "none")))]
+
 #[path = "fusion_sys/alloc/mod.rs"]
 mod alloc;
 #[path = "fusion_sys/event/mod.rs"]

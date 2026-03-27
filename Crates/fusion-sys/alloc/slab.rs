@@ -6,7 +6,7 @@ use core::ptr::{self, NonNull};
 
 use crate::mem::resource::AllocatorLayoutPolicy;
 use crate::sync::{Mutex, RetainedHandle};
-use fusion_pal::pal::mem::MemBase;
+use fusion_pal::sys::mem::MemBase;
 
 use super::{
     AllocCapabilities,

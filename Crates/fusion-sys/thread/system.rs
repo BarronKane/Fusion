@@ -2,8 +2,14 @@
 
 use core::time::Duration;
 
-use fusion_pal::pal::mem::{MemBase, MemCatalog};
-use fusion_pal::sys::mem::{MemBackingCaps, MemCaps, MemCatalogCaps, system_mem};
+use fusion_pal::sys::mem::{
+    MemBackingCaps,
+    MemBase,
+    MemCaps,
+    MemCatalog,
+    MemCatalogCaps,
+    system_mem,
+};
 use fusion_pal::sys::thread::{PlatformThread, system_thread as pal_system_thread};
 
 use super::{

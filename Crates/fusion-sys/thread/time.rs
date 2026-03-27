@@ -24,7 +24,7 @@ use super::{
 };
 
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-use fusion_pal::sys::cortex_m::hal::soc::board as cortex_m_soc_board;
+use fusion_pal::sys::soc::cortex_m::hal::soc::board as cortex_m_soc_board;
 
 #[cfg(not(feature = "sys-cortex-m"))]
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
@@ -664,9 +664,9 @@ fn raw_now_for_selected_backend(
 }
 
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-fn map_hardware_thread_error(error: fusion_pal::hal::HardwareError) -> ThreadError {
+fn map_hardware_thread_error(error: fusion_pal::contract::hal::HardwareError) -> ThreadError {
     match error.kind() {
-        fusion_pal::hal::HardwareErrorKind::Unsupported => ThreadError::unsupported(),
+        fusion_pal::contract::hal::HardwareErrorKind::Unsupported => ThreadError::unsupported(),
         _ => ThreadError::invalid(),
     }
 }

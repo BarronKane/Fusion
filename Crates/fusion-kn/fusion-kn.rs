@@ -44,7 +44,7 @@ pub use evidence::*;
 #[cfg(feature = "contract")]
 pub use module::*;
 
-#[cfg(all(test, feature = "contract"))]
+#[cfg(all(test, feature = "contract", not(target_os = "none")))]
 mod tests {
     use super::*;
 

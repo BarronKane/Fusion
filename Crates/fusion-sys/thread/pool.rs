@@ -13,7 +13,8 @@ use core::array;
 use core::cell::UnsafeCell;
 use core::fmt;
 
-use fusion_pal::hal::{HardwareTopologyQuery as _, system_hardware};
+use fusion_pal::contract::hal::HardwareTopologyQuery as _;
+use fusion_pal::sys::cpu::system_cpu;
 use fusion_pal::sys::thread::{
     ThreadConstraintMode,
     ThreadMigrationPolicy,
@@ -733,7 +734,7 @@ fn resolve_worker_placement<'a>(
         }
         SystemPoolPlacement::PerCore => {
             let mut resolved = [ZERO_LOGICAL_CPU; MAX_POOL_WORKERS];
-            let summary = system_hardware()
+            let summary = system_cpu()
                 .write_logical_cpus(&mut resolved[..worker_count])
                 .map_err(|_| ThreadError::unsupported())?;
             if summary.total < worker_count {

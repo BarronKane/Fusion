@@ -121,6 +121,7 @@ enum TargetArtifact {
 
 #[derive(Debug)]
 struct PipelineConfig {
+    manifest_path: Option<PathBuf>,
     roots_path: Option<PathBuf>,
     contracts_path: Option<PathBuf>,
     red_inline_contracts_path: Option<PathBuf>,
@@ -151,6 +152,7 @@ impl PipelineConfig {
         let _program = args.next();
 
         let mut roots_path = None;
+        let mut manifest_path = None;
         let mut contracts_path = manifest_dir
             .join(DEFAULT_CONTRACTS_NAME)
             .is_file()
@@ -191,6 +193,7 @@ impl PipelineConfig {
                 current_dir,
                 &mut args,
                 &arg.to_string_lossy(),
+                &mut manifest_path,
                 &mut roots_path,
                 &mut contracts_path,
                 &mut red_inline_contracts_path,
@@ -222,6 +225,7 @@ impl PipelineConfig {
         }
 
         Ok(Self {
+            manifest_path,
             roots_path,
             contracts_path,
             red_inline_contracts_path,
@@ -249,6 +253,7 @@ fn apply_cli_arg(
     current_dir: &Path,
     args: &mut impl Iterator<Item = std::ffi::OsString>,
     arg: &str,
+    manifest_path: &mut Option<PathBuf>,
     roots_path: &mut Option<PathBuf>,
     contracts_path: &mut Option<PathBuf>,
     red_inline_contracts_path: &mut Option<PathBuf>,
@@ -269,6 +274,15 @@ fn apply_cli_arg(
     no_default_features: &mut bool,
 ) -> Result<(), String> {
     match arg {
+        "--manifest-path" => {
+            *manifest_path = Some(resolve_cli_path(
+                current_dir,
+                &PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| usage("missing value for --manifest-path"))?,
+                ),
+            ));
+        }
         "--roots" => {
             *roots_path = Some(resolve_cli_path(
                 current_dir,
@@ -473,10 +487,14 @@ fn build_target_artifact(
         .current_dir(workspace_root)
         .env("CARGO_INCREMENTAL", "0")
         .arg("rustc")
-        .arg("-p")
-        .arg(&config.package)
         .arg("--target-dir")
         .arg(target_dir);
+
+    if let Some(manifest_path) = config.manifest_path.as_ref() {
+        command.arg("--manifest-path").arg(manifest_path);
+    }
+
+    command.arg("-p").arg(&config.package);
 
     match &config.target_artifact {
         TargetArtifact::Lib => {
@@ -1184,7 +1202,7 @@ fn run_command(mut command: Command, label: &str) -> Result<(), String> {
 
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage: cargo run -p fusion-std --bin fusion_std_fiber_task_pipeline -- [--roots <path>] [--contracts <path>] [--red-inline-contracts <path>] [--async-poll-stack-roots <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-rust <path>] [--output <path>] [--async-poll-stack-output <path>] [--async-poll-stack-rust <path>] [--toolchain <channel>] [--package <name>] [--crate-name <name>] [--bin <name> | --lib] [--profile <dev|release>] [--target <triple>] [--features <csv>] [--no-default-features]\n\nWhen --roots is omitted, the pipeline merges fusion-std's hidden generated-task root registry (for the fusion-std lib target) with generated closure roots discovered from the analyzed artifact."
+        "{reason}\nusage: cargo run -p fusion-std --bin fusion_std_fiber_task_pipeline -- [--manifest-path <path>] [--roots <path>] [--contracts <path>] [--red-inline-contracts <path>] [--async-poll-stack-roots <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-rust <path>] [--output <path>] [--async-poll-stack-output <path>] [--async-poll-stack-rust <path>] [--toolchain <channel>] [--package <name>] [--crate-name <name>] [--bin <name> | --lib] [--profile <dev|release>] [--target <triple>] [--features <csv>] [--no-default-features]\n\nWhen --roots is omitted, the pipeline merges fusion-std's hidden generated-task root registry (for the fusion-std lib target) with generated closure roots discovered from the analyzed artifact."
     )
 }
 

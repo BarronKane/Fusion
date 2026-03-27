@@ -104,7 +104,7 @@ impl Drop for ThinMutexGuard<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     use super::*;
     use core::sync::atomic::{AtomicU32, Ordering};

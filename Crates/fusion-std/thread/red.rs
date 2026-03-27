@@ -21,7 +21,7 @@ use fusion_sys::vector::{
 };
 
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-use fusion_pal::sys::hal::soc::board as cortex_m_board;
+use fusion_pal::sys::cpu::soc::board as cortex_m_board;
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
 use fusion_sys::vector::VectorInlineEligibility;
 
@@ -454,16 +454,20 @@ pub fn red_thread_support() -> RedThreadSupport {
 }
 
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-const fn map_cortex_m_hardware_error(error: fusion_pal::pal::hal::HardwareError) -> ThreadError {
+const fn map_cortex_m_hardware_error(
+    error: fusion_pal::contract::hal::HardwareError,
+) -> ThreadError {
     match error.kind() {
-        fusion_pal::pal::hal::HardwareErrorKind::Unsupported => ThreadError::unsupported(),
-        fusion_pal::pal::hal::HardwareErrorKind::Invalid => ThreadError::invalid(),
-        fusion_pal::pal::hal::HardwareErrorKind::ResourceExhausted => {
+        fusion_pal::contract::hal::HardwareErrorKind::Unsupported => ThreadError::unsupported(),
+        fusion_pal::contract::hal::HardwareErrorKind::Invalid => ThreadError::invalid(),
+        fusion_pal::contract::hal::HardwareErrorKind::ResourceExhausted => {
             ThreadError::resource_exhausted()
         }
-        fusion_pal::pal::hal::HardwareErrorKind::StateConflict => ThreadError::state_conflict(),
-        fusion_pal::pal::hal::HardwareErrorKind::Busy => ThreadError::busy(),
-        fusion_pal::pal::hal::HardwareErrorKind::Platform(code) => ThreadError::platform(code),
+        fusion_pal::contract::hal::HardwareErrorKind::StateConflict => {
+            ThreadError::state_conflict()
+        }
+        fusion_pal::contract::hal::HardwareErrorKind::Busy => ThreadError::busy(),
+        fusion_pal::contract::hal::HardwareErrorKind::Platform(code) => ThreadError::platform(code),
     }
 }
 

@@ -2,8 +2,8 @@
 
 use crate::event::EventSourceHandle;
 #[cfg(all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350"))]
-use fusion_pal::sys::cortex_m::hal::soc::pio::lower_rp2350_program;
-use fusion_pal::sys::cortex_m::hal::soc::pio::{
+use fusion_pal::sys::soc::cortex_m::hal::soc::pio::lower_rp2350_program;
+use fusion_pal::sys::soc::cortex_m::hal::soc::pio::{
     PlatformPio,
     rp2350_build_execution_registers,
     rp2350_execution_is_default,
@@ -343,7 +343,7 @@ impl PcuSystem {
     pub fn initialize_lanes(&self, claim: &PcuLaneClaim, initial_pc: u8) -> Result<(), PcuError> {
         #[cfg(all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350"))]
         {
-            return fusion_pal::sys::cortex_m::hal::soc::board::initialize_pcu_lanes(
+            return fusion_pal::sys::soc::cortex_m::hal::soc::board::initialize_pcu_lanes(
                 claim, initial_pc,
             );
         }
@@ -406,7 +406,7 @@ impl PcuSystem {
         {
             let (clkdiv, execctrl, shiftctrl, pinctrl) =
                 rp2350_build_execution_registers(execution, instructions)?;
-            return fusion_pal::sys::cortex_m::hal::soc::board::apply_pcu_execution_config(
+            return fusion_pal::sys::soc::cortex_m::hal::soc::board::apply_pcu_execution_config(
                 &claim, clkdiv, execctrl, shiftctrl, pinctrl,
             );
         }

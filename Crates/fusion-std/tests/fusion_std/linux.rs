@@ -204,10 +204,10 @@ fusion_std::assert_generated_fiber_task_supported!(
     ExternalGeneratedContractTask
 );
 
-#[cfg(feature = "critical-safe-generated-contracts")]
+#[cfg(feature = "critical-safe")]
 struct FeatureStrictGeneratedContractTask(u32);
 
-#[cfg(feature = "critical-safe-generated-contracts")]
+#[cfg(feature = "critical-safe")]
 impl GeneratedExplicitFiberTask for FeatureStrictGeneratedContractTask {
     type Output = u32;
 
@@ -216,14 +216,14 @@ impl GeneratedExplicitFiberTask for FeatureStrictGeneratedContractTask {
     }
 }
 
-#[cfg(feature = "critical-safe-generated-contracts")]
+#[cfg(feature = "critical-safe")]
 fusion_std::declare_generated_fiber_task_contract!(
     FeatureStrictGeneratedContractTask,
     NonZeroUsize::new(8 * 1024).unwrap(),
     FiberTaskPriority::new(11),
 );
 
-#[cfg(feature = "critical-safe-generated-contracts")]
+#[cfg(feature = "critical-safe")]
 const STRICT_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [
     match FiberStackClassConfig::new(
         match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
@@ -237,14 +237,14 @@ const STRICT_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [
     },
 ];
 
-#[cfg(feature = "critical-safe-generated-contracts")]
+#[cfg(feature = "critical-safe")]
 const STRICT_GENERATED_CONFIG: GreenPoolConfig<'static> =
     match GreenPoolConfig::classed(&STRICT_GENERATED_CLASSES) {
         Ok(config) => config,
         Err(_) => panic!("classed config should build"),
     };
 
-#[cfg(feature = "critical-safe-generated-contracts")]
+#[cfg(feature = "critical-safe")]
 fusion_std::assert_generated_fiber_task_supported!(
     STRICT_GENERATED_CONFIG,
     FeatureStrictGeneratedContractTask
@@ -370,7 +370,7 @@ fn downstream_generated_async_poll_stack_contracts_work_without_runtime_type_loo
     assert_eq!(handle.join().expect("task should complete"), 29);
 }
 
-#[cfg(feature = "critical-safe-generated-contracts")]
+#[cfg(feature = "critical-safe")]
 #[test]
 fn strict_generated_contract_feature_bypasses_runtime_metadata_lookup() {
     let _guard = lock_fusion_std_tests();

@@ -1,0 +1,43 @@
+[package]
+name = "fusion-pal"
+description = ""
+documentation = ""
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[lib]
+crate-type = ["rlib"]
+path = "fusion-pal.rs"
+
+[features]
+default = ["std", "hosted"]
+std = []
+soc = []
+hosted = ["std"]
+hal = []
+critical-safe = []
+debug-profile = []
+sys-cortex-m = ["soc", "dep:cortex-m", "dep:cortex-m-rt"]
+soc-rp2350 = ["sys-cortex-m"]
+sys-fusion-kn = ["hosted", "dep:fusion-kn"]
+cortex-m-vector-secure-world = []
+cortex-m-vector-nonsecure-world = []
+
+[lints]
+workspace = true
+
+[dependencies]
+bitflags.workspace = true
+fusion-kn = { workspace = true, optional = true, features = ["client"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+cortex-m = { workspace = true, optional = true }
+cortex-m-rt = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+rustix.workspace = true
