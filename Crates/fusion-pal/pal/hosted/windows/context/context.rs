@@ -1,6 +1,6 @@
 //! Windows fusion-pal user-space context backend.
 
-use crate::contract::runtime::context::{UnsupportedContext, UnsupportedSavedContext};
+use crate::contract::pal::runtime::context::{UnsupportedContext, UnsupportedSavedContext};
 
 /// Selected Windows context provider type.
 pub type PlatformContext = UnsupportedContext;

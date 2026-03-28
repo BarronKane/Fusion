@@ -664,9 +664,9 @@ fn raw_now_for_selected_backend(
 }
 
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-fn map_hardware_thread_error(error: fusion_pal::contract::hal::HardwareError) -> ThreadError {
+fn map_hardware_thread_error(error: fusion_pal::contract::pal::HardwareError) -> ThreadError {
     match error.kind() {
-        fusion_pal::contract::hal::HardwareErrorKind::Unsupported => ThreadError::unsupported(),
+        fusion_pal::contract::pal::HardwareErrorKind::Unsupported => ThreadError::unsupported(),
         _ => ThreadError::invalid(),
     }
 }

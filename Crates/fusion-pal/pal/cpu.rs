@@ -4,7 +4,14 @@
 //! compile-time ISA and ABI truth where that is the only honest source today, and exposes the
 //! canonical CPU-facing provider through the backend-neutral HAL contract.
 
-use crate::contract::hal::{
+use crate::contract::pal::runtime::context::{ContextBase as _, ContextImplementationKind};
+use crate::contract::pal::runtime::thread::{
+    ThreadClusterId,
+    ThreadCoreClassId,
+    ThreadCoreId,
+    ThreadLogicalCpuId,
+};
+use crate::contract::pal::{
     HardwareAtomicWidthSet,
     HardwareAuthoritySet,
     HardwareBase,
@@ -27,13 +34,6 @@ use crate::contract::hal::{
     HardwareTopologyQuery,
     HardwareTopologySummary,
     HardwareWriteSummary,
-};
-use crate::contract::runtime::context::{ContextBase as _, ContextImplementationKind};
-use crate::contract::runtime::thread::{
-    ThreadClusterId,
-    ThreadCoreClassId,
-    ThreadCoreId,
-    ThreadLogicalCpuId,
 };
 
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
@@ -364,7 +364,7 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use crate::contract::hal::{HardwareErrorKind, HardwareTopologyCaps};
+    use crate::contract::pal::{HardwareErrorKind, HardwareTopologyCaps};
     #[cfg(target_os = "linux")]
     use rustix::thread::{self as rustix_thread, CpuSet};
 
@@ -462,7 +462,7 @@ mod tests {
         let cpu = system_cpu();
         let cpuset = rustix_thread::sched_getaffinity(None).expect("affinity query should work");
         let mut output = [ThreadLogicalCpuId {
-            group: crate::contract::runtime::thread::ThreadProcessorGroupId(0),
+            group: crate::contract::pal::runtime::thread::ThreadProcessorGroupId(0),
             index: 0,
         }; CpuSet::MAX_CPU];
         let summary = cpu
@@ -482,7 +482,7 @@ mod tests {
             return;
         };
 
-        let mut output = [crate::contract::runtime::thread::ThreadCoreId(0); CpuSet::MAX_CPU];
+        let mut output = [crate::contract::pal::runtime::thread::ThreadCoreId(0); CpuSet::MAX_CPU];
         let written = cpu
             .write_cores(&mut output)
             .expect("linux core enumeration");

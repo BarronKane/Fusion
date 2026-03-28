@@ -29,7 +29,7 @@ use core::sync::atomic::compiler_fence;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 
-use crate::contract::runtime::sync::{
+use crate::contract::pal::runtime::sync::{
     MutexCaps,
     MutexSupport,
     OnceBeginResult,

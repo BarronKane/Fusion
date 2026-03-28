@@ -6,7 +6,12 @@ use rustix::fs::{CWD, Mode, OFlags, openat};
 use rustix::io::{Errno, read};
 use rustix::thread::{self as rustix_thread, CpuSet};
 
-use crate::contract::hal::{
+use crate::contract::pal::runtime::thread::{
+    ThreadCoreId,
+    ThreadLogicalCpuId,
+    ThreadProcessorGroupId,
+};
+use crate::contract::pal::{
     HardwareAuthoritySet,
     HardwareBase,
     HardwareCpuCaps,
@@ -28,7 +33,6 @@ use crate::contract::hal::{
     HardwareTopologySupport,
     HardwareWriteSummary,
 };
-use crate::contract::runtime::thread::{ThreadCoreId, ThreadLogicalCpuId, ThreadProcessorGroupId};
 
 /// Selected Linux hardware provider type.
 #[derive(Debug, Clone, Copy, Default)]
@@ -95,14 +99,14 @@ impl HardwareTopologyQuery for LinuxHardware {
 
     fn write_cores(
         &self,
-        output: &mut [crate::contract::runtime::thread::ThreadCoreId],
+        output: &mut [crate::contract::pal::runtime::thread::ThreadCoreId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
         write_cores(output)
     }
 
     fn write_clusters(
         &self,
-        _output: &mut [crate::contract::runtime::thread::ThreadClusterId],
+        _output: &mut [crate::contract::pal::runtime::thread::ThreadClusterId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
         Err(HardwareError::unsupported())
     }
@@ -123,7 +127,7 @@ impl HardwareTopologyQuery for LinuxHardware {
 
     fn write_core_classes(
         &self,
-        _output: &mut [crate::contract::runtime::thread::ThreadCoreClassId],
+        _output: &mut [crate::contract::pal::runtime::thread::ThreadCoreClassId],
     ) -> Result<HardwareWriteSummary, HardwareError> {
         Err(HardwareError::unsupported())
     }
@@ -239,7 +243,7 @@ fn write_numa_nodes(
 
     let total = parse_index_list(bytes, |index| {
         if written < output.len() {
-            output[written] = crate::contract::hardware::mem::MemTopologyNodeId(index);
+            output[written] = crate::contract::pal::mem::MemTopologyNodeId(index);
             written += 1;
         }
         Ok(())

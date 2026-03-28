@@ -1,6 +1,6 @@
 //! iOS fusion-pal event backend.
 
-use crate::contract::runtime::event::{UnsupportedEvent, UnsupportedPoller};
+use crate::contract::pal::runtime::event::{UnsupportedEvent, UnsupportedPoller};
 
 /// Selected iOS event provider type.
 pub type PlatformEvent = UnsupportedEvent;

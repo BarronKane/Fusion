@@ -1,9 +1,6 @@
-pub mod caps;
+#[path = "drivers/drivers.rs"]
+pub mod drivers;
 #[path = "firmware/firmware.rs"]
 pub mod firmware;
-#[path = "hal/hal.rs"]
-pub mod hal;
-#[path = "hardware/hardware.rs"]
-pub mod hardware;
-#[path = "runtime/runtime.rs"]
-pub mod runtime;
+#[path = "pal/pal.rs"]
+pub mod pal;

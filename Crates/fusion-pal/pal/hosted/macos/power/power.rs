@@ -1,6 +1,6 @@
 //! macOS fusion-pal power backend.
 
-use crate::contract::hardware::power::UnsupportedPower;
+use crate::contract::pal::power::UnsupportedPower;
 
 /// Selected macOS power provider type.
 pub type PlatformPower = UnsupportedPower;

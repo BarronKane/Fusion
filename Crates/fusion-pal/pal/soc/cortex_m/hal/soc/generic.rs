@@ -15,15 +15,20 @@ use super::pio::{
     PioProgramLease as PcuProgramLease,
     PioSupport as PcuSupport,
 };
-use crate::contract::hal::HardwareTopologyNodeId;
-use crate::contract::hal::{
+use crate::contract::pal::HardwareTopologyNodeId;
+use crate::contract::pal::runtime::thread::{ThreadClusterId, ThreadCoreClassId};
+use crate::contract::pal::runtime::thread::{
+    ThreadCoreId,
+    ThreadError,
+    ThreadId,
+    ThreadLogicalCpuId,
+};
+use crate::contract::pal::{
     HardwareAuthoritySet,
     HardwareError,
     HardwareTopologySummary,
     HardwareWriteSummary,
 };
-use crate::contract::runtime::thread::{ThreadClusterId, ThreadCoreClassId};
-use crate::contract::runtime::thread::{ThreadCoreId, ThreadError, ThreadId, ThreadLogicalCpuId};
 use core::time::Duration;
 
 use super::board_contract::{self, CortexMSocBoard};
@@ -507,7 +512,7 @@ pub fn power_modes() -> &'static [CortexMPowerModeDescriptor] {
 
 /// Returns the selected generic Cortex-M PAL-facing power descriptors.
 #[must_use]
-pub fn pal_power_modes() -> &'static [crate::contract::hardware::power::PowerModeDescriptor] {
+pub fn pal_power_modes() -> &'static [crate::contract::pal::power::PowerModeDescriptor] {
     board_contract::pal_power_modes(system_soc())
 }
 

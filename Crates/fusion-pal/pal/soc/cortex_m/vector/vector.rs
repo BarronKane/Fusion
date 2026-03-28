@@ -14,7 +14,8 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering, compiler_fence};
 
-use crate::contract::hal::vector::{
+use crate::contract::pal::runtime::thread::ThreadCoreId;
+use crate::contract::pal::vector::{
     IrqSlot,
     SlotState,
     SystemException,
@@ -40,7 +41,6 @@ use crate::contract::hal::vector::{
     VectorTableMode,
     VectorTableTopology,
 };
-use crate::contract::runtime::thread::ThreadCoreId;
 use crate::pal::soc::cortex_m::hal::selected_soc_inline_current_exception_stack_allows;
 use crate::pal::soc::cortex_m::hal::selected_soc_irq_implemented_priority_bits;
 
@@ -255,7 +255,7 @@ impl VectorBase for CortexMVector {
 
         VectorSupport {
             caps,
-            implementation: crate::contract::caps::ImplementationKind::Native,
+            implementation: crate::contract::pal::caps::ImplementationKind::Native,
             slot_count,
             implemented_priority_bits: selected_soc_irq_implemented_priority_bits(),
         }
@@ -667,16 +667,16 @@ pub fn take_pending_active_scope(
     }
 }
 
-const fn map_hardware_error(error: crate::contract::hal::HardwareError) -> VectorError {
+const fn map_hardware_error(error: crate::contract::pal::HardwareError) -> VectorError {
     match error.kind() {
-        crate::contract::hal::HardwareErrorKind::Unsupported => VectorError::unsupported(),
-        crate::contract::hal::HardwareErrorKind::Invalid => VectorError::invalid(),
-        crate::contract::hal::HardwareErrorKind::ResourceExhausted => {
+        crate::contract::pal::HardwareErrorKind::Unsupported => VectorError::unsupported(),
+        crate::contract::pal::HardwareErrorKind::Invalid => VectorError::invalid(),
+        crate::contract::pal::HardwareErrorKind::ResourceExhausted => {
             VectorError::resource_exhausted()
         }
-        crate::contract::hal::HardwareErrorKind::StateConflict => VectorError::state_conflict(),
-        crate::contract::hal::HardwareErrorKind::Busy => VectorError::state_conflict(),
-        crate::contract::hal::HardwareErrorKind::Platform(code) => VectorError::platform(code),
+        crate::contract::pal::HardwareErrorKind::StateConflict => VectorError::state_conflict(),
+        crate::contract::pal::HardwareErrorKind::Busy => VectorError::state_conflict(),
+        crate::contract::pal::HardwareErrorKind::Platform(code) => VectorError::platform(code),
     }
 }
 

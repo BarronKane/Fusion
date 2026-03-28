@@ -3,7 +3,7 @@
 use bitflags::bitflags;
 
 /// Shared implementation-category vocabulary specialized for PCU support.
-pub use crate::contract::caps::ImplementationKind as PcuImplementationKind;
+pub use crate::contract::pal::caps::ImplementationKind as PcuImplementationKind;
 
 bitflags! {
     /// Programmable-IO features the backend can honestly surface.

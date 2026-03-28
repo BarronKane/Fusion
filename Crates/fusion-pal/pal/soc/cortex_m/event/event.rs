@@ -11,7 +11,7 @@ use core::arch::asm;
 use core::mem::MaybeUninit;
 use core::ptr;
 
-use crate::contract::runtime::event::{
+use crate::contract::pal::runtime::event::{
     EventBase,
     EventCaps,
     EventCompletion,
@@ -43,7 +43,7 @@ const CORTEX_M_EVENT_SUPPORT: EventSupport = EventSupport {
         .union(EventCaps::TIMEOUT),
     model: EventModel::Hybrid,
     max_events: Some(CORTEX_M_EVENT_QUEUE_CAPACITY + CORTEX_M_IRQ_REGISTRATION_CAPACITY),
-    implementation: crate::contract::runtime::event::EventImplementationKind::Emulated,
+    implementation: crate::contract::pal::runtime::event::EventImplementationKind::Emulated,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -464,8 +464,8 @@ fn board_timeout_fired() -> Result<bool, EventError> {
     crate::pal::soc::cortex_m::hal::soc::board::event_timeout_fired().map_err(map_hardware_error)
 }
 
-const fn map_hardware_error(error: crate::contract::hal::HardwareError) -> EventError {
-    use crate::contract::hal::HardwareErrorKind;
+const fn map_hardware_error(error: crate::contract::pal::HardwareError) -> EventError {
+    use crate::contract::pal::HardwareErrorKind;
 
     match error.kind() {
         HardwareErrorKind::Unsupported => EventError::unsupported(),
@@ -494,7 +494,7 @@ fn wait_for_interrupt() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::runtime::event::{EventCompletionOpKind, EventSource};
+    use crate::contract::pal::runtime::event::{EventCompletionOpKind, EventSource};
 
     #[test]
     fn cortex_m_event_support_reports_completion_queue() {

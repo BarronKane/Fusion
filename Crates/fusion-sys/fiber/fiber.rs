@@ -9,7 +9,7 @@ use core::fmt;
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
-pub use fusion_pal::sys::context::{
+pub use fusion_pal::sys::execution_context::{
     ContextAuthoritySet,
     ContextBase,
     ContextCaps,

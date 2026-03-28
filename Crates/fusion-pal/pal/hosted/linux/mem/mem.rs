@@ -17,7 +17,7 @@ use rustix::mm::{self, Advice as MmAdvice, MapFlags as MmMapFlags, MprotectFlags
 use rustix::param;
 use rustix::system;
 
-use crate::contract::hardware::mem::{
+use crate::contract::pal::mem::{
     Address,
     Advise,
     Backing,
@@ -634,7 +634,7 @@ impl MemLock for LinuxMem {
     }
 }
 
-impl crate::contract::hardware::mem::MemCatalog for LinuxMem {}
+impl crate::contract::pal::mem::MemCatalog for LinuxMem {}
 
 fn parse_kernel_release(release: &[u8]) -> Option<KernelVersion> {
     let (major, rest) = parse_release_component(release)?;
@@ -736,7 +736,7 @@ const fn supports_thp_advice_at(version: Option<KernelVersion>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::hardware::mem::{MapFlags, MemAdviceCaps, MemPlacementCaps, RegionAttrs};
+    use crate::contract::pal::mem::{MapFlags, MemAdviceCaps, MemPlacementCaps, RegionAttrs};
 
     fn anon_request(len: usize) -> MapRequest<'static> {
         MapRequest {

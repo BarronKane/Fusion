@@ -1,6 +1,6 @@
 //! Backend-neutral unsupported vector-ownership export.
 
-pub use crate::contract::hal::vector::{
+pub use crate::contract::pal::vector::{
     UnsupportedSealedVectorTable as PlatformSealedVectorTable,
     UnsupportedVector as PlatformVector,
     UnsupportedVectorBuilder as PlatformVectorBuilder,

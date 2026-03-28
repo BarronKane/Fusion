@@ -1,6 +1,6 @@
 //! macOS fusion-pal user-space context backend.
 
-use crate::contract::runtime::context::{UnsupportedContext, UnsupportedSavedContext};
+use crate::contract::pal::runtime::context::{UnsupportedContext, UnsupportedSavedContext};
 
 /// Selected macOS context provider type.
 pub type PlatformContext = UnsupportedContext;

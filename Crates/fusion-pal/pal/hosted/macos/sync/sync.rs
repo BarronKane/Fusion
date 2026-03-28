@@ -1,6 +1,6 @@
 //! macOS fusion-pal synchronization backend stub.
 
-use crate::contract::runtime::sync::{
+use crate::contract::pal::runtime::sync::{
     SyncImplementationKind,
     UnsupportedRawMutex,
     UnsupportedRawOnce,

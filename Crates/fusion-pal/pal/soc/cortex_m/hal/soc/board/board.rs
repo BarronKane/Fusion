@@ -2,19 +2,9 @@
 
 //! Cortex-M SoC board contract and generic helpers.
 
-use crate::contract::hal::{
-    HardwareAuthoritySet,
-    HardwareError,
-    HardwareGuarantee,
-    HardwareTopologyCaps,
-    HardwareTopologyNodeId,
-    HardwareTopologySummary,
-    HardwareTopologySupport,
-    HardwareWriteSummary,
-};
-use crate::contract::hardware::mem::MemTopologyNodeId;
-use crate::contract::hardware::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
-use crate::contract::runtime::thread::{
+use crate::contract::pal::mem::MemTopologyNodeId;
+use crate::contract::pal::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
+use crate::contract::pal::runtime::thread::{
     ThreadAuthoritySet,
     ThreadClusterId,
     ThreadCoreClassId,
@@ -24,6 +14,16 @@ use crate::contract::runtime::thread::{
     ThreadId,
     ThreadLogicalCpuId,
     ThreadProcessorGroupId,
+};
+use crate::contract::pal::{
+    HardwareAuthoritySet,
+    HardwareError,
+    HardwareGuarantee,
+    HardwareTopologyCaps,
+    HardwareTopologyNodeId,
+    HardwareTopologySummary,
+    HardwareTopologySupport,
+    HardwareWriteSummary,
 };
 use core::time::Duration;
 
@@ -457,7 +457,7 @@ impl CortexMSocDescriptor {
             numa_nodes,
             core_classes,
             authorities: self.topology_authorities,
-            implementation: crate::contract::hal::HardwareImplementationKind::Native,
+            implementation: crate::contract::pal::HardwareImplementationKind::Native,
         }
     }
 }
@@ -941,7 +941,7 @@ pub trait CortexMSocBoard: Copy {
 
     /// Returns the selected board's generic PAL-facing power descriptors.
     #[must_use]
-    fn pal_power_modes(&self) -> &'static [crate::contract::hardware::power::PowerModeDescriptor] {
+    fn pal_power_modes(&self) -> &'static [crate::contract::pal::power::PowerModeDescriptor] {
         &[]
     }
 
@@ -1399,7 +1399,7 @@ pub fn power_modes<T: CortexMSocBoard>(soc: T) -> &'static [CortexMPowerModeDesc
 #[must_use]
 pub fn pal_power_modes<T: CortexMSocBoard>(
     soc: T,
-) -> &'static [crate::contract::hardware::power::PowerModeDescriptor] {
+) -> &'static [crate::contract::pal::power::PowerModeDescriptor] {
     soc.pal_power_modes()
 }
 

@@ -1,6 +1,6 @@
 //! Cortex-M bare-metal power backend.
 
-use crate::contract::hardware::power::{
+use crate::contract::pal::power::{
     PowerBase,
     PowerCaps,
     PowerControl,
@@ -52,13 +52,13 @@ impl PowerControl for CortexMPower {
     }
 }
 
-const fn map_power_error(error: crate::contract::hal::HardwareError) -> PowerError {
+const fn map_power_error(error: crate::contract::pal::HardwareError) -> PowerError {
     match error.kind() {
-        crate::contract::hal::HardwareErrorKind::Unsupported => PowerError::unsupported(),
-        crate::contract::hal::HardwareErrorKind::Invalid => PowerError::invalid(),
-        crate::contract::hal::HardwareErrorKind::ResourceExhausted
-        | crate::contract::hal::HardwareErrorKind::Busy => PowerError::busy(),
-        crate::contract::hal::HardwareErrorKind::StateConflict => PowerError::state_conflict(),
-        crate::contract::hal::HardwareErrorKind::Platform(code) => PowerError::platform(code),
+        crate::contract::pal::HardwareErrorKind::Unsupported => PowerError::unsupported(),
+        crate::contract::pal::HardwareErrorKind::Invalid => PowerError::invalid(),
+        crate::contract::pal::HardwareErrorKind::ResourceExhausted
+        | crate::contract::pal::HardwareErrorKind::Busy => PowerError::busy(),
+        crate::contract::pal::HardwareErrorKind::StateConflict => PowerError::state_conflict(),
+        crate::contract::pal::HardwareErrorKind::Platform(code) => PowerError::platform(code),
     }
 }

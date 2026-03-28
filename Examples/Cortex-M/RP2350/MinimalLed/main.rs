@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
 use cortex_m_rt::{entry, exception};
-use fusion_std::component::LedPair;
+use fusion_sys::hardware::peripheral::LedPair;
 use fusion_std::gpio::{Gpio, GpioDriveStrength, GpioPin};
 use fusion_std::thread::async_sleep_for;
 use fusion_sys::thread::system_monotonic_time;

@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use libc::{self, c_void};
 
 use super::mem::system_mem;
-use crate::contract::hardware::mem::{
+use crate::contract::pal::mem::{
     Backing,
     CachePolicy,
     MapFlags,
@@ -205,7 +205,7 @@ impl LinuxFiberHost {
                 flags: MapFlags::PRIVATE,
                 attrs: RegionAttrs::VIRTUAL_ONLY,
                 cache: CachePolicy::Default,
-                placement: crate::contract::hardware::mem::Placement::Anywhere,
+                placement: crate::contract::pal::mem::Placement::Anywhere,
                 backing: Backing::Anonymous,
             })
         }

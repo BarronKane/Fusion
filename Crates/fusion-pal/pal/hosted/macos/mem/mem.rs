@@ -6,7 +6,7 @@
 
 use core::num::NonZeroUsize;
 
-use crate::contract::hardware::mem::{
+use crate::contract::pal::mem::{
     Address,
     Advise,
     MapFlags,
@@ -126,4 +126,4 @@ impl MemLock for MacOsMem {
     }
 }
 
-impl crate::contract::hardware::mem::MemCatalog for MacOsMem {}
+impl crate::contract::pal::mem::MemCatalog for MacOsMem {}

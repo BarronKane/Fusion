@@ -15,7 +15,7 @@ use fusion_example_rp2350_on_device::pcu::{
     run_pcu_pio_smoke_suite,
     suite_pass_display_code,
 };
-use fusion_std::component::{
+use fusion_sys::hardware::peripheral::{
     SevenSegmentGlyph,
     SevenSegmentPolarity,
     ShiftedFourDigitSevenSegmentDisplay,

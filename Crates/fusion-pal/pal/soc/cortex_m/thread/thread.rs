@@ -7,7 +7,7 @@
 use core::arch::asm;
 use core::time::Duration;
 
-use crate::contract::runtime::thread::{
+use crate::contract::pal::runtime::thread::{
     RawThreadEntry,
     ThreadAuthoritySet,
     ThreadBase,
@@ -82,7 +82,7 @@ impl ThreadBase for CortexMThread {
                 lifecycle: ThreadLifecycleSupport::unsupported(),
                 placement: ThreadPlacementSupport::unsupported(),
                 scheduler,
-                stack: crate::contract::runtime::thread::ThreadStackSupport::unsupported(),
+                stack: crate::contract::pal::runtime::thread::ThreadStackSupport::unsupported(),
                 locality: ThreadLocalitySupport::unsupported(),
             },
             |observation| ThreadSupport {
@@ -92,7 +92,7 @@ impl ThreadBase for CortexMThread {
                     identity_stability: ThreadIdentityStability::SystemLifetime,
                     authorities: observation.authorities,
                     implementation:
-                        crate::contract::runtime::thread::ThreadImplementationKind::Native,
+                        crate::contract::pal::runtime::thread::ThreadImplementationKind::Native,
                 },
                 placement: ThreadPlacementSupport {
                     caps: ThreadPlacementCaps::CURRENT_CPU_OBSERVE
@@ -104,10 +104,10 @@ impl ThreadBase for CortexMThread {
                     observation: ThreadGuarantee::Verified,
                     authorities: observation.authorities,
                     implementation:
-                        crate::contract::runtime::thread::ThreadImplementationKind::Native,
+                        crate::contract::pal::runtime::thread::ThreadImplementationKind::Native,
                 },
                 scheduler,
-                stack: crate::contract::runtime::thread::ThreadStackSupport::unsupported(),
+                stack: crate::contract::pal::runtime::thread::ThreadStackSupport::unsupported(),
                 locality: ThreadLocalitySupport::unsupported(),
             },
         )
@@ -239,7 +239,7 @@ impl ThreadObservationControl for CortexMThread {
             scheduler: ThreadSchedulerObservation::unknown(),
             placement: ThreadPlacementOutcome {
                 guarantee: ThreadGuarantee::Verified,
-                phase: crate::contract::runtime::thread::ThreadPlacementPhase::Inherit,
+                phase: crate::contract::pal::runtime::thread::ThreadPlacementPhase::Inherit,
                 location: observation.location,
             },
         })
@@ -282,19 +282,19 @@ fn scheduler_support() -> ThreadSchedulerSupport {
         observation: ThreadGuarantee::Unsupported,
         default_priority_range: None,
         authorities,
-        implementation: crate::contract::runtime::thread::ThreadImplementationKind::Emulated,
+        implementation: crate::contract::pal::runtime::thread::ThreadImplementationKind::Emulated,
     }
 }
 
-const fn map_hardware_error(error: crate::contract::hal::HardwareError) -> ThreadError {
+const fn map_hardware_error(error: crate::contract::pal::HardwareError) -> ThreadError {
     match error.kind() {
-        crate::contract::hal::HardwareErrorKind::Unsupported => ThreadError::unsupported(),
-        crate::contract::hal::HardwareErrorKind::Invalid => ThreadError::invalid(),
-        crate::contract::hal::HardwareErrorKind::ResourceExhausted => {
+        crate::contract::pal::HardwareErrorKind::Unsupported => ThreadError::unsupported(),
+        crate::contract::pal::HardwareErrorKind::Invalid => ThreadError::invalid(),
+        crate::contract::pal::HardwareErrorKind::ResourceExhausted => {
             ThreadError::resource_exhausted()
         }
-        crate::contract::hal::HardwareErrorKind::StateConflict => ThreadError::state_conflict(),
-        crate::contract::hal::HardwareErrorKind::Busy => ThreadError::busy(),
-        crate::contract::hal::HardwareErrorKind::Platform(code) => ThreadError::platform(code),
+        crate::contract::pal::HardwareErrorKind::StateConflict => ThreadError::state_conflict(),
+        crate::contract::pal::HardwareErrorKind::Busy => ThreadError::busy(),
+        crate::contract::pal::HardwareErrorKind::Platform(code) => ThreadError::platform(code),
     }
 }

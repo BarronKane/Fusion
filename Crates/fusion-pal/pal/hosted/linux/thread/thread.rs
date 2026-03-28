@@ -25,7 +25,7 @@ use rustix::io::Errno;
 use rustix::process::Pid;
 use rustix::thread::{self as rustix_thread, CpuSet, futex};
 
-use crate::contract::runtime::thread::{
+use crate::contract::pal::runtime::thread::{
     RawThreadEntry,
     ThreadAuthoritySet,
     ThreadBase,
@@ -95,7 +95,7 @@ const LINUX_THREAD_SUPPORT: ThreadSupport = ThreadSupport {
             .union(ThreadLifecycleCaps::EXIT_CODE),
         identity_stability: ThreadIdentityStability::ThreadLifetime,
         authorities: ThreadAuthoritySet::OPERATING_SYSTEM,
-        implementation: crate::contract::runtime::thread::ThreadImplementationKind::Native,
+        implementation: crate::contract::pal::runtime::thread::ThreadImplementationKind::Native,
     },
     placement: ThreadPlacementSupport {
         caps: ThreadPlacementCaps::LOGICAL_CPU_AFFINITY
@@ -109,7 +109,7 @@ const LINUX_THREAD_SUPPORT: ThreadSupport = ThreadSupport {
         core_class_affinity: ThreadGuarantee::Unsupported,
         observation: ThreadGuarantee::Verified,
         authorities: ThreadAuthoritySet::OPERATING_SYSTEM,
-        implementation: crate::contract::runtime::thread::ThreadImplementationKind::Native,
+        implementation: crate::contract::pal::runtime::thread::ThreadImplementationKind::Native,
     },
     scheduler: ThreadSchedulerSupport {
         caps: ThreadSchedulerCaps::YIELD
@@ -132,7 +132,7 @@ const LINUX_THREAD_SUPPORT: ThreadSupport = ThreadSupport {
             ordering: ThreadPriorityOrder::HigherIsStronger,
         }),
         authorities: ThreadAuthoritySet::OPERATING_SYSTEM,
-        implementation: crate::contract::runtime::thread::ThreadImplementationKind::Native,
+        implementation: crate::contract::pal::runtime::thread::ThreadImplementationKind::Native,
     },
     stack: ThreadStackSupport {
         caps: ThreadStackCaps::EXPLICIT_SIZE
@@ -146,15 +146,16 @@ const LINUX_THREAD_SUPPORT: ThreadSupport = ThreadSupport {
         locality: ThreadGuarantee::Unsupported,
         usage_observation: ThreadGuarantee::Unknown,
         authorities: ThreadAuthoritySet::OPERATING_SYSTEM,
-        implementation: crate::contract::runtime::thread::ThreadImplementationKind::Native,
+        implementation: crate::contract::pal::runtime::thread::ThreadImplementationKind::Native,
     },
     locality: ThreadLocalitySupport {
-        caps: crate::contract::runtime::thread::ThreadLocalityCaps::empty(),
+        caps: crate::contract::pal::runtime::thread::ThreadLocalityCaps::empty(),
         first_touch: ThreadGuarantee::Unsupported,
         location_observation: ThreadGuarantee::Unsupported,
         memory_policy: ThreadGuarantee::Unsupported,
         authorities: ThreadAuthoritySet::empty(),
-        implementation: crate::contract::runtime::thread::ThreadImplementationKind::Unsupported,
+        implementation:
+            crate::contract::pal::runtime::thread::ThreadImplementationKind::Unsupported,
     },
 };
 
@@ -267,7 +268,7 @@ unsafe impl ThreadLifecycle for LinuxThread {
         }
 
         Ok(ThreadTermination::from_entry_return(ThreadEntryReturn {
-            code: crate::contract::runtime::thread::ThreadExitCode(result as usize),
+            code: crate::contract::pal::runtime::thread::ThreadExitCode(result as usize),
         }))
     }
 
@@ -724,8 +725,8 @@ fn location_from_affinity(cpuset: &CpuSet) -> ThreadExecutionLocation {
             if cpuset.is_set(cpu) {
                 if let Ok(index) = u16::try_from(cpu) {
                     location.logical_cpu =
-                        Some(crate::contract::runtime::thread::ThreadLogicalCpuId {
-                            group: crate::contract::runtime::thread::ThreadProcessorGroupId(0),
+                        Some(crate::contract::pal::runtime::thread::ThreadLogicalCpuId {
+                            group: crate::contract::pal::runtime::thread::ThreadProcessorGroupId(0),
                             index,
                         });
                 }
@@ -750,8 +751,8 @@ fn current_execution_location() -> ThreadExecutionLocation {
     let mut location = ThreadExecutionLocation::unknown();
     let cpu = rustix_thread::sched_getcpu();
     if let Ok(index) = u16::try_from(cpu) {
-        location.logical_cpu = Some(crate::contract::runtime::thread::ThreadLogicalCpuId {
-            group: crate::contract::runtime::thread::ThreadProcessorGroupId(0),
+        location.logical_cpu = Some(crate::contract::pal::runtime::thread::ThreadLogicalCpuId {
+            group: crate::contract::pal::runtime::thread::ThreadProcessorGroupId(0),
             index,
         });
     }
@@ -1048,7 +1049,7 @@ mod tests {
         assert_eq!(termination.kind, ThreadTerminationKind::Returned);
         assert_eq!(
             termination.code,
-            Some(crate::contract::runtime::thread::ThreadExitCode(7))
+            Some(crate::contract::pal::runtime::thread::ThreadExitCode(7))
         );
         assert_eq!(touched.load(Ordering::Acquire), 1);
     }
@@ -1093,8 +1094,8 @@ mod tests {
         let context = AffinityContext {
             observed_cpu: AtomicU32::new(u32::MAX),
         };
-        let cpus = [crate::contract::runtime::thread::ThreadLogicalCpuId {
-            group: crate::contract::runtime::thread::ThreadProcessorGroupId(0),
+        let cpus = [crate::contract::pal::runtime::thread::ThreadLogicalCpuId {
+            group: crate::contract::pal::runtime::thread::ThreadProcessorGroupId(0),
             index: selected_cpu,
         }];
         let config = ThreadConfig {

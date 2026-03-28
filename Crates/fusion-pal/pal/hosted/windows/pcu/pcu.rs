@@ -1,6 +1,6 @@
 //! Windows fusion-pal programmable-IO backend.
 
-use crate::pcu::UnsupportedPcu;
+use crate::contract::pal::pcu::UnsupportedPcu;
 
 /// Selected Windows programmable-IO provider type.
 pub type PlatformPcu = UnsupportedPcu;

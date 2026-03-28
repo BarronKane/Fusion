@@ -28,7 +28,7 @@ mod implementation;
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod implementation {
-    use crate::contract::runtime::context::{UnsupportedContext, UnsupportedSavedContext};
+    use crate::contract::pal::runtime::context::{UnsupportedContext, UnsupportedSavedContext};
 
     /// Selected Linux context provider type.
     pub type PlatformContext = UnsupportedContext;

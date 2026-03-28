@@ -670,9 +670,9 @@ pub mod cortex_m {
 
     #[cfg(feature = "soc-rp2350")]
     const fn map_rp2350_hardware_error(
-        error: fusion_pal::contract::hal::HardwareError,
+        error: fusion_pal::contract::pal::HardwareError,
     ) -> super::EventError {
-        use fusion_pal::contract::hal::HardwareErrorKind;
+        use fusion_pal::contract::pal::HardwareErrorKind;
 
         match error.kind() {
             HardwareErrorKind::Unsupported => super::EventError::unsupported(),

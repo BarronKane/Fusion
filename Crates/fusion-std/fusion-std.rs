@@ -13,9 +13,6 @@ extern crate std;
 #[cfg(all(not(feature = "std"), panic = "unwind"))]
 compile_error!("fusion-std without feature `std` requires panic = \"abort\".");
 
-/// Public component surfaces layered over truthful low-level contracts.
-#[path = "component/component.rs"]
-pub mod component;
 /// Public GPIO surface re-exported from `fusion-sys`.
 pub use fusion_sys::gpio;
 /// Public coprocessor sugar layered over the truthful `fusion-sys::pcu` substrate.

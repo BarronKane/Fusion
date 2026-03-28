@@ -83,19 +83,57 @@ use crate::pal::hosted::macos as platform;
 #[cfg(target_os = "windows")]
 use crate::pal::hosted::windows as platform;
 
-/// Public user-space context module re-exported from the selected platform backend.
-pub mod context {
+/// Public execution-context module re-exported from the selected platform backend.
+pub mod execution_context {
     pub use super::platform::context::{PlatformContext, PlatformSavedContext, system_context};
-    pub use crate::contract::runtime::context::*;
+    pub use crate::contract::pal::runtime::context::*;
+}
+/// Public native visible-context contract surface.
+pub mod context {
+    pub use crate::contract::pal::domain::{
+        ContextBase,
+        ContextCaps,
+        ContextId,
+        ContextImplementationKind,
+        ContextKind,
+        ContextProjectionKind,
+        ContextSupport,
+        CourierId,
+        DomainError,
+        DomainErrorKind,
+        DomainId,
+        UnsupportedContext,
+    };
 }
 /// Public CPU- and topology-oriented hardware module re-exported from the selected backend.
 pub mod cpu {
     pub use crate::pal::cpu::*;
 }
+/// Public courier contract surface.
+pub mod courier {
+    pub use crate::contract::pal::domain::{
+        ContextId,
+        CourierBase,
+        CourierCaps,
+        CourierId,
+        CourierImplementationKind,
+        CourierSupport,
+        CourierVisibility,
+        CourierVisibilityControl,
+        DomainError,
+        DomainErrorKind,
+        DomainId,
+        UnsupportedCourier,
+    };
+}
+/// Public channel contract surface.
+pub mod channel {
+    pub use crate::contract::pal::interconnect::channel::*;
+}
 /// Public event module re-exported from the selected platform backend.
 pub mod event {
     pub use super::platform::event::{PlatformEvent, PlatformPoller, system_event};
-    pub use crate::contract::runtime::event::*;
+    pub use crate::contract::pal::runtime::event::*;
 }
 /// Public hosted-fiber helper module re-exported from the selected platform backend.
 pub mod fiber {
@@ -118,20 +156,39 @@ pub mod fiber {
 pub mod fusion_kn {
     pub use super::hosted::fusion_kn::*;
 }
+/// Public protocol contract surface.
+pub mod protocol {
+    pub use crate::contract::pal::interconnect::protocol::*;
+}
+/// Public native domain contract surface.
+pub mod domain {
+    pub use crate::contract::pal::domain::{
+        CourierId,
+        DomainBase,
+        DomainCaps,
+        DomainError,
+        DomainErrorKind,
+        DomainId,
+        DomainImplementationKind,
+        DomainKind,
+        DomainSupport,
+        UnsupportedDomain,
+    };
+}
 /// Public memory module re-exported from the selected platform backend.
 pub mod mem {
     pub use super::platform::mem::{PlatformMem, system_mem};
-    pub use crate::contract::hardware::mem::*;
+    pub use crate::contract::pal::mem::*;
 }
 /// Public programmable-IO module re-exported from the selected platform backend.
 pub mod pcu {
     pub use super::platform::pcu::{PlatformPcu, system_pcu};
-    pub use crate::pcu::*;
+    pub use crate::contract::pal::pcu::*;
 }
 /// Public power module re-exported from the selected platform backend.
 pub mod power {
     pub use super::platform::power::{PlatformPower, system_power};
-    pub use crate::contract::hardware::power::*;
+    pub use crate::contract::pal::power::*;
 }
 /// Public synchronization module re-exported from the selected platform backend.
 pub mod sync {
@@ -146,12 +203,16 @@ pub mod sync {
         PlatformSync,
         system_sync,
     };
-    pub use crate::contract::runtime::sync::*;
+    pub use crate::contract::pal::runtime::sync::*;
 }
 /// Public thread module re-exported from the selected platform backend.
 pub mod thread {
     pub use super::platform::thread::{PlatformThread, PlatformThreadHandle, system_thread};
-    pub use crate::contract::runtime::thread::*;
+    pub use crate::contract::pal::runtime::thread::*;
+}
+/// Public transport-layer contract surface.
+pub mod transport {
+    pub use crate::contract::pal::interconnect::transport::*;
 }
 /// Public vector module re-exported from the selected platform backend.
 pub mod vector {
@@ -163,5 +224,5 @@ pub mod vector {
         system_vector,
         take_pending_active_scope,
     };
-    pub use crate::contract::hal::vector::*;
+    pub use crate::contract::pal::vector::*;
 }

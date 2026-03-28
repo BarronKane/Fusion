@@ -4,7 +4,13 @@ pub mod core;
 #[path = "soc/soc.rs"]
 pub mod soc;
 
-use crate::contract::hal::{
+use crate::contract::pal::runtime::thread::{
+    ThreadClusterId,
+    ThreadCoreClassId,
+    ThreadCoreId,
+    ThreadLogicalCpuId,
+};
+use crate::contract::pal::{
     HardwareAuthoritySet,
     HardwareBase,
     HardwareCpuCaps,
@@ -22,12 +28,6 @@ use crate::contract::hal::{
     HardwareTopologyQuery,
     HardwareTopologySummary,
     HardwareWriteSummary,
-};
-use crate::contract::runtime::thread::{
-    ThreadClusterId,
-    ThreadCoreClassId,
-    ThreadCoreId,
-    ThreadLogicalCpuId,
 };
 
 #[allow(unused_imports)]

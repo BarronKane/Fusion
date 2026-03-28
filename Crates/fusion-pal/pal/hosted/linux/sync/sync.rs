@@ -17,7 +17,7 @@ use core::time::Duration;
 use rustix::io::Errno;
 use rustix::thread::futex;
 
-use crate::contract::runtime::sync::{
+use crate::contract::pal::runtime::sync::{
     MutexCaps,
     MutexSupport,
     OnceBeginResult,

@@ -3,7 +3,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::sync::{Mutex as SyncMutex, SyncError};
-use fusion_pal::contract::hal::HardwareTopologyQuery as _;
+use fusion_pal::contract::pal::HardwareTopologyQuery as _;
 use fusion_pal::sys::cpu::system_cpu;
 use fusion_sys::fiber::FiberError;
 use fusion_sys::thread::ThreadGuarantee;

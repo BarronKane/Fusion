@@ -33,16 +33,10 @@ use super::pio::{
     PioProgramLease as PcuProgramLease,
     PioSupport as PcuSupport,
 };
-use crate::contract::hal::{
-    HardwareAuthoritySet,
-    HardwareError,
-    HardwareTopologySummary,
-    HardwareWriteSummary,
-};
-use crate::contract::hardware::mem::MemTopologyNodeId;
-use crate::contract::hardware::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
-use crate::contract::hardware::power::{PowerModeDepth, PowerModeDescriptor};
-use crate::contract::runtime::thread::{
+use crate::contract::pal::mem::MemTopologyNodeId;
+use crate::contract::pal::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
+use crate::contract::pal::power::{PowerModeDepth, PowerModeDescriptor};
+use crate::contract::pal::runtime::thread::{
     ThreadAuthoritySet,
     ThreadClusterId,
     ThreadCoreClassId,
@@ -52,6 +46,12 @@ use crate::contract::runtime::thread::{
     ThreadId,
     ThreadLogicalCpuId,
     ThreadProcessorGroupId,
+};
+use crate::contract::pal::{
+    HardwareAuthoritySet,
+    HardwareError,
+    HardwareTopologySummary,
+    HardwareWriteSummary,
 };
 
 use super::board_contract::{self, CortexMSocBoard};

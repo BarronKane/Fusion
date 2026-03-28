@@ -12,10 +12,6 @@ pub mod contract;
 #[path = "pal/pal.rs"]
 pub mod pal;
 
-#[path = "pcu/pcu.rs"]
-/// Backend-neutral PCU vocabulary now owned by the top-level fusion-pal crate.
-pub mod pcu;
-
 #[path = "sys/sys.rs"]
 pub mod sys;
 

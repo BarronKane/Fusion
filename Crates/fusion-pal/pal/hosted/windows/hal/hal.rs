@@ -1,6 +1,6 @@
 //! Windows fusion-pal hardware backend stub.
 
-use crate::contract::hal::UnsupportedHardware;
+use crate::contract::pal::UnsupportedHardware;
 
 /// Selected hardware provider type for Windows builds.
 pub type PlatformHardware = UnsupportedHardware;

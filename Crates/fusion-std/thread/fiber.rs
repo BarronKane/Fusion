@@ -107,7 +107,7 @@ use super::{RuntimeSizingStrategy, default_runtime_sizing_strategy};
 #[cfg(feature = "std")]
 use core::sync::atomic::AtomicU64;
 #[cfg(feature = "std")]
-use fusion_pal::contract::hal::{HardwareTopologyQuery as _, HardwareTopologySummary};
+use fusion_pal::contract::pal::{HardwareTopologyQuery as _, HardwareTopologySummary};
 #[cfg(feature = "std")]
 use fusion_pal::sys::cpu::system_cpu;
 

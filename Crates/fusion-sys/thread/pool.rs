@@ -13,7 +13,7 @@ use core::array;
 use core::cell::UnsafeCell;
 use core::fmt;
 
-use fusion_pal::contract::hal::HardwareTopologyQuery as _;
+use fusion_pal::contract::pal::HardwareTopologyQuery as _;
 use fusion_pal::sys::cpu::system_cpu;
 use fusion_pal::sys::thread::{
     ThreadConstraintMode,

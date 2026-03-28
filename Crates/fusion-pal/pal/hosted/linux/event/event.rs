@@ -7,7 +7,7 @@
 use core::mem::MaybeUninit;
 use core::time::Duration;
 
-use crate::contract::runtime::event::{
+use crate::contract::pal::runtime::event::{
     EventBase,
     EventCaps,
     EventCompletionOp,
@@ -31,7 +31,7 @@ const LINUX_EVENT_SUPPORT: EventSupport = EventSupport {
         .union(EventCaps::TIMEOUT),
     model: EventModel::Readiness,
     max_events: None,
-    implementation: crate::contract::runtime::event::EventImplementationKind::Native,
+    implementation: crate::contract::pal::runtime::event::EventImplementationKind::Native,
 };
 
 /// Linux readiness-poller provider.
@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(support.model, EventModel::Readiness);
         assert_eq!(
             support.implementation,
-            crate::contract::runtime::event::EventImplementationKind::Native
+            crate::contract::pal::runtime::event::EventImplementationKind::Native
         );
         assert!(support.caps.contains(EventCaps::READINESS));
         assert!(support.caps.contains(EventCaps::LEVEL_TRIGGERED));

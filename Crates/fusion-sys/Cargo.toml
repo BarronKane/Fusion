@@ -14,7 +14,7 @@ path = "fusion-sys.rs"
 
 [features]
 default = ["std", "hosted"]
-std = []
+std = ["fusion-pal/std"]
 soc = ["fusion-pal/soc"]
 hosted = ["std", "fusion-pal/hosted"]
 hal = ["fusion-pal/hal"]
@@ -32,7 +32,7 @@ bitflags.workspace = true
 
 [dev-dependencies]
 libc.workspace = true
-rustix = { workspace = true, features = ["fs"] }
+rustix.workspace = true
 
 [lints]
 workspace = true

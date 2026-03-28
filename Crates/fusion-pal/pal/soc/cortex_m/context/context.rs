@@ -7,7 +7,7 @@
 use core::arch::global_asm;
 use core::mem;
 
-use crate::contract::runtime::context::{
+use crate::contract::pal::runtime::context::{
     ContextAuthoritySet,
     ContextBase,
     ContextCaps,

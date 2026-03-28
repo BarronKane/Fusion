@@ -6,7 +6,7 @@
 
 use core::num::NonZeroUsize;
 
-use crate::contract::hardware::mem::{
+use crate::contract::pal::mem::{
     Address,
     Advise,
     MapFlags,
@@ -400,12 +400,7 @@ const fn usable_len_from_descriptor(descriptor: CortexMMemoryRegionDescriptor) -
 #[cfg(test)]
 mod tests {
     use super::{CortexMMemoryRegionDescriptor, CortexMMemoryRegionKind, region_from_descriptor};
-    use crate::contract::hardware::mem::{
-        CachePolicy,
-        MemResourceBackingKind,
-        Protect,
-        RegionAttrs,
-    };
+    use crate::contract::pal::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
 
     #[test]
     fn address_zero_region_is_not_materialized_as_region_handle() {

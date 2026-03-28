@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::pcu::{
+use crate::contract::pal::pcu::{
     PcuBase,
     PcuCaps,
     PcuControl,

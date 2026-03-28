@@ -51,7 +51,7 @@ path = "bin/fusion_std_pico_tool.rs"
 
 [features]
 default = ["std", "hosted"]
-std = []
+std = ["fusion-sys/std"]
 soc = ["fusion-sys/soc"]
 hosted = ["std", "fusion-sys/hosted"]
 hal = ["fusion-sys/hal"]
