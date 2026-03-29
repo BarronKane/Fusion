@@ -1,6 +1,10 @@
-//! Shared hosted-fiber support vocabulary used by selected platform backends.
+//! Backend-neutral hosted-fiber helper vocabulary.
+
+mod unsupported;
 
 use core::fmt;
+
+pub use unsupported::*;
 
 /// Fault-promotion callback invoked from a platform fault handler.
 pub type PlatformElasticFaultHandler = fn(usize) -> bool;

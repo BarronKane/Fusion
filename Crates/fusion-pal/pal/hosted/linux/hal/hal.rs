@@ -6,6 +6,15 @@ use rustix::fs::{CWD, Mode, OFlags, openat};
 use rustix::io::{Errno, read};
 use rustix::thread::{self as rustix_thread, CpuSet};
 
+use crate::contract::pal::cpu::{
+    fallback_stack_abi,
+    selected_architecture,
+    selected_atomic_widths,
+    selected_cache_line_bytes,
+    selected_endianness,
+    selected_memory_ordering,
+    selected_pointer_width_bits,
+};
 use crate::contract::pal::runtime::thread::{
     ThreadCoreId,
     ThreadLogicalCpuId,
@@ -81,7 +90,7 @@ impl HardwareCpuQuery for LinuxHardware {
     }
 
     fn stack_abi(&self) -> Result<HardwareStackAbi, HardwareError> {
-        crate::pal::cpu::system_cpu().stack_abi()
+        Ok(fallback_stack_abi())
     }
 }
 
@@ -162,7 +171,7 @@ fn support() -> HardwareSupport {
             cache_line_bytes,
             memory_ordering: HardwareGuarantee::Verified,
             atomic_widths: HardwareGuarantee::Verified,
-            stack_abi: crate::pal::cpu::stack_abi_guarantee(),
+            stack_abi: HardwareGuarantee::Verified,
             simd,
             authorities: cpu_authorities(cache_line_bytes, simd),
             implementation: HardwareImplementationKind::Native,
@@ -173,14 +182,13 @@ fn support() -> HardwareSupport {
 
 fn cpu_description() -> HardwareCpuDescription {
     HardwareCpuDescription {
-        architecture: crate::pal::cpu::selected_architecture(),
+        architecture: selected_architecture(),
         vendor: runtime_vendor(),
-        endianness: crate::pal::cpu::selected_endianness(),
-        cache_line_bytes: runtime_cache_line_bytes()
-            .or(crate::pal::cpu::selected_cache_line_bytes()),
-        memory_ordering: crate::pal::cpu::selected_memory_ordering(),
-        pointer_width_bits: crate::pal::cpu::selected_pointer_width_bits(),
-        atomic_widths: crate::pal::cpu::selected_atomic_widths(),
+        endianness: selected_endianness(),
+        cache_line_bytes: runtime_cache_line_bytes().or(selected_cache_line_bytes()),
+        memory_ordering: selected_memory_ordering(),
+        pointer_width_bits: selected_pointer_width_bits(),
+        atomic_widths: selected_atomic_widths(),
         simd: runtime_simd_set(),
     }
 }
@@ -324,9 +332,7 @@ const fn runtime_vendor_guarantee() -> HardwareGuarantee {
 }
 
 fn runtime_cache_line_guarantee() -> HardwareGuarantee {
-    if runtime_cache_line_bytes().is_some()
-        || crate::pal::cpu::selected_cache_line_bytes().is_some()
-    {
+    if runtime_cache_line_bytes().is_some() || selected_cache_line_bytes().is_some() {
         HardwareGuarantee::Verified
     } else {
         HardwareGuarantee::Unsupported

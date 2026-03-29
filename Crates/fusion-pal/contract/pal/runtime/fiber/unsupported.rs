@@ -1,34 +1,19 @@
-//! Unsupported hosted-fiber backend surface used by targets without a platform implementation.
+//! Backend-neutral unsupported hosted-fiber helper implementation.
 
-use crate::pal::hosted::fiber_common::{
-    FiberHostError,
-    FiberHostSupport,
-    PlatformElasticFaultHandler,
-    PlatformWakeToken,
-};
+use super::{FiberHostError, FiberHostSupport, PlatformElasticFaultHandler, PlatformWakeToken};
 
 /// Unsupported hosted-fiber helper provider.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UnsupportedFiberHost;
 
-/// Target-selected hosted-fiber helper provider alias for unsupported targets.
-pub type PlatformFiberHost = UnsupportedFiberHost;
-
-/// Opaque alternate-signal-stack guard for carrier threads.
+/// Unsupported alternate-signal-stack guard.
 #[derive(Debug)]
-pub struct PlatformFiberSignalStack;
+pub struct UnsupportedFiberSignalStack;
 
-/// Opaque wake signal compatible with readiness registration.
+/// Unsupported wake signal compatible with readiness registration.
 #[derive(Debug)]
-pub struct PlatformFiberWakeSignal;
+pub struct UnsupportedFiberWakeSignal;
 
-/// Returns the process-wide hosted-fiber helper provider handle.
-#[must_use]
-pub const fn system_fiber_host() -> PlatformFiberHost {
-    PlatformFiberHost::new()
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref, clippy::unused_self)]
 impl UnsupportedFiberHost {
     /// Creates a new unsupported hosted-fiber helper provider.
     #[must_use]
@@ -76,7 +61,9 @@ impl UnsupportedFiberHost {
     /// # Errors
     ///
     /// Always returns `Unsupported` on this backend.
-    pub const fn install_signal_stack(&self) -> Result<PlatformFiberSignalStack, FiberHostError> {
+    pub const fn install_signal_stack(
+        &self,
+    ) -> Result<UnsupportedFiberSignalStack, FiberHostError> {
         Err(FiberHostError::unsupported())
     }
 
@@ -85,7 +72,7 @@ impl UnsupportedFiberHost {
     /// # Errors
     ///
     /// Always returns `Unsupported` on this backend.
-    pub const fn create_wake_signal(&self) -> Result<PlatformFiberWakeSignal, FiberHostError> {
+    pub const fn create_wake_signal(&self) -> Result<UnsupportedFiberWakeSignal, FiberHostError> {
         Err(FiberHostError::unsupported())
     }
 
@@ -103,7 +90,7 @@ impl UnsupportedFiberHost {
     }
 }
 
-impl PlatformFiberWakeSignal {
+impl UnsupportedFiberWakeSignal {
     /// Returns the source handle used to register this signal with a readiness poller.
     ///
     /// # Errors

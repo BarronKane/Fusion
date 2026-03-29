@@ -4,6 +4,13 @@ pub mod core;
 #[path = "soc/soc.rs"]
 pub mod soc;
 
+use crate::contract::pal::cpu::{
+    selected_architecture,
+    selected_atomic_widths,
+    selected_endianness,
+    selected_memory_ordering,
+    selected_pointer_width_bits,
+};
 use crate::contract::pal::runtime::thread::{
     ThreadClusterId,
     ThreadCoreClassId,
@@ -114,13 +121,13 @@ impl HardwareCpuQuery for CortexMHardware {
         let cpuid = read_cpuid();
 
         Ok(HardwareCpuDescription {
-            architecture: crate::pal::cpu::selected_architecture(),
+            architecture: selected_architecture(),
             vendor: cpuid.vendor(),
-            endianness: crate::pal::cpu::selected_endianness(),
+            endianness: selected_endianness(),
             cache_line_bytes: None,
-            memory_ordering: crate::pal::cpu::selected_memory_ordering(),
-            pointer_width_bits: crate::pal::cpu::selected_pointer_width_bits(),
-            atomic_widths: crate::pal::cpu::selected_atomic_widths(),
+            memory_ordering: selected_memory_ordering(),
+            pointer_width_bits: selected_pointer_width_bits(),
+            atomic_widths: selected_atomic_widths(),
             simd: HardwareSimdSet::empty(),
         })
     }

@@ -1,6 +1,6 @@
 //! Linux fusion-pal programmable-IO backend.
 
-use crate::contract::pal::pcu::UnsupportedPcu;
+use crate::contract::drivers::pcu::UnsupportedPcu;
 
 /// Selected Linux programmable-IO provider type.
 pub type PlatformPcu = UnsupportedPcu;

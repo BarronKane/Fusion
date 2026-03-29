@@ -4,9 +4,23 @@ pub mod context;
 #[path = "event/event.rs"]
 /// Cortex-M bare-metal event backend implementation.
 pub mod event;
-#[path = "../../unsupported/fiber.rs"]
+#[path = "gpio/gpio.rs"]
+/// Cortex-M GPIO backend implementation backed by selected static topology.
+pub mod gpio;
 /// Cortex-M hosted-fiber surface (unsupported — fibers are managed directly).
-pub mod fiber;
+pub mod fiber {
+    pub use crate::contract::pal::runtime::fiber::{
+        UnsupportedFiberHost as PlatformFiberHost,
+        UnsupportedFiberSignalStack as PlatformFiberSignalStack,
+        UnsupportedFiberWakeSignal as PlatformFiberWakeSignal,
+    };
+
+    /// Returns the unsupported hosted-fiber helper provider for the selected backend.
+    #[must_use]
+    pub const fn system_fiber_host() -> PlatformFiberHost {
+        PlatformFiberHost::new()
+    }
+}
 #[path = "hal/hal.rs"]
 /// Cortex-M hardware backend implementation.
 pub mod hal;

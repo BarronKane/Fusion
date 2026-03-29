@@ -1,6 +1,6 @@
 //! macOS fusion-pal programmable-IO backend.
 
-use crate::contract::pal::pcu::UnsupportedPcu;
+use crate::contract::drivers::pcu::UnsupportedPcu;
 
 /// Selected macOS programmable-IO provider type.
 pub type PlatformPcu = UnsupportedPcu;

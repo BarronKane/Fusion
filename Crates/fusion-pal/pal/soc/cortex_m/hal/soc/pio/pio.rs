@@ -1,9 +1,9 @@
 //! Cortex-M SoC-layer programmable-IO vocabulary and backend contract.
 
-use crate::contract::pal::pcu::PcuError;
+use crate::contract::drivers::pcu::PcuError;
 
 mod error {
-    pub use crate::contract::pal::pcu::PcuError;
+    pub use crate::contract::drivers::pcu::PcuError;
 }
 
 mod caps;
@@ -13,7 +13,7 @@ mod lowering;
 mod types;
 mod unsupported;
 
-pub use crate::contract::pal::pcu::{PcuError as PioError, PcuErrorKind as PioErrorKind};
+pub use crate::contract::drivers::pcu::{PcuError as PioError, PcuErrorKind as PioErrorKind};
 #[doc(hidden)]
 pub use caps::{PcuCaps, PcuImplementationKind, PcuSupport};
 pub use caps::{

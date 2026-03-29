@@ -5,13 +5,10 @@ pub mod cpu;
 #[path = "domain/domain.rs"]
 pub mod domain;
 pub mod error;
-pub mod gpio;
 #[path = "interconnect/interconnect.rs"]
 pub mod interconnect;
 #[path = "mem/mem.rs"]
 pub mod mem;
-#[path = "pcu/pcu.rs"]
-pub mod pcu;
 #[path = "power/power.rs"]
 pub mod power;
 #[path = "runtime/runtime.rs"]
@@ -23,9 +20,7 @@ pub mod vector;
 pub use caps::*;
 pub use cpu::*;
 pub use error::*;
-pub use gpio::*;
 pub use mem::*;
-pub use pcu::*;
 pub use power::*;
 pub use unsupported::*;
 pub use vector::*;

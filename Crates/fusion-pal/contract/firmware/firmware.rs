@@ -1,9 +1,4 @@
-pub mod acpi;
-pub mod devicetree;
+#[path = "topology/topology.rs"]
+pub mod topology;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirmwareDiscoveryKind {
-    Acpi,
-    DeviceTree,
-    StaticComposition,
-}
+pub use topology::FirmwareTopologySourceKind;

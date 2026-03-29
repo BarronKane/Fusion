@@ -1,6 +1,6 @@
 //! Reusable deterministic PIO kernel helpers.
 
-use crate::contract::pal::pcu::PcuError;
+use crate::contract::drivers::pcu::PcuError;
 
 use super::{
     PcuIrExecutionConfig,

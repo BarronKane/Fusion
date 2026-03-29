@@ -229,3 +229,151 @@ impl HardwareWriteSummary {
         Self { total, written }
     }
 }
+
+pub(crate) fn selected_atomic_widths() -> HardwareAtomicWidthSet {
+    let mut widths = HardwareAtomicWidthSet::empty();
+
+    #[cfg(target_has_atomic = "8")]
+    {
+        widths |= HardwareAtomicWidthSet::WIDTH_8;
+    }
+
+    #[cfg(target_has_atomic = "16")]
+    {
+        widths |= HardwareAtomicWidthSet::WIDTH_16;
+    }
+
+    #[cfg(target_has_atomic = "32")]
+    {
+        widths |= HardwareAtomicWidthSet::WIDTH_32;
+    }
+
+    #[cfg(target_has_atomic = "64")]
+    {
+        widths |= HardwareAtomicWidthSet::WIDTH_64;
+    }
+
+    #[cfg(target_has_atomic = "128")]
+    {
+        widths |= HardwareAtomicWidthSet::WIDTH_128;
+    }
+
+    widths
+}
+
+pub(crate) const fn selected_architecture() -> HardwareCpuArchitecture {
+    #[cfg(target_arch = "x86_64")]
+    {
+        return HardwareCpuArchitecture::X86_64;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        return HardwareCpuArchitecture::Aarch64;
+    }
+
+    #[cfg(target_arch = "arm")]
+    {
+        return HardwareCpuArchitecture::Arm;
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    {
+        return HardwareCpuArchitecture::RiscV64;
+    }
+
+    #[allow(unreachable_code)]
+    HardwareCpuArchitecture::Other
+}
+
+pub(crate) const fn selected_endianness() -> HardwareEndian {
+    #[cfg(target_endian = "little")]
+    {
+        return HardwareEndian::Little;
+    }
+
+    #[cfg(target_endian = "big")]
+    {
+        return HardwareEndian::Big;
+    }
+
+    #[allow(unreachable_code)]
+    HardwareEndian::Unknown
+}
+
+pub(crate) const fn selected_memory_ordering() -> HardwareMemoryOrdering {
+    #[cfg(target_arch = "x86_64")]
+    {
+        return HardwareMemoryOrdering::TotalStoreOrder;
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "arm", target_arch = "riscv64"))]
+    {
+        return HardwareMemoryOrdering::WeaklyOrdered;
+    }
+
+    #[allow(unreachable_code)]
+    HardwareMemoryOrdering::Unknown
+}
+
+#[allow(dead_code)]
+pub(crate) const fn selected_cache_line_bytes() -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        return Some(64);
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+pub(crate) const fn selected_pointer_width_bits() -> u16 {
+    #[cfg(target_pointer_width = "64")]
+    {
+        return 64;
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    {
+        return 32;
+    }
+
+    #[cfg(target_pointer_width = "16")]
+    {
+        return 16;
+    }
+
+    #[allow(unreachable_code)]
+    0
+}
+
+#[allow(dead_code)]
+pub(crate) const fn fallback_stack_abi() -> HardwareStackAbi {
+    #[cfg(target_arch = "x86_64")]
+    {
+        return HardwareStackAbi {
+            min_stack_alignment: 16,
+            red_zone_bytes: 128,
+            direction: HardwareStackDirection::Down,
+            guard_required: None,
+        };
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "arm", target_arch = "riscv64"))]
+    {
+        return HardwareStackAbi {
+            min_stack_alignment: 16,
+            red_zone_bytes: 0,
+            direction: HardwareStackDirection::Down,
+            guard_required: None,
+        };
+    }
+
+    #[allow(unreachable_code)]
+    HardwareStackAbi {
+        min_stack_alignment: 1,
+        red_zone_bytes: 0,
+        direction: HardwareStackDirection::Unknown,
+        guard_required: None,
+    }
+}

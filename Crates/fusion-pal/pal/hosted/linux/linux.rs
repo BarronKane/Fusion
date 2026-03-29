@@ -4,6 +4,19 @@ pub mod context;
 #[path = "event/event.rs"]
 /// Linux fusion-pal event backend implementation.
 pub mod event;
+/// Linux GPIO surface remains unsupported for now.
+pub mod gpio {
+    pub use crate::contract::drivers::gpio::{
+        UnsupportedGpio as PlatformGpio,
+        UnsupportedGpioPin as PlatformGpioPin,
+    };
+
+    /// Returns the unsupported GPIO provider for the selected backend.
+    #[must_use]
+    pub const fn system_gpio() -> PlatformGpio {
+        PlatformGpio::new()
+    }
+}
 #[path = "fiber/fiber.rs"]
 /// Linux fusion-pal hosted-fiber helper implementation.
 pub mod fiber;
@@ -25,6 +38,19 @@ pub mod sync;
 #[path = "thread/thread.rs"]
 /// Linux fusion-pal thread backend implementation.
 pub mod thread;
-#[path = "../../unsupported/vector.rs"]
 /// Linux fusion-pal vector-ownership surface remains unsupported for now.
-pub mod vector;
+pub mod vector {
+    pub use crate::contract::pal::vector::{
+        UnsupportedSealedVectorTable as PlatformSealedVectorTable,
+        UnsupportedVector as PlatformVector,
+        UnsupportedVectorBuilder as PlatformVectorBuilder,
+        bind_reserved_pendsv_dispatch,
+        take_pending_active_scope,
+    };
+
+    /// Returns the unsupported vector provider for the selected backend.
+    #[must_use]
+    pub const fn system_vector() -> PlatformVector {
+        PlatformVector::new()
+    }
+}

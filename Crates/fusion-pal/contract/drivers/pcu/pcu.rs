@@ -1,4 +1,4 @@
-//! Backend-neutral PCU contract vocabulary.
+//! Driver-facing PCU contract vocabulary.
 
 mod caps;
 mod error;

@@ -107,7 +107,14 @@ pub mod context {
 }
 /// Public CPU- and topology-oriented hardware module re-exported from the selected backend.
 pub mod cpu {
-    pub use crate::pal::cpu::*;
+    #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+    pub use super::platform::hal::core;
+    #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+    pub use super::platform::hal::soc;
+    pub use super::platform::hal::{
+        PlatformHardware as PlatformCpu,
+        system_hardware as system_cpu,
+    };
 }
 /// Public courier contract surface.
 pub mod courier {
@@ -135,6 +142,11 @@ pub mod event {
     pub use super::platform::event::{PlatformEvent, PlatformPoller, system_event};
     pub use crate::contract::pal::runtime::event::*;
 }
+/// Public GPIO driver module re-exported from the selected platform backend.
+pub mod gpio {
+    pub use super::platform::gpio::{PlatformGpio, PlatformGpioPin, system_gpio};
+    pub use crate::contract::drivers::gpio::*;
+}
 /// Public hosted-fiber helper module re-exported from the selected platform backend.
 pub mod fiber {
     pub use super::platform::fiber::{
@@ -143,7 +155,7 @@ pub mod fiber {
         PlatformFiberWakeSignal,
         system_fiber_host,
     };
-    pub use crate::pal::hosted::fiber_common::{
+    pub use crate::contract::pal::runtime::fiber::{
         FiberHostError,
         FiberHostErrorKind,
         FiberHostSupport,
@@ -183,7 +195,7 @@ pub mod mem {
 /// Public programmable-IO module re-exported from the selected platform backend.
 pub mod pcu {
     pub use super::platform::pcu::{PlatformPcu, system_pcu};
-    pub use crate::contract::pal::pcu::*;
+    pub use crate::contract::drivers::pcu::*;
 }
 /// Public power module re-exported from the selected platform backend.
 pub mod power {

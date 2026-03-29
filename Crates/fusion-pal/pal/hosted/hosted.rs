@@ -5,8 +5,6 @@ pub const PAL_LANE_NAME: &str = "hosted";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SelectedPalLane;
 
-pub mod fiber_common;
-
 #[cfg(feature = "sys-fusion-kn")]
 #[path = "fusion_kn/fusion_kn.rs"]
 /// Mediated Fusion kernel hosted platform family.

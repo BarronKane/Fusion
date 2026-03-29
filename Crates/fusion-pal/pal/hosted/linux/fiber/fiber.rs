@@ -25,7 +25,7 @@ use crate::contract::pal::mem::{
     Region,
     RegionAttrs,
 };
-use crate::pal::hosted::fiber_common::{
+use crate::contract::pal::runtime::fiber::{
     FiberHostError,
     FiberHostSupport,
     PlatformElasticFaultHandler,

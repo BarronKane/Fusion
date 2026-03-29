@@ -76,6 +76,7 @@ object.workspace = true
 libc.workspace = true
 
 [target.'cfg(not(target_os = "none"))'.dev-dependencies]
+# Bench-only external dependency for hosted runtime comparisons.
 tokio.workspace = true
 
 [lints]
