@@ -10,7 +10,7 @@ pub const PAL_LANE_NAME: &str = "hal";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SelectedPalLane;
 
-#[path = "acpi.rs"]
+#[path = "acpi/acpi.rs"]
 pub mod acpi;
 #[path = "devicetree.rs"]
 pub mod devicetree;
