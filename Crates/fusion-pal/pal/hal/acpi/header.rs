@@ -31,6 +31,8 @@ impl AcpiSignature {
     pub const DSDT: Self = Self(*b"DSDT");
     /// FADT signature (`FACP` on the wire).
     pub const FADT: Self = Self(*b"FACP");
+    /// FACS signature.
+    pub const FACS: Self = Self(*b"FACS");
     /// XSDT signature.
     pub const XSDT: Self = Self(*b"XSDT");
     /// MCFG signature.
