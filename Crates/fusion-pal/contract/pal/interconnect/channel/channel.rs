@@ -18,6 +18,13 @@ pub enum ChannelMode {
     SingleProducerMultiConsumer,
 }
 
+/// One-way role surfaced by one channel endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChannelRole {
+    Read,
+    Write,
+}
+
 /// Full support surface for one channel transport instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChannelSupport {
@@ -37,7 +44,10 @@ pub struct ChannelSupport {
     pub protocol: ProtocolDescriptor,
 }
 
-/// Base contract for one protocol-anchored channel instance.
+/// Base contract for one protocol-anchored unidirectional channel instance.
+///
+/// Fusion channels are one-way only. Request/reply or duplex interactions are modeled as paired
+/// channels rather than one bidirectional object pretending to be simpler than it is.
 pub trait ChannelBase: TransportAttachmentControl {
     /// Protocol carried by this channel.
     type Protocol: Protocol;
@@ -46,7 +56,7 @@ pub trait ChannelBase: TransportAttachmentControl {
     fn channel_support(&self) -> ChannelSupport;
 }
 
-/// Producer-side channel contract.
+/// Write-side channel contract.
 pub trait ChannelSend: ChannelBase {
     /// Sends one message through the channel.
     ///
@@ -61,7 +71,7 @@ pub trait ChannelSend: ChannelBase {
     ) -> Result<(), ChannelError>;
 }
 
-/// Consumer-side channel contract.
+/// Read-side channel contract.
 pub trait ChannelReceive: ChannelBase {
     /// Receives one message from the channel when available.
     ///

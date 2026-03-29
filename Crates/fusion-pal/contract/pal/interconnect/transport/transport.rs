@@ -13,8 +13,6 @@ pub use unsupported::*;
 pub enum TransportDirection {
     /// One-way transport from producer to consumer.
     Unidirectional,
-    /// Two-way transport over one transport surface.
-    Bidirectional,
 }
 
 /// One active producer/consumer topology.

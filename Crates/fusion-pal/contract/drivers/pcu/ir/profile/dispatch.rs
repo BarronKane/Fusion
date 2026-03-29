@@ -7,6 +7,7 @@ use super::super::{
     PcuKernelId,
     PcuKernelIr,
     PcuKernelSignature,
+    PcuParameter,
     PcuPort,
 };
 
@@ -39,6 +40,7 @@ pub struct PcuDispatchKernelIr<'a> {
     pub entry: PcuDispatchEntryPoint<'a>,
     pub bindings: &'a [PcuBinding<'a>],
     pub ports: &'a [PcuPort<'a>],
+    pub parameters: &'a [PcuParameter<'a>],
     pub capabilities: PcuDispatchCapabilities,
 }
 
@@ -59,6 +61,7 @@ impl PcuKernelIr for PcuDispatchKernelIr<'_> {
         PcuKernelSignature {
             bindings: self.bindings,
             ports: self.ports,
+            parameters: self.parameters,
             invocation: PcuInvocationModel::grid(self.entry.workgroup_size),
         }
     }
@@ -94,6 +97,7 @@ mod tests {
             },
             bindings: &[],
             ports: &[],
+            parameters: &[],
             capabilities: PcuDispatchCapabilities::INT32 | PcuDispatchCapabilities::STORAGE_BUFFERS,
         };
 

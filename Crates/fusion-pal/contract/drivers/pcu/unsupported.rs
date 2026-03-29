@@ -3,10 +3,10 @@
 use super::{
     PcuBase,
     PcuControl,
-    PcuDeviceClaim,
-    PcuDeviceDescriptor,
-    PcuDeviceId,
     PcuError,
+    PcuExecutorClaim,
+    PcuExecutorDescriptor,
+    PcuExecutorId,
     PcuSupport,
 };
 
@@ -27,17 +27,17 @@ impl PcuBase for UnsupportedPcu {
         PcuSupport::unsupported()
     }
 
-    fn devices(&self) -> &'static [PcuDeviceDescriptor] {
+    fn executors(&self) -> &'static [PcuExecutorDescriptor] {
         &[]
     }
 }
 
 impl PcuControl for UnsupportedPcu {
-    fn claim_device(&self, _device: PcuDeviceId) -> Result<PcuDeviceClaim, PcuError> {
+    fn claim_executor(&self, _executor: PcuExecutorId) -> Result<PcuExecutorClaim, PcuError> {
         Err(PcuError::unsupported())
     }
 
-    fn release_device(&self, _claim: PcuDeviceClaim) -> Result<(), PcuError> {
+    fn release_executor(&self, _claim: PcuExecutorClaim) -> Result<(), PcuError> {
         Err(PcuError::unsupported())
     }
 }

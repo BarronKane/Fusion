@@ -8,6 +8,8 @@ mod invocation;
 mod kernel;
 #[path = "op.rs"]
 mod op;
+#[path = "parameter.rs"]
+mod parameter;
 #[path = "port.rs"]
 mod port;
 #[path = "profile/profile.rs"]
@@ -19,6 +21,7 @@ pub use binding::*;
 pub use invocation::*;
 pub use kernel::*;
 pub use op::*;
+pub use parameter::*;
 pub use port::*;
 pub use profile::*;
 pub use types::*;

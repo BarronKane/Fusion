@@ -9,10 +9,10 @@ bitflags! {
     /// Generic PCU features the backend can honestly surface.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct PcuCaps: u32 {
-        /// The backend can enumerate surfaced PCU devices.
-        const ENUMERATE           = 1 << 0;
-        /// Devices can be claimed explicitly.
-        const CLAIM_DEVICE        = 1 << 1;
+        /// The backend can enumerate surfaced PCU executors.
+        const ENUMERATE_EXECUTORS = 1 << 0;
+        /// Executors can be claimed explicitly.
+        const CLAIM_EXECUTOR      = 1 << 1;
         /// The backend can accept dispatched kernels or jobs.
         const DISPATCH            = 1 << 2;
         /// Completion can be polled or queried asynchronously.
@@ -23,6 +23,10 @@ bitflags! {
         const COMPUTE_DISPATCH    = 1 << 5;
         /// The backend can expose or negotiate device-local execution memory.
         const DEVICE_LOCAL_MEMORY = 1 << 6;
+        /// Back-compat alias while the tree stops saying “device” when it means “executor.”
+        const ENUMERATE           = Self::ENUMERATE_EXECUTORS.bits();
+        /// Back-compat alias while the tree stops saying “device” when it means “executor.”
+        const CLAIM_DEVICE        = Self::CLAIM_EXECUTOR.bits();
     }
 }
 
@@ -33,8 +37,8 @@ pub struct PcuSupport {
     pub caps: PcuCaps,
     /// Native, lowered-with-restrictions, or unsupported implementation category.
     pub implementation: PcuImplementationKind,
-    /// Number of surfaced PCU devices.
-    pub device_count: u8,
+    /// Number of surfaced PCU executors.
+    pub executor_count: u8,
 }
 
 impl PcuSupport {
@@ -44,7 +48,7 @@ impl PcuSupport {
         Self {
             caps: PcuCaps::empty(),
             implementation: PcuImplementationKind::Unsupported,
-            device_count: 0,
+            executor_count: 0,
         }
     }
 }

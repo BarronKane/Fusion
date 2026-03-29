@@ -1,11 +1,13 @@
-//! Generic coprocessor invocation, planning, and execution vocabulary.
+//! Generic PCU invocation, planning, and execution vocabulary.
 
 use super::{
-    PcuDeviceId,
     PcuError,
+    PcuExecutorId,
     PcuInvocationBindings,
+    PcuInvocationParameters,
     PcuInvocationShape,
     PcuKernel,
+    PcuParameterSlot,
     PcuStreamKernelIr,
     PcuStreamPattern,
     PcuStreamValueType,
@@ -63,7 +65,7 @@ pub struct PcuDispatchPlan<'a> {
     pub(crate) kernel: &'a PcuKernel<'a>,
     pub(crate) shape: PcuInvocationShape,
     pub(crate) backend: PcuBackendKind,
-    pub(crate) device: Option<PcuDeviceId>,
+    pub(crate) executor: Option<PcuExecutorId>,
 }
 
 impl PcuDispatchPlan<'_> {
@@ -73,10 +75,16 @@ impl PcuDispatchPlan<'_> {
         self.backend
     }
 
-    /// Returns the selected generic coprocessor device when one backend-specific claim is needed.
+    /// Returns the selected generic PCU executor when one backend-specific claim is needed.
     #[must_use]
-    pub const fn device(self) -> Option<PcuDeviceId> {
-        self.device
+    pub const fn executor(self) -> Option<PcuExecutorId> {
+        self.executor
+    }
+
+    /// Back-compat alias while higher layers stop saying “device” when they mean “executor.”
+    #[must_use]
+    pub const fn device(self) -> Option<PcuExecutorId> {
+        self.executor()
     }
 }
 
@@ -93,7 +101,7 @@ pub struct PcuCpuPreparedKernel<'a> {
 pub struct PcuCortexMPioPreparedKernel<'a> {
     pub(crate) kernel: &'a PcuStreamKernelIr<'a>,
     pub(crate) shape: PcuInvocationShape,
-    pub(crate) device_id: PcuDeviceId,
+    pub(crate) executor_id: PcuExecutorId,
     pub(crate) program_id: PcuProgramId,
     pub(crate) word_count: u8,
     pub(crate) words: [u16; 32],
@@ -224,11 +232,25 @@ impl PcuPreparedKernel<'_> {
         self,
         bindings: PcuInvocationBindings<'_>,
     ) -> Result<PcuCompletedInvocation, PcuError> {
+        self.dispatch_with_parameters(bindings, PcuInvocationParameters::empty())
+    }
+
+    /// Dispatches one prepared kernel with explicit runtime parameters and returns a completion
+    /// handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest dispatch, binding, or runtime-parameter failure.
+    pub fn dispatch_with_parameters(
+        self,
+        bindings: PcuInvocationBindings<'_>,
+        parameters: PcuInvocationParameters<'_>,
+    ) -> Result<PcuCompletedInvocation, PcuError> {
         let backend = self.backend();
         let completion = match self {
-            Self::Cpu(prepared) => dispatch_cpu(prepared, bindings),
+            Self::Cpu(prepared) => dispatch_cpu(prepared, bindings, parameters),
             #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-            Self::CortexMPio(prepared) => dispatch_cortex_m_pio(prepared, bindings),
+            Self::CortexMPio(prepared) => dispatch_cortex_m_pio(prepared, bindings, parameters),
         }?;
         Ok(PcuCompletedInvocation::new(backend, completion))
     }
@@ -237,9 +259,12 @@ impl PcuPreparedKernel<'_> {
 fn dispatch_cpu(
     prepared: PcuCpuPreparedKernel<'_>,
     bindings: PcuInvocationBindings<'_>,
+    parameters: PcuInvocationParameters<'_>,
 ) -> Result<Result<(), PcuError>, PcuError> {
     let result = match (prepared.kernel, bindings) {
-        (PcuKernel::Stream(kernel), bindings) => execute_cpu_stream_kernel(*kernel, bindings),
+        (PcuKernel::Stream(kernel), bindings) => {
+            execute_cpu_stream_kernel(*kernel, bindings, parameters)
+        }
         _ => Err(PcuError::unsupported()),
     };
     Ok(result)
@@ -248,7 +273,13 @@ fn dispatch_cpu(
 fn execute_cpu_stream_kernel(
     kernel: PcuStreamKernelIr<'_>,
     bindings: PcuInvocationBindings<'_>,
+    parameters: PcuInvocationParameters<'_>,
 ) -> Result<(), PcuError> {
+    if !kernel.simple_transform_patterns_are_valid()
+        || !kernel.invocation_parameters_are_valid(parameters)
+    {
+        return Err(PcuError::invalid());
+    }
     match (kernel.simple_transform_type(), bindings) {
         (Some(PcuStreamValueType::U8), PcuInvocationBindings::StreamBytes(bindings)) => {
             if bindings.input.len() != bindings.output.len() {
@@ -257,7 +288,7 @@ fn execute_cpu_stream_kernel(
             for (input, output) in bindings.input.iter().zip(bindings.output.iter_mut()) {
                 let mut value = *input;
                 for pattern in kernel.patterns.iter().copied() {
-                    value = apply_stream_pattern_u8(value, pattern)?;
+                    value = apply_stream_pattern_u8(value, pattern, parameters)?;
                 }
                 *output = value;
             }
@@ -270,7 +301,7 @@ fn execute_cpu_stream_kernel(
             for (input, output) in bindings.input.iter().zip(bindings.output.iter_mut()) {
                 let mut value = *input;
                 for pattern in kernel.patterns.iter().copied() {
-                    value = apply_stream_pattern_u16(value, pattern)?;
+                    value = apply_stream_pattern_u16(value, pattern, parameters)?;
                 }
                 *output = value;
             }
@@ -283,7 +314,7 @@ fn execute_cpu_stream_kernel(
             for (input, output) in bindings.input.iter().zip(bindings.output.iter_mut()) {
                 let mut value = *input;
                 for pattern in kernel.patterns.iter().copied() {
-                    value = apply_stream_pattern_u32(value, pattern)?;
+                    value = apply_stream_pattern_u32(value, pattern, parameters)?;
                 }
                 *output = value;
             }
@@ -366,7 +397,7 @@ fn prepare_cortex_m_pio(plan: PcuDispatchPlan<'_>) -> Result<PcuPreparedKernel<'
     Ok(PcuPreparedKernel::CortexMPio(PcuCortexMPioPreparedKernel {
         kernel,
         shape: plan.shape,
-        device_id: plan.device.ok_or_else(PcuError::unsupported)?,
+        executor_id: plan.executor.ok_or_else(PcuError::unsupported)?,
         program_id: image.id,
         word_count: image.words.len() as u8,
         words,
@@ -378,8 +409,15 @@ fn prepare_cortex_m_pio(plan: PcuDispatchPlan<'_>) -> Result<PcuPreparedKernel<'
 fn dispatch_cortex_m_pio(
     prepared: PcuCortexMPioPreparedKernel<'_>,
     bindings: PcuInvocationBindings<'_>,
+    parameters: PcuInvocationParameters<'_>,
 ) -> Result<Result<(), PcuError>, PcuError> {
     const POLL_LIMIT: usize = 1_000_000;
+
+    // The current portable PIO IR and RP2350 lowering path do not have a truthful runtime-
+    // parameter preload story. Keep parameterized kernels on CPU fallback until that exists.
+    if !parameters.is_empty() {
+        return Err(PcuError::unsupported());
+    }
 
     let PcuInvocationBindings::StreamWords(bindings) = bindings else {
         return Err(PcuError::invalid());
@@ -391,15 +429,24 @@ fn dispatch_cortex_m_pio(
     }
 
     let generic_pcu = crate::pcu::system_pcu();
-    let device_claim = generic_pcu.claim_device(prepared.device_id)?;
+    let executor_claim = generic_pcu.claim_executor(prepared.executor_id)?;
     let pio = system_pio();
+    let engine_index = prepared
+        .executor_id
+        .0
+        .checked_sub(1)
+        .map(usize::from)
+        .ok_or_else(|| {
+            let _ = generic_pcu.release_executor(executor_claim);
+            PcuError::invalid()
+        })?;
     let engine = pio
         .engines()
-        .iter()
-        .find(|descriptor| descriptor.lane_count > 0)
+        .get(engine_index)
         .copied()
+        .filter(|descriptor| descriptor.lane_count > 0)
         .ok_or_else(|| {
-            let _ = generic_pcu.release_device(device_claim);
+            let _ = generic_pcu.release_executor(executor_claim);
             PcuError::unsupported()
         })?;
     let lanes_in_use = core::cmp::min(prepared.shape.thread_count().get() as u8, engine.lane_count);
@@ -413,7 +460,7 @@ fn dispatch_cortex_m_pio(
         Ok(claim) => claim,
         Err(error) => {
             let _ = pio.release_engine(engine_claim);
-            let _ = generic_pcu.release_device(device_claim);
+            let _ = generic_pcu.release_executor(executor_claim);
             return Err(error);
         }
     };
@@ -426,7 +473,7 @@ fn dispatch_cortex_m_pio(
         Err(error) => {
             let _ = pio.release_lanes(lane_claim);
             let _ = pio.release_engine(engine_claim);
-            let _ = generic_pcu.release_device(device_claim);
+            let _ = generic_pcu.release_executor(executor_claim);
             return Err(error);
         }
     };
@@ -512,7 +559,7 @@ fn dispatch_cortex_m_pio(
     let unload_error = pio.unload_program(&engine_claim, lease).err();
     let release_lanes_error = pio.release_lanes(lane_claim).err();
     let release_engine_error = pio.release_engine(engine_claim).err();
-    let release_device_error = generic_pcu.release_device(device_claim).err();
+    let release_executor_error = generic_pcu.release_executor(executor_claim).err();
 
     if let Err(error) = dispatch_result {
         return Ok(Err(error));
@@ -521,7 +568,7 @@ fn dispatch_cortex_m_pio(
         .or(unload_error)
         .or(release_lanes_error)
         .or(release_engine_error)
-        .or(release_device_error)
+        .or(release_executor_error)
     {
         return Ok(Err(error));
     }
@@ -529,11 +576,21 @@ fn dispatch_cortex_m_pio(
     Ok(Ok(()))
 }
 
-fn apply_stream_pattern_u8(value: u8, pattern: PcuStreamPattern) -> Result<u8, PcuError> {
+fn apply_stream_pattern_u8(
+    value: u8,
+    pattern: PcuStreamPattern,
+    parameters: PcuInvocationParameters<'_>,
+) -> Result<u8, PcuError> {
     Ok(match pattern {
         PcuStreamPattern::BitReverse => value.reverse_bits(),
         PcuStreamPattern::BitInvert => !value,
         PcuStreamPattern::Increment => value.wrapping_add(1),
+        PcuStreamPattern::AddParameter { parameter } => {
+            value.wrapping_add(parameter_value_u8(parameters, parameter)?)
+        }
+        PcuStreamPattern::XorParameter { parameter } => {
+            value ^ parameter_value_u8(parameters, parameter)?
+        }
         PcuStreamPattern::ShiftLeft { bits } => {
             if bits > 8 {
                 return Err(PcuError::invalid());
@@ -554,11 +611,21 @@ fn apply_stream_pattern_u8(value: u8, pattern: PcuStreamPattern) -> Result<u8, P
     })
 }
 
-fn apply_stream_pattern_u16(value: u16, pattern: PcuStreamPattern) -> Result<u16, PcuError> {
+fn apply_stream_pattern_u16(
+    value: u16,
+    pattern: PcuStreamPattern,
+    parameters: PcuInvocationParameters<'_>,
+) -> Result<u16, PcuError> {
     Ok(match pattern {
         PcuStreamPattern::BitReverse => value.reverse_bits(),
         PcuStreamPattern::BitInvert => !value,
         PcuStreamPattern::Increment => value.wrapping_add(1),
+        PcuStreamPattern::AddParameter { parameter } => {
+            value.wrapping_add(parameter_value_u16(parameters, parameter)?)
+        }
+        PcuStreamPattern::XorParameter { parameter } => {
+            value ^ parameter_value_u16(parameters, parameter)?
+        }
         PcuStreamPattern::ShiftLeft { bits } => {
             if bits > 16 {
                 return Err(PcuError::invalid());
@@ -579,11 +646,21 @@ fn apply_stream_pattern_u16(value: u16, pattern: PcuStreamPattern) -> Result<u16
     })
 }
 
-fn apply_stream_pattern_u32(value: u32, pattern: PcuStreamPattern) -> Result<u32, PcuError> {
+fn apply_stream_pattern_u32(
+    value: u32,
+    pattern: PcuStreamPattern,
+    parameters: PcuInvocationParameters<'_>,
+) -> Result<u32, PcuError> {
     Ok(match pattern {
         PcuStreamPattern::BitReverse => value.reverse_bits(),
         PcuStreamPattern::BitInvert => !value,
         PcuStreamPattern::Increment => value.wrapping_add(1),
+        PcuStreamPattern::AddParameter { parameter } => {
+            value.wrapping_add(parameter_value_u32(parameters, parameter)?)
+        }
+        PcuStreamPattern::XorParameter { parameter } => {
+            value ^ parameter_value_u32(parameters, parameter)?
+        }
         PcuStreamPattern::ShiftLeft { bits } => {
             if bits > 32 {
                 return Err(PcuError::invalid());
@@ -600,6 +677,36 @@ fn apply_stream_pattern_u32(value: u32, pattern: PcuStreamPattern) -> Result<u32
         PcuStreamPattern::MaskLower { bits } => mask_lower_u32(value, bits)?,
         PcuStreamPattern::ByteSwap32 => value.swap_bytes(),
     })
+}
+
+fn parameter_value_u8(
+    parameters: PcuInvocationParameters<'_>,
+    slot: PcuParameterSlot,
+) -> Result<u8, PcuError> {
+    parameters
+        .value(slot)
+        .and_then(|value| value.as_u8())
+        .ok_or_else(PcuError::invalid)
+}
+
+fn parameter_value_u16(
+    parameters: PcuInvocationParameters<'_>,
+    slot: PcuParameterSlot,
+) -> Result<u16, PcuError> {
+    parameters
+        .value(slot)
+        .and_then(|value| value.as_u16())
+        .ok_or_else(PcuError::invalid)
+}
+
+fn parameter_value_u32(
+    parameters: PcuInvocationParameters<'_>,
+    slot: PcuParameterSlot,
+) -> Result<u32, PcuError> {
+    parameters
+        .value(slot)
+        .and_then(|value| value.as_u32())
+        .ok_or_else(PcuError::invalid)
 }
 
 fn extract_bits_u32(value: u32, offset: u8, width: u8) -> Result<u32, PcuError> {
@@ -633,11 +740,18 @@ mod tests {
         PcuCompletedInvocation,
         PcuInvocationBindings,
         PcuInvocationHandle,
+        PcuInvocationParameters,
         PcuInvocationShape,
         PcuInvocationStatus,
+        PcuParameterSlot,
         PcuStreamPattern,
     };
-    use crate::pcu::{PcuByteStreamBindings, PcuHalfWordStreamBindings};
+    use crate::pcu::{
+        PcuByteStreamBindings,
+        PcuHalfWordStreamBindings,
+        PcuParameterBinding,
+        PcuParameterValue,
+    };
 
     #[test]
     fn invocation_shape_preserves_thread_count() {
@@ -665,23 +779,39 @@ mod tests {
     #[test]
     fn cpu_stream_helpers_cover_multiple_word_widths() {
         assert_eq!(
-            super::apply_stream_pattern_u8(0b0001_0110, PcuStreamPattern::BitReverse)
-                .expect("u8 bit reverse should succeed"),
+            super::apply_stream_pattern_u8(
+                0b0001_0110,
+                PcuStreamPattern::BitReverse,
+                PcuInvocationParameters::empty(),
+            )
+            .expect("u8 bit reverse should succeed"),
             0b0110_1000
         );
         assert_eq!(
-            super::apply_stream_pattern_u16(0x00f0, PcuStreamPattern::BitInvert)
-                .expect("u16 bit invert should succeed"),
+            super::apply_stream_pattern_u16(
+                0x00f0,
+                PcuStreamPattern::BitInvert,
+                PcuInvocationParameters::empty(),
+            )
+            .expect("u16 bit invert should succeed"),
             !0x00f0
         );
         assert_eq!(
-            super::apply_stream_pattern_u32(u32::MAX, PcuStreamPattern::Increment)
-                .expect("u32 increment should wrap"),
+            super::apply_stream_pattern_u32(
+                u32::MAX,
+                PcuStreamPattern::Increment,
+                PcuInvocationParameters::empty(),
+            )
+            .expect("u32 increment should wrap"),
             0
         );
         assert_eq!(
-            super::apply_stream_pattern_u32(0x0000_0001, PcuStreamPattern::ShiftLeft { bits: 4 })
-                .expect("u32 shift should succeed"),
+            super::apply_stream_pattern_u32(
+                0x0000_0001,
+                PcuStreamPattern::ShiftLeft { bits: 4 },
+                PcuInvocationParameters::empty(),
+            )
+            .expect("u32 shift should succeed"),
             0x0000_0010
         );
         assert_eq!(
@@ -690,35 +820,72 @@ mod tests {
                 PcuStreamPattern::ExtractBits {
                     offset: 4,
                     width: 4
-                }
+                },
+                PcuInvocationParameters::empty(),
             )
             .expect("u32 extract should succeed"),
             0b1111
         );
         assert_eq!(
-            super::apply_stream_pattern_u32(0xabcd_1234, PcuStreamPattern::MaskLower { bits: 12 })
-                .expect("u32 mask should succeed"),
+            super::apply_stream_pattern_u32(
+                0xabcd_1234,
+                PcuStreamPattern::MaskLower { bits: 12 },
+                PcuInvocationParameters::empty(),
+            )
+            .expect("u32 mask should succeed"),
             0x234
         );
         assert_eq!(
-            super::apply_stream_pattern_u32(0x1122_3344, PcuStreamPattern::ByteSwap32)
-                .expect("u32 byte swap should succeed"),
+            super::apply_stream_pattern_u32(
+                0x1122_3344,
+                PcuStreamPattern::ByteSwap32,
+                PcuInvocationParameters::empty(),
+            )
+            .expect("u32 byte swap should succeed"),
             0x4433_2211
         );
         assert_eq!(
-            super::apply_stream_pattern_u8(0xff, PcuStreamPattern::ShiftLeft { bits: 8 })
-                .expect("full-width u8 shift should zero"),
+            super::apply_stream_pattern_u8(
+                0xff,
+                PcuStreamPattern::ShiftLeft { bits: 8 },
+                PcuInvocationParameters::empty(),
+            )
+            .expect("full-width u8 shift should zero"),
             0
         );
         assert_eq!(
-            super::apply_stream_pattern_u16(0xffff, PcuStreamPattern::ShiftRight { bits: 16 })
-                .expect("full-width u16 shift should zero"),
+            super::apply_stream_pattern_u16(
+                0xffff,
+                PcuStreamPattern::ShiftRight { bits: 16 },
+                PcuInvocationParameters::empty(),
+            )
+            .expect("full-width u16 shift should zero"),
             0
         );
         assert_eq!(
-            super::apply_stream_pattern_u32(0xffff_ffff, PcuStreamPattern::ShiftLeft { bits: 32 })
-                .expect("full-width u32 shift should zero"),
+            super::apply_stream_pattern_u32(
+                0xffff_ffff,
+                PcuStreamPattern::ShiftLeft { bits: 32 },
+                PcuInvocationParameters::empty(),
+            )
+            .expect("full-width u32 shift should zero"),
             0
+        );
+        assert_eq!(
+            super::apply_stream_pattern_u32(
+                0x0f0f_0f0f,
+                PcuStreamPattern::XorParameter {
+                    parameter: PcuParameterSlot(0),
+                },
+                PcuInvocationParameters {
+                    bindings: &[PcuParameterBinding::new(
+                        PcuParameterSlot(0),
+                        PcuParameterValue::U32(0xffff_0000),
+                    )],
+                },
+            )
+            .expect("u32 xor parameter should succeed"),
+            0xf0f0_0f0f
         );
 
         let _ = PcuInvocationBindings::StreamBytes(PcuByteStreamBindings {

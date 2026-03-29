@@ -13,9 +13,12 @@ use super::{
     PcuInvocationBindings,
     PcuInvocationDescriptor,
     PcuInvocationHandle,
+    PcuInvocationParameters,
     PcuInvocationShape,
     PcuKernel,
     PcuKernelId,
+    PcuParameter,
+    PcuParameterSlot,
     PcuPort,
     PcuStreamCapabilities,
     PcuStreamKernelIr,
@@ -48,6 +51,7 @@ pub struct PcuStreamDispatchBuilder<'a, const MAX_PATTERNS: usize = DEFAULT_PATT
     kernel_id: PcuKernelId,
     entry_point: &'a str,
     value_type: PcuStreamValueType,
+    parameters: &'a [PcuParameter<'a>],
     patterns: [PcuStreamPattern; MAX_PATTERNS],
     pattern_len: usize,
     capabilities: PcuStreamCapabilities,
@@ -67,6 +71,7 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
             kernel_id,
             entry_point,
             value_type,
+            parameters: &[],
             patterns: [PcuStreamPattern::BitReverse; MAX_PATTERNS],
             pattern_len: 0,
             capabilities: PcuStreamCapabilities::FIFO_INPUT | PcuStreamCapabilities::FIFO_OUTPUT,
@@ -121,6 +126,12 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
     #[must_use]
     pub fn patterns(&self) -> &[PcuStreamPattern] {
         &self.patterns[..self.pattern_len]
+    }
+
+    /// Returns the declared runtime parameters carried by this stream kernel.
+    #[must_use]
+    pub const fn parameters(&self) -> &'a [PcuParameter<'a>] {
+        self.parameters
     }
 
     /// Synthesizes the corresponding `fusion-sys` stream-kernel IR payload.
@@ -184,7 +195,7 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
         self.with_policy(PcuDispatchPolicy::Require(backend))
     }
 
-    /// Prefers one specific backend without forced fallback semantics.
+    /// Prefers one specific backend and falls back to another supported executor when needed.
     #[must_use]
     pub const fn prefer_backend(self, backend: PcuBackendKind) -> Self {
         self.with_policy(PcuDispatchPolicy::Prefer(backend))
@@ -210,6 +221,13 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
     pub fn with_pattern(mut self, pattern: PcuStreamPattern) -> Result<Self, PcuError> {
         self.push_pattern(pattern)?;
         Ok(self)
+    }
+
+    /// Replaces the declared runtime-parameter slice used by this stream kernel.
+    #[must_use]
+    pub const fn with_parameters(mut self, parameters: &'a [PcuParameter<'a>]) -> Self {
+        self.parameters = parameters;
+        self
     }
 
     /// Appends several semantic stream patterns in-order.
@@ -249,6 +267,24 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
     /// Returns `ResourceExhausted` when the builder pattern budget is exhausted.
     pub fn increment(self) -> Result<Self, PcuError> {
         self.with_pattern(PcuStreamPattern::Increment)
+    }
+
+    /// Appends one runtime-parameterized wrapping add transform.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ResourceExhausted` when the builder pattern budget is exhausted.
+    pub fn add_parameter(self, parameter: PcuParameterSlot) -> Result<Self, PcuError> {
+        self.with_pattern(PcuStreamPattern::AddParameter { parameter })
+    }
+
+    /// Appends one runtime-parameterized xor transform.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ResourceExhausted` when the builder pattern budget is exhausted.
+    pub fn xor_parameter(self, parameter: PcuParameterSlot) -> Result<Self, PcuError> {
+        self.with_pattern(PcuStreamPattern::XorParameter { parameter })
     }
 
     /// Appends one specialized left shift.
@@ -306,13 +342,27 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
         input: &[u8],
         output: &mut [u8],
     ) -> Result<PcuCompletedInvocation, PcuError> {
+        self.dispatch_bytes_with_parameters(input, output, PcuInvocationParameters::empty())
+    }
+
+    /// Dispatches one byte-stream transform with explicit runtime parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest planning, preparation, or dispatch failure.
+    pub fn dispatch_bytes_with_parameters(
+        self,
+        input: &[u8],
+        output: &mut [u8],
+        parameters: PcuInvocationParameters<'_>,
+    ) -> Result<PcuCompletedInvocation, PcuError> {
         if self.value_type != PcuStreamValueType::U8 {
             return Err(PcuError::invalid());
         }
-        self.dispatch(PcuInvocationBindings::StreamBytes(PcuByteStreamBindings {
-            input,
-            output,
-        }))
+        self.dispatch(
+            PcuInvocationBindings::StreamBytes(PcuByteStreamBindings { input, output }),
+            parameters,
+        )
     }
 
     /// Dispatches one half-word stream transform.
@@ -325,12 +375,27 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
         input: &[u16],
         output: &mut [u16],
     ) -> Result<PcuCompletedInvocation, PcuError> {
+        self.dispatch_half_words_with_parameters(input, output, PcuInvocationParameters::empty())
+    }
+
+    /// Dispatches one half-word stream transform with explicit runtime parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest planning, preparation, or dispatch failure.
+    pub fn dispatch_half_words_with_parameters(
+        self,
+        input: &[u16],
+        output: &mut [u16],
+        parameters: PcuInvocationParameters<'_>,
+    ) -> Result<PcuCompletedInvocation, PcuError> {
         if self.value_type != PcuStreamValueType::U16 {
             return Err(PcuError::invalid());
         }
-        self.dispatch(PcuInvocationBindings::StreamHalfWords(
-            PcuHalfWordStreamBindings { input, output },
-        ))
+        self.dispatch(
+            PcuInvocationBindings::StreamHalfWords(PcuHalfWordStreamBindings { input, output }),
+            parameters,
+        )
     }
 
     /// Dispatches one word-stream transform.
@@ -343,13 +408,27 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
         input: &[u32],
         output: &mut [u32],
     ) -> Result<PcuCompletedInvocation, PcuError> {
+        self.dispatch_words_with_parameters(input, output, PcuInvocationParameters::empty())
+    }
+
+    /// Dispatches one word-stream transform with explicit runtime parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest planning, preparation, or dispatch failure.
+    pub fn dispatch_words_with_parameters(
+        self,
+        input: &[u32],
+        output: &mut [u32],
+        parameters: PcuInvocationParameters<'_>,
+    ) -> Result<PcuCompletedInvocation, PcuError> {
         if self.value_type != PcuStreamValueType::U32 {
             return Err(PcuError::invalid());
         }
-        self.dispatch(PcuInvocationBindings::StreamWords(PcuWordStreamBindings {
-            input,
-            output,
-        }))
+        self.dispatch(
+            PcuInvocationBindings::StreamWords(PcuWordStreamBindings { input, output }),
+            parameters,
+        )
     }
 
     /// Dispatches one byte-stream transform and waits for completion.
@@ -416,6 +495,7 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
     fn dispatch(
         self,
         bindings: PcuInvocationBindings<'_>,
+        parameters: PcuInvocationParameters<'_>,
     ) -> Result<PcuCompletedInvocation, PcuError> {
         let ir = self.kernel_ir();
         if !ir.simple_transform_patterns_are_valid() {
@@ -423,9 +503,9 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
         }
         let kernel = PcuKernel::Stream(ir);
         let descriptor = self.descriptor(&kernel);
-        let plan = self.system.raw().plan(descriptor)?;
-        let prepared = self.system.raw().prepare(plan)?;
-        prepared.dispatch(bindings)
+        let plan = self.system.plan(descriptor)?;
+        let prepared = self.system.prepare(plan)?;
+        prepared.dispatch_with_parameters(bindings, parameters)
     }
 
     fn kernel_ir(&self) -> PcuStreamKernelIr<'_> {
@@ -438,6 +518,7 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
                 PcuStreamValueType::U16 => &HALF_WORD_STREAM_PORTS,
                 PcuStreamValueType::U32 => &WORD_STREAM_PORTS,
             },
+            parameters: self.parameters,
             patterns: self.patterns(),
             capabilities: self.capabilities,
         }
@@ -459,6 +540,8 @@ const fn pattern_capabilities(pattern: PcuStreamPattern) -> PcuStreamCapabilitie
         PcuStreamPattern::BitReverse => PcuStreamCapabilities::BIT_REVERSE,
         PcuStreamPattern::BitInvert => PcuStreamCapabilities::BIT_INVERT,
         PcuStreamPattern::Increment => PcuStreamCapabilities::INCREMENT,
+        PcuStreamPattern::AddParameter { .. } => PcuStreamCapabilities::ADD_PARAMETER,
+        PcuStreamPattern::XorParameter { .. } => PcuStreamCapabilities::XOR_PARAMETER,
         PcuStreamPattern::ShiftLeft { .. } => PcuStreamCapabilities::SHIFT_LEFT,
         PcuStreamPattern::ShiftRight { .. } => PcuStreamCapabilities::SHIFT_RIGHT,
         PcuStreamPattern::ExtractBits { .. } => PcuStreamCapabilities::EXTRACT_BITS,

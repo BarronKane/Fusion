@@ -247,8 +247,8 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelBase
         let state = self.state.borrow();
         let mode = state.mode();
         ChannelSupport {
-            caps: ChannelCaps::SEND
-                | ChannelCaps::RECEIVE
+            caps: ChannelCaps::WRITE
+                | ChannelCaps::READ
                 | ChannelCaps::BUFFERED
                 | ChannelCaps::MODE_PROMOTION
                 | ChannelCaps::CLAIM_GATED_CROSS_COURIER,

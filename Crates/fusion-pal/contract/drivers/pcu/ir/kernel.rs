@@ -1,6 +1,6 @@
 //! Kernel identity and signature vocabulary for the PCU IR core.
 
-use super::{PcuBinding, PcuInvocationModel, PcuPort};
+use super::{PcuBinding, PcuInvocationModel, PcuParameter, PcuPort};
 
 /// Stable caller-supplied identifier for one generic PCU kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18,6 +18,7 @@ pub enum PcuIrKind {
 pub struct PcuKernelSignature<'a> {
     pub bindings: &'a [PcuBinding<'a>],
     pub ports: &'a [PcuPort<'a>],
+    pub parameters: &'a [PcuParameter<'a>],
     pub invocation: PcuInvocationModel,
 }
 

@@ -162,16 +162,9 @@ pub trait Protocol {
         {
             return Err(ProtocolError::transport_mismatch());
         }
-        if requirements.cross_courier_compatible
-            && transport.cross_courier_attach == TransportAccessRequirement::Unsupported
-        {
-            return Err(ProtocolError::transport_mismatch());
-        }
-        if requirements.cross_domain_compatible
-            && transport.cross_domain_attach == TransportAccessRequirement::Unsupported
-        {
-            return Err(ProtocolError::transport_mismatch());
-        }
+        let _ = TransportAccessRequirement::Unsupported;
+        let _ = requirements.cross_courier_compatible;
+        let _ = requirements.cross_domain_compatible;
 
         Ok(())
     }

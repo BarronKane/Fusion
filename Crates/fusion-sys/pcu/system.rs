@@ -1,13 +1,13 @@
-//! Generic fusion-sys wrapper over the selected coprocessor backend.
+//! Generic fusion-sys wrapper over the selected PCU executor backend.
 
 use fusion_pal::sys::pcu::{
     PcuBase,
     PcuControl,
-    PcuDeviceClaim,
-    PcuDeviceClass,
-    PcuDeviceDescriptor,
-    PcuDeviceId,
     PcuError,
+    PcuExecutorClaim,
+    PcuExecutorClass,
+    PcuExecutorDescriptor,
+    PcuExecutorId,
     PcuSupport,
     PlatformPcu,
     system_pcu as pal_system_pcu,
@@ -17,9 +17,11 @@ use super::{
     PcuBackendKind,
     PcuDispatchPlan,
     PcuDispatchPolicy,
+    PcuInvocation,
     PcuInvocationBindings,
     PcuInvocationDescriptor,
     PcuInvocationHandle,
+    PcuInvocationParameters,
     PcuPreparedKernel,
     PcuStreamKernelIr,
 };
@@ -27,7 +29,7 @@ use super::{
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
 use super::PcuStreamPattern;
 
-/// fusion-sys wrapper around the selected generic coprocessor backend.
+/// fusion-sys wrapper around the selected generic PCU executor backend.
 #[derive(Debug, Clone, Copy)]
 pub struct PcuSystem {
     inner: PlatformPcu,
@@ -42,34 +44,66 @@ impl PcuSystem {
         }
     }
 
-    /// Reports the truthful generic coprocessor surface for the selected backend.
+    /// Reports the truthful generic PCU executor surface for the selected backend.
     #[must_use]
     pub fn support(&self) -> PcuSupport {
         PcuBase::support(&self.inner)
     }
 
-    /// Returns the surfaced generic coprocessor devices.
+    /// Returns the surfaced generic PCU executors.
     #[must_use]
-    pub fn devices(&self) -> &'static [PcuDeviceDescriptor] {
-        PcuBase::devices(&self.inner)
+    pub fn executors(&self) -> &'static [PcuExecutorDescriptor] {
+        PcuBase::executors(&self.inner)
     }
 
-    /// Claims one surfaced generic coprocessor device.
+    /// Returns one surfaced executor descriptor by stable id.
+    #[must_use]
+    pub fn executor(&self, executor: PcuExecutorId) -> Option<&'static PcuExecutorDescriptor> {
+        self.executors()
+            .iter()
+            .find(|descriptor| descriptor.id == executor)
+    }
+
+    /// Back-compat alias while higher layers stop saying “device” when they mean “executor.”
+    #[must_use]
+    pub fn devices(&self) -> &'static [PcuExecutorDescriptor] {
+        self.executors()
+    }
+
+    /// Claims one surfaced generic PCU executor.
     ///
     /// # Errors
     ///
     /// Returns any honest backend claim failure.
-    pub fn claim_device(&self, device: PcuDeviceId) -> Result<PcuDeviceClaim, PcuError> {
-        PcuControl::claim_device(&self.inner, device)
+    pub fn claim_executor(&self, executor: PcuExecutorId) -> Result<PcuExecutorClaim, PcuError> {
+        PcuControl::claim_executor(&self.inner, executor)
     }
 
-    /// Releases one previously claimed generic coprocessor device.
+    /// Back-compat alias while higher layers stop saying “device” when they mean “executor.”
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend claim failure.
+    pub fn claim_device(&self, device: PcuExecutorId) -> Result<PcuExecutorClaim, PcuError> {
+        self.claim_executor(device)
+    }
+
+    /// Releases one previously claimed generic PCU executor.
     ///
     /// # Errors
     ///
     /// Returns any honest backend release failure.
-    pub fn release_device(&self, claim: PcuDeviceClaim) -> Result<(), PcuError> {
-        PcuControl::release_device(&self.inner, claim)
+    pub fn release_executor(&self, claim: PcuExecutorClaim) -> Result<(), PcuError> {
+        PcuControl::release_executor(&self.inner, claim)
+    }
+
+    /// Back-compat alias while higher layers stop saying “device” when they mean “executor.”
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend release failure.
+    pub fn release_device(&self, claim: PcuExecutorClaim) -> Result<(), PcuError> {
+        self.release_executor(claim)
     }
 
     fn stream_kernel_supports_pio(&self, kernel: PcuStreamKernelIr<'_>) -> bool {
@@ -78,6 +112,7 @@ impl PcuSystem {
             use crate::pcu::cortex_m::pio::system_pio;
 
             if !kernel.simple_transform_patterns_are_valid()
+                || !kernel.parameters.is_empty()
                 || kernel.simple_transform_type() != Some(super::PcuStreamValueType::U32)
                 || kernel.patterns.len() != 1
             {
@@ -107,11 +142,35 @@ impl PcuSystem {
         }
     }
 
-    fn select_pio_device(&self) -> Option<PcuDeviceId> {
-        self.devices()
+    fn has_cpu_executor(&self) -> bool {
+        self.executors()
             .iter()
-            .find(|descriptor| descriptor.class == PcuDeviceClass::Io)
+            .any(|descriptor| descriptor.class == PcuExecutorClass::Cpu)
+    }
+
+    fn select_pio_executor(&self) -> Option<PcuExecutorId> {
+        self.executors()
+            .iter()
+            .find(|descriptor| descriptor.class == PcuExecutorClass::Io)
             .map(|descriptor| descriptor.id)
+    }
+
+    /// Returns the exact dispatch policy required to target one surfaced executor directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Invalid` when the executor is unknown and `Unsupported` when the executor class
+    /// does not yet map to one executable local backend.
+    pub fn dispatch_policy_for_executor(
+        &self,
+        executor: PcuExecutorId,
+    ) -> Result<PcuDispatchPolicy, PcuError> {
+        let descriptor = self.executor(executor).ok_or_else(PcuError::invalid)?;
+        match descriptor.class {
+            PcuExecutorClass::Cpu => Ok(PcuDispatchPolicy::CpuOnly),
+            PcuExecutorClass::Io => Ok(PcuDispatchPolicy::Require(PcuBackendKind::CortexMPio)),
+            _ => Err(PcuError::unsupported()),
+        }
     }
 
     fn select_backend(
@@ -126,8 +185,9 @@ impl PcuSystem {
         }
         let pio_supported = kernel
             .as_stream()
-            .is_some_and(|stream| self.stream_kernel_supports_pio(stream));
-        let cpu_supported = kernel.as_stream().is_some();
+            .is_some_and(|stream| self.stream_kernel_supports_pio(stream))
+            && self.select_pio_executor().is_some();
+        let cpu_supported = kernel.as_stream().is_some() && self.has_cpu_executor();
 
         match invocation.policy {
             PcuDispatchPolicy::CpuOnly => {
@@ -154,6 +214,8 @@ impl PcuSystem {
             PcuDispatchPolicy::Prefer(PcuBackendKind::Cpu) => {
                 if cpu_supported {
                     Ok(PcuBackendKind::Cpu)
+                } else if pio_supported {
+                    Ok(PcuBackendKind::CortexMPio)
                 } else {
                     Err(PcuError::unsupported())
                 }
@@ -161,6 +223,8 @@ impl PcuSystem {
             PcuDispatchPolicy::Prefer(PcuBackendKind::CortexMPio) => {
                 if pio_supported {
                     Ok(PcuBackendKind::CortexMPio)
+                } else if cpu_supported {
+                    Ok(PcuBackendKind::Cpu)
                 } else {
                     Err(PcuError::unsupported())
                 }
@@ -191,13 +255,35 @@ impl PcuSystem {
             kernel: invocation.kernel,
             shape: invocation.shape,
             backend,
-            device: match backend {
+            executor: match backend {
                 PcuBackendKind::Cpu => None,
-                PcuBackendKind::CortexMPio => {
-                    Some(self.select_pio_device().ok_or_else(PcuError::unsupported)?)
-                }
+                PcuBackendKind::CortexMPio => Some(
+                    self.select_pio_executor()
+                        .ok_or_else(PcuError::unsupported)?,
+                ),
             },
         })
+    }
+
+    /// Plans one kernel invocation against one exact surfaced executor.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor-selection, capability, or policy-selection failure.
+    pub fn plan_for_executor<'a>(
+        &self,
+        invocation: PcuInvocation<'a>,
+        executor: PcuExecutorId,
+    ) -> Result<PcuDispatchPlan<'a>, PcuError> {
+        let mut plan = self.plan(PcuInvocationDescriptor {
+            kernel: invocation.kernel,
+            shape: invocation.shape,
+            policy: self.dispatch_policy_for_executor(executor)?,
+        })?;
+        if matches!(plan.backend, PcuBackendKind::CortexMPio) {
+            plan.executor = Some(executor);
+        }
+        Ok(plan)
     }
 
     /// Prepares one already-planned kernel for execution.
@@ -223,8 +309,58 @@ impl PcuSystem {
         invocation: PcuInvocationDescriptor<'_>,
         bindings: PcuInvocationBindings<'_>,
     ) -> Result<impl PcuInvocationHandle, PcuError> {
+        self.dispatch_with_parameters(invocation, bindings, PcuInvocationParameters::empty())
+    }
+
+    /// Plans, prepares, and dispatches one kernel invocation with explicit runtime parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest planning, preparation, or dispatch failure.
+    pub fn dispatch_with_parameters(
+        &self,
+        invocation: PcuInvocationDescriptor<'_>,
+        bindings: PcuInvocationBindings<'_>,
+        parameters: PcuInvocationParameters<'_>,
+    ) -> Result<impl PcuInvocationHandle, PcuError> {
         let prepared = self.prepare(self.plan(invocation)?)?;
-        prepared.dispatch(bindings)
+        prepared.dispatch_with_parameters(bindings, parameters)
+    }
+
+    /// Plans, prepares, and dispatches one kernel invocation against one exact surfaced executor.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor-selection, planning, preparation, or dispatch failure.
+    pub fn dispatch_on_executor(
+        &self,
+        invocation: PcuInvocation<'_>,
+        bindings: PcuInvocationBindings<'_>,
+        executor: PcuExecutorId,
+    ) -> Result<impl PcuInvocationHandle, PcuError> {
+        self.dispatch_on_executor_with_parameters(
+            invocation,
+            bindings,
+            PcuInvocationParameters::empty(),
+            executor,
+        )
+    }
+
+    /// Plans, prepares, and dispatches one kernel invocation against one exact surfaced executor
+    /// with explicit runtime parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor-selection, planning, preparation, or dispatch failure.
+    pub fn dispatch_on_executor_with_parameters(
+        &self,
+        invocation: PcuInvocation<'_>,
+        bindings: PcuInvocationBindings<'_>,
+        parameters: PcuInvocationParameters<'_>,
+        executor: PcuExecutorId,
+    ) -> Result<impl PcuInvocationHandle, PcuError> {
+        let prepared = self.prepare(self.plan_for_executor(invocation, executor)?)?;
+        prepared.dispatch_with_parameters(bindings, parameters)
     }
 }
 
@@ -232,12 +368,6 @@ impl Default for PcuSystem {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Returns a wrapper for the selected generic coprocessor backend.
-#[must_use]
-pub const fn system_pcu() -> PcuSystem {
-    PcuSystem::new()
 }
 
 #[cfg(test)]
@@ -248,6 +378,8 @@ mod tests {
     use crate::pcu::{
         PcuByteStreamBindings,
         PcuDispatchPolicy,
+        PcuExecutorClass,
+        PcuInvocation,
         PcuInvocationBindings,
         PcuInvocationDescriptor,
         PcuInvocationHandle,
@@ -266,7 +398,10 @@ mod tests {
     fn generic_system_support_matches_device_inventory() {
         let system = PcuSystem::new();
         let support = system.support();
-        assert_eq!(usize::from(support.device_count), system.devices().len());
+        assert_eq!(
+            usize::from(support.executor_count),
+            system.executors().len()
+        );
     }
 
     #[test]
@@ -281,6 +416,7 @@ mod tests {
             entry_point: "bit_reverse",
             bindings: &[],
             ports: &ports,
+            parameters: &[],
             patterns: &patterns,
             capabilities: PcuStreamCapabilities::FIFO_INPUT
                 | PcuStreamCapabilities::FIFO_OUTPUT
@@ -300,6 +436,37 @@ mod tests {
     }
 
     #[test]
+    fn host_prefer_cortex_m_pio_falls_back_to_cpu() {
+        let ports = [
+            PcuPort::stream_input(Some("input"), PcuStreamValueType::U32.as_value_type()),
+            PcuPort::stream_output(Some("output"), PcuStreamValueType::U32.as_value_type()),
+        ];
+        let patterns = [PcuStreamPattern::BitReverse];
+        let kernel = PcuKernel::Stream(PcuStreamKernelIr {
+            id: PcuKernelId(46),
+            entry_point: "bit_reverse",
+            bindings: &[],
+            ports: &ports,
+            parameters: &[],
+            patterns: &patterns,
+            capabilities: PcuStreamCapabilities::FIFO_INPUT
+                | PcuStreamCapabilities::FIFO_OUTPUT
+                | PcuStreamCapabilities::BIT_REVERSE,
+        });
+        let system = PcuSystem::new();
+        let plan = system
+            .plan(PcuInvocationDescriptor {
+                kernel: &kernel,
+                shape: PcuInvocationShape::threads(NonZeroU32::new(1).unwrap()),
+                policy: PcuDispatchPolicy::Prefer(crate::pcu::PcuBackendKind::CortexMPio),
+            })
+            .expect("prefer-pio planning should fall back to CPU on host");
+
+        assert_eq!(plan.backend(), crate::pcu::PcuBackendKind::Cpu);
+        assert_eq!(plan.device(), None);
+    }
+
+    #[test]
     fn host_stream_dispatch_executes_cpu_fallback() {
         let ports = [
             PcuPort::stream_input(Some("input"), PcuStreamValueType::U32.as_value_type()),
@@ -311,6 +478,7 @@ mod tests {
             entry_point: "bit_reverse",
             bindings: &[],
             ports: &ports,
+            parameters: &[],
             patterns: &patterns,
             capabilities: PcuStreamCapabilities::FIFO_INPUT
                 | PcuStreamCapabilities::FIFO_OUTPUT
@@ -352,6 +520,7 @@ mod tests {
             entry_point: "bit_invert",
             bindings: &[],
             ports: &ports,
+            parameters: &[],
             patterns: &patterns,
             capabilities: PcuStreamCapabilities::FIFO_INPUT
                 | PcuStreamCapabilities::FIFO_OUTPUT
@@ -393,6 +562,7 @@ mod tests {
             entry_point: "illegal_bswap32_u8",
             bindings: &[],
             ports: &ports,
+            parameters: &[],
             patterns: &patterns,
             capabilities: PcuStreamCapabilities::FIFO_INPUT
                 | PcuStreamCapabilities::FIFO_OUTPUT
@@ -408,5 +578,61 @@ mod tests {
             .expect_err("invalid pattern/type pairing should be rejected at planning time");
 
         assert_eq!(error.kind(), crate::pcu::PcuError::invalid().kind());
+    }
+
+    #[test]
+    fn host_cpu_executor_maps_to_direct_cpu_policy() {
+        let system = PcuSystem::new();
+        let cpu = system
+            .executors()
+            .iter()
+            .find(|descriptor| descriptor.class == PcuExecutorClass::Cpu)
+            .expect("host should surface one cpu executor");
+
+        assert_eq!(
+            system
+                .dispatch_policy_for_executor(cpu.id)
+                .expect("cpu executor should map to one direct policy"),
+            PcuDispatchPolicy::CpuOnly
+        );
+    }
+
+    #[test]
+    fn host_plan_for_executor_targets_cpu_directly() {
+        let ports = [
+            PcuPort::stream_input(Some("input"), PcuStreamValueType::U32.as_value_type()),
+            PcuPort::stream_output(Some("output"), PcuStreamValueType::U32.as_value_type()),
+        ];
+        let patterns = [PcuStreamPattern::BitReverse];
+        let kernel = PcuKernel::Stream(PcuStreamKernelIr {
+            id: PcuKernelId(45),
+            entry_point: "bit_reverse",
+            bindings: &[],
+            ports: &ports,
+            parameters: &[],
+            patterns: &patterns,
+            capabilities: PcuStreamCapabilities::FIFO_INPUT
+                | PcuStreamCapabilities::FIFO_OUTPUT
+                | PcuStreamCapabilities::BIT_REVERSE,
+        });
+        let system = PcuSystem::new();
+        let cpu = system
+            .executors()
+            .iter()
+            .find(|descriptor| descriptor.class == PcuExecutorClass::Cpu)
+            .expect("host should surface one cpu executor");
+
+        let plan = system
+            .plan_for_executor(
+                PcuInvocation {
+                    kernel: &kernel,
+                    shape: PcuInvocationShape::threads(NonZeroU32::new(1).unwrap()),
+                },
+                cpu.id,
+            )
+            .expect("host cpu executor planning should succeed");
+
+        assert_eq!(plan.backend(), crate::pcu::PcuBackendKind::Cpu);
+        assert_eq!(plan.executor(), None);
     }
 }
