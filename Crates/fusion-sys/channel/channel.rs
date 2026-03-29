@@ -142,6 +142,26 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
             TransportAttachmentScope::CrossDomain => Err(TransportError::unsupported()),
         }
     }
+
+    #[cfg(feature = "debug-insights")]
+    pub(crate) fn clear_pending_messages(&self) -> Result<usize, ChannelError> {
+        let mut state = self
+            .state
+            .try_borrow_mut()
+            .map_err(|_| ChannelError::busy())?;
+        let dropped = state.len;
+        if dropped == 0 {
+            return Ok(0);
+        }
+
+        for slot in &mut state.buffer {
+            *slot = None;
+        }
+        state.head = 0;
+        state.tail = 0;
+        state.len = 0;
+        Ok(dropped)
+    }
 }
 
 impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportBase

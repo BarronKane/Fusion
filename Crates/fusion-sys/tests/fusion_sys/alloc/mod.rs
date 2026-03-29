@@ -4,4 +4,9 @@
 //! implementations are still being built on top of it.
 
 mod all;
-mod stubs;
+mod allocator_channel;
+mod allocator_root;
+mod arena;
+mod retained;
+mod slab;
+mod support;

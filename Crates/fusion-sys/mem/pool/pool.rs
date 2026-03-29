@@ -21,6 +21,8 @@ mod stats;
 pub use builder::MemoryPoolBuilder;
 pub use error::{MemoryPoolError, MemoryPoolErrorKind};
 pub use extent::{
+    MemoryPoolExtentDisposition,
+    MemoryPoolExtentInfo,
     MemoryPoolExtentRequest,
     MemoryPoolLease,
     MemoryPoolLeaseId,
@@ -37,7 +39,7 @@ pub use policy::{MemoryPoolPolicy, MemoryPoolProvisioningPolicy};
 pub use stats::MemoryPoolStats;
 
 use crate::mem::provider::{MemoryCompatibilityEnvelope, MemoryPoolClassId, MemoryTopologyNodeId};
-use crate::mem::resource::{MemoryResource, ResourceRange};
+use crate::mem::resource::{MemoryResource, ResourceAttrs, ResourceRange};
 use crate::sync::Mutex;
 
 use self::builder::MemoryPoolBuilder as Builder;
@@ -169,6 +171,58 @@ impl<const MEMBERS: usize, const EXTENTS: usize> MemoryPool<MEMBERS, EXTENTS> {
             usize::try_from(member_id.0).map_err(|_| MemoryPoolError::invalid_request())?;
         let usage = state.member_usage(member_index);
         Ok(MemoryPoolMemberInfo::from_member(member, usage))
+    }
+
+    /// Returns descriptive information for one member by stable stream index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the pool cannot synchronize its metadata honestly.
+    pub fn member_info_at(
+        &self,
+        index: usize,
+    ) -> Result<Option<MemoryPoolMemberInfo>, MemoryPoolError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|error| MemoryPoolError::synchronization(error.kind))?;
+        let mut seen = 0;
+        for (member_index, member) in self.members.iter().enumerate() {
+            let Some(member) = member else {
+                continue;
+            };
+            if seen == index {
+                let usage = state.member_usage(member_index);
+                return Ok(Some(MemoryPoolMemberInfo::from_member(member, usage)));
+            }
+            seen += 1;
+        }
+        Ok(None)
+    }
+
+    /// Returns one tracked extent snapshot by stable stream index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the pool cannot synchronize its metadata honestly.
+    pub fn extent_info_at(
+        &self,
+        index: usize,
+    ) -> Result<Option<MemoryPoolExtentInfo>, MemoryPoolError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|error| MemoryPoolError::synchronization(error.kind))?;
+        let mut seen = 0;
+        for record in state.extents.iter().flatten() {
+            if seen == index {
+                return Ok(Some(
+                    record.public_info(self.member_id(record.member_index)?),
+                ));
+            }
+            seen += 1;
+        }
+        Ok(None)
     }
 
     /// Acquires a new extent lease from the pool.
@@ -372,9 +426,11 @@ impl<const MEMBERS: usize, const EXTENTS: usize> MemoryPool<MEMBERS, EXTENTS> {
                 allocation,
                 metadata_cost,
                 waste,
+                source_span_len: record.range.len,
+                front_padding: prefix_len,
             };
 
-            if is_better_candidate(best, candidate) {
+            if is_better_candidate(best, candidate, self.prefers_tight_front_allocation()) {
                 best = Some(candidate);
             }
         }
@@ -408,6 +464,14 @@ impl<const MEMBERS: usize, const EXTENTS: usize> MemoryPool<MEMBERS, EXTENTS> {
 
         Some(ResourceRange::new(offset, request.len))
     }
+
+    const fn prefers_tight_front_allocation(&self) -> bool {
+        self.compatibility.attrs.intersects(
+            ResourceAttrs::DMA_VISIBLE
+                .union(ResourceAttrs::DEVICE_LOCAL)
+                .union(ResourceAttrs::PHYS_CONTIGUOUS),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -417,24 +481,49 @@ struct AllocationCandidate {
     allocation: ResourceRange,
     metadata_cost: usize,
     waste: usize,
+    source_span_len: usize,
+    front_padding: usize,
 }
 
 fn is_better_candidate(
     current: Option<AllocationCandidate>,
     candidate: AllocationCandidate,
+    prefer_tight_front: bool,
 ) -> bool {
     current.is_none_or(|current| {
-        (
-            candidate.metadata_cost,
-            candidate.waste,
-            candidate.member_index,
-            candidate.slot_index,
-        ) < (
-            current.metadata_cost,
-            current.waste,
-            current.member_index,
-            current.slot_index,
-        )
+        if prefer_tight_front {
+            (
+                candidate.source_span_len,
+                candidate.front_padding,
+                candidate.metadata_cost,
+                candidate.waste,
+                candidate.member_index,
+                candidate.slot_index,
+            ) < (
+                current.source_span_len,
+                current.front_padding,
+                current.metadata_cost,
+                current.waste,
+                current.member_index,
+                current.slot_index,
+            )
+        } else {
+            (
+                candidate.metadata_cost,
+                candidate.waste,
+                candidate.source_span_len,
+                candidate.front_padding,
+                candidate.member_index,
+                candidate.slot_index,
+            ) < (
+                current.metadata_cost,
+                current.waste,
+                current.source_span_len,
+                current.front_padding,
+                current.member_index,
+                current.slot_index,
+            )
+        }
     })
 }
 

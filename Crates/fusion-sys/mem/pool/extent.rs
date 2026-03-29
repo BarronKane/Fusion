@@ -115,6 +115,24 @@ impl MemoryPoolExtentRequest {
     }
 }
 
+/// Public disposition snapshot for one recorded pool extent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MemoryPoolExtentDisposition {
+    Free,
+    Leased(MemoryPoolLeaseId),
+}
+
+/// Public snapshot of one tracked extent record inside a pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemoryPoolExtentInfo {
+    /// Member that owns the tracked extent.
+    pub member: super::MemoryPoolMemberId,
+    /// Byte range relative to the owning member's resource base.
+    pub range: ResourceRange,
+    /// Current lease state of the tracked extent.
+    pub disposition: MemoryPoolExtentDisposition,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ExtentDisposition {
     Free,
@@ -126,4 +144,20 @@ pub(super) struct ExtentRecord {
     pub member_index: usize,
     pub range: ResourceRange,
     pub disposition: ExtentDisposition,
+}
+
+impl ExtentRecord {
+    pub(super) const fn public_info(
+        self,
+        member: super::MemoryPoolMemberId,
+    ) -> MemoryPoolExtentInfo {
+        MemoryPoolExtentInfo {
+            member,
+            range: self.range,
+            disposition: match self.disposition {
+                ExtentDisposition::Free => MemoryPoolExtentDisposition::Free,
+                ExtentDisposition::Leased(id) => MemoryPoolExtentDisposition::Leased(id),
+            },
+        }
+    }
 }

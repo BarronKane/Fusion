@@ -85,6 +85,7 @@ impl<const EXTENTS: usize> MemoryPoolState<EXTENTS> {
     pub(super) fn member_usage(&self, member_index: usize) -> MemberUsageStats {
         let mut free_bytes: usize = 0;
         let mut leased_bytes: usize = 0;
+        let mut largest_free_extent: usize = 0;
 
         for record in self.extents.iter().flatten() {
             if record.member_index != member_index {
@@ -94,6 +95,7 @@ impl<const EXTENTS: usize> MemoryPoolState<EXTENTS> {
             match record.disposition {
                 ExtentDisposition::Free => {
                     free_bytes = free_bytes.saturating_add(record.range.len);
+                    largest_free_extent = largest_free_extent.max(record.range.len);
                 }
                 ExtentDisposition::Leased(_) => {
                     leased_bytes = leased_bytes.saturating_add(record.range.len);
@@ -101,27 +103,38 @@ impl<const EXTENTS: usize> MemoryPoolState<EXTENTS> {
             }
         }
 
-        MemberUsageStats::new(free_bytes, leased_bytes)
+        MemberUsageStats::new(free_bytes, leased_bytes, largest_free_extent)
     }
 
     pub(super) fn stats(&self, member_count: usize) -> MemoryPoolStats {
         let mut free_extent_count = 0;
         let mut leased_extent_count = 0;
+        let mut largest_free_extent = 0;
 
         for record in self.extents.iter().flatten() {
             match record.disposition {
-                ExtentDisposition::Free => free_extent_count += 1,
+                ExtentDisposition::Free => {
+                    free_extent_count += 1;
+                    largest_free_extent = largest_free_extent.max(record.range.len);
+                }
                 ExtentDisposition::Leased(_) => leased_extent_count += 1,
             }
         }
+        let extent_slots_used = free_extent_count + leased_extent_count;
+        let extent_slot_capacity = EXTENTS;
+        let extent_slots_free = extent_slot_capacity.saturating_sub(extent_slots_used);
 
         MemoryPoolStats {
             total_bytes: self.free_bytes.saturating_add(self.leased_bytes),
             free_bytes: self.free_bytes,
             leased_bytes: self.leased_bytes,
+            largest_free_extent,
             member_count,
             free_extent_count,
             leased_extent_count,
+            extent_slot_capacity,
+            extent_slots_used,
+            extent_slots_free,
         }
     }
 }

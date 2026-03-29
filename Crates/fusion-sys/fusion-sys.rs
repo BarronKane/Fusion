@@ -42,6 +42,9 @@ pub mod gpio;
 #[path = "hardware/hardware.rs"]
 /// fusion-sys truthful hardware composition surfaces.
 pub mod hardware;
+#[path = "insight/insight.rs"]
+/// fusion-sys channel-native debug/inspection surfaces.
+pub mod insight;
 #[path = "mem/mem.rs"]
 /// fusion-sys memory contracts and resource abstractions.
 pub mod mem;

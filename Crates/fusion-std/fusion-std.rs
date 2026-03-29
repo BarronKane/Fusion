@@ -17,6 +17,8 @@ compile_error!("fusion-std without feature `std` requires panic = \"abort\".");
 pub use fusion_sys::atomic;
 /// Public GPIO surface re-exported from `fusion-sys`.
 pub use fusion_sys::gpio;
+/// Public channel-native debug/inspection surface re-exported from `fusion-sys`.
+pub use fusion_sys::insight;
 /// Public coprocessor sugar layered over the truthful `fusion-sys::pcu` substrate.
 #[path = "pcu/pcu.rs"]
 pub mod pcu;

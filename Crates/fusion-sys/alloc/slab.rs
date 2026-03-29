@@ -3,6 +3,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, align_of, size_of};
 use core::ptr::{self, NonNull};
+use core::slice;
 
 use crate::mem::resource::AllocatorLayoutPolicy;
 use crate::sync::{Mutex, RetainedHandle};
@@ -94,6 +95,112 @@ pub struct Slab<const SIZE: usize, const COUNT: usize, L: LifetimePolicy = Morta
     slot_align: usize,
     metadata: NonNull<SlabMetadata<COUNT>>,
     _lifetime: PhantomData<L>,
+}
+
+/// Untyped slab allocation tied to the slab that produced it.
+///
+/// Dropping this token returns the occupied slot to the slab automatically.
+pub struct SlabAllocation<'a, const SIZE: usize, const COUNT: usize, L: LifetimePolicy = Mortal> {
+    slab: &'a Slab<SIZE, COUNT, L>,
+    allocation: Option<AllocResult>,
+}
+
+impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> fmt::Debug
+    for SlabAllocation<'_, SIZE, COUNT, L>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SlabAllocation")
+            .field("allocation", &self.allocation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, const SIZE: usize, const COUNT: usize, L: LifetimePolicy>
+    SlabAllocation<'a, SIZE, COUNT, L>
+{
+    const fn new(slab: &'a Slab<SIZE, COUNT, L>, allocation: AllocResult) -> Self {
+        Self {
+            slab,
+            allocation: Some(allocation),
+        }
+    }
+
+    /// Returns the allocation length in bytes.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        match self.allocation.as_ref() {
+            Some(allocation) => allocation.len,
+            None => 0,
+        }
+    }
+
+    /// Returns the alignment satisfied by this allocation.
+    #[must_use]
+    pub const fn align(&self) -> usize {
+        match self.allocation.as_ref() {
+            Some(allocation) => allocation.align,
+            None => 0,
+        }
+    }
+
+    /// Returns whether this allocation is still live.
+    #[must_use]
+    pub const fn is_live(&self) -> bool {
+        self.allocation.is_some()
+    }
+
+    /// Returns the base pointer of the live allocation.
+    #[must_use]
+    pub fn ptr(&self) -> Option<NonNull<u8>> {
+        self.allocation.as_ref().map(|allocation| allocation.ptr)
+    }
+
+    /// Returns the borrowed immutable byte view of the live allocation.
+    #[must_use]
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        let allocation = self.allocation.as_ref()?;
+        // SAFETY: the allocation token keeps its slab slot live for the lifetime of this borrow.
+        Some(unsafe { slice::from_raw_parts(allocation.ptr.as_ptr(), allocation.len) })
+    }
+
+    /// Returns the borrowed mutable byte view of the live allocation.
+    #[must_use]
+    pub fn as_bytes_mut(&mut self) -> Option<&mut [u8]> {
+        let allocation = self.allocation.as_ref()?;
+        // SAFETY: this token uniquely owns the slab slot lifetime it describes.
+        Some(unsafe { slice::from_raw_parts_mut(allocation.ptr.as_ptr(), allocation.len) })
+    }
+
+    /// Releases the occupied slab slot early.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the allocation was already released or the slot can no longer be
+    /// returned honestly.
+    pub fn try_release(&mut self) -> Result<(), AllocError> {
+        let allocation = self
+            .allocation
+            .take()
+            .ok_or_else(AllocError::invalid_request)?;
+        match self.slab.release_allocation(&allocation) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.allocation = Some(allocation);
+                Err(error)
+            }
+        }
+    }
+}
+
+impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> Drop
+    for SlabAllocation<'_, SIZE, COUNT, L>
+{
+    fn drop(&mut self) {
+        let Some(allocation) = self.allocation.take() else {
+            return;
+        };
+        let _ = self.slab.release_allocation(&allocation);
+    }
 }
 
 impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> fmt::Debug for Slab<SIZE, COUNT, L> {
@@ -261,6 +368,91 @@ impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> Slab<SIZE, COUNT,
     pub const fn slot_align(&self) -> usize {
         self.slot_align
     }
+
+    /// Allocates one slab slot whose lifetime is tied to this slab reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request does not fit one slab slot or the slab is exhausted.
+    pub fn alloc(
+        &self,
+        request: &AllocRequest,
+    ) -> Result<SlabAllocation<'_, SIZE, COUNT, L>, AllocError> {
+        let allocation = self.allocate_untyped(request)?;
+        Ok(SlabAllocation::new(self, allocation))
+    }
+
+    fn allocate_untyped(&self, request: &AllocRequest) -> Result<AllocResult, AllocError> {
+        if request.len == 0 || request.align == 0 || !request.align.is_power_of_two() {
+            return Err(AllocError::invalid_request());
+        }
+        if request.len > SIZE || request.align > self.slot_align {
+            return Err(AllocError::invalid_request());
+        }
+
+        let slot = {
+            let mut state = self
+                .metadata()
+                .state
+                .lock()
+                .map_err(|error| AllocError::synchronization(error.kind))?;
+            state
+                .allocate_slot()
+                .ok_or_else(AllocError::capacity_exhausted)?
+        };
+
+        let addr = self
+            .payload_base()?
+            .checked_add(
+                slot.checked_mul(SIZE)
+                    .ok_or_else(AllocError::invalid_request)?,
+            )
+            .ok_or_else(AllocError::invalid_request)?;
+        let ptr = NonNull::new(addr as *mut u8).ok_or_else(AllocError::invalid_request)?;
+
+        if request.zeroed {
+            // SAFETY: the slab owns the reserved extent and slot allocation guarantees exclusive
+            // access to this slot until the returned token is released.
+            unsafe {
+                ptr.as_ptr().write_bytes(0, SIZE);
+            }
+        }
+
+        Ok(AllocResult::from_parts(
+            ptr,
+            SIZE,
+            self.slot_align,
+            self.extent().member().compatibility.domain,
+            self.extent().member().compatibility.attrs,
+            self.extent().member().compatibility.hazards,
+            self.extent().member().compatibility.geometry,
+            AllocationBacking::SlabSlot {
+                pool_marker: self.extent().pool_marker(),
+                lease_id: self.extent().lease_id(),
+                slot,
+            },
+        ))
+    }
+
+    fn release_allocation(&self, allocation: &AllocResult) -> Result<(), AllocError> {
+        match allocation.backing {
+            AllocationBacking::SlabSlot {
+                pool_marker,
+                lease_id,
+                slot,
+            } if pool_marker == self.extent().pool_marker()
+                && lease_id == self.extent().lease_id() =>
+            {
+                let mut state = self
+                    .metadata()
+                    .state
+                    .lock()
+                    .map_err(|error| AllocError::synchronization(error.kind))?;
+                state.release_slot(slot)
+            }
+            _ => Err(AllocError::invalid_request()),
+        }
+    }
 }
 
 impl<const SIZE: usize, const COUNT: usize> Slab<SIZE, COUNT, Immortal> {
@@ -324,75 +516,11 @@ impl<const SIZE: usize, const COUNT: usize, L: LifetimePolicy> AllocationStrateg
     }
 
     fn allocate(&self, request: &AllocRequest) -> Result<AllocResult, AllocError> {
-        if request.len == 0 || request.align == 0 || !request.align.is_power_of_two() {
-            return Err(AllocError::invalid_request());
-        }
-        if request.len > SIZE || request.align > self.slot_align {
-            return Err(AllocError::invalid_request());
-        }
-
-        let slot = {
-            let mut state = self
-                .metadata()
-                .state
-                .lock()
-                .map_err(|error| AllocError::synchronization(error.kind))?;
-            state
-                .allocate_slot()
-                .ok_or_else(AllocError::capacity_exhausted)?
-        };
-
-        let addr = self
-            .payload_base()?
-            .checked_add(
-                slot.checked_mul(SIZE)
-                    .ok_or_else(AllocError::invalid_request)?,
-            )
-            .ok_or_else(AllocError::invalid_request)?;
-        let ptr = NonNull::new(addr as *mut u8).ok_or_else(AllocError::invalid_request)?;
-
-        if request.zeroed {
-            // SAFETY: the slab owns the reserved extent and slot allocation guarantees exclusive
-            // access to this slot until the returned token is released.
-            unsafe {
-                ptr.as_ptr().write_bytes(0, SIZE);
-            }
-        }
-
-        Ok(AllocResult::from_parts(
-            ptr,
-            SIZE,
-            self.slot_align,
-            self.extent().member().compatibility.domain,
-            self.extent().member().compatibility.attrs,
-            self.extent().member().compatibility.hazards,
-            self.extent().member().compatibility.geometry,
-            AllocationBacking::SlabSlot {
-                pool_marker: self.extent().pool_marker(),
-                lease_id: self.extent().lease_id(),
-                slot,
-            },
-        ))
+        self.allocate_untyped(request)
     }
 
     fn deallocate(&self, allocation: AllocResult) -> Result<(), AllocError> {
-        match allocation.backing {
-            AllocationBacking::SlabSlot {
-                pool_marker,
-                lease_id,
-                slot,
-            } if pool_marker == self.extent().pool_marker()
-                && lease_id == self.extent().lease_id() =>
-            {
-                let mut state = self
-                    .metadata()
-                    .state
-                    .lock()
-                    .map_err(|error| AllocError::synchronization(error.kind))?;
-                state.release_slot(slot)
-            }
-            _ => Err(AllocError::invalid_request()),
-        }
+        self.release_allocation(&allocation)
     }
 }
 

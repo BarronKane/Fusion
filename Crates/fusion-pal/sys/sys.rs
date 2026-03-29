@@ -150,6 +150,10 @@ pub mod courier {
 pub mod channel {
     pub use crate::contract::pal::interconnect::channel::*;
 }
+/// Public insight/debug side-channel contract surface.
+pub mod insight {
+    pub use crate::contract::pal::interconnect::insight::*;
+}
 /// Public event module re-exported from the selected platform backend.
 pub mod event {
     pub use super::platform::event::{PlatformEvent, PlatformPoller, system_event};

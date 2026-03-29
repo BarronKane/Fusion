@@ -57,6 +57,22 @@ fn aligned_region(len: usize, align: usize) -> Region {
     }
 }
 
+fn shifted_region(len: usize, align: usize, offset: usize) -> Region {
+    let layout = Layout::from_size_align(
+        len.checked_add(offset)
+            .expect("shifted test region should fit"),
+        align,
+    )
+    .expect("shifted test layout should be valid");
+    // SAFETY: the layout is valid and the allocation is intentionally leaked for the test.
+    let ptr = unsafe { alloc_zeroed(layout) };
+    let base = NonNull::new(unsafe { ptr.add(offset) }).expect("shifted test allocation exists");
+    Region {
+        base: Address::from(base),
+        len,
+    }
+}
+
 fn general_contract() -> ResourceContract {
     ResourceContract {
         allowed_protect: Protect::READ | Protect::WRITE,
@@ -94,8 +110,17 @@ fn bound_resource_with_shape(
     backing: ResourceBackingKind,
     attrs: ResourceAttrs,
 ) -> BoundMemoryResource {
+    bound_resource_with_region(aligned_region(len, 4096), domain, backing, attrs)
+}
+
+fn bound_resource_with_region(
+    region: Region,
+    domain: MemoryDomain,
+    backing: ResourceBackingKind,
+    attrs: ResourceAttrs,
+) -> BoundMemoryResource {
     BoundMemoryResource::new(BoundResourceSpec::new(
-        aligned_region(len, 4096),
+        region,
         domain,
         backing,
         attrs,
@@ -123,6 +148,10 @@ fn bound_resource(len: usize, attrs: ResourceAttrs) -> BoundMemoryResource {
 
 fn poolable_attrs() -> ResourceAttrs {
     ResourceAttrs::ALLOCATABLE | ResourceAttrs::CACHEABLE | ResourceAttrs::COHERENT
+}
+
+fn constrained_dma_attrs() -> ResourceAttrs {
+    poolable_attrs() | ResourceAttrs::DMA_VISIBLE | ResourceAttrs::PHYS_CONTIGUOUS
 }
 
 #[test]
@@ -302,6 +331,40 @@ fn pool_reports_member_usage_after_leasing() {
         .expect("member info should be available");
     assert_eq!(info.free_bytes, 6144);
     assert_eq!(info.leased_bytes, 2048);
+    assert_eq!(info.largest_free_extent, 6144);
+}
+
+#[test]
+fn pool_stats_report_largest_free_extent_and_extent_slot_pressure() {
+    let contributor = MemoryPoolContributor::explicit_ready(MemoryResourceHandle::from(
+        bound_resource(8192, poolable_attrs()),
+    ));
+    let mut builder = MemoryPool::<2, 8>::builder(MemoryPoolPolicy::ready_only());
+    builder
+        .add_contributor(contributor)
+        .expect("contributor should fit");
+    let pool = builder.build().expect("pool should build");
+
+    let lease = pool
+        .acquire_extent(&MemoryPoolExtentRequest {
+            len: 2048,
+            align: 1024,
+        })
+        .expect("extent should allocate");
+    let stats = pool.stats().expect("pool stats should be available");
+
+    assert_eq!(stats.total_bytes, 8192);
+    assert_eq!(stats.free_bytes, 6144);
+    assert_eq!(stats.leased_bytes, 2048);
+    assert_eq!(stats.largest_free_extent, 6144);
+    assert_eq!(stats.extent_slot_capacity, 8);
+    assert_eq!(stats.extent_slots_used, 2);
+    assert_eq!(stats.extent_slots_free, 6);
+
+    pool.release_extent(lease).expect("lease should release");
+    let released = pool.stats().expect("released stats should be available");
+    assert_eq!(released.largest_free_extent, 8192);
+    assert_eq!(released.extent_slots_used, 1);
 }
 
 #[test]
@@ -421,6 +484,44 @@ fn pool_serializes_concurrent_acquire_release_cycles() {
     let stats = pool.stats().expect("pool stats should be available");
     assert_eq!(stats.leased_bytes, 0);
     assert_eq!(stats.free_bytes, 32 * 1024);
+}
+
+#[test]
+fn constrained_pool_prefers_smallest_front_span() {
+    let contributor = MemoryPoolContributor::explicit_ready(MemoryResourceHandle::from(
+        bound_resource_with_region(
+            shifted_region(12 * 1024, 4096, 1024),
+            MemoryDomain::StaticRegion,
+            ResourceBackingKind::StaticRegion,
+            constrained_dma_attrs(),
+        ),
+    ));
+    let mut builder = MemoryPool::<1, 8>::builder(MemoryPoolPolicy::ready_only());
+    builder
+        .add_contributor(contributor)
+        .expect("contributor should fit");
+    let pool = builder.build().expect("pool should build");
+
+    let anchor = pool
+        .acquire_extent(&MemoryPoolExtentRequest {
+            len: 2048,
+            align: 4096,
+        })
+        .expect("anchor extent should allocate");
+    assert_eq!(anchor.range().offset, 3072);
+
+    let preferred = pool
+        .acquire_extent(&MemoryPoolExtentRequest {
+            len: 1024,
+            align: 2048,
+        })
+        .expect("constrained extent should allocate");
+
+    assert_eq!(
+        preferred.range().offset,
+        1024,
+        "constrained pools should consume the smallest fitting front span first"
+    );
 }
 
 // Look this is just for fun.

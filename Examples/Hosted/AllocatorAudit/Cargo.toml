@@ -1,0 +1,23 @@
+[package]
+name = "fusion-example-hosted-allocator-audit"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "allocator_audit"
+path = "main.rs"
+
+[features]
+default = ["std", "hosted", "debug-insights"]
+hosted = ["fusion-sys/hosted"]
+std = ["fusion-sys/std"]
+debug-insights = ["fusion-sys/debug-insights"]
+
+[dependencies]
+fusion-sys = { workspace = true, features = ["std", "hosted"] }
+
+[lints]
+workspace = true

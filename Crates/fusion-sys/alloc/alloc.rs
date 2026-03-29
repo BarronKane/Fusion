@@ -24,12 +24,19 @@ mod heap;
 mod lifetime;
 mod metadata;
 mod policy;
+mod protocol;
 mod root;
+mod service;
 mod slab;
 
-pub use arena::{ArenaInitError, ArenaSlice, BoundedArena};
+pub use arena::{ArenaAllocation, ArenaInitError, ArenaSlice, BoundedArena};
 pub use control::ControlLease;
-pub use domain::{AllocatorDomainId, AllocatorDomainInfo, AllocatorDomainKind};
+pub use domain::{
+    AllocatorDomainAudit,
+    AllocatorDomainId,
+    AllocatorDomainInfo,
+    AllocatorDomainKind,
+};
 #[allow(unused_imports)]
 pub use error::{AllocError, AllocErrorKind};
 pub use heap::HeapAllocator;
@@ -40,9 +47,22 @@ pub(crate) use metadata::{
     front_metadata_layout_with_policy,
 };
 pub use policy::{AllocCapabilities, AllocHazards, AllocModeSet, AllocPolicy};
+pub use protocol::{
+    AllocatorControlRequest,
+    AllocatorControlStatusMessage,
+    AllocatorControlStatusProtocol,
+    AllocatorControlWriteProtocol,
+    AllocatorDomainMetadataMessage,
+    AllocatorDomainMetadataProtocol,
+};
 #[allow(unused_imports)]
 pub use root::{Allocator, AllocatorBuilder};
-pub use slab::Slab;
+pub use service::{
+    AllocatorChannelService,
+    AllocatorChannelServiceError,
+    AllocatorChannelServiceErrorKind,
+};
+pub use slab::{Slab, SlabAllocation};
 
 #[allow(unused_imports)]
 pub use crate::mem::pool::{
@@ -52,6 +72,8 @@ pub use crate::mem::pool::{
     MemoryPoolContributorOrigin,
     MemoryPoolError,
     MemoryPoolErrorKind,
+    MemoryPoolExtentDisposition,
+    MemoryPoolExtentInfo,
     MemoryPoolExtentRequest,
     MemoryPoolLease,
     MemoryPoolLeaseId,
@@ -175,8 +197,13 @@ struct PoolHandleVTable {
         unsafe fn(NonNull<()>, &MemoryPoolExtentRequest) -> Result<MemoryPoolLease, AllocError>,
     release_extent: unsafe fn(NonNull<()>, MemoryPoolLease) -> Result<(), AllocError>,
     lease_region: unsafe fn(NonNull<()>, &MemoryPoolLease) -> Result<Region, AllocError>,
+    stats: unsafe fn(NonNull<()>) -> Result<MemoryPoolStats, AllocError>,
     member_info:
         unsafe fn(NonNull<()>, MemoryPoolMemberId) -> Result<MemoryPoolMemberInfo, AllocError>,
+    member_info_at:
+        unsafe fn(NonNull<()>, usize) -> Result<Option<MemoryPoolMemberInfo>, AllocError>,
+    extent_info_at:
+        unsafe fn(NonNull<()>, usize) -> Result<Option<MemoryPoolExtentInfo>, AllocError>,
     retain: unsafe fn(NonNull<()>) -> Result<(), AllocError>,
     release: unsafe fn(NonNull<()>),
 }
@@ -248,7 +275,10 @@ impl PoolHandle {
                 acquire_extent: acquire_extent_impl::<MEMBERS, EXTENTS>,
                 release_extent: release_extent_impl::<MEMBERS, EXTENTS>,
                 lease_region: lease_region_impl::<MEMBERS, EXTENTS>,
+                stats: stats_impl::<MEMBERS, EXTENTS>,
                 member_info: member_info_impl::<MEMBERS, EXTENTS>,
+                member_info_at: member_info_at_impl::<MEMBERS, EXTENTS>,
+                extent_info_at: extent_info_at_impl::<MEMBERS, EXTENTS>,
                 retain: retain_impl::<MEMBERS, EXTENTS>,
                 release: release_impl::<MEMBERS, EXTENTS>,
             },
@@ -282,11 +312,29 @@ impl PoolHandle {
         unsafe { (self.vtable.lease_region)(self.ptr, lease) }
     }
 
+    pub(crate) fn stats(&self) -> Result<MemoryPoolStats, AllocError> {
+        unsafe { (self.vtable.stats)(self.ptr) }
+    }
+
     pub(crate) fn member_info(
         &self,
         member: MemoryPoolMemberId,
     ) -> Result<MemoryPoolMemberInfo, AllocError> {
         unsafe { (self.vtable.member_info)(self.ptr, member) }
+    }
+
+    pub(crate) fn member_info_at(
+        &self,
+        index: usize,
+    ) -> Result<Option<MemoryPoolMemberInfo>, AllocError> {
+        unsafe { (self.vtable.member_info_at)(self.ptr, index) }
+    }
+
+    pub(crate) fn extent_info_at(
+        &self,
+        index: usize,
+    ) -> Result<Option<MemoryPoolExtentInfo>, AllocError> {
+        unsafe { (self.vtable.extent_info_at)(self.ptr, index) }
     }
 }
 
@@ -345,6 +393,32 @@ unsafe fn member_info_impl<const MEMBERS: usize, const EXTENTS: usize>(
 ) -> Result<MemoryPoolMemberInfo, AllocError> {
     pool_ref::<MEMBERS, EXTENTS>(ptr)
         .member_info(member)
+        .map_err(Into::into)
+}
+
+unsafe fn member_info_at_impl<const MEMBERS: usize, const EXTENTS: usize>(
+    ptr: NonNull<()>,
+    index: usize,
+) -> Result<Option<MemoryPoolMemberInfo>, AllocError> {
+    pool_ref::<MEMBERS, EXTENTS>(ptr)
+        .member_info_at(index)
+        .map_err(Into::into)
+}
+
+unsafe fn extent_info_at_impl<const MEMBERS: usize, const EXTENTS: usize>(
+    ptr: NonNull<()>,
+    index: usize,
+) -> Result<Option<MemoryPoolExtentInfo>, AllocError> {
+    pool_ref::<MEMBERS, EXTENTS>(ptr)
+        .extent_info_at(index)
+        .map_err(Into::into)
+}
+
+unsafe fn stats_impl<const MEMBERS: usize, const EXTENTS: usize>(
+    ptr: NonNull<()>,
+) -> Result<MemoryPoolStats, AllocError> {
+    pool_ref::<MEMBERS, EXTENTS>(ptr)
+        .stats()
         .map_err(Into::into)
 }
 

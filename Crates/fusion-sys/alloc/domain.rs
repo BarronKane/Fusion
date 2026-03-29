@@ -1,6 +1,12 @@
-use crate::mem::resource::{MemoryDomain, MemoryDomainSet, ResourceAttrs, ResourceHazardSet};
+use crate::mem::resource::{
+    AllocatorLayoutPolicy,
+    MemoryDomain,
+    MemoryDomainSet,
+    ResourceAttrs,
+    ResourceHazardSet,
+};
 
-use super::AllocPolicy;
+use super::{AllocPolicy, MemoryPoolStats};
 
 /// Stable identifier for one allocator-owned domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,6 +38,18 @@ pub struct AllocatorDomainInfo {
     pub attrs: ResourceAttrs,
     /// Aggregate inherent hazards across assigned resources.
     pub hazards: ResourceHazardSet,
+}
+
+/// Operationally auditable snapshot of one allocator-owned domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AllocatorDomainAudit {
+    /// Stable descriptive domain info.
+    pub info: AllocatorDomainInfo,
+    /// Primary allocator-facing layout policy derived from the domain's owned resources when one
+    /// exists.
+    pub primary_layout_policy: Option<AllocatorLayoutPolicy>,
+    /// Current pool stats when the domain owns a realized pool.
+    pub pool_stats: Option<MemoryPoolStats>,
 }
 
 impl AllocatorDomainInfo {

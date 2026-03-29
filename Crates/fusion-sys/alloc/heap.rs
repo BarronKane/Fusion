@@ -48,30 +48,23 @@ impl HeapAllocator {
         })
     }
 
-    /// Returns the capability surface a general-purpose heap intends to provide.
+    /// Returns the capability surface currently available for the heap path.
+    ///
+    /// Heap remains intentionally unimplemented on the active allocator model, so this surface
+    /// stays empty until the backing implementation lands.
     #[must_use]
     pub const fn supported_capabilities(policy: AllocPolicy) -> AllocCapabilities {
-        if !policy.allows(AllocModeSet::HEAP) {
-            return AllocCapabilities::empty();
-        }
-
-        let capabilities = AllocCapabilities::HEAP
-            .union(AllocCapabilities::ZEROED_ALLOC)
-            .union(AllocCapabilities::REALLOC);
-        if policy.allows(AllocModeSet::GLOBAL_ALLOC) {
-            capabilities.union(AllocCapabilities::GLOBAL_ALLOC)
-        } else {
-            capabilities
-        }
+        let _ = policy;
+        AllocCapabilities::empty()
     }
 
     /// Returns the expected coarse heap hazards.
+    ///
+    /// Heap remains stubbed, so this surface also stays empty rather than advertising hazards for
+    /// behavior that does not yet exist.
     #[must_use]
     pub const fn expected_hazards() -> AllocHazards {
-        AllocHazards::FRAGMENTATION
-            .union(AllocHazards::VARIABLE_LATENCY)
-            .union(AllocHazards::EXTERNAL_GROWTH)
-            .union(AllocHazards::MAY_BLOCK)
+        AllocHazards::empty()
     }
 
     /// Returns the heap policy.

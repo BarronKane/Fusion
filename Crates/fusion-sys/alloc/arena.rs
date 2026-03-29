@@ -35,6 +35,7 @@ use super::{
 struct ArenaState {
     cursor: usize,
     live_slices: usize,
+    live_allocations: usize,
 }
 
 #[derive(Debug)]
@@ -64,6 +65,109 @@ pub struct ArenaSlice<T> {
     control: ControlLease<ArenaControl>,
     ptr: NonNull<T>,
     len: usize,
+}
+
+/// Untyped mortal allocation borrowed from one bounded arena.
+///
+/// This token ties the allocation lifetime to the arena that created it. Dropping the token ends
+/// the allocation's live lifetime honestly; the cursor is reclaimed immediately only when the
+/// allocation still sits at the top of the arena stack.
+pub struct ArenaAllocation<'a, L: LifetimePolicy = Mortal> {
+    arena: &'a BoundedArena<L>,
+    allocation: Option<AllocResult>,
+}
+
+impl<L: LifetimePolicy> fmt::Debug for ArenaAllocation<'_, L> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ArenaAllocation")
+            .field("allocation", &self.allocation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, L: LifetimePolicy> ArenaAllocation<'a, L> {
+    const fn new(arena: &'a BoundedArena<L>, allocation: AllocResult) -> Self {
+        Self {
+            arena,
+            allocation: Some(allocation),
+        }
+    }
+
+    /// Returns the allocation length in bytes.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        match self.allocation.as_ref() {
+            Some(allocation) => allocation.len,
+            None => 0,
+        }
+    }
+
+    /// Returns the alignment satisfied by this allocation.
+    #[must_use]
+    pub const fn align(&self) -> usize {
+        match self.allocation.as_ref() {
+            Some(allocation) => allocation.align,
+            None => 0,
+        }
+    }
+
+    /// Returns whether this allocation has already been released.
+    #[must_use]
+    pub const fn is_live(&self) -> bool {
+        self.allocation.is_some()
+    }
+
+    /// Returns the base pointer of the live allocation.
+    #[must_use]
+    pub fn ptr(&self) -> Option<NonNull<u8>> {
+        self.allocation.as_ref().map(|allocation| allocation.ptr)
+    }
+
+    /// Returns the borrowed immutable byte view of the live allocation.
+    #[must_use]
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        let allocation = self.allocation.as_ref()?;
+        // SAFETY: the allocation token keeps the arena-backed range live for the lifetime of this
+        // borrow, and the range is exactly `len` bytes starting at `ptr`.
+        Some(unsafe { slice::from_raw_parts(allocation.ptr.as_ptr(), allocation.len) })
+    }
+
+    /// Returns the borrowed mutable byte view of the live allocation.
+    #[must_use]
+    pub fn as_bytes_mut(&mut self) -> Option<&mut [u8]> {
+        let allocation = self.allocation.as_ref()?;
+        // SAFETY: this token uniquely owns the live mortal allocation lifetime it describes.
+        Some(unsafe { slice::from_raw_parts_mut(allocation.ptr.as_ptr(), allocation.len) })
+    }
+
+    /// Attempts to release the allocation early using arena pop semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the allocation is already gone or when releasing it would violate
+    /// the arena's current stack discipline.
+    pub fn try_release(&mut self) -> Result<(), AllocError> {
+        let allocation = self
+            .allocation
+            .take()
+            .ok_or_else(AllocError::invalid_request)?;
+        match self.arena.release_allocation(&allocation, true) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.allocation = Some(allocation);
+                Err(error)
+            }
+        }
+    }
+}
+
+impl<L: LifetimePolicy> Drop for ArenaAllocation<'_, L> {
+    fn drop(&mut self) {
+        let Some(allocation) = self.allocation.take() else {
+            return;
+        };
+        let _ = self.arena.release_allocation(&allocation, false);
+    }
 }
 
 unsafe impl<T: Send> Send for ArenaSlice<T> {}
@@ -276,6 +380,7 @@ impl<L: LifetimePolicy> BoundedArena<L> {
                 state: Mutex::new(ArenaState {
                     cursor: 0,
                     live_slices: 0,
+                    live_allocations: 0,
                 }),
             },
         )?;
@@ -381,6 +486,20 @@ impl<L: LifetimePolicy> BoundedArena<L> {
         Ok(ArenaSlice::new(control, ptr, 1))
     }
 
+    /// Allocates one untyped arena-backed byte range whose lifetime is tied to this arena.
+    ///
+    /// Dropping the returned token ends the allocation's live lifetime honestly. The underlying
+    /// bytes are reclaimed immediately only when the allocation still sits at the arena top;
+    /// otherwise the dead range remains part of the bounded extent until a later reset.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is invalid or the bounded extent is exhausted.
+    pub fn alloc(&self, request: &AllocRequest) -> Result<ArenaAllocation<'_, L>, AllocError> {
+        let allocation = self.allocate_untyped(request)?;
+        Ok(ArenaAllocation::new(self, allocation))
+    }
+
     /// Allocates and initializes one typed slice from the arena.
     ///
     /// # Errors
@@ -478,6 +597,106 @@ impl<L: LifetimePolicy> BoundedArena<L> {
         drop(state);
         Ok(ArenaSlice::new(control, ptr, len))
     }
+
+    fn allocate_untyped(&self, request: &AllocRequest) -> Result<AllocResult, AllocError> {
+        if request.len == 0 || request.align == 0 || !request.align.is_power_of_two() {
+            return Err(AllocError::invalid_request());
+        }
+        if request.align > self.control().max_align {
+            return Err(AllocError::invalid_request());
+        }
+
+        let base = self.payload_base()?;
+        let mut state = self
+            .control()
+            .state
+            .lock()
+            .map_err(|error| AllocError::synchronization(error.kind))?;
+        let start = align_up(
+            base.checked_add(state.cursor)
+                .ok_or_else(AllocError::invalid_request)?,
+            request.align,
+        )?;
+        let offset = start
+            .checked_sub(base)
+            .ok_or_else(AllocError::invalid_request)?;
+        let end = offset
+            .checked_add(request.len)
+            .ok_or_else(AllocError::invalid_request)?;
+        if end > self.control().header.payload_len {
+            return Err(AllocError::capacity_exhausted());
+        }
+
+        state.cursor = end;
+        state.live_allocations = state
+            .live_allocations
+            .checked_add(1)
+            .ok_or_else(AllocError::capacity_exhausted)?;
+        let ptr = NonNull::new(start as *mut u8).ok_or_else(AllocError::invalid_request)?;
+        if request.zeroed {
+            // SAFETY: the arena owns the reserved extent and the cursor discipline grants
+            // exclusive access to the newly allocated range until the caller retires it.
+            unsafe {
+                ptr.as_ptr().write_bytes(0, request.len);
+            }
+        }
+
+        Ok(AllocResult::from_parts(
+            ptr,
+            request.len,
+            request.align,
+            self.control().member().compatibility.domain,
+            self.control().member().compatibility.attrs,
+            self.control().member().compatibility.hazards,
+            self.control().member().compatibility.geometry,
+            AllocationBacking::ArenaBlock {
+                pool_marker: self.control().pool_marker(),
+                lease_id: self.control().lease_id(),
+                offset,
+                len: request.len,
+            },
+        ))
+    }
+
+    fn release_allocation(
+        &self,
+        allocation: &AllocResult,
+        require_top: bool,
+    ) -> Result<(), AllocError> {
+        let AllocationBacking::ArenaBlock {
+            pool_marker,
+            lease_id,
+            offset,
+            len,
+        } = allocation.backing
+        else {
+            return Err(AllocError::invalid_request());
+        };
+        if pool_marker != self.control().pool_marker() || lease_id != self.control().lease_id() {
+            return Err(AllocError::invalid_request());
+        }
+
+        let mut state = self
+            .control()
+            .state
+            .lock()
+            .map_err(|error| AllocError::synchronization(error.kind))?;
+        if state.live_allocations == 0 {
+            return Err(AllocError::invalid_request());
+        }
+
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(AllocError::invalid_request)?;
+        if end == state.cursor {
+            state.cursor = offset;
+        } else if require_top {
+            return Err(AllocError::invalid_request());
+        }
+
+        state.live_allocations -= 1;
+        Ok(())
+    }
 }
 
 impl BoundedArena<Mortal> {
@@ -493,7 +712,7 @@ impl BoundedArena<Mortal> {
             .state
             .lock()
             .map_err(|error| AllocError::synchronization(error.kind))?;
-        if state.live_slices != 0 {
+        if state.live_slices != 0 || state.live_allocations != 0 {
             return Err(AllocError::busy());
         }
         state.cursor = 0;
@@ -581,89 +800,11 @@ impl<L: LifetimePolicy> AllocationStrategy for BoundedArena<L> {
     }
 
     fn allocate(&self, request: &AllocRequest) -> Result<AllocResult, AllocError> {
-        if request.len == 0 || request.align == 0 || !request.align.is_power_of_two() {
-            return Err(AllocError::invalid_request());
-        }
-        if request.align > self.control().max_align {
-            return Err(AllocError::invalid_request());
-        }
-
-        let base = self.payload_base()?;
-        let mut state = self
-            .control()
-            .state
-            .lock()
-            .map_err(|error| AllocError::synchronization(error.kind))?;
-        let start = align_up(
-            base.checked_add(state.cursor)
-                .ok_or_else(AllocError::invalid_request)?,
-            request.align,
-        )?;
-        let offset = start
-            .checked_sub(base)
-            .ok_or_else(AllocError::invalid_request)?;
-        let end = offset
-            .checked_add(request.len)
-            .ok_or_else(AllocError::invalid_request)?;
-        if end > self.control().header.payload_len {
-            return Err(AllocError::capacity_exhausted());
-        }
-
-        state.cursor = end;
-        let ptr = NonNull::new(start as *mut u8).ok_or_else(AllocError::invalid_request)?;
-        if request.zeroed {
-            // SAFETY: the arena owns the reserved extent and the cursor discipline grants
-            // exclusive access to the newly allocated range until the caller releases or resets it.
-            unsafe {
-                ptr.as_ptr().write_bytes(0, request.len);
-            }
-        }
-
-        Ok(AllocResult::from_parts(
-            ptr,
-            request.len,
-            request.align,
-            self.control().member().compatibility.domain,
-            self.control().member().compatibility.attrs,
-            self.control().member().compatibility.hazards,
-            self.control().member().compatibility.geometry,
-            AllocationBacking::ArenaBlock {
-                pool_marker: self.control().pool_marker(),
-                lease_id: self.control().lease_id(),
-                offset,
-                len: request.len,
-            },
-        ))
+        self.allocate_untyped(request)
     }
 
     fn deallocate(&self, allocation: AllocResult) -> Result<(), AllocError> {
-        let AllocationBacking::ArenaBlock {
-            pool_marker,
-            lease_id,
-            offset,
-            len,
-        } = allocation.backing
-        else {
-            return Err(AllocError::invalid_request());
-        };
-        if pool_marker != self.control().pool_marker() || lease_id != self.control().lease_id() {
-            return Err(AllocError::invalid_request());
-        }
-
-        let mut state = self
-            .control()
-            .state
-            .lock()
-            .map_err(|error| AllocError::synchronization(error.kind))?;
-        let end = offset
-            .checked_add(len)
-            .ok_or_else(AllocError::invalid_request)?;
-        if end != state.cursor {
-            return Err(AllocError::invalid_request());
-        }
-
-        state.cursor = offset;
-        Ok(())
+        self.release_allocation(&allocation, true)
     }
 }
 

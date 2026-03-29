@@ -10,6 +10,7 @@ members = [
 
     # Hosted example.
     "Examples/Hosted/Template",
+    "Examples/Hosted/AllocatorAudit",
 ]
 
 [workspace.package]

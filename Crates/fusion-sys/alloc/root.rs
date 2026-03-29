@@ -21,6 +21,7 @@ use super::{
     AllocModeSet,
     AllocPolicy,
     AllocResult,
+    AllocatorDomainAudit,
     AllocatorDomainId,
     AllocatorDomainInfo,
     AllocatorDomainKind,
@@ -305,6 +306,63 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
         self.domain_record(id).map(|record| record.info)
     }
 
+    /// Writes known domain identifiers into `out` and returns the number written.
+    pub fn write_domain_ids(&self, out: &mut [AllocatorDomainId]) -> usize {
+        let mut written = 0;
+        for record in self.domains.iter().flatten() {
+            let Some(slot) = out.get_mut(written) else {
+                break;
+            };
+            *slot = record.info.id;
+            written += 1;
+        }
+        written
+    }
+
+    /// Returns one auditable domain snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain does not exist or its realized pool cannot synchronize its
+    /// live stats honestly.
+    pub fn domain_audit(&self, id: AllocatorDomainId) -> Result<AllocatorDomainAudit, AllocError> {
+        let record = self
+            .domain_record(id)
+            .ok_or_else(AllocError::invalid_domain)?;
+        let primary_layout_policy = self
+            .resources
+            .iter()
+            .flatten()
+            .find(|binding| binding.domain == id)
+            .map(|binding| binding.info.layout);
+        let pool_stats = record.pool.as_ref().map(PoolHandle::stats).transpose()?;
+        Ok(AllocatorDomainAudit {
+            info: record.info,
+            primary_layout_policy,
+            pool_stats,
+        })
+    }
+
+    /// Writes auditable domain snapshots into `out` and returns the number written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when one realized pool cannot synchronize its stats honestly.
+    pub fn write_domain_audits(
+        &self,
+        out: &mut [AllocatorDomainAudit],
+    ) -> Result<usize, AllocError> {
+        let mut written = 0;
+        for record in self.domains.iter().flatten() {
+            let Some(slot) = out.get_mut(written) else {
+                break;
+            };
+            *slot = self.domain_audit(record.info.id)?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
     /// Returns the implicit default domain when one exists.
     #[must_use]
     pub fn default_domain(&self) -> Option<AllocatorDomainId> {
@@ -313,6 +371,66 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             .flatten()
             .find(|domain| domain.info.kind == AllocatorDomainKind::Default)
             .map(|domain| domain.info.id)
+    }
+
+    /// Returns current pool stats for one domain when that domain owns a realized pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain does not exist or the pool cannot synchronize its live
+    /// stats honestly.
+    pub fn domain_pool_stats(
+        &self,
+        id: AllocatorDomainId,
+    ) -> Result<Option<super::MemoryPoolStats>, AllocError> {
+        let record = self
+            .domain_record(id)
+            .ok_or_else(AllocError::invalid_domain)?;
+        record.pool.as_ref().map(PoolHandle::stats).transpose()
+    }
+
+    /// Returns one pool-member snapshot for `domain` by stable stream index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain does not exist or the pool cannot synchronize its live
+    /// metadata honestly.
+    pub fn domain_pool_member_info_at(
+        &self,
+        id: AllocatorDomainId,
+        index: usize,
+    ) -> Result<Option<super::MemoryPoolMemberInfo>, AllocError> {
+        let record = self
+            .domain_record(id)
+            .ok_or_else(AllocError::invalid_domain)?;
+        record
+            .pool
+            .as_ref()
+            .map(|pool| pool.member_info_at(index))
+            .transpose()
+            .map(|maybe| maybe.flatten())
+    }
+
+    /// Returns one tracked pool-extent snapshot for `domain` by stable stream index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain does not exist or the pool cannot synchronize its live
+    /// metadata honestly.
+    pub fn domain_pool_extent_info_at(
+        &self,
+        id: AllocatorDomainId,
+        index: usize,
+    ) -> Result<Option<super::MemoryPoolExtentInfo>, AllocError> {
+        let record = self
+            .domain_record(id)
+            .ok_or_else(AllocError::invalid_domain)?;
+        record
+            .pool
+            .as_ref()
+            .map(|pool| pool.extent_info_at(index))
+            .transpose()
+            .map(|maybe| maybe.flatten())
     }
 
     /// Returns a slab strategy view for `domain`.

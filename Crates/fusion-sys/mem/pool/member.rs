@@ -7,7 +7,7 @@ use crate::mem::provider::{
     MemoryStrategyId,
     MemoryTopologyNodeId,
 };
-use crate::mem::resource::{MemoryResource, MemoryResourceHandle, ResourceRange};
+use crate::mem::resource::{MemoryResource, MemoryResourceHandle, ResourceInfo, ResourceRange};
 
 use super::MemoryPoolError;
 
@@ -136,6 +136,8 @@ impl MemoryPoolMember {
 pub struct MemoryPoolMemberInfo {
     /// Stable member identifier.
     pub id: MemoryPoolMemberId,
+    /// Immutable descriptive information for the backing resource.
+    pub resource: ResourceInfo,
     /// Provenance of the member.
     pub origin: MemoryPoolContributorOrigin,
     /// Pool-usable range inside the member resource.
@@ -150,12 +152,15 @@ pub struct MemoryPoolMemberInfo {
     pub free_bytes: usize,
     /// Currently leased bytes in this member.
     pub leased_bytes: usize,
+    /// Largest currently free contiguous extent in this member.
+    pub largest_free_extent: usize,
 }
 
 impl MemoryPoolMemberInfo {
-    pub(super) const fn from_member(member: &MemoryPoolMember, stats: MemberUsageStats) -> Self {
+    pub(super) fn from_member(member: &MemoryPoolMember, stats: MemberUsageStats) -> Self {
         Self {
             id: member.id,
+            resource: member.handle.resolved().info,
             origin: member.origin,
             usable_range: member.usable_range,
             compatibility: member.compatibility,
@@ -163,6 +168,7 @@ impl MemoryPoolMemberInfo {
             pool_class: member.pool_class,
             free_bytes: stats.free_bytes,
             leased_bytes: stats.leased_bytes,
+            largest_free_extent: stats.largest_free_extent,
         }
     }
 }
@@ -171,13 +177,19 @@ impl MemoryPoolMemberInfo {
 pub(super) struct MemberUsageStats {
     pub free_bytes: usize,
     pub leased_bytes: usize,
+    pub largest_free_extent: usize,
 }
 
 impl MemberUsageStats {
-    pub(super) const fn new(free_bytes: usize, leased_bytes: usize) -> Self {
+    pub(super) const fn new(
+        free_bytes: usize,
+        leased_bytes: usize,
+        largest_free_extent: usize,
+    ) -> Self {
         Self {
             free_bytes,
             leased_bytes,
+            largest_free_extent,
         }
     }
 }

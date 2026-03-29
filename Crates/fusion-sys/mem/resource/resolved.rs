@@ -65,6 +65,12 @@ impl ResourceInfo {
     pub const fn ops(self) -> super::ops::ResourceOpSet {
         self.support.ops
     }
+
+    /// Returns the contiguous governed range represented by this resource.
+    #[must_use]
+    pub const fn range(self) -> Region {
+        self.range
+    }
 }
 
 /// Creation-time resolution record for a resource instance.
