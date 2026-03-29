@@ -1,6 +1,18 @@
-//! Minimal semantic stream-kernel IR vocabulary for PCU dispatch.
+//! Continuous-I/O stream profile layered over the PCU IR core.
 
-use super::{PcuIrKind, PcuKernelId, PcuKernelIr};
+use super::super::{
+    PcuBinding,
+    PcuInvocationModel,
+    PcuIrKind,
+    PcuKernelId,
+    PcuKernelIr,
+    PcuKernelSignature,
+    PcuPort,
+    PcuPortDirection,
+    PcuPortRate,
+    PcuScalarType,
+    PcuValueType,
+};
 
 /// Stream element types surfaced by the current stream dialect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22,19 +34,27 @@ impl PcuStreamValueType {
     }
 }
 
-/// Resource class for one stream-kernel binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PcuStreamBindingClass {
-    Input,
-    Output,
-}
+impl PcuStreamValueType {
+    /// Returns the corresponding PCU core value type.
+    #[must_use]
+    pub const fn as_value_type(self) -> PcuValueType {
+        match self {
+            Self::U8 => PcuValueType::Scalar(PcuScalarType::U8),
+            Self::U16 => PcuValueType::Scalar(PcuScalarType::U16),
+            Self::U32 => PcuValueType::Scalar(PcuScalarType::U32),
+        }
+    }
 
-/// One explicit stream-kernel binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuStreamBinding<'a> {
-    pub name: Option<&'a str>,
-    pub class: PcuStreamBindingClass,
-    pub value_type: PcuStreamValueType,
+    /// Attempts to recover one stream value type from one PCU core value type.
+    #[must_use]
+    pub const fn from_value_type(value_type: PcuValueType) -> Option<Self> {
+        match value_type {
+            PcuValueType::Scalar(PcuScalarType::U8) => Some(Self::U8),
+            PcuValueType::Scalar(PcuScalarType::U16) => Some(Self::U16),
+            PcuValueType::Scalar(PcuScalarType::U32) => Some(Self::U32),
+            _ => None,
+        }
+    }
 }
 
 /// One semantic parameterized stream function/pattern.
@@ -109,7 +129,8 @@ bitflags::bitflags! {
 pub struct PcuStreamKernelIr<'a> {
     pub id: PcuKernelId,
     pub entry_point: &'a str,
-    pub bindings: &'a [PcuStreamBinding<'a>],
+    pub bindings: &'a [PcuBinding<'a>],
+    pub ports: &'a [PcuPort<'a>],
     pub patterns: &'a [PcuStreamPattern],
     pub capabilities: PcuStreamCapabilities,
 }
@@ -119,21 +140,19 @@ impl PcuStreamKernelIr<'_> {
     /// typed stream transform.
     #[must_use]
     pub fn simple_transform_type(&self) -> Option<PcuStreamValueType> {
-        match self.bindings {
-            [
-                PcuStreamBinding {
-                    class: PcuStreamBindingClass::Input,
-                    value_type,
-                    ..
-                },
-                PcuStreamBinding {
-                    class: PcuStreamBindingClass::Output,
-                    value_type: output_type,
-                    ..
-                },
-            ] if value_type == output_type => Some(*value_type),
-            _ => None,
+        let [input, output] = self.ports else {
+            return None;
+        };
+        if input.direction != PcuPortDirection::Input
+            || output.direction != PcuPortDirection::Output
+            || input.rate != PcuPortRate::Stream
+            || output.rate != PcuPortRate::Stream
+        {
+            return None;
         }
+        let input_type = PcuStreamValueType::from_value_type(input.value_type)?;
+        let output_type = PcuStreamValueType::from_value_type(output.value_type)?;
+        (input_type == output_type).then_some(input_type)
     }
 
     /// Returns whether the bound stream patterns are semantically valid for the simple transform
@@ -162,6 +181,14 @@ impl PcuKernelIr for PcuStreamKernelIr<'_> {
     fn entry_point(&self) -> &str {
         self.entry_point
     }
+
+    fn signature(&self) -> PcuKernelSignature<'_> {
+        PcuKernelSignature {
+            bindings: self.bindings,
+            ports: self.ports,
+            invocation: PcuInvocationModel::continuous(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -170,23 +197,16 @@ mod tests {
 
     #[test]
     fn stream_ir_reports_simple_transform_shape() {
-        let bindings = [
-            PcuStreamBinding {
-                name: Some("input"),
-                class: PcuStreamBindingClass::Input,
-                value_type: PcuStreamValueType::U32,
-            },
-            PcuStreamBinding {
-                name: Some("output"),
-                class: PcuStreamBindingClass::Output,
-                value_type: PcuStreamValueType::U32,
-            },
+        let ports = [
+            PcuPort::stream_input(Some("input"), PcuStreamValueType::U32.as_value_type()),
+            PcuPort::stream_output(Some("output"), PcuStreamValueType::U32.as_value_type()),
         ];
         let patterns = [PcuStreamPattern::BitReverse];
         let kernel = PcuStreamKernelIr {
             id: PcuKernelId(7),
             entry_point: "bit_reverse",
-            bindings: &bindings,
+            bindings: &[],
+            ports: &ports,
             patterns: &patterns,
             capabilities: PcuStreamCapabilities::FIFO_INPUT
                 | PcuStreamCapabilities::FIFO_OUTPUT
@@ -200,6 +220,10 @@ mod tests {
             Some(PcuStreamValueType::U32)
         );
         assert!(kernel.simple_transform_patterns_are_valid());
+        assert_eq!(
+            kernel.signature().invocation,
+            PcuInvocationModel::continuous()
+        );
     }
 
     #[test]

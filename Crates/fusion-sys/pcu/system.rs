@@ -254,8 +254,7 @@ mod tests {
         PcuInvocationShape,
         PcuKernel,
         PcuKernelId,
-        PcuStreamBinding,
-        PcuStreamBindingClass,
+        PcuPort,
         PcuStreamCapabilities,
         PcuStreamKernelIr,
         PcuStreamPattern,
@@ -272,23 +271,16 @@ mod tests {
 
     #[test]
     fn host_stream_planning_falls_back_to_cpu() {
-        let bindings = [
-            PcuStreamBinding {
-                name: Some("input"),
-                class: PcuStreamBindingClass::Input,
-                value_type: PcuStreamValueType::U32,
-            },
-            PcuStreamBinding {
-                name: Some("output"),
-                class: PcuStreamBindingClass::Output,
-                value_type: PcuStreamValueType::U32,
-            },
+        let ports = [
+            PcuPort::stream_input(Some("input"), PcuStreamValueType::U32.as_value_type()),
+            PcuPort::stream_output(Some("output"), PcuStreamValueType::U32.as_value_type()),
         ];
         let patterns = [PcuStreamPattern::BitReverse];
         let kernel = PcuKernel::Stream(PcuStreamKernelIr {
             id: PcuKernelId(41),
             entry_point: "bit_reverse",
-            bindings: &bindings,
+            bindings: &[],
+            ports: &ports,
             patterns: &patterns,
             capabilities: PcuStreamCapabilities::FIFO_INPUT
                 | PcuStreamCapabilities::FIFO_OUTPUT
@@ -309,23 +301,16 @@ mod tests {
 
     #[test]
     fn host_stream_dispatch_executes_cpu_fallback() {
-        let bindings = [
-            PcuStreamBinding {
-                name: Some("input"),
-                class: PcuStreamBindingClass::Input,
-                value_type: PcuStreamValueType::U32,
-            },
-            PcuStreamBinding {
-                name: Some("output"),
-                class: PcuStreamBindingClass::Output,
-                value_type: PcuStreamValueType::U32,
-            },
+        let ports = [
+            PcuPort::stream_input(Some("input"), PcuStreamValueType::U32.as_value_type()),
+            PcuPort::stream_output(Some("output"), PcuStreamValueType::U32.as_value_type()),
         ];
         let patterns = [PcuStreamPattern::BitReverse];
         let kernel = PcuKernel::Stream(PcuStreamKernelIr {
             id: PcuKernelId(42),
             entry_point: "bit_reverse",
-            bindings: &bindings,
+            bindings: &[],
+            ports: &ports,
             patterns: &patterns,
             capabilities: PcuStreamCapabilities::FIFO_INPUT
                 | PcuStreamCapabilities::FIFO_OUTPUT
@@ -357,23 +342,16 @@ mod tests {
 
     #[test]
     fn host_byte_stream_dispatch_executes_cpu_fallback() {
-        let bindings = [
-            PcuStreamBinding {
-                name: Some("input"),
-                class: PcuStreamBindingClass::Input,
-                value_type: PcuStreamValueType::U8,
-            },
-            PcuStreamBinding {
-                name: Some("output"),
-                class: PcuStreamBindingClass::Output,
-                value_type: PcuStreamValueType::U8,
-            },
+        let ports = [
+            PcuPort::stream_input(Some("input"), PcuStreamValueType::U8.as_value_type()),
+            PcuPort::stream_output(Some("output"), PcuStreamValueType::U8.as_value_type()),
         ];
         let patterns = [PcuStreamPattern::BitInvert];
         let kernel = PcuKernel::Stream(PcuStreamKernelIr {
             id: PcuKernelId(43),
             entry_point: "bit_invert",
-            bindings: &bindings,
+            bindings: &[],
+            ports: &ports,
             patterns: &patterns,
             capabilities: PcuStreamCapabilities::FIFO_INPUT
                 | PcuStreamCapabilities::FIFO_OUTPUT
@@ -405,23 +383,16 @@ mod tests {
 
     #[test]
     fn host_stream_planning_rejects_invalid_specialization() {
-        let bindings = [
-            PcuStreamBinding {
-                name: Some("input"),
-                class: PcuStreamBindingClass::Input,
-                value_type: PcuStreamValueType::U8,
-            },
-            PcuStreamBinding {
-                name: Some("output"),
-                class: PcuStreamBindingClass::Output,
-                value_type: PcuStreamValueType::U8,
-            },
+        let ports = [
+            PcuPort::stream_input(Some("input"), PcuStreamValueType::U8.as_value_type()),
+            PcuPort::stream_output(Some("output"), PcuStreamValueType::U8.as_value_type()),
         ];
         let patterns = [PcuStreamPattern::ByteSwap32];
         let kernel = PcuKernel::Stream(PcuStreamKernelIr {
             id: PcuKernelId(44),
             entry_point: "illegal_bswap32_u8",
-            bindings: &bindings,
+            bindings: &[],
+            ports: &ports,
             patterns: &patterns,
             capabilities: PcuStreamCapabilities::FIFO_INPUT
                 | PcuStreamCapabilities::FIFO_OUTPUT

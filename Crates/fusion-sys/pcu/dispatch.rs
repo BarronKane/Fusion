@@ -1,10 +1,10 @@
 //! Generic coprocessor invocation, planning, and execution vocabulary.
 
-use core::num::NonZeroU32;
-
 use super::{
     PcuDeviceId,
     PcuError,
+    PcuInvocationBindings,
+    PcuInvocationShape,
     PcuKernel,
     PcuStreamKernelIr,
     PcuStreamPattern,
@@ -33,26 +33,6 @@ use crate::pcu::cortex_m::pio::{
     system_pio,
 };
 
-/// Compute-style invocation geometry for one kernel dispatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuInvocationShape {
-    threads: NonZeroU32,
-}
-
-impl PcuInvocationShape {
-    /// Creates one checked invocation shape.
-    #[must_use]
-    pub const fn threads(threads: NonZeroU32) -> Self {
-        Self { threads }
-    }
-
-    /// Returns the requested logical thread count.
-    #[must_use]
-    pub const fn thread_count(self) -> NonZeroU32 {
-        self.threads
-    }
-}
-
 /// Concrete backend kind selected for one prepared or completed invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PcuBackendKind {
@@ -75,35 +55,6 @@ pub struct PcuInvocationDescriptor<'a> {
     pub kernel: &'a PcuKernel<'a>,
     pub shape: PcuInvocationShape,
     pub policy: PcuDispatchPolicy,
-}
-
-/// Caller-provided input/output bindings for one `u8` stream transform.
-#[derive(Debug)]
-pub struct PcuByteStreamBindings<'a> {
-    pub input: &'a [u8],
-    pub output: &'a mut [u8],
-}
-
-/// Caller-provided input/output bindings for one `u16` stream transform.
-#[derive(Debug)]
-pub struct PcuHalfWordStreamBindings<'a> {
-    pub input: &'a [u16],
-    pub output: &'a mut [u16],
-}
-
-/// Caller-provided input/output bindings for one `u32` stream transform.
-#[derive(Debug)]
-pub struct PcuWordStreamBindings<'a> {
-    pub input: &'a [u32],
-    pub output: &'a mut [u32],
-}
-
-/// Invocation bindings for one prepared kernel.
-#[derive(Debug)]
-pub enum PcuInvocationBindings<'a> {
-    StreamBytes(PcuByteStreamBindings<'a>),
-    StreamHalfWords(PcuHalfWordStreamBindings<'a>),
-    StreamWords(PcuWordStreamBindings<'a>),
 }
 
 /// Planned dispatch for one kernel invocation.
@@ -679,15 +630,14 @@ mod tests {
 
     use super::{
         PcuBackendKind,
-        PcuByteStreamBindings,
         PcuCompletedInvocation,
-        PcuHalfWordStreamBindings,
         PcuInvocationBindings,
         PcuInvocationHandle,
         PcuInvocationShape,
         PcuInvocationStatus,
         PcuStreamPattern,
     };
+    use crate::pcu::{PcuByteStreamBindings, PcuHalfWordStreamBindings};
 
     #[test]
     fn invocation_shape_preserves_thread_count() {

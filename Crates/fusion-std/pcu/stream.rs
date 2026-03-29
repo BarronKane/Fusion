@@ -16,8 +16,7 @@ use super::{
     PcuInvocationShape,
     PcuKernel,
     PcuKernelId,
-    PcuStreamBinding,
-    PcuStreamBindingClass,
+    PcuPort,
     PcuStreamCapabilities,
     PcuStreamKernelIr,
     PcuStreamPattern,
@@ -27,43 +26,19 @@ use super::{
 
 const DEFAULT_PATTERN_CAPACITY: usize = 16;
 
-const BYTE_STREAM_BINDINGS: [PcuStreamBinding<'static>; 2] = [
-    PcuStreamBinding {
-        name: Some("input"),
-        class: PcuStreamBindingClass::Input,
-        value_type: PcuStreamValueType::U8,
-    },
-    PcuStreamBinding {
-        name: Some("output"),
-        class: PcuStreamBindingClass::Output,
-        value_type: PcuStreamValueType::U8,
-    },
+const BYTE_STREAM_PORTS: [PcuPort<'static>; 2] = [
+    PcuPort::stream_input(Some("input"), PcuStreamValueType::U8.as_value_type()),
+    PcuPort::stream_output(Some("output"), PcuStreamValueType::U8.as_value_type()),
 ];
 
-const HALF_WORD_STREAM_BINDINGS: [PcuStreamBinding<'static>; 2] = [
-    PcuStreamBinding {
-        name: Some("input"),
-        class: PcuStreamBindingClass::Input,
-        value_type: PcuStreamValueType::U16,
-    },
-    PcuStreamBinding {
-        name: Some("output"),
-        class: PcuStreamBindingClass::Output,
-        value_type: PcuStreamValueType::U16,
-    },
+const HALF_WORD_STREAM_PORTS: [PcuPort<'static>; 2] = [
+    PcuPort::stream_input(Some("input"), PcuStreamValueType::U16.as_value_type()),
+    PcuPort::stream_output(Some("output"), PcuStreamValueType::U16.as_value_type()),
 ];
 
-const WORD_STREAM_BINDINGS: [PcuStreamBinding<'static>; 2] = [
-    PcuStreamBinding {
-        name: Some("input"),
-        class: PcuStreamBindingClass::Input,
-        value_type: PcuStreamValueType::U32,
-    },
-    PcuStreamBinding {
-        name: Some("output"),
-        class: PcuStreamBindingClass::Output,
-        value_type: PcuStreamValueType::U32,
-    },
+const WORD_STREAM_PORTS: [PcuPort<'static>; 2] = [
+    PcuPort::stream_input(Some("input"), PcuStreamValueType::U32.as_value_type()),
+    PcuPort::stream_output(Some("output"), PcuStreamValueType::U32.as_value_type()),
 ];
 
 /// Builder for one unary stream transform dispatched through the selected PCU backend.
@@ -457,10 +432,11 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
         PcuStreamKernelIr {
             id: self.kernel_id,
             entry_point: self.entry_point,
-            bindings: match self.value_type {
-                PcuStreamValueType::U8 => &BYTE_STREAM_BINDINGS,
-                PcuStreamValueType::U16 => &HALF_WORD_STREAM_BINDINGS,
-                PcuStreamValueType::U32 => &WORD_STREAM_BINDINGS,
+            bindings: &[],
+            ports: match self.value_type {
+                PcuStreamValueType::U8 => &BYTE_STREAM_PORTS,
+                PcuStreamValueType::U16 => &HALF_WORD_STREAM_PORTS,
+                PcuStreamValueType::U32 => &WORD_STREAM_PORTS,
             },
             patterns: self.patterns(),
             capabilities: self.capabilities,

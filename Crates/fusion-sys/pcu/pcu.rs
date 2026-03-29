@@ -18,6 +18,7 @@ pub use system::*;
 
 pub use fusion_pal::sys::pcu::{
     PcuBase,
+    PcuByteStreamBindings,
     PcuCaps,
     PcuControl,
     PcuDeviceClaim,
@@ -26,6 +27,11 @@ pub use fusion_pal::sys::pcu::{
     PcuDeviceId,
     PcuError,
     PcuErrorKind,
+    PcuHalfWordStreamBindings,
     PcuImplementationKind,
+    PcuInvocation,
+    PcuInvocationBindings,
+    PcuInvocationShape,
     PcuSupport,
+    PcuWordStreamBindings,
 };

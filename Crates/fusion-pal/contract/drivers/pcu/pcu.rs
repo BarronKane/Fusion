@@ -1,13 +1,23 @@
 //! Driver-facing PCU contract vocabulary.
 
-mod caps;
-mod error;
-mod types;
-mod unsupported;
+#[path = "caps.rs"]
+pub mod caps;
+#[path = "device.rs"]
+pub mod device;
+#[path = "error.rs"]
+pub mod error;
+#[path = "invocation.rs"]
+pub mod invocation;
+#[path = "ir/ir.rs"]
+pub mod ir;
+#[path = "unsupported.rs"]
+pub mod unsupported;
 
 pub use caps::*;
+pub use device::*;
 pub use error::*;
-pub use types::*;
+pub use invocation::*;
+pub use ir::*;
 pub use unsupported::*;
 
 /// Capability trait for generic PCU backends.
