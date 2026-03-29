@@ -1,3 +1,5 @@
+use core::ops::{Deref, DerefMut};
+
 use bitflags::bitflags;
 
 /// Stable identifier for a hardware-topology node shared across hardware and thread APIs.
@@ -221,6 +223,60 @@ pub struct HardwareWriteSummary {
     /// Number of items actually written into the supplied buffer.
     pub written: usize,
 }
+
+macro_rules! define_cache_padded {
+    ($name:ident, $align:literal) => {
+        #[repr(C, align($align))]
+        #[derive(Debug, Default)]
+        pub struct $name<T> {
+            value: T,
+        }
+
+        impl<T> $name<T> {
+            /// Creates one cache-padded wrapper.
+            #[must_use]
+            pub const fn new(value: T) -> Self {
+                Self { value }
+            }
+
+            /// Consumes the wrapper and returns the inner value.
+            #[must_use]
+            pub fn into_inner(self) -> T {
+                self.value
+            }
+
+            /// Returns a shared reference to the inner value.
+            #[must_use]
+            pub const fn get(&self) -> &T {
+                &self.value
+            }
+
+            /// Returns an exclusive reference to the inner value.
+            #[must_use]
+            pub fn get_mut(&mut self) -> &mut T {
+                &mut self.value
+            }
+        }
+
+        impl<T> Deref for $name<T> {
+            type Target = T;
+
+            fn deref(&self) -> &Self::Target {
+                self.get()
+            }
+        }
+
+        impl<T> DerefMut for $name<T> {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                self.get_mut()
+            }
+        }
+    };
+}
+
+define_cache_padded!(CachePadded32, 32);
+define_cache_padded!(CachePadded64, 64);
+define_cache_padded!(CachePadded128, 128);
 
 impl HardwareWriteSummary {
     /// Creates a new enumeration-write summary.

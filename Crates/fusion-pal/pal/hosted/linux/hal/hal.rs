@@ -7,6 +7,7 @@ use rustix::io::{Errno, read};
 use rustix::thread::{self as rustix_thread, CpuSet};
 
 use crate::contract::pal::cpu::{
+    CachePadded64,
     fallback_stack_abi,
     selected_architecture,
     selected_atomic_widths,
@@ -49,6 +50,12 @@ pub struct LinuxHardware;
 
 /// Target-selected Linux hardware provider alias.
 pub type PlatformHardware = LinuxHardware;
+
+/// Compile-time cache-padding wrapper for Linux-hosted builds.
+pub type PlatformCachePadded<T> = CachePadded64<T>;
+
+/// Compile-time cache-padding alignment exported by the selected Linux backend.
+pub const PLATFORM_CACHE_LINE_ALIGN_BYTES: usize = 64;
 
 impl LinuxHardware {
     /// Creates a new Linux hardware provider handle.

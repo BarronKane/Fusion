@@ -1,3 +1,6 @@
+#[path = "atomic/atomic.rs"]
+/// Linux fusion-pal atomic backend implementation.
+pub mod atomic;
 #[path = "context/context.rs"]
 /// Linux fusion-pal user-space context backend implementation.
 pub mod context;

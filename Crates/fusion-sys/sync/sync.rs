@@ -4,6 +4,7 @@
 //! local fallbacks, exposes internal-friendly locking utilities such as [`ThinMutex`], and
 //! keeps the no-alloc, no-poison contract surface explicit for higher layers.
 
+mod left_right;
 mod mutex;
 mod once;
 mod rwlock;
@@ -12,6 +13,7 @@ mod shared;
 mod spin;
 mod thin_mutex;
 
+pub use left_right::*;
 pub use mutex::*;
 pub use once::*;
 pub use rwlock::*;
@@ -47,8 +49,4 @@ pub use fusion_pal::sys::sync::{
     SyncImplementationKind,
     SyncSupport,
     TimeoutCaps,
-    WaitCaps,
-    WaitOutcome,
-    WaitPrimitive,
-    WaitSupport,
 };

@@ -13,6 +13,7 @@ use crate::sync::{
     SyncError,
     SyncErrorKind,
 };
+use fusion_pal::sys::cpu::CachePadded;
 use fusion_pal::sys::mem::{
     Backing,
     CachePolicy,
@@ -366,10 +367,7 @@ fn cache_thread_pool_shared_region(region: Region) -> Result<bool, ThreadPoolErr
     Ok(false)
 }
 
-#[repr(C, align(64))]
-struct InlineThreadJobBytes {
-    bytes: [u8; THREAD_POOL_JOB_INLINE_BYTES],
-}
+type InlineThreadJobBytes = CachePadded<[u8; THREAD_POOL_JOB_INLINE_BYTES]>;
 
 struct InlineThreadJobStorage {
     storage: MaybeUninit<InlineThreadJobBytes>,

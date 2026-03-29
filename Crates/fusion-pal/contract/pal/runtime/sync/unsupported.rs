@@ -4,9 +4,6 @@
 //! They are useful for hosted stubs and any other backend path that needs to report truthful
 //! absence of synchronization primitives without inventing platform-specific behavior.
 
-use core::sync::atomic::AtomicU32;
-use core::time::Duration;
-
 use super::{
     MutexSupport,
     OnceBeginResult,
@@ -21,9 +18,6 @@ use super::{
     SyncBase,
     SyncError,
     SyncSupport,
-    WaitOutcome,
-    WaitPrimitive,
-    WaitSupport,
 };
 
 /// Unsupported synchronization provider placeholder.
@@ -57,29 +51,6 @@ impl UnsupportedSync {
 impl SyncBase for UnsupportedSync {
     fn support(&self) -> SyncSupport {
         SyncSupport::unsupported()
-    }
-}
-
-impl WaitPrimitive for UnsupportedSync {
-    fn support(&self) -> WaitSupport {
-        WaitSupport::unsupported()
-    }
-
-    fn wait_while_equal(
-        &self,
-        _word: &AtomicU32,
-        _expected: u32,
-        _timeout: Option<Duration>,
-    ) -> Result<WaitOutcome, SyncError> {
-        Err(SyncError::unsupported())
-    }
-
-    fn wake_one(&self, _word: &AtomicU32) -> Result<usize, SyncError> {
-        Err(SyncError::unsupported())
-    }
-
-    fn wake_all(&self, _word: &AtomicU32) -> Result<usize, SyncError> {
-        Err(SyncError::unsupported())
     }
 }
 

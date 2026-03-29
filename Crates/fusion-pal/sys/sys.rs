@@ -88,6 +88,17 @@ pub mod execution_context {
     pub use super::platform::context::{PlatformContext, PlatformSavedContext, system_context};
     pub use crate::contract::pal::runtime::context::*;
 }
+/// Public atomic substrate module re-exported from the selected platform backend.
+pub mod atomic {
+    pub use super::platform::atomic::{
+        PLATFORM_ATOMIC_WAIT_WORD32_IMPLEMENTATION,
+        PLATFORM_ATOMIC_WORD32_IMPLEMENTATION,
+        PlatformAtomic,
+        PlatformAtomicWord32,
+        system_atomic,
+    };
+    pub use crate::contract::pal::runtime::atomic::*;
+}
 /// Public native visible-context contract surface.
 pub mod context {
     pub use crate::contract::pal::domain::{
@@ -112,6 +123,8 @@ pub mod cpu {
     #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
     pub use super::platform::hal::soc;
     pub use super::platform::hal::{
+        PLATFORM_CACHE_LINE_ALIGN_BYTES,
+        PlatformCachePadded as CachePadded,
         PlatformHardware as PlatformCpu,
         system_hardware as system_cpu,
     };

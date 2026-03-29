@@ -1,9 +1,9 @@
 //! Linux fusion-pal synchronization backend.
 //!
-//! The Linux backend exposes futex-backed local wait/wake, a thin non-recursive mutex built
-//! on that wait primitive, and a local counting semaphore composed over the same futex word.
-//! Richer semantics such as PI mutexes, robustness, or process-shared primitives remain
-//! capability-gated extensions rather than baseline promises.
+//! The Linux backend exposes one thin futex-backed mutex plus local composed synchronization
+//! primitives built over the same word-based substrate. Richer semantics such as PI mutexes,
+//! robustness, or process-shared primitives remain capability-gated extensions rather than
+//! baseline promises.
 //!
 //! The current backend intentionally sticks to baseline `FUTEX_WAIT` / `FUTEX_WAKE` style
 //! operations. If future work adds newer futex operations with stronger timeout or clock
@@ -17,6 +17,7 @@ use core::time::Duration;
 use rustix::io::Errno;
 use rustix::thread::futex;
 
+use crate::contract::pal::runtime::atomic::AtomicWaitOutcome;
 use crate::contract::pal::runtime::sync::{
     MutexCaps,
     MutexSupport,
@@ -44,10 +45,6 @@ use crate::contract::pal::runtime::sync::{
     SyncImplementationKind,
     SyncSupport,
     TimeoutCaps,
-    WaitCaps,
-    WaitOutcome,
-    WaitPrimitive,
-    WaitSupport,
 };
 
 const UNLOCKED: u32 = 0;
@@ -56,17 +53,6 @@ const CONTENDED: u32 = 2;
 const ONCE_UNINITIALIZED: u32 = 0;
 const ONCE_RUNNING: u32 = 1;
 const ONCE_COMPLETE: u32 = 2;
-
-const LINUX_WAIT_SUPPORT: WaitSupport = WaitSupport {
-    caps: WaitCaps::WAIT_WHILE_EQUAL
-        .union(WaitCaps::WAKE_ONE)
-        .union(WaitCaps::WAKE_ALL)
-        .union(WaitCaps::SPURIOUS_WAKE),
-    timeout: TimeoutCaps::RELATIVE.union(TimeoutCaps::RELATIVE_MONOTONIC),
-    process_scope: ProcessScopeSupport::LocalOnly,
-    implementation: SyncImplementationKind::Native,
-    fallback: SyncFallbackKind::None,
-};
 
 const LINUX_MUTEX_SUPPORT: MutexSupport = MutexSupport {
     caps: MutexCaps::TRY_LOCK
@@ -161,35 +147,11 @@ impl LinuxSync {
 impl SyncBase for LinuxSync {
     fn support(&self) -> SyncSupport {
         SyncSupport {
-            wait: LINUX_WAIT_SUPPORT,
             mutex: LINUX_MUTEX_SUPPORT,
             once: LINUX_ONCE_SUPPORT,
             semaphore: LINUX_SEMAPHORE_SUPPORT,
             rwlock: LINUX_RWLOCK_SUPPORT,
         }
-    }
-}
-
-impl WaitPrimitive for LinuxSync {
-    fn support(&self) -> WaitSupport {
-        LINUX_WAIT_SUPPORT
-    }
-
-    fn wait_while_equal(
-        &self,
-        word: &AtomicU32,
-        expected: u32,
-        timeout: Option<Duration>,
-    ) -> Result<WaitOutcome, SyncError> {
-        futex_wait_private(word, expected, timeout)
-    }
-
-    fn wake_one(&self, word: &AtomicU32) -> Result<usize, SyncError> {
-        futex::wake(word, futex::Flags::PRIVATE, 1).map_err(map_errno)
-    }
-
-    fn wake_all(&self, word: &AtomicU32) -> Result<usize, SyncError> {
-        futex::wake(word, futex::Flags::PRIVATE, u32::MAX).map_err(map_errno)
     }
 }
 
@@ -257,10 +219,10 @@ impl RawOnce for LinuxRawOnce {
             match self.state.load(Ordering::Acquire) {
                 ONCE_COMPLETE | ONCE_UNINITIALIZED => return Ok(()),
                 ONCE_RUNNING => match futex_wait_private(&self.state, ONCE_RUNNING, None)? {
-                    WaitOutcome::Woken
-                    | WaitOutcome::Mismatch
-                    | WaitOutcome::Interrupted
-                    | WaitOutcome::TimedOut => {}
+                    AtomicWaitOutcome::Woken
+                    | AtomicWaitOutcome::Mismatch
+                    | AtomicWaitOutcome::Interrupted
+                    | AtomicWaitOutcome::TimedOut => {}
                 },
                 _ => return Err(SyncError::invalid()),
             }
@@ -327,10 +289,10 @@ impl LinuxRawMutex {
             }
 
             match futex_wait_private(&self.state, CONTENDED, None)? {
-                WaitOutcome::Woken
-                | WaitOutcome::Mismatch
-                | WaitOutcome::Interrupted
-                | WaitOutcome::TimedOut => {
+                AtomicWaitOutcome::Woken
+                | AtomicWaitOutcome::Mismatch
+                | AtomicWaitOutcome::Interrupted
+                | AtomicWaitOutcome::TimedOut => {
                     state = self.state.load(Ordering::Relaxed);
                 }
             }
@@ -411,10 +373,10 @@ impl RawSemaphore for LinuxSemaphore {
             let current = self.permits.load(Ordering::Acquire);
             if current == 0 {
                 match futex_wait_private(&self.permits, 0, None)? {
-                    WaitOutcome::Woken
-                    | WaitOutcome::Mismatch
-                    | WaitOutcome::Interrupted
-                    | WaitOutcome::TimedOut => {}
+                    AtomicWaitOutcome::Woken
+                    | AtomicWaitOutcome::Mismatch
+                    | AtomicWaitOutcome::Interrupted
+                    | AtomicWaitOutcome::TimedOut => {}
                 }
                 continue;
             }
@@ -581,10 +543,10 @@ unsafe impl RawRwLock for LinuxRawRwLock {
             // SAFETY: this thread currently holds the gate mutex.
             unsafe { self.unlock_gate_unchecked() };
             match futex_wait_private(&self.epoch, observed, None)? {
-                WaitOutcome::Woken
-                | WaitOutcome::Mismatch
-                | WaitOutcome::Interrupted
-                | WaitOutcome::TimedOut => {}
+                AtomicWaitOutcome::Woken
+                | AtomicWaitOutcome::Mismatch
+                | AtomicWaitOutcome::Interrupted
+                | AtomicWaitOutcome::TimedOut => {}
             }
         }
     }
@@ -623,10 +585,10 @@ unsafe impl RawRwLock for LinuxRawRwLock {
             let wait_result = futex_wait_private(&self.epoch, observed, None);
             drop(waiting_writer);
             match wait_result? {
-                WaitOutcome::Woken
-                | WaitOutcome::Mismatch
-                | WaitOutcome::Interrupted
-                | WaitOutcome::TimedOut => {}
+                AtomicWaitOutcome::Woken
+                | AtomicWaitOutcome::Mismatch
+                | AtomicWaitOutcome::Interrupted
+                | AtomicWaitOutcome::TimedOut => {}
             }
         }
     }
@@ -673,7 +635,7 @@ fn futex_wait_private(
     word: &AtomicU32,
     expected: u32,
     timeout: Option<Duration>,
-) -> Result<WaitOutcome, SyncError> {
+) -> Result<AtomicWaitOutcome, SyncError> {
     let timeout_storage = duration_to_timespec(timeout)?;
     match futex::wait(
         word,
@@ -681,10 +643,10 @@ fn futex_wait_private(
         expected,
         timeout_storage.as_ref(),
     ) {
-        Ok(()) => Ok(WaitOutcome::Woken),
-        Err(Errno::AGAIN) => Ok(WaitOutcome::Mismatch),
-        Err(Errno::TIMEDOUT) => Ok(WaitOutcome::TimedOut),
-        Err(Errno::INTR) => Ok(WaitOutcome::Interrupted),
+        Ok(()) => Ok(AtomicWaitOutcome::Woken),
+        Err(Errno::AGAIN) => Ok(AtomicWaitOutcome::Mismatch),
+        Err(Errno::TIMEDOUT) => Ok(AtomicWaitOutcome::TimedOut),
+        Err(Errno::INTR) => Ok(AtomicWaitOutcome::Interrupted),
         Err(errno) => Err(map_errno(errno)),
     }
 }

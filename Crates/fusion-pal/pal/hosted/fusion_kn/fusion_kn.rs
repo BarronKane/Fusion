@@ -13,7 +13,7 @@ pub use fusion_kn::client::*;
 pub use fusion_kn::contract::*;
 
 #[cfg(target_os = "linux")]
-pub use linux_platform::{context, event, fiber, gpio, hal, mem, power, sync, thread};
+pub use linux_platform::{atomic, context, event, fiber, gpio, hal, mem, power, sync, thread};
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]

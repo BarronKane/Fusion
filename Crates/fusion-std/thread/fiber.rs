@@ -21,6 +21,7 @@ use crate::sync::{
     SyncError,
     SyncErrorKind,
 };
+use fusion_pal::sys::cpu::CachePadded;
 use fusion_pal::sys::fiber::{
     FiberHostError,
     FiberHostErrorKind,
@@ -2791,10 +2792,7 @@ impl MetadataPriorityQueue {
     }
 }
 
-#[repr(C, align(64))]
-struct InlineGreenJobBytes {
-    bytes: [u8; INLINE_GREEN_JOB_BYTES],
-}
+type InlineGreenJobBytes = CachePadded<[u8; INLINE_GREEN_JOB_BYTES]>;
 
 struct InlineGreenJobStorage {
     storage: MaybeUninit<InlineGreenJobBytes>,
@@ -2892,10 +2890,7 @@ impl InlineGreenJobRunner {
     }
 }
 
-#[repr(C, align(64))]
-struct InlineGreenResultBytes {
-    bytes: [u8; INLINE_GREEN_RESULT_BYTES],
-}
+type InlineGreenResultBytes = CachePadded<[u8; INLINE_GREEN_RESULT_BYTES]>;
 
 struct InlineGreenResultStorage {
     storage: MaybeUninit<InlineGreenResultBytes>,

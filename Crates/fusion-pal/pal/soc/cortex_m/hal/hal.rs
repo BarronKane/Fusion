@@ -5,6 +5,7 @@ pub mod core;
 pub mod soc;
 
 use crate::contract::pal::cpu::{
+    CachePadded32,
     selected_architecture,
     selected_atomic_widths,
     selected_endianness,
@@ -74,6 +75,12 @@ pub struct CortexMHardware;
 
 /// Target-selected Cortex-M hardware provider alias.
 pub type PlatformHardware = CortexMHardware;
+
+/// Compile-time cache-padding wrapper for Cortex-M builds.
+pub type PlatformCachePadded<T> = CachePadded32<T>;
+
+/// Compile-time cache-padding alignment exported by the selected Cortex-M backend.
+pub const PLATFORM_CACHE_LINE_ALIGN_BYTES: usize = 32;
 
 impl CortexMHardware {
     /// Creates a new Cortex-M hardware provider handle.

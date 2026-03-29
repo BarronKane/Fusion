@@ -1,6 +1,28 @@
 #[path = "context/context.rs"]
 /// iOS fusion-pal user-space context backend implementation.
 pub mod context;
+/// iOS atomic surface remains unsupported for now.
+pub mod atomic {
+    pub use crate::contract::pal::runtime::atomic::{
+        AtomicImplementationKind,
+        UnsupportedAtomic as PlatformAtomic,
+        UnsupportedAtomicWord32 as PlatformAtomicWord32,
+    };
+
+    /// Backend truth for the selected 32-bit atomic-word implementation on iOS.
+    pub const PLATFORM_ATOMIC_WORD32_IMPLEMENTATION: AtomicImplementationKind =
+        AtomicImplementationKind::Unsupported;
+
+    /// Backend truth for the selected 32-bit atomic wait/wake implementation on iOS.
+    pub const PLATFORM_ATOMIC_WAIT_WORD32_IMPLEMENTATION: AtomicImplementationKind =
+        AtomicImplementationKind::Unsupported;
+
+    /// Returns the unsupported atomic provider for the selected backend.
+    #[must_use]
+    pub const fn system_atomic() -> PlatformAtomic {
+        PlatformAtomic::new()
+    }
+}
 #[path = "event/event.rs"]
 /// iOS fusion-pal event backend implementation.
 pub mod event;

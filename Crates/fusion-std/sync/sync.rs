@@ -35,6 +35,8 @@ use crate::thread::{
 };
 
 pub use fusion_sys::sync::{
+    LeftRight,
+    LeftRightReadGuard,
     MutexCaps,
     MutexSupport,
     Once,
@@ -69,10 +71,6 @@ pub use fusion_sys::sync::{
     ThinMutex,
     ThinMutexGuard,
     TimeoutCaps,
-    WaitCaps,
-    WaitOutcome,
-    WaitPrimitive,
-    WaitSupport,
 };
 
 /// Explicit cooperative lock rank used for ordered green-context lock acquisition.

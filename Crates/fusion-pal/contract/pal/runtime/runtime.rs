@@ -1,3 +1,5 @@
+#[path = "atomic/atomic.rs"]
+pub mod atomic;
 #[path = "context/context.rs"]
 pub mod context;
 #[path = "event/event.rs"]

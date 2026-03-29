@@ -43,6 +43,7 @@ use core::time::Duration;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use crate::sync::{Mutex as SyncMutex, Semaphore, SyncError, SyncErrorKind};
+use fusion_pal::sys::cpu::CachePadded;
 use fusion_pal::sys::mem::MemBase;
 use fusion_sys::alloc::{
     AllocError,
@@ -454,7 +455,7 @@ const fn async_storage_class_for_layout(
     medium_bytes: usize,
     large_bytes: usize,
 ) -> AsyncStorageClass {
-    if bytes <= inline_bytes && align <= INLINE_ASYNC_STORAGE_ALIGN {
+    if bytes <= inline_bytes && align <= align_of::<InlineAsyncFutureBytes>() {
         return AsyncStorageClass::Inline;
     }
     if bytes <= medium_bytes && align <= async_storage_class_slot_align(medium_bytes) {
@@ -1960,7 +1961,6 @@ impl Default for Reactor {
 const CURRENT_QUEUE_CAPACITY: usize = 256;
 const TASK_REGISTRY_CAPACITY: usize = 256;
 const JOIN_SET_CAPACITY: usize = 64;
-const INLINE_ASYNC_STORAGE_ALIGN: usize = 64;
 const INLINE_ASYNC_FUTURE_BYTES: usize = 256;
 const ASYNC_FUTURE_CLASS_MEDIUM_BYTES: usize = 512;
 const ASYNC_FUTURE_CLASS_LARGE_BYTES: usize = 1024;
@@ -2905,10 +2905,7 @@ impl FixedIndexStack {
     }
 }
 
-#[repr(C, align(64))]
-struct InlineAsyncFutureBytes {
-    bytes: [u8; INLINE_ASYNC_FUTURE_BYTES],
-}
+type InlineAsyncFutureBytes = CachePadded<[u8; INLINE_ASYNC_FUTURE_BYTES]>;
 
 type InlineAsyncPollFn = unsafe fn(
     *mut u8,
@@ -3155,10 +3152,7 @@ unsafe impl Send for AsyncFutureFrameAllocation {}
 // SAFETY: shared references do not permit mutation; slot-level synchronization still governs use.
 unsafe impl Sync for AsyncFutureFrameAllocation {}
 
-#[repr(C, align(64))]
-struct InlineAsyncResultBytes {
-    bytes: [u8; INLINE_ASYNC_RESULT_BYTES],
-}
+type InlineAsyncResultBytes = CachePadded<[u8; INLINE_ASYNC_RESULT_BYTES]>;
 
 struct InlineAsyncResultStorage {
     storage: MaybeUninit<InlineAsyncResultBytes>,

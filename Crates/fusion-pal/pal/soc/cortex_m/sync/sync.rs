@@ -22,12 +22,16 @@ use core::sync::atomic::AtomicU8;
 #[cfg(target_has_atomic = "16")]
 use core::sync::atomic::AtomicU16;
 #[cfg(any(
+    all(not(target_has_atomic = "8"), target_has_atomic = "32"),
+    all(not(target_has_atomic = "16"), target_has_atomic = "32")
+))]
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::Ordering;
+#[cfg(any(
     not(any(target_has_atomic = "8", target_has_atomic = "32")),
     not(any(target_has_atomic = "16", target_has_atomic = "32"))
 ))]
 use core::sync::atomic::compiler_fence;
-use core::sync::atomic::{AtomicU32, Ordering};
-use core::time::Duration;
 
 use crate::contract::pal::runtime::sync::{
     MutexCaps,
@@ -55,9 +59,6 @@ use crate::contract::pal::runtime::sync::{
     SyncImplementationKind,
     SyncSupport,
     TimeoutCaps,
-    WaitOutcome,
-    WaitPrimitive,
-    WaitSupport,
 };
 
 const MUTEX_UNLOCKED: u8 = 0;
@@ -399,35 +400,11 @@ impl CortexMSync {
 impl SyncBase for CortexMSync {
     fn support(&self) -> SyncSupport {
         SyncSupport {
-            wait: WaitSupport::unsupported(),
             mutex: mutex_support_surface(),
             once: once_support_surface(),
             semaphore: semaphore_support_surface(),
             rwlock: rwlock_support_surface(),
         }
-    }
-}
-
-impl WaitPrimitive for CortexMSync {
-    fn support(&self) -> WaitSupport {
-        WaitSupport::unsupported()
-    }
-
-    fn wait_while_equal(
-        &self,
-        _word: &AtomicU32,
-        _expected: u32,
-        _timeout: Option<Duration>,
-    ) -> Result<WaitOutcome, SyncError> {
-        Err(SyncError::unsupported())
-    }
-
-    fn wake_one(&self, _word: &AtomicU32) -> Result<usize, SyncError> {
-        Err(SyncError::unsupported())
-    }
-
-    fn wake_all(&self, _word: &AtomicU32) -> Result<usize, SyncError> {
-        Err(SyncError::unsupported())
     }
 }
 

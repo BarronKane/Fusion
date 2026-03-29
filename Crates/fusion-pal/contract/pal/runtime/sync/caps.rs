@@ -83,21 +83,6 @@ bitflags! {
 }
 
 bitflags! {
-    /// Capability flags for a raw wait/wake primitive.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct WaitCaps: u32 {
-        /// Supports waiting while a word remains equal to an expected value.
-        const WAIT_WHILE_EQUAL = 1 << 0;
-        /// Supports waking a single waiter.
-        const WAKE_ONE         = 1 << 1;
-        /// Supports waking all waiters on a word.
-        const WAKE_ALL         = 1 << 2;
-        /// Wait operations may return spuriously and require caller-side rechecking.
-        const SPURIOUS_WAKE    = 1 << 3;
-    }
-}
-
-bitflags! {
     /// Capability flags for a raw rwlock primitive.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct RwLockCaps: u32 {
@@ -158,35 +143,6 @@ bitflags! {
         const ACQUIRE_FOR  = 1 << 2;
         /// Supports releasing more than one permit at a time.
         const RELEASE_MANY = 1 << 3;
-    }
-}
-
-/// Raw wait/wake support offered by a backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WaitSupport {
-    /// Fine-grained wait/wake capability flags.
-    pub caps: WaitCaps,
-    /// Supported timeout models for wait operations.
-    pub timeout: TimeoutCaps,
-    /// Process-sharing semantics, if any.
-    pub process_scope: ProcessScopeSupport,
-    /// Whether the backend implementation is native, emulated, or unavailable.
-    pub implementation: SyncImplementationKind,
-    /// Synchronization-specific fallback detail, if any.
-    pub fallback: SyncFallbackKind,
-}
-
-impl WaitSupport {
-    /// Returns an explicitly unsupported wait surface.
-    #[must_use]
-    pub const fn unsupported() -> Self {
-        Self {
-            caps: WaitCaps::empty(),
-            timeout: TimeoutCaps::empty(),
-            process_scope: ProcessScopeSupport::LocalOnly,
-            implementation: SyncImplementationKind::Unsupported,
-            fallback: SyncFallbackKind::None,
-        }
     }
 }
 
@@ -318,8 +274,6 @@ impl RwLockSupport {
 /// Aggregated synchronization support surface for a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SyncSupport {
-    /// Raw wait/wake support.
-    pub wait: WaitSupport,
     /// Raw mutex support.
     pub mutex: MutexSupport,
     /// Raw once support.
@@ -335,7 +289,6 @@ impl SyncSupport {
     #[must_use]
     pub const fn unsupported() -> Self {
         Self {
-            wait: WaitSupport::unsupported(),
             mutex: MutexSupport::unsupported(),
             once: OnceSupport::unsupported(),
             semaphore: SemaphoreSupport::unsupported(),

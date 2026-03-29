@@ -1,3 +1,6 @@
+#[path = "atomic/atomic.rs"]
+/// Cortex-M bare-metal atomic backend implementation.
+pub mod atomic;
 #[path = "context/context.rs"]
 /// Cortex-M bare-metal context backend implementation.
 pub mod context;

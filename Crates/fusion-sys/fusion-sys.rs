@@ -12,6 +12,9 @@ pub use fusion_pal::{Platform, TARGET_PLATFORM};
 #[path = "alloc/alloc.rs"]
 /// fusion-sys allocation contracts and allocator-facing surfaces.
 pub mod alloc;
+#[path = "atomic/atomic.rs"]
+/// fusion-sys atomic substrate contracts and wrappers.
+pub mod atomic;
 #[path = "channel/channel.rs"]
 /// fusion-sys channel transports and local channel demonstration surface.
 pub mod channel;
