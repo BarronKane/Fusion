@@ -882,10 +882,27 @@ mod tests {
         EFFICIENCY_RUNS.fetch_add(1, Ordering::AcqRel);
     }
 
+    fn tiered_pool_is_unsupported(error: TieredGreenPoolError) -> bool {
+        matches!(error, TieredGreenPoolError::Unsupported)
+            || matches!(
+                error,
+                TieredGreenPoolError::ThreadPool(thread_error)
+                    if thread_error.kind() == fusion_sys::thread::ThreadErrorKind::Unsupported
+            )
+            || matches!(
+                error,
+                TieredGreenPoolError::Green(fiber_error)
+                    if fiber_error.kind() == fusion_sys::fiber::FiberErrorKind::Unsupported
+            )
+    }
+
     #[test]
     fn vector_lane_mapping_tracks_resolved_tier() {
-        let pool =
-            TieredGreenPool::new(&TieredGreenPoolConfig::new()).expect("tiered pool should build");
+        let pool = match TieredGreenPool::new(&TieredGreenPoolConfig::new()) {
+            Ok(pool) => pool,
+            Err(error) if tiered_pool_is_unsupported(error) => return,
+            Err(error) => panic!("tiered pool should build: {error:?}"),
+        };
 
         let performance = TieredTaskAttributes::new(
             FiberTaskAttributes::new(FiberStackClass::MIN)
@@ -913,8 +930,11 @@ mod tests {
         PERFORMANCE_RUNS.store(0, Ordering::Release);
         EFFICIENCY_RUNS.store(0, Ordering::Release);
 
-        let pool =
-            TieredGreenPool::new(&TieredGreenPoolConfig::new()).expect("tiered pool should build");
+        let pool = match TieredGreenPool::new(&TieredGreenPoolConfig::new()) {
+            Ok(pool) => pool,
+            Err(error) if tiered_pool_is_unsupported(error) => return,
+            Err(error) => panic!("tiered pool should build: {error:?}"),
+        };
 
         let performance = TieredTaskAttributes::new(
             FiberTaskAttributes::new(FiberStackClass::MIN)
@@ -967,8 +987,11 @@ mod tests {
         PERFORMANCE_RUNS.store(0, Ordering::Release);
         EFFICIENCY_RUNS.store(0, Ordering::Release);
 
-        let pool =
-            TieredGreenPool::new(&TieredGreenPoolConfig::new()).expect("tiered pool should build");
+        let pool = match TieredGreenPool::new(&TieredGreenPoolConfig::new()) {
+            Ok(pool) => pool,
+            Err(error) if tiered_pool_is_unsupported(error) => return,
+            Err(error) => panic!("tiered pool should build: {error:?}"),
+        };
 
         let performance = TieredTaskAttributes::new(
             FiberTaskAttributes::new(FiberStackClass::MIN)

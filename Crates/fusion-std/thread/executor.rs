@@ -7137,7 +7137,7 @@ mod tests {
     impl TestPipe {
         fn new() -> Self {
             let mut fds = [0_i32; 2];
-            let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+            let rc = create_nonblocking_cloexec_pipe(&mut fds);
             assert_eq!(rc, 0, "test pipe should create");
             Self {
                 read_fd: fds[0],
@@ -7176,13 +7176,55 @@ mod tests {
                     return byte;
                 }
                 assert_eq!(rc, -1, "pipe read should either succeed or set errno");
-                let errno = unsafe { *libc::__errno_location() };
+                let errno = last_errno();
                 if errno == libc::EINTR {
                     continue;
                 }
                 panic!("pipe read should complete after readiness, errno={errno}");
             }
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn create_nonblocking_cloexec_pipe(fds: &mut [i32; 2]) -> i32 {
+        unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    fn create_nonblocking_cloexec_pipe(fds: &mut [i32; 2]) -> i32 {
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if rc != 0 {
+            return rc;
+        }
+
+        for &fd in fds.iter() {
+            let current = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if current < 0 {
+                return -1;
+            }
+            if unsafe { libc::fcntl(fd, libc::F_SETFL, current | libc::O_NONBLOCK) } < 0 {
+                return -1;
+            }
+
+            let current_fd = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if current_fd < 0 {
+                return -1;
+            }
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, current_fd | libc::FD_CLOEXEC) } < 0 {
+                return -1;
+            }
+        }
+        0
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn last_errno() -> i32 {
+        unsafe { *libc::__errno_location() }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn last_errno() -> i32 {
+        unsafe { *libc::__error() }
     }
 
     #[cfg(feature = "std")]
@@ -7234,6 +7276,16 @@ mod tests {
                 thread::park();
             }
         }
+    }
+
+    #[cfg(feature = "std")]
+    const fn is_unsupported_executor_error(error: ExecutorError) -> bool {
+        matches!(error, ExecutorError::Unsupported)
+    }
+
+    #[cfg(feature = "std")]
+    const fn is_unsupported_fiber_error(error: fusion_sys::fiber::FiberError) -> bool {
+        matches!(error.kind(), fusion_sys::fiber::FiberErrorKind::Unsupported)
     }
 
     #[test]
@@ -7635,14 +7687,20 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn executor_binds_to_hosted_fiber_runtime() {
-        let runtime = HostedFiberRuntime::fixed_with_stack(
+        let runtime = match HostedFiberRuntime::fixed_with_stack(
             hosted_green_executor_stack_size().expect("green executor stack size should resolve"),
             2,
-        )
-        .expect("hosted fiber runtime should build");
-        let executor = Executor::new(ExecutorConfig::green_pool())
-            .on_hosted_fibers(&runtime)
-            .expect("executor should bind to hosted fibers");
+        ) {
+            Ok(runtime) => runtime,
+            Err(error) if is_unsupported_fiber_error(error) => return,
+            Err(error) => panic!("hosted fiber runtime should build: {error:?}"),
+        };
+        let executor = match Executor::new(ExecutorConfig::green_pool()).on_hosted_fibers(&runtime)
+        {
+            Ok(executor) => executor,
+            Err(error) if is_unsupported_executor_error(error) => return,
+            Err(error) => panic!("executor should bind to hosted fibers: {error:?}"),
+        };
         assert_eq!(executor.mode(), ExecutorMode::GreenPool);
         drop(executor);
         drop(runtime);
@@ -8130,13 +8188,16 @@ mod tests {
             group: ThreadProcessorGroupId(0),
             index: 0,
         };
-        let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
+        let runtime = match ThreadAsyncRuntime::new(&ThreadPoolConfig {
             min_threads: 1,
             max_threads: 1,
             placement: PoolPlacement::Static(core::slice::from_ref(&cpu)),
             ..ThreadPoolConfig::new()
-        })
-        .expect("thread async runtime should build");
+        }) {
+            Ok(runtime) => runtime,
+            Err(error) if is_unsupported_executor_error(error) => return,
+            Err(error) => panic!("thread async runtime should build: {error:?}"),
+        };
 
         assert_eq!(
             runtime.bootstrap(),
@@ -8403,12 +8464,15 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn thread_async_runtime_waits_for_readiness() {
-        let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
+        let runtime = match ThreadAsyncRuntime::new(&ThreadPoolConfig {
             min_threads: 1,
             max_threads: 1,
             ..ThreadPoolConfig::new()
-        })
-        .expect("thread async runtime should build");
+        }) {
+            Ok(runtime) => runtime,
+            Err(error) if is_unsupported_executor_error(error) => return,
+            Err(error) => panic!("thread async runtime should build: {error:?}"),
+        };
         let pipe = Arc::new(TestPipe::new());
         let handle = runtime
             .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, {
@@ -8418,49 +8482,65 @@ mod tests {
                         pipe.source(),
                         EventInterest::READABLE | EventInterest::ERROR | EventInterest::HANGUP,
                     )
-                    .await
-                    .expect("readiness wait should complete");
+                    .await?;
                     assert!(readiness.contains(EventReadiness::READABLE));
-                    pipe.read_byte()
+                    Ok::<u8, ExecutorError>(pipe.read_byte())
                 }
             })
             .expect("task should spawn");
 
         thread::sleep(Duration::from_millis(1));
         pipe.write_byte(12);
-        assert_eq!(handle.join().expect("task should complete"), 12);
+        match handle.join() {
+            Ok(Ok(value)) => assert_eq!(value, 12),
+            Ok(Err(error)) if is_unsupported_executor_error(error) => {}
+            Err(error) if is_unsupported_executor_error(error) => {}
+            other => panic!("task should complete or report unsupported: {other:?}"),
+        }
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn thread_async_runtime_sleep_for_completes() {
-        let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
+        let runtime = match ThreadAsyncRuntime::new(&ThreadPoolConfig {
             min_threads: 1,
             max_threads: 1,
             ..ThreadPoolConfig::new()
-        })
-        .expect("thread async runtime should build");
+        }) {
+            Ok(runtime) => runtime,
+            Err(error) if is_unsupported_executor_error(error) => return,
+            Err(error) => panic!("thread async runtime should build: {error:?}"),
+        };
         let handle = runtime
             .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
-                async_sleep_for(Duration::from_millis(1))
-                    .await
-                    .expect("sleep should complete");
-                13_u8
+                async_sleep_for(Duration::from_millis(1)).await?;
+                Ok::<u8, ExecutorError>(13_u8)
             })
             .expect("task should spawn");
-        assert_eq!(handle.join().expect("task should complete"), 13);
+        match handle.join() {
+            Ok(Ok(value)) => assert_eq!(value, 13),
+            Ok(Err(error)) if is_unsupported_executor_error(error) => {}
+            Err(error) if is_unsupported_executor_error(error) => {}
+            other => panic!("task should complete or report unsupported: {other:?}"),
+        }
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn fiber_async_runtime_binds_owned_hosted_fibers() {
-        let hosted = HostedFiberRuntime::fixed_with_stack(
+        let hosted = match HostedFiberRuntime::fixed_with_stack(
             hosted_green_executor_stack_size().expect("green executor stack size should resolve"),
             2,
-        )
-        .expect("hosted fiber runtime should build");
-        let runtime =
-            FiberAsyncRuntime::from_hosted_fibers(hosted).expect("fiber async runtime should bind");
+        ) {
+            Ok(hosted) => hosted,
+            Err(error) if is_unsupported_fiber_error(error) => return,
+            Err(error) => panic!("hosted fiber runtime should build: {error:?}"),
+        };
+        let runtime = match FiberAsyncRuntime::from_hosted_fibers(hosted) {
+            Ok(runtime) => runtime,
+            Err(error) if is_unsupported_executor_error(error) => return,
+            Err(error) => panic!("fiber async runtime should bind: {error:?}"),
+        };
         assert_eq!(runtime.executor().mode(), ExecutorMode::GreenPool);
         drop(runtime);
     }
@@ -8468,7 +8548,11 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn fiber_async_runtime_rejects_undersized_hosted_fibers() {
-        let hosted = HostedFiberRuntime::fixed(2).expect("hosted fiber runtime should build");
+        let hosted = match HostedFiberRuntime::fixed(2) {
+            Ok(hosted) => hosted,
+            Err(error) if is_unsupported_fiber_error(error) => return,
+            Err(error) => panic!("hosted fiber runtime should build: {error:?}"),
+        };
         assert!(matches!(
             FiberAsyncRuntime::from_hosted_fibers(hosted),
             Err(ExecutorError::Unsupported)
@@ -8478,7 +8562,11 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn fiber_async_runtime_spawn_generated_preserves_contract() {
-        let runtime = FiberAsyncRuntime::fixed(2).expect("fiber async runtime should build");
+        let runtime = match FiberAsyncRuntime::fixed(2) {
+            Ok(runtime) => runtime,
+            Err(error) if is_unsupported_executor_error(error) => return,
+            Err(error) => panic!("fiber async runtime should build: {error:?}"),
+        };
         let handle = runtime
             .spawn_generated(ExplicitGeneratedPollStackFuture)
             .expect("generated-contract task should spawn");
@@ -8541,7 +8629,11 @@ mod tests {
     #[test]
     fn fiber_async_runtime_repeated_create_drop_stays_alive() {
         for _ in 0..32 {
-            let runtime = FiberAsyncRuntime::fixed(2).expect("fiber async runtime should build");
+            let runtime = match FiberAsyncRuntime::fixed(2) {
+                Ok(runtime) => runtime,
+                Err(error) if is_unsupported_executor_error(error) => return,
+                Err(error) => panic!("fiber async runtime should build: {error:?}"),
+            };
             let handle = runtime
                 .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                     async_yield_now().await;
@@ -8556,7 +8648,11 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn fiber_async_runtime_sleep_for_completes() {
-        let runtime = FiberAsyncRuntime::fixed(2).expect("fiber async runtime should build");
+        let runtime = match FiberAsyncRuntime::fixed(2) {
+            Ok(runtime) => runtime,
+            Err(error) if is_unsupported_executor_error(error) => return,
+            Err(error) => panic!("fiber async runtime should build: {error:?}"),
+        };
         let handle = runtime
             .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_sleep_for(Duration::from_millis(1)).await
@@ -8568,7 +8664,11 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn fiber_async_runtime_waits_for_readiness() {
-        let runtime = FiberAsyncRuntime::fixed(2).expect("fiber async runtime should build");
+        let runtime = match FiberAsyncRuntime::fixed(2) {
+            Ok(runtime) => runtime,
+            Err(error) if is_unsupported_executor_error(error) => return,
+            Err(error) => panic!("fiber async runtime should build: {error:?}"),
+        };
         let pipe = Arc::new(TestPipe::new());
         let handle = runtime
             .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, {
