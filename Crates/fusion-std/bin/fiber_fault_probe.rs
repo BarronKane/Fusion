@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use fusion_std::thread::{
     FiberStackBacking,
+    FiberStackClass,
+    FiberTaskAttributes,
     FiberTelemetry,
     GreenPool,
     GreenPoolConfig,
@@ -63,13 +65,15 @@ fn main() -> ExitCode {
         let release = Arc::new(AtomicBool::new(false));
         let entered_for_job = Arc::clone(&entered);
         let release_for_job = Arc::clone(&release);
-        let Ok(handle) = fibers.spawn(move || {
-            let _ = std::hint::black_box(consume_stack(8));
-            entered_for_job.store(true, Ordering::Release);
-            while !release_for_job.load(Ordering::Acquire) {
-                spin_loop();
-            }
-        }) else {
+        let Ok(handle) =
+            fibers.spawn_with_attrs(FiberTaskAttributes::new(FiberStackClass::MIN), move || {
+                let _ = std::hint::black_box(consume_stack(8));
+                entered_for_job.store(true, Ordering::Release);
+                while !release_for_job.load(Ordering::Acquire) {
+                    spin_loop();
+                }
+            })
+        else {
             return ExitCode::from(12);
         };
 

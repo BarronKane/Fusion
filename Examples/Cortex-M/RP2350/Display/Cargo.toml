@@ -22,8 +22,5 @@ fusion-sys = { workspace = true, features = ["soc-rp2350"] }
 cortex-m = { workspace = true }
 cortex-m-rt = { workspace = true }
 
-[build-dependencies]
-fusion-std = { workspace = true, features = ["std"] }
-
 [lints]
 workspace = true

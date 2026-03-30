@@ -23,6 +23,7 @@ fn linux_fiber_support_reports_expected_cross_carrier_contexts() {
     );
     assert!(support.context.caps.contains(ContextCaps::MAKE));
     assert!(support.context.caps.contains(ContextCaps::SWAP));
+    assert_eq!(support.context.structural_stack_overhead_bytes, 352);
     assert_eq!(support.context.stack_direction, ContextStackDirection::Down);
     assert_eq!(
         support.context.tls_isolation,

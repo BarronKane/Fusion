@@ -30,6 +30,7 @@ pub use fusion_pal::sys::execution_context::{
     PlatformSavedContext,
     RawContextEntry,
     system_context,
+    system_context_support,
 };
 
 use crate::channel::{ChannelError, ChannelSend, LocalChannel};

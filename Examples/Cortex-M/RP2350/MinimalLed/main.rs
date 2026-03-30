@@ -7,21 +7,18 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
 use cortex_m_rt::{entry, exception};
+use fusion_example_rp2350_on_device::runtime::block_on_with_poll_stack_bytes;
 use fusion_sys::hardware::peripheral::LedPair;
 use fusion_std::gpio::{Gpio, GpioDriveStrength, GpioPin};
 use fusion_std::thread::async_sleep_for;
 use fusion_sys::thread::system_monotonic_time;
-
-mod backend {
-    include!(concat!(env!("OUT_DIR"), "/rp2350_backing.rs"));
-}
-use backend::block_on;
 
 const BLUE_LED_PIN: u8 = 28;
 const RED_LED_PIN: u8 = 27;
 const FIZZBUZZ_PERIOD: Duration = Duration::from_millis(300);
 const STARTUP_PHASE_PERIOD: Duration = Duration::from_millis(500);
 const PANIC_PHASE_PERIOD: Duration = Duration::from_millis(500);
+const FIZZBUZZ_POLL_STACK_BYTES: usize = 2048;
 
 type PicoLeds = LedPair<GpioPin, GpioPin>;
 
@@ -108,7 +105,7 @@ fn main() -> ! {
     leds.off().expect("LEDs should start off");
     startup_dance(leds);
 
-    block_on(fizzbuzz_loop(leds))
+    block_on_with_poll_stack_bytes(FIZZBUZZ_POLL_STACK_BYTES, fizzbuzz_loop(leds))
         .expect("current-thread async runtime should drive fizzbuzz loop");
 }
 

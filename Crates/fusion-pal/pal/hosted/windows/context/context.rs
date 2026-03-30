@@ -1,6 +1,10 @@
 //! Windows fusion-pal user-space context backend.
 
-use crate::contract::pal::runtime::context::{UnsupportedContext, UnsupportedSavedContext};
+use crate::contract::pal::runtime::context::{
+    ContextSupport,
+    UnsupportedContext,
+    UnsupportedSavedContext,
+};
 
 /// Selected Windows context provider type.
 pub type PlatformContext = UnsupportedContext;
@@ -11,4 +15,10 @@ pub type PlatformSavedContext = UnsupportedSavedContext;
 #[must_use]
 pub const fn system_context() -> PlatformContext {
     PlatformContext::new()
+}
+
+/// Returns the selected Windows context support truth.
+#[must_use]
+pub const fn system_context_support() -> ContextSupport {
+    ContextSupport::unsupported()
 }

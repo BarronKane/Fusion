@@ -28,7 +28,11 @@ mod implementation;
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod implementation {
-    use crate::contract::pal::runtime::context::{UnsupportedContext, UnsupportedSavedContext};
+    use crate::contract::pal::runtime::context::{
+        ContextSupport,
+        UnsupportedContext,
+        UnsupportedSavedContext,
+    };
 
     /// Selected Linux context provider type.
     pub type PlatformContext = UnsupportedContext;
@@ -40,6 +44,17 @@ mod implementation {
     pub const fn system_context() -> PlatformContext {
         PlatformContext::new()
     }
+
+    /// Returns the unsupported Linux context support truth for unsupported Linux ISAs.
+    #[must_use]
+    pub const fn system_context_support() -> ContextSupport {
+        ContextSupport::unsupported()
+    }
 }
 
-pub use implementation::{PlatformContext, PlatformSavedContext, system_context};
+pub use implementation::{
+    PlatformContext,
+    PlatformSavedContext,
+    system_context,
+    system_context_support,
+};

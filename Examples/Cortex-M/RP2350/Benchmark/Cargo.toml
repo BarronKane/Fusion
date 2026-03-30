@@ -15,14 +15,12 @@ default = []
 sizing-global-nearest-round-up = []
 
 [dependencies]
+fusion-example-rp2350-on-device = { workspace = true }
 fusion-pal = { workspace = true, features = ["soc-rp2350"] }
 fusion-std = { workspace = true, features = ["soc-rp2350"] }
 fusion-sys = { workspace = true, features = ["soc-rp2350"] }
 cortex-m = { workspace = true }
 cortex-m-rt = { workspace = true }
-
-[build-dependencies]
-fusion-std = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true

@@ -820,6 +820,7 @@ fn generate_runtime_metadata(options: &CommandOptions) -> Result<GeneratedRuntim
         FIBER_TASK_METADATA_NAME,
     )?;
     let async_poll_stack_path = metadata.output_dir.join(ASYNC_POLL_STACK_METADATA_NAME);
+    ensure_generated_runtime_metadata_file(&async_poll_stack_path, ASYNC_POLL_STACK_METADATA_NAME)?;
     let async_poll_stack_metadata = async_poll_stack_path
         .is_file()
         .then_some(async_poll_stack_path);

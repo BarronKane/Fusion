@@ -27,6 +27,7 @@ global_asm!(include_str!("aarch64.S"));
 
 const STACK_ALIGNMENT: usize = 16;
 const RED_ZONE_BYTES: usize = 0;
+const STRUCTURAL_STACK_OVERHEAD_BYTES: usize = 352;
 
 const AARCH64_CONTEXT_SUPPORT: ContextSupport = ContextSupport {
     caps: ContextCaps::MAKE
@@ -37,6 +38,7 @@ const AARCH64_CONTEXT_SUPPORT: ContextSupport = ContextSupport {
         .union(ContextCaps::SIGNAL_MASK_PRESERVED)
         .union(ContextCaps::GUARD_REQUIRED),
     guarantee: ContextGuarantee::Enforced,
+    structural_stack_overhead_bytes: STRUCTURAL_STACK_OVERHEAD_BYTES,
     min_stack_alignment: STACK_ALIGNMENT,
     red_zone_bytes: RED_ZONE_BYTES,
     stack_direction: ContextStackDirection::Down,
@@ -222,6 +224,12 @@ pub const fn system_context() -> PlatformContext {
     PlatformContext::new()
 }
 
+/// Returns the selected Linux context support truth.
+#[must_use]
+pub const fn system_context_support() -> ContextSupport {
+    AARCH64_CONTEXT_SUPPORT
+}
+
 #[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     use core::num::NonZeroUsize;
@@ -275,6 +283,10 @@ mod tests {
         assert_eq!(support.guarantee, ContextGuarantee::Enforced);
         assert!(support.caps.contains(ContextCaps::MAKE));
         assert!(support.caps.contains(ContextCaps::SWAP));
+        assert_eq!(
+            support.structural_stack_overhead_bytes,
+            STRUCTURAL_STACK_OVERHEAD_BYTES
+        );
         assert_eq!(support.red_zone_bytes, RED_ZONE_BYTES);
         assert_eq!(support.stack_direction, ContextStackDirection::Down);
         assert_eq!(

@@ -58,6 +58,7 @@ const THROUGHPUT_BATCH_SEMAPHORE_MAX: u32 = THROUGHPUT_BATCH_SIZE as u32;
 const MULTI_YIELD_COUNT: usize = 10;
 const ASYNC_CONTENTION_TASKS: usize = 32;
 const ASYNC_CONTENTION_YIELDS: usize = 32;
+const BENCH_ASYNC_POLL_STACK_BYTES: usize = 2048;
 const REACTOR_BATCH_SMALL: usize = 16;
 const REACTOR_BATCH_LARGE: usize = 64;
 const INLINE_NO_YIELD_BENCH_TASK: FiberTaskAttributes =
@@ -428,7 +429,7 @@ pub fn current_fiber_pool_spawn_join_yield_once(b: &mut Bencher) {
 pub fn current_async_runtime_spawn_join_noop(b: &mut Bencher) {
     let runtime = CurrentAsyncRuntime::new();
     let (): () = runtime
-        .spawn(async_noop_job())
+        .spawn_with_poll_stack_bytes(BENCH_ASYNC_POLL_STACK_BYTES, async_noop_job())
         .expect("warmup task should spawn")
         .join()
         .expect("warmup task should join");
@@ -436,7 +437,7 @@ pub fn current_async_runtime_spawn_join_noop(b: &mut Bencher) {
 
     b.iter(|| {
         let handle = runtime
-            .spawn(async_noop_job())
+            .spawn_with_poll_stack_bytes(BENCH_ASYNC_POLL_STACK_BYTES, async_noop_job())
             .expect("benchmark task should spawn");
         let (): () = handle.join().expect("benchmark task should join");
         black_box(());
@@ -446,7 +447,7 @@ pub fn current_async_runtime_spawn_join_noop(b: &mut Bencher) {
 pub fn current_async_runtime_spawn_join_yield_once(b: &mut Bencher) {
     let runtime = CurrentAsyncRuntime::new();
     let (): () = runtime
-        .spawn(async_yield_once_job())
+        .spawn_with_poll_stack_bytes(BENCH_ASYNC_POLL_STACK_BYTES, async_yield_once_job())
         .expect("warmup task should spawn")
         .join()
         .expect("warmup task should join");
@@ -454,7 +455,7 @@ pub fn current_async_runtime_spawn_join_yield_once(b: &mut Bencher) {
 
     b.iter(|| {
         let handle = runtime
-            .spawn(async_yield_once_job())
+            .spawn_with_poll_stack_bytes(BENCH_ASYNC_POLL_STACK_BYTES, async_yield_once_job())
             .expect("benchmark task should spawn");
         let (): () = handle.join().expect("benchmark task should join");
         black_box(());
@@ -1187,9 +1188,12 @@ pub fn cross_thread_wake_round_fusion(
 ) {
     let state = Arc::new(CrossThreadWakeState::default());
     let handle = runtime
-        .spawn(CrossThreadWakeFuture {
-            state: Arc::clone(&state),
-        })
+        .spawn_with_poll_stack_bytes(
+            BENCH_ASYNC_POLL_STACK_BYTES,
+            CrossThreadWakeFuture {
+                state: Arc::clone(&state),
+            },
+        )
         .expect("cross-thread wake future should spawn");
     tx.send(state)
         .expect("wake worker should accept one signal request");
@@ -1220,7 +1224,7 @@ pub fn current_async_contention_round(runtime: &CurrentAsyncRuntime) {
     for _ in 0..ASYNC_CONTENTION_TASKS {
         handles.push(
             runtime
-                .spawn(async_contention_job())
+                .spawn_with_poll_stack_bytes(BENCH_ASYNC_POLL_STACK_BYTES, async_contention_job())
                 .expect("contention task should spawn"),
         );
     }
@@ -1257,7 +1261,7 @@ pub fn bench_thread_async_runtime_lifecycle_throughput<F, Fut>(
         for _ in 0..THROUGHPUT_BATCH_SIZE {
             handles.push(
                 runtime
-                    .spawn(future_factory())
+                    .spawn_with_poll_stack_bytes(BENCH_ASYNC_POLL_STACK_BYTES, future_factory())
                     .expect("throughput task should spawn"),
             );
         }

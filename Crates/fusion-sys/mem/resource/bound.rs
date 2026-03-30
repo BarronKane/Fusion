@@ -43,7 +43,26 @@
 
 use core::num::NonZeroUsize;
 
-use fusion_pal::sys::mem::{Address, CachePolicy, Placement, Protect, Region, RegionInfo};
+use fusion_pal::sys::mem::{
+    Address,
+    CachePolicy,
+    MemAllocatorLayoutPolicy as PalAllocatorLayoutPolicy,
+    MemAllocatorLayoutRealization as PalAllocatorLayoutRealization,
+    MemCatalogResource,
+    MemDomain as PalMemDomain,
+    MemGeometry as PalMemGeometry,
+    MemOvercommitPolicy as PalMemOvercommitPolicy,
+    MemResourceBackingKind as PalResourceBackingKind,
+    MemResourceContract as PalResourceContract,
+    MemResourceResidencySupport as PalResourceResidencySupport,
+    MemResourceSupport as PalResourceSupport,
+    MemSharingPolicy as PalMemSharingPolicy,
+    MemStateValue as PalStateValue,
+    Placement,
+    Protect,
+    Region,
+    RegionInfo,
+};
 
 use super::{
     AllocatorLayoutPolicy,
@@ -165,6 +184,35 @@ impl BoundMemoryResource {
         })
     }
 
+    /// Binds one cataloged PAL resource into a concrete bound resource.
+    ///
+    /// This is the honest path for discovered board- or firmware-owned memory that already
+    /// exists and should become allocator-governed without pretending it was freshly mapped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog record is not CPU-addressable or is internally
+    /// inconsistent as a bound resource.
+    pub fn from_catalog_resource(resource: MemCatalogResource) -> Result<Self, ResourceError> {
+        let range = resource
+            .cpu_range
+            .ok_or_else(ResourceError::invalid_request)?;
+        let mut spec = BoundResourceSpec::new(
+            range,
+            domain_from_catalog(resource.envelope.domain),
+            backing_from_catalog(resource.envelope.backing),
+            ResourceAttrs::from_bits_retain(resource.envelope.attrs.bits()),
+            geometry_from_catalog(resource.envelope.geometry),
+            layout_from_catalog(resource.envelope.layout),
+            contract_from_catalog(resource.envelope.contract),
+            support_from_catalog(resource.envelope.support),
+            state_from_catalog(resource.state),
+        );
+        spec.additional_hazards =
+            ResourceHazardSet::from_bits_retain(resource.envelope.hazards.bits());
+        Self::new(spec)
+    }
+
     /// Binds one caller-owned static allocatable region using the canonical deterministic
     /// bare-metal contract.
     ///
@@ -260,6 +308,117 @@ fn static_allocatable_state() -> ResourceState {
         StateValue::Uniform(false),
         StateValue::Uniform(true),
     )
+}
+
+const fn domain_from_catalog(domain: PalMemDomain) -> MemoryDomain {
+    match domain {
+        PalMemDomain::VirtualAddressSpace => MemoryDomain::VirtualAddressSpace,
+        PalMemDomain::DeviceLocal => MemoryDomain::DeviceLocal,
+        PalMemDomain::Physical => MemoryDomain::Physical,
+        PalMemDomain::StaticRegion => MemoryDomain::StaticRegion,
+        PalMemDomain::Mmio => MemoryDomain::Mmio,
+    }
+}
+
+const fn backing_from_catalog(backing: PalResourceBackingKind) -> ResourceBackingKind {
+    match backing {
+        PalResourceBackingKind::AnonymousPrivate => ResourceBackingKind::AnonymousPrivate,
+        PalResourceBackingKind::AnonymousShared => ResourceBackingKind::AnonymousShared,
+        PalResourceBackingKind::FilePrivate => ResourceBackingKind::FilePrivate,
+        PalResourceBackingKind::FileShared => ResourceBackingKind::FileShared,
+        PalResourceBackingKind::Borrowed => ResourceBackingKind::Borrowed,
+        PalResourceBackingKind::StaticRegion => ResourceBackingKind::StaticRegion,
+        PalResourceBackingKind::Partition => ResourceBackingKind::Partition,
+        PalResourceBackingKind::DeviceLocal => ResourceBackingKind::DeviceLocal,
+        PalResourceBackingKind::Physical => ResourceBackingKind::Physical,
+        PalResourceBackingKind::Mmio => ResourceBackingKind::Mmio,
+    }
+}
+
+const fn geometry_from_catalog(geometry: PalMemGeometry) -> MemoryGeometry {
+    MemoryGeometry {
+        base_granule: geometry.base_granule,
+        alloc_granule: geometry.alloc_granule,
+        protect_granule: geometry.protect_granule,
+        commit_granule: geometry.commit_granule,
+        lock_granule: geometry.lock_granule,
+        large_granule: geometry.large_granule,
+    }
+}
+
+const fn layout_from_catalog(layout: PalAllocatorLayoutPolicy) -> AllocatorLayoutPolicy {
+    AllocatorLayoutPolicy {
+        metadata_granule: layout.metadata_granule,
+        min_extent_align: layout.min_extent_align,
+        default_arena_align: layout.default_arena_align,
+        default_slab_align: layout.default_slab_align,
+        realization: match layout.realization {
+            PalAllocatorLayoutRealization::LazyVirtual => {
+                super::AllocatorLayoutRealization::LazyVirtual
+            }
+            PalAllocatorLayoutRealization::EagerPhysical => {
+                super::AllocatorLayoutRealization::EagerPhysical
+            }
+        },
+    }
+}
+
+const fn contract_from_catalog(contract: PalResourceContract) -> ResourceContract {
+    ResourceContract {
+        allowed_protect: contract.allowed_protect,
+        write_xor_execute: contract.write_xor_execute,
+        sharing: match contract.sharing {
+            PalMemSharingPolicy::Private => SharingPolicy::Private,
+            PalMemSharingPolicy::Shared => SharingPolicy::Shared,
+        },
+        overcommit: match contract.overcommit {
+            PalMemOvercommitPolicy::Allow => super::OvercommitPolicy::Allow,
+            PalMemOvercommitPolicy::Disallow => super::OvercommitPolicy::Disallow,
+        },
+        cache_policy: contract.cache_policy,
+        integrity: match contract.integrity {
+            Some(constraints) => Some(super::IntegrityConstraints {
+                mode: constraints.mode,
+                tag: constraints.tag,
+            }),
+            None => None,
+        },
+    }
+}
+
+const fn support_from_catalog(support: PalResourceSupport) -> ResourceSupport {
+    ResourceSupport {
+        protect: support.protect,
+        ops: ResourceOpSet::from_bits_retain(support.ops.bits()),
+        advice: support.advice,
+        residency: ResourceResidencySupport::from_bits_retain(
+            support.residency.bits() & PalResourceResidencySupport::all().bits(),
+        ),
+    }
+}
+
+const fn state_from_catalog(state: fusion_pal::sys::mem::MemResourceStateSummary) -> ResourceState {
+    ResourceState::static_state(
+        protect_state_from_catalog(state.current_protect),
+        bool_state_from_catalog(state.locked),
+        bool_state_from_catalog(state.committed),
+    )
+}
+
+const fn protect_state_from_catalog(state: PalStateValue<Protect>) -> StateValue<Protect> {
+    match state {
+        PalStateValue::Uniform(value) => StateValue::Uniform(value),
+        PalStateValue::Asymmetric => StateValue::Asymmetric,
+        PalStateValue::Unknown => StateValue::Unknown,
+    }
+}
+
+const fn bool_state_from_catalog(state: PalStateValue<bool>) -> StateValue<bool> {
+    match state {
+        PalStateValue::Uniform(value) => StateValue::Uniform(value),
+        PalStateValue::Asymmetric => StateValue::Asymmetric,
+        PalStateValue::Unknown => StateValue::Unknown,
+    }
 }
 
 impl MemoryResource for BoundMemoryResource {

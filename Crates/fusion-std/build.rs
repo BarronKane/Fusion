@@ -1,33 +1,64 @@
+//! Temporary build-time bridge for generated Fiber/Async contract metadata.
+//!
+//! This file is not intended to be one permanent architectural center of gravity.
+//! Its current job is narrower:
+//! - emit generated fiber-task contract sidecars into `OUT_DIR`
+//! - emit generated async poll-stack contract sidecars into `OUT_DIR`
+//! - let `fusion-std` include those sidecars so generated exact contracts can participate in
+//!   ordinary library builds today
+//!
+//! What this means in practice today:
+//! - generated analyzer metadata is currently treated as required build input
+//! - this build script will bootstrap the analyzer sidecars into the active build graph when they
+//!   are missing so one clean checkout still builds
+//! - missing or mismatched analyzer artifacts are hard build failures
+//! - this is intentionally stricter than the long-term architecture because silent fallback here
+//!   hides build-graph and metadata-pipeline mistakes
+//!
+//! Why this still smells:
+//! - this is solution/build-pipeline work living in one library crate
+//! - it discovers analyzer artifacts through environment variables and active-build-directory
+//!   scanning
+//! - it reconstructs compiler-owned truth from outside `rustc`/`cargo`
+//! - it is therefore a compatibility bridge, not the final model
+//!
+//! What would be required for this to universally "Just Works":
+//! - `rustc` must emit Fusion metadata as first-class compiler artifacts:
+//!   - generated fiber task contracts
+//!   - generated async poll-stack contracts
+//!   - exact future/output layout truth where relevant
+//! - `cargo` must understand and propagate those artifacts through the dependency graph
+//! - downstream crates must not need:
+//!   - `OUT_DIR` sidecar discovery
+//!   - target-dir scavenging
+//!   - environment-variable handoff
+//!   - ad hoc build-script coordination
+//! - strict/critical-safe builds must be able to demand exact generated contracts directly from
+//!   compiler/toolchain outputs rather than from this build-script bridge
+//!
+//! Until that toolchain work exists, this file is tolerated debt. It should not grow new
+//! responsibilities, and anything that is platform/board/linker truth belongs below this layer.
+//! `memory.x` generation has already been moved down into `fusion-pal/build.rs` for exactly that
+//! reason.
+
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const AUTO_MANIFEST_NAME: &str = "fusion-std-fiber-task.generated";
 const AUTO_REPORT_NAME: &str = "fusion-std-fiber-task.report";
+const AUTO_RUST_CONTRACTS_NAME: &str = "fusion-std-fiber-task.contracts.rs";
+const AUTO_RED_INLINE_RUST_NAME: &str = "fusion-std-red-inline.contracts.rs";
 const OUTPUT_NAME: &str = "fiber_task_generated.rs";
 const ASYNC_POLL_STACK_OUTPUT_NAME: &str = "async_task_generated.rs";
 const AUTO_ASYNC_POLL_STACK_MANIFEST_NAME: &str = "fusion-std-async-poll-stack.generated";
-const MEMORY_LAYOUT_OUTPUT_NAME: &str = "memory.x";
+const AUTO_ASYNC_POLL_STACK_RUST_NAME: &str = "fusion-std-async-poll-stack.contracts.rs";
 const GENERATED_METADATA_ENV: &str = "FUSION_FIBER_TASK_METADATA";
 const GENERATED_REPORT_ENV: &str = "FUSION_FIBER_TASK_REPORT";
 const GENERATED_ASYNC_POLL_STACK_METADATA_ENV: &str = "FUSION_ASYNC_POLL_STACK_METADATA";
 const STRICT_CONTRACTS_FEATURE_ENV: &str = "CARGO_FEATURE_CRITICAL_SAFE";
-const SYS_CORTEX_M_FEATURE_ENV: &str = "CARGO_FEATURE_SYS_CORTEX_M";
-const SOC_RP2350_FEATURE_ENV: &str = "CARGO_FEATURE_SOC_RP2350";
-const CORTEX_M_VECTOR_NONSECURE_WORLD_FEATURE_ENV: &str =
-    "CARGO_FEATURE_CORTEX_M_VECTOR_NONSECURE_WORLD";
-const MAIN_STACK_RESERVE_ENV: &str = "FUSION_CORTEX_M_MAIN_STACK_RESERVE";
-const RP2350_FLASH_BOOT_METADATA_KIND: &str = "rp2350-image-def";
-const RP2350_FLASH_BOOT_MIN_WINDOW_BYTES: usize = 4 * 1024;
-const RP2350_BOOT_BLOCK_MARKER_START: u32 = 0xffff_ded3;
-const RP2350_BOOT_BLOCK_MARKER_END: u32 = 0xab12_3579;
-const RP2350_BOOT_ITEM_1BS_IMAGE_TYPE: u32 = 0x42;
-const RP2350_BOOT_ITEM_2BS_LAST: u32 = 0xff;
-const RP2350_BOOT_IMAGE_TYPE_EXE: u32 = 0x0001;
-const RP2350_BOOT_IMAGE_TYPE_SECURITY_NS: u32 = 0x0010;
-const RP2350_BOOT_IMAGE_TYPE_SECURITY_S: u32 = 0x0020;
-const RP2350_BOOT_IMAGE_TYPE_CHIP_RP2350: u32 = 0x1000;
 const GENERATED_ASYNC_POLL_STACK_ANCHOR_TYPE_NAME: &str =
     "fusion_std::thread::executor::GeneratedAsyncPollStackMetadataAnchorFuture";
 const GENERATED_ASYNC_POLL_STACK_ANCHOR_BYTES: usize = 1536;
@@ -75,27 +106,9 @@ fn parse_generated_execution(
     }
 }
 
-#[derive(Debug, Clone)]
-struct CortexMMemoryLayoutSpec {
-    board_name: String,
-    flash_origin: usize,
-    flash_length: usize,
-    flash_boot_metadata: CortexMFlashBootMetadata,
-    ram_origin: usize,
-    ram_length: usize,
-    default_main_stack_reserve: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CortexMFlashBootMetadata {
-    None,
-    Rp2350ImageDef { window_bytes: usize },
-}
-
 fn main() {
     let (auto_manifest_candidates, auto_report_candidates, auto_async_poll_stack_candidates) =
         setup_build_inputs();
-    emit_platform_memory_layout();
     let output_path =
         PathBuf::from(env::var("OUT_DIR").expect("Cargo should provide OUT_DIR")).join(OUTPUT_NAME);
     let generated =
@@ -125,17 +138,26 @@ fn setup_build_inputs() -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
     println!("cargo:rerun-if-env-changed={GENERATED_REPORT_ENV}");
     println!("cargo:rerun-if-env-changed={GENERATED_ASYNC_POLL_STACK_METADATA_ENV}");
     println!("cargo:rerun-if-env-changed={STRICT_CONTRACTS_FEATURE_ENV}");
-    println!("cargo:rerun-if-env-changed={SYS_CORTEX_M_FEATURE_ENV}");
-    println!("cargo:rerun-if-env-changed={SOC_RP2350_FEATURE_ENV}");
-    println!("cargo:rerun-if-env-changed={MAIN_STACK_RESERVE_ENV}");
+    println!("cargo:rerun-if-env-changed=CARGO_BUILD_TARGET_DIR");
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
 
     let manifest_dir = PathBuf::from(
         env::var("CARGO_MANIFEST_DIR").expect("Cargo should always provide CARGO_MANIFEST_DIR"),
     );
-    let auto_manifest_candidates = candidate_auto_artifact_paths(&manifest_dir, AUTO_MANIFEST_NAME);
-    let auto_report_candidates = candidate_auto_artifact_paths(&manifest_dir, AUTO_REPORT_NAME);
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("Cargo should provide OUT_DIR"));
+    let auto_manifest_candidates =
+        candidate_auto_artifact_paths(&manifest_dir, &out_dir, AUTO_MANIFEST_NAME);
+    let auto_report_candidates =
+        candidate_auto_artifact_paths(&manifest_dir, &out_dir, AUTO_REPORT_NAME);
     let auto_async_poll_stack_candidates =
-        candidate_auto_artifact_paths(&manifest_dir, AUTO_ASYNC_POLL_STACK_MANIFEST_NAME);
+        candidate_auto_artifact_paths(&manifest_dir, &out_dir, AUTO_ASYNC_POLL_STACK_MANIFEST_NAME);
+    ensure_generated_artifacts(
+        &manifest_dir,
+        &out_dir,
+        &auto_manifest_candidates,
+        &auto_report_candidates,
+        &auto_async_poll_stack_candidates,
+    );
     let analyzer_metadata = env::var_os(GENERATED_METADATA_ENV).map(PathBuf::from);
     let analyzer_report = env::var_os(GENERATED_REPORT_ENV).map(PathBuf::from);
     let async_poll_stack_metadata =
@@ -177,231 +199,6 @@ fn setup_build_inputs() -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
     )
 }
 
-fn emit_platform_memory_layout() {
-    if env::var_os(SYS_CORTEX_M_FEATURE_ENV).is_none() {
-        return;
-    }
-
-    let Some(source_path) = selected_platform_memory_layout_spec_path() else {
-        return;
-    };
-
-    println!("cargo:rerun-if-changed={}", source_path.display());
-    let spec = load_platform_memory_layout_spec(&source_path).unwrap_or_else(|error| {
-        panic!(
-            "fusion-std: failed to load platform memory layout spec from {}: {error}",
-            source_path.display()
-        )
-    });
-    let main_stack_reserve = selected_main_stack_reserve(&spec)
-        .unwrap_or_else(|error| panic!("fusion-std: invalid {MAIN_STACK_RESERVE_ENV}: {error}"));
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("Cargo should provide OUT_DIR"));
-    let output_path = out_dir.join(MEMORY_LAYOUT_OUTPUT_NAME);
-    let rendered = render_platform_memory_layout(&spec, main_stack_reserve);
-    fs::write(&output_path, rendered).unwrap_or_else(|error| {
-        panic!(
-            "fusion-std: failed to write generated platform memory layout to {}: {error}",
-            output_path.display()
-        )
-    });
-    println!("cargo:rustc-link-search={}", out_dir.display());
-}
-
-fn selected_platform_memory_layout_spec_path() -> Option<PathBuf> {
-    if env::var_os(SOC_RP2350_FEATURE_ENV).is_some() {
-        return Some(
-            PathBuf::from(
-                env::var("CARGO_MANIFEST_DIR").expect("Cargo should provide CARGO_MANIFEST_DIR"),
-            )
-            .join("../fusion-pal/pal/soc/cortex_m/hal/soc/board/rp2350-pico2w.memory.layout"),
-        );
-    }
-    None
-}
-
-fn load_platform_memory_layout_spec(path: &Path) -> Result<CortexMMemoryLayoutSpec, String> {
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    let mut board_name = None;
-    let mut flash_origin = None;
-    let mut flash_length = None;
-    let mut flash_boot_metadata_kind = None;
-    let mut flash_boot_window = None;
-    let mut ram_origin = None;
-    let mut ram_length = None;
-    let mut default_main_stack_reserve = None;
-
-    for (line_no, raw_line) in contents.lines().enumerate() {
-        let line = raw_line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        let (key, value) = line
-            .split_once('=')
-            .ok_or_else(|| format!("line {} is missing '='", line_no + 1))?;
-        let key = key.trim();
-        let value = value.trim();
-        match key {
-            "board_name" => board_name = Some(value.trim_matches('"').to_owned()),
-            "flash_origin" => flash_origin = Some(parse_linker_scalar(value)?),
-            "flash_length" => flash_length = Some(parse_linker_scalar(value)?),
-            "flash_boot_metadata_kind" => {
-                flash_boot_metadata_kind = Some(value.trim_matches('"').to_owned());
-            }
-            "flash_boot_window" => flash_boot_window = Some(parse_linker_scalar(value)?),
-            "ram_origin" => ram_origin = Some(parse_linker_scalar(value)?),
-            "ram_length" => ram_length = Some(parse_linker_scalar(value)?),
-            "default_main_stack_reserve" => {
-                default_main_stack_reserve = Some(parse_linker_scalar(value)?);
-            }
-            other => {
-                return Err(format!(
-                    "unsupported memory layout key `{other}` at line {}",
-                    line_no + 1
-                ));
-            }
-        }
-    }
-
-    let flash_length = flash_length.ok_or_else(|| "missing flash_length".to_owned())?;
-    let flash_boot_metadata = match flash_boot_metadata_kind.as_deref() {
-        None => CortexMFlashBootMetadata::None,
-        Some(RP2350_FLASH_BOOT_METADATA_KIND) => {
-            let window_bytes =
-                flash_boot_window.ok_or_else(|| "missing flash_boot_window".to_owned())?;
-            if window_bytes < RP2350_FLASH_BOOT_MIN_WINDOW_BYTES {
-                return Err(format!(
-                    "flash_boot_window {window_bytes:#x} is smaller than the RP2350 first-4-KiB boot requirement"
-                ));
-            }
-            if window_bytes >= flash_length {
-                return Err(format!(
-                    "flash_boot_window {window_bytes:#x} leaves no flash space beyond the reserved boot window"
-                ));
-            }
-            CortexMFlashBootMetadata::Rp2350ImageDef { window_bytes }
-        }
-        Some(other) => {
-            return Err(format!("unsupported flash boot metadata kind `{other}`"));
-        }
-    };
-    if matches!(flash_boot_metadata, CortexMFlashBootMetadata::None) && flash_boot_window.is_some()
-    {
-        return Err(
-            "flash_boot_window is only valid when flash_boot_metadata_kind is configured"
-                .to_owned(),
-        );
-    }
-
-    Ok(CortexMMemoryLayoutSpec {
-        board_name: board_name.ok_or_else(|| "missing board_name".to_owned())?,
-        flash_origin: flash_origin.ok_or_else(|| "missing flash_origin".to_owned())?,
-        flash_length,
-        flash_boot_metadata,
-        ram_origin: ram_origin.ok_or_else(|| "missing ram_origin".to_owned())?,
-        ram_length: ram_length.ok_or_else(|| "missing ram_length".to_owned())?,
-        default_main_stack_reserve: default_main_stack_reserve
-            .ok_or_else(|| "missing default_main_stack_reserve".to_owned())?,
-    })
-}
-
-fn selected_main_stack_reserve(spec: &CortexMMemoryLayoutSpec) -> Result<usize, String> {
-    let reserve = match env::var_os(MAIN_STACK_RESERVE_ENV) {
-        Some(value) => parse_linker_scalar(&value.to_string_lossy())?,
-        None => spec.default_main_stack_reserve,
-    };
-    if reserve == 0 {
-        return Err("main stack reserve must be non-zero".to_owned());
-    }
-    if reserve >= spec.ram_length {
-        return Err(format!(
-            "main stack reserve {reserve:#x} leaves no RAM below the stack boundary"
-        ));
-    }
-    Ok(reserve)
-}
-
-fn render_platform_memory_layout(
-    spec: &CortexMMemoryLayoutSpec,
-    main_stack_reserve: usize,
-) -> String {
-    let flash_boot_metadata = render_flash_boot_metadata(spec);
-    format!(
-        "/* Generated by fusion-std build.rs from the owning Cortex-M board layout spec.\n\
-* Board: {board_name}\n\
-* Main/exception stack reserve: 0x{main_stack_reserve:x} bytes\n\
-*/\n\
-MEMORY\n\
-{{\n\
-    /* XIP flash -- program code executes in place */\n\
-    FLASH : ORIGIN = 0x{flash_origin:08x}, LENGTH = 0x{flash_length:x}\n\
-    /* SRAM -- all board-visible application RAM */\n\
-    RAM   : ORIGIN = 0x{ram_origin:08x}, LENGTH = 0x{ram_length:x}\n\
-}}\n\n\
-{flash_boot_metadata}\
-/* Reserve the configured main/exception stack window at the top of RAM.\n\
- * The gap between `__sheap` (after .bss/.uninit) and `_stack_end`\n\
- * becomes board-owned free SRAM for allocator and fiber backing.\n\
- */\n\
-_stack_end = ORIGIN(RAM) + LENGTH(RAM) - 0x{main_stack_reserve:x};\n",
-        board_name = spec.board_name,
-        flash_origin = spec.flash_origin,
-        flash_length = spec.flash_length,
-        flash_boot_metadata = flash_boot_metadata,
-        ram_origin = spec.ram_origin,
-        ram_length = spec.ram_length,
-        main_stack_reserve = main_stack_reserve,
-    )
-}
-
-fn render_flash_boot_metadata(spec: &CortexMMemoryLayoutSpec) -> String {
-    match spec.flash_boot_metadata {
-        CortexMFlashBootMetadata::None => String::new(),
-        CortexMFlashBootMetadata::Rp2350ImageDef { window_bytes } => format!(
-            "/* RP2350 flash boot metadata.\n\
-* Keep the Arm vector table at flash base, reserve the rest of the first boot window for boot\n\
-* metadata, and emit one board-owned IMAGE_DEF block directly into `.start_block` so the ROM gets\n\
-* facts instead of our feelings.\n\
-*/\n\
-_stext = ORIGIN(FLASH) + 0x{window_bytes:x};\n\
-SECTIONS\n\
-{{\n\
-    .start_block : ALIGN(4)\n\
-    {{\n\
-        LONG(0x{marker_start:08x})\n\
-        LONG(0x{image_type_item:08x})\n\
-        LONG(0x{block_last:08x})\n\
-        LONG(0x00000000)\n\
-        LONG(0x{marker_end:08x})\n\
-    }} > FLASH\n\
-}}\n\
-INSERT AFTER .vector_table;\n\
-ASSERT(ADDR(.start_block) + SIZEOF(.start_block) <= ORIGIN(FLASH) + 0x{window_bytes:x},\n\
-       \"RP2350 boot metadata must fit inside the configured first-flash boot window\");\n\n",
-            marker_start = RP2350_BOOT_BLOCK_MARKER_START,
-            image_type_item = rp2350_flash_boot_image_type_item(),
-            block_last = rp2350_flash_boot_block_last_item(),
-            marker_end = RP2350_BOOT_BLOCK_MARKER_END,
-            window_bytes = window_bytes,
-        ),
-    }
-}
-
-fn rp2350_flash_boot_image_type_item() -> u32 {
-    let security_bits = if env::var_os(CORTEX_M_VECTOR_NONSECURE_WORLD_FEATURE_ENV).is_some() {
-        RP2350_BOOT_IMAGE_TYPE_SECURITY_NS
-    } else {
-        RP2350_BOOT_IMAGE_TYPE_SECURITY_S
-    };
-    let image_type =
-        RP2350_BOOT_IMAGE_TYPE_EXE | RP2350_BOOT_IMAGE_TYPE_CHIP_RP2350 | security_bits;
-    (image_type << 16) | (1 << 8) | RP2350_BOOT_ITEM_1BS_IMAGE_TYPE
-}
-
-const fn rp2350_flash_boot_block_last_item() -> u32 {
-    (1 << 8) | RP2350_BOOT_ITEM_2BS_LAST
-}
-
 fn parse_linker_scalar(raw: &str) -> Result<usize, String> {
     let raw = raw.trim();
     if let Some(hex) = raw.strip_prefix("0x") {
@@ -434,41 +231,34 @@ fn generate_fiber_task_metadata(
     let analyzer_metadata = env::var_os(GENERATED_METADATA_ENV).map(PathBuf::from);
     let analyzer_report = env::var_os(GENERATED_REPORT_ENV).map(PathBuf::from);
     let strict_generated_contracts = env::var_os(STRICT_CONTRACTS_FEATURE_ENV).is_some();
-    let explicit_metadata_source = analyzer_metadata.as_deref().filter(|path| path.is_file());
-    let explicit_report_source = analyzer_report.as_deref().filter(|path| path.is_file());
-    let auto_metadata_source = first_existing_path(auto_manifest_candidates).map(PathBuf::as_path);
-    let metadata_source = if strict_generated_contracts {
-        Some(
-            explicit_metadata_source
-                .or(auto_metadata_source)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "fusion-std: strict generated-task contracts require analyzer output; run \
-                     `fusion_std_fiber_task_pipeline` or set {GENERATED_METADATA_ENV}"
-                    )
-                }),
-        )
-    } else {
-        explicit_metadata_source.or(auto_metadata_source)
+    let metadata_source = required_generated_artifact_source(
+        analyzer_metadata.as_deref(),
+        auto_manifest_candidates,
+        GENERATED_METADATA_ENV,
+        AUTO_MANIFEST_NAME,
+        "fiber-task metadata",
+    );
+    let report_source = required_generated_artifact_source(
+        analyzer_report.as_deref(),
+        auto_report_candidates,
+        GENERATED_REPORT_ENV,
+        AUTO_REPORT_NAME,
+        "fiber-task analyzer report",
+    );
+    assert_matching_generated_artifact_roots(
+        "fiber-task metadata",
+        metadata_source,
+        "fiber-task analyzer report",
+        report_source,
+    );
+    let mut entries = match load_generated_entries(metadata_source) {
+        Ok(entries) => entries,
+        Err(error) => panic!(
+            "fusion-std: failed to load generated fiber-task metadata from {}: {error}",
+            metadata_source.display()
+        ),
     };
-    let report_source = explicit_report_source;
-    let mut entries =
-        metadata_source.map_or_else(Vec::new, |path| match load_generated_entries(path) {
-            Ok(entries) => entries,
-            Err(error) => panic!(
-                "fusion-std: failed to load generated fiber-task metadata from {}: {error}",
-                path.display()
-            ),
-        });
     if strict_generated_contracts {
-        let Some(report_source) = report_source
-            .or_else(|| first_existing_path(auto_report_candidates).map(PathBuf::as_path))
-        else {
-            panic!(
-                "fusion-std: strict generated-task contracts require an analyzer report; \
-                 set {GENERATED_REPORT_ENV} or place {AUTO_REPORT_NAME} under target/"
-            )
-        };
         if let Err(error) = assert_report_has_no_unresolved_symbols(report_source) {
             panic!(
                 "fusion-std: strict generated-task contracts rejected analyzer report {}: \
@@ -484,18 +274,20 @@ fn generate_fiber_task_metadata(
 
 fn generate_async_poll_stack_metadata(auto_manifest_candidates: &[PathBuf]) -> String {
     let explicit_source = env::var_os(GENERATED_ASYNC_POLL_STACK_METADATA_ENV).map(PathBuf::from);
-    let metadata_source = explicit_source
-        .as_deref()
-        .filter(|path| path.is_file())
-        .or_else(|| first_existing_path(auto_manifest_candidates).map(PathBuf::as_path));
-    let mut entries = metadata_source.map_or_else(Vec::new, |path| {
-        load_generated_async_poll_stack_entries(path).unwrap_or_else(|error| {
+    let metadata_source = required_generated_artifact_source(
+        explicit_source.as_deref(),
+        auto_manifest_candidates,
+        GENERATED_ASYNC_POLL_STACK_METADATA_ENV,
+        AUTO_ASYNC_POLL_STACK_MANIFEST_NAME,
+        "async poll-stack metadata",
+    );
+    let mut entries =
+        load_generated_async_poll_stack_entries(metadata_source).unwrap_or_else(|error| {
             panic!(
                 "fusion-std: failed to load generated async poll-stack metadata from {}: {error}",
-                path.display()
+                metadata_source.display()
             )
-        })
-    });
+        });
     entries = merge_async_poll_stack_entries(entries);
     if !entries
         .iter()
@@ -529,18 +321,14 @@ fn merge_async_poll_stack_entries(
         .collect()
 }
 
-fn candidate_auto_artifact_paths(manifest_dir: &Path, artifact_name: &str) -> Vec<PathBuf> {
+fn candidate_auto_artifact_paths(
+    manifest_dir: &Path,
+    out_dir: &Path,
+    artifact_name: &str,
+) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(target_dir) = env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
-        if target_dir.is_absolute() {
-            roots.push(target_dir);
-        } else {
-            roots.push(manifest_dir.join(&target_dir));
-            if let Some(workspace_root) = workspace_root(manifest_dir) {
-                roots.push(workspace_root.join(&target_dir));
-            }
-        }
-    }
+    roots.extend(active_target_artifact_roots(out_dir));
+    roots.extend(configured_target_artifact_roots(manifest_dir));
 
     if let Some(workspace_root) = workspace_root(manifest_dir) {
         roots.push(workspace_root.join("target"));
@@ -559,12 +347,274 @@ fn candidate_auto_artifact_paths(manifest_dir: &Path, artifact_name: &str) -> Ve
     candidates
 }
 
+fn active_target_artifact_roots(out_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let profile = env::var_os("PROFILE");
+    let target = env::var_os("TARGET");
+    // Cargo always gives us OUT_DIR, so use it to recover the active build graph before falling
+    // back to broader target-dir guesses. This keeps dependency builds with their own target dir
+    // from depending on workspace-root folklore.
+    let active_profile_dir = profile
+        .as_deref()
+        .and_then(|profile_name| {
+            out_dir
+                .ancestors()
+                .find(|ancestor| ancestor.file_name() == Some(profile_name))
+        })
+        .map(Path::to_path_buf)
+        .or_else(|| out_dir.ancestors().nth(3).map(Path::to_path_buf));
+
+    if let Some(profile_dir) = active_profile_dir {
+        roots.push(profile_dir.clone());
+        if let Some(parent) = profile_dir.parent() {
+            if target_component_matches(parent.file_name(), target.as_deref()) {
+                roots.push(parent.to_path_buf());
+                if let Some(target_root) = parent.parent() {
+                    roots.push(target_root.to_path_buf());
+                }
+            } else {
+                roots.push(parent.to_path_buf());
+            }
+        }
+    }
+
+    roots
+}
+
+fn configured_target_artifact_roots(manifest_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for env_name in ["CARGO_BUILD_TARGET_DIR", "CARGO_TARGET_DIR"] {
+        let Some(target_dir) = env::var_os(env_name).map(PathBuf::from) else {
+            continue;
+        };
+        if target_dir.is_absolute() {
+            roots.push(target_dir);
+        } else {
+            roots.push(manifest_dir.join(&target_dir));
+            if let Some(workspace_root) = workspace_root(manifest_dir) {
+                roots.push(workspace_root.join(&target_dir));
+            }
+        }
+    }
+    roots
+}
+
+fn target_component_matches(component: Option<&OsStr>, target: Option<&OsStr>) -> bool {
+    component.is_some() && component == target
+}
+
 fn workspace_root(manifest_dir: &Path) -> Option<&Path> {
     manifest_dir.parent().and_then(Path::parent)
 }
 
 fn first_existing_path(candidates: &[PathBuf]) -> Option<&PathBuf> {
     candidates.iter().find(|path| path.is_file())
+}
+
+fn ensure_generated_artifacts(
+    _manifest_dir: &Path,
+    _out_dir: &Path,
+    auto_manifest_candidates: &[PathBuf],
+    auto_report_candidates: &[PathBuf],
+    auto_async_poll_stack_candidates: &[PathBuf],
+) {
+    let explicit_metadata = env::var_os(GENERATED_METADATA_ENV).map(PathBuf::from);
+    let explicit_report = env::var_os(GENERATED_REPORT_ENV).map(PathBuf::from);
+    let explicit_async = env::var_os(GENERATED_ASYNC_POLL_STACK_METADATA_ENV).map(PathBuf::from);
+    let preferred_metadata =
+        preferred_generated_artifact_path(auto_manifest_candidates, AUTO_MANIFEST_NAME);
+    let preferred_report =
+        preferred_generated_artifact_path(auto_report_candidates, AUTO_REPORT_NAME);
+    let preferred_async = preferred_generated_artifact_path(
+        auto_async_poll_stack_candidates,
+        AUTO_ASYNC_POLL_STACK_MANIFEST_NAME,
+    );
+
+    if preferred_metadata.is_file() && preferred_report.is_file() && preferred_async.is_file() {
+        return;
+    }
+    if explicit_metadata.is_some() || explicit_report.is_some() || explicit_async.is_some() {
+        return;
+    }
+
+    bootstrap_generated_artifacts(preferred_metadata, preferred_report, preferred_async);
+}
+
+fn preferred_generated_artifact_path<'a>(
+    candidates: &'a [PathBuf],
+    artifact_name: &str,
+) -> &'a Path {
+    candidates.first().map(PathBuf::as_path).unwrap_or_else(|| {
+        panic!("fusion-std: no candidate path available for generated artifact {artifact_name}")
+    })
+}
+
+fn bootstrap_generated_artifacts(metadata_path: &Path, report_path: &Path, async_path: &Path) {
+    let metadata_dir = metadata_path.parent().unwrap_or_else(|| {
+        panic!(
+            "fusion-std: metadata path {} has no parent",
+            metadata_path.display()
+        )
+    });
+    let report_dir = report_path.parent().unwrap_or_else(|| {
+        panic!(
+            "fusion-std: report path {} has no parent",
+            report_path.display()
+        )
+    });
+    let async_dir = async_path.parent().unwrap_or_else(|| {
+        panic!(
+            "fusion-std: async metadata path {} has no parent",
+            async_path.display()
+        )
+    });
+    if !(same_parent_directory(metadata_path, report_path)
+        && same_parent_directory(metadata_path, async_path))
+    {
+        panic!(
+            "fusion-std: generated artifact bootstrap expected metadata/report/async outputs to \
+             share one directory, got {}, {}, {}",
+            metadata_dir.display(),
+            report_dir.display(),
+            async_dir.display()
+        );
+    }
+    fs::create_dir_all(metadata_dir).unwrap_or_else(|error| {
+        panic!(
+            "fusion-std: failed to create generated metadata directory {}: {error}",
+            metadata_dir.display()
+        )
+    });
+    write_bootstrap_file_if_missing(
+        metadata_path,
+        b"fusion_std::thread::fiber::GeneratedFiberTaskMetadataAnchorTask=8,5,inline-no-yield\n",
+        "fiber-task metadata",
+    );
+    write_bootstrap_file_if_missing(
+        report_path,
+        b"# Generated by fusion-std build.rs bootstrap\n",
+        "fiber-task analyzer report",
+    );
+    write_bootstrap_file_if_missing(
+        async_path,
+        format!(
+            "{GENERATED_ASYNC_POLL_STACK_ANCHOR_TYPE_NAME}={GENERATED_ASYNC_POLL_STACK_ANCHOR_BYTES}\n"
+        )
+        .as_bytes(),
+        "async poll-stack metadata",
+    );
+    write_bootstrap_file_if_missing(
+        &metadata_dir.join(AUTO_RUST_CONTRACTS_NAME),
+        br#"// Generated by fusion-std build.rs bootstrap
+fusion_std::declare_generated_fiber_task_contract!(
+    crate::thread::fiber::GeneratedFiberTaskMetadataAnchorTask,
+    core::num::NonZeroUsize::new(8).unwrap(),
+    fusion_std::thread::FiberTaskPriority::new(5),
+    fusion_std::thread::FiberTaskExecution::InlineNoYield,
+);
+"#,
+        "fiber-task Rust sidecar",
+    );
+    write_bootstrap_file_if_missing(
+        &metadata_dir.join(AUTO_RED_INLINE_RUST_NAME),
+        b"// Generated by fusion-std build.rs bootstrap\n",
+        "red-inline Rust sidecar",
+    );
+    write_bootstrap_file_if_missing(
+        &metadata_dir.join(AUTO_ASYNC_POLL_STACK_RUST_NAME),
+        br#"// Generated by fusion-std build.rs bootstrap
+fusion_std::declare_generated_async_poll_stack_contract!(
+    crate::thread::executor::GeneratedAsyncPollStackMetadataAnchorFuture,
+    1536,
+);
+"#,
+        "async poll-stack Rust sidecar",
+    );
+}
+
+fn write_bootstrap_file_if_missing(path: &Path, contents: &[u8], label: &str) {
+    if path.is_file() {
+        return;
+    }
+    fs::write(path, contents).unwrap_or_else(|error| {
+        panic!(
+            "fusion-std: failed to write bootstrap {label} {}: {error}",
+            path.display()
+        )
+    });
+}
+
+/// TODO: Remove this hard-fail bridge once Fusion metadata is emitted and propagated directly by
+/// `rustc`/`cargo`. Until then, silently falling back on missing or mismatched analyzer artifacts
+/// just launders build-graph bugs into runtime guesswork.
+fn required_generated_artifact_source<'a>(
+    explicit_source: Option<&'a Path>,
+    auto_candidates: &'a [PathBuf],
+    env_name: &str,
+    auto_name: &str,
+    artifact_kind: &str,
+) -> &'a Path {
+    let auto_source = first_existing_path(auto_candidates).map(PathBuf::as_path);
+    match explicit_source {
+        Some(path) if !path.is_file() => {
+            panic!(
+                "fusion-std: {artifact_kind} was explicitly set via {env_name}={}, but that file \
+                 does not exist",
+                path.display()
+            );
+        }
+        Some(path) => {
+            if let Some(auto_path) = auto_source
+                && !same_existing_file(path, auto_path)
+            {
+                panic!(
+                    "fusion-std: explicit {artifact_kind} {} does not match active-build \
+                     artifact {}; fix {env_name} or the analyzer output location",
+                    path.display(),
+                    auto_path.display()
+                );
+            }
+            path
+        }
+        None => auto_source.unwrap_or_else(|| {
+            panic!(
+                "fusion-std: missing required {artifact_kind}; run `fusion_std_fiber_task_pipeline` \
+                 or set {env_name}. Expected auto artifact named {auto_name} under the active \
+                 build target directory."
+            )
+        }),
+    }
+}
+
+fn assert_matching_generated_artifact_roots(
+    left_kind: &str,
+    left: &Path,
+    right_kind: &str,
+    right: &Path,
+) {
+    if !same_parent_directory(left, right) {
+        panic!(
+            "fusion-std: {left_kind} {} and {right_kind} {} do not come from the same generated \
+             artifact directory",
+            left.display(),
+            right.display()
+        );
+    }
+}
+
+fn same_parent_directory(left: &Path, right: &Path) -> bool {
+    match (left.parent(), right.parent()) {
+        (Some(left_parent), Some(right_parent)) => same_existing_file(left_parent, right_parent),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn same_existing_file(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 fn load_generated_entries(path: &Path) -> Result<Vec<GeneratedFiberTaskEntry>, String> {
@@ -706,17 +756,28 @@ fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
         rendered.push_str("impl GeneratedExplicitFiberTaskContract for ");
         rendered.push_str(&render_type_path(&entry.type_name));
         rendered.push_str(" {\n");
-        rendered.push_str("    const ATTRIBUTES: FiberTaskAttributes = match FiberTaskAttributes::from_stack_bytes(\n");
+        rendered.push_str(
+            "    const ATTRIBUTES: FiberTaskAttributes = match admit_generated_fiber_task_stack_bytes(\n",
+        );
         rendered.push_str("        NonZeroUsize::new(");
         rendered.push_str(&entry.stack_bytes.to_string());
         rendered.push_str(").unwrap(),\n");
-        rendered.push_str("        FiberTaskPriority::new(");
+        rendered.push_str("    ) {\n");
+        rendered
+            .push_str("        Ok(stack_bytes) => match FiberTaskAttributes::from_stack_bytes(\n");
+        rendered.push_str("            stack_bytes,\n");
+        rendered.push_str("            FiberTaskPriority::new(");
         rendered.push_str(&entry.priority.to_string());
         rendered.push_str("),\n");
-        rendered.push_str("    ) {\n");
-        rendered.push_str("        Ok(attributes) => attributes.with_execution(crate::thread::");
+        rendered.push_str("        ) {\n");
+        rendered
+            .push_str("            Ok(attributes) => attributes.with_execution(crate::thread::");
         rendered.push_str(entry.execution.render());
         rendered.push_str("),\n");
+        rendered.push_str(
+            "            Err(_) => panic!(\"invalid generated explicit fiber task contract\"),\n",
+        );
+        rendered.push_str("        },\n");
         rendered.push_str(
             "        Err(_) => panic!(\"invalid generated explicit fiber task contract\"),\n",
         );

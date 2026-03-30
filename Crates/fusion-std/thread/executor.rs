@@ -18,7 +18,7 @@
 //!     Ok(executor) => executor,
 //!     Err(_) => return,
 //! };
-//! let handle = match executor.spawn(async { 5_u8 }) {
+//! let handle = match executor.spawn_with_poll_stack_bytes(1024, async { 5_u8 }) {
 //!     Ok(handle) => handle,
 //!     Err(_) => return,
 //! };
@@ -210,8 +210,8 @@ impl AsyncTaskAdmission {
         } else {
             align_of::<F::Output>()
         };
-        let poll_stack = generated_async_poll_stack_contract::<F>()
-            .unwrap_or_else(|| AsyncPollStackContract::from_future_layout_bytes(size_of::<F>()));
+        let poll_stack =
+            generated_async_poll_stack_contract::<F>().unwrap_or(AsyncPollStackContract::Unknown);
         Self {
             carrier,
             future_bytes: size_of::<F>(),
@@ -237,23 +237,11 @@ pub enum AsyncPollStackContract {
     Unknown,
     /// One build-generated poll-stack budget was emitted for this exact future type.
     Generated { bytes: usize },
-    /// One generated heuristic poll-stack budget was derived from the exact future frame layout.
-    DerivedHeuristic { bytes: usize },
     /// One explicit poll-stack byte budget was attached to the task admission.
     Explicit { bytes: usize },
 }
 
 impl AsyncPollStackContract {
-    const fn from_future_layout_bytes(bytes: usize) -> Self {
-        if bytes <= INLINE_ASYNC_FUTURE_BYTES {
-            return Self::DerivedHeuristic { bytes: 512 };
-        }
-        if bytes <= DEFAULT_ASYNC_SPILL_BUDGET_PER_TASK_BYTES {
-            return Self::DerivedHeuristic { bytes: 2048 };
-        }
-        Self::Unknown
-    }
-
     const fn from_bytes(bytes: usize) -> Self {
         if bytes == 0 {
             Self::Unknown
@@ -347,6 +335,9 @@ fn generated_async_poll_stack_bytes_by_type_name(type_name: &str) -> Option<usiz
 }
 
 fn generated_async_poll_stack_contract<F: 'static>() -> Option<AsyncPollStackContract> {
+    // TODO: unnamed async blocks and other anonymous future types remain a metadata blind spot
+    // across crate boundaries under the current sidecar bridge. Rejecting `Unknown` is the honest
+    // path for now; the real fix is toolchain-owned future metadata instead of heuristic cosplay.
     generated_async_poll_stack_bytes_by_type_name(type_name::<F>())
         .map(|bytes| AsyncPollStackContract::Generated { bytes })
 }
@@ -436,12 +427,18 @@ impl ExecutorBackingAllocators {
     }
 
     fn from_current_backing(backing: CurrentAsyncRuntimeBacking) -> Result<Self, ExecutorError> {
+        let CurrentAsyncRuntimeBacking {
+            control,
+            reactor,
+            registry,
+            spill,
+            slab_owner: _,
+        } = backing;
         Ok(Self {
-            control: ExecutorDomainAllocator::from_resource(backing.control)?,
-            reactor: ExecutorDomainAllocator::from_resource(backing.reactor)?,
-            registry: ExecutorDomainAllocator::from_resource(backing.registry)?,
-            spill: backing
-                .spill
+            control: ExecutorDomainAllocator::from_resource(control)?,
+            reactor: ExecutorDomainAllocator::from_resource(reactor)?,
+            registry: ExecutorDomainAllocator::from_resource(registry)?,
+            spill: spill
                 .map(ExecutorDomainAllocator::from_resource)
                 .transpose()?,
         })
@@ -1394,42 +1391,10 @@ impl ExecutorPlanningSupport {
         }
     }
 
-    /// Returns the truthful Cortex-M no-std executor planning support.
-    ///
-    /// These values are intentionally explicit so host-side build planning can use target truth
-    /// instead of laundering host/std layout through a fake “exact” path. Target Cortex-M builds
-    /// validate this descriptor below so it cannot quietly rot.
-    #[must_use]
-    pub const fn cortex_m() -> Self {
-        Self {
-            control_bytes: 3640,
-            control_align: 8,
-            reactor_wait_entry_bytes: 32,
-            reactor_wait_entry_align: 8,
-            reactor_outcome_entry_bytes: 8,
-            reactor_outcome_entry_align: 4,
-            reactor_queue_entry_bytes: 24,
-            reactor_queue_entry_align: 8,
-            reactor_pending_entry_bytes: 0,
-            reactor_pending_entry_align: 1,
-            registry_free_entry_bytes: 4,
-            registry_free_entry_align: 4,
-            registry_slot_bytes: 136,
-            registry_slot_align: 8,
-        }
-    }
-
     /// Returns the default planning support for the selected build target/runtime lane.
     #[must_use]
     pub const fn selected_target() -> Self {
-        #[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-        {
-            Self::cortex_m()
-        }
-        #[cfg(not(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm")))]
-        {
-            Self::compiled_binary()
-        }
+        Self::compiled_binary()
     }
 
     const fn reactor_align(self) -> usize {
@@ -1509,37 +1474,6 @@ impl ExecutorPlanningSupport {
             .ok_or_else(executor_overflow)
     }
 }
-
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 3640] = [(); match ControlLease::<ExecutorCore>::extent_request() {
-    Ok(request) => request.len,
-    Err(_) => 0,
-}];
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 8] = [(); match ControlLease::<ExecutorCore>::extent_request() {
-    Ok(request) => request.align,
-    Err(_) => 0,
-}];
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 32] = [(); size_of::<AsyncReactorWaitEntry>()];
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 8] = [(); align_of::<AsyncReactorWaitEntry>()];
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 8] = [(); size_of::<Option<AsyncWaitOutcome>>()];
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 4] = [(); align_of::<Option<AsyncWaitOutcome>>()];
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 24] = [(); size_of::<Option<CurrentJob>>()];
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 8] = [(); align_of::<Option<CurrentJob>>()];
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 4] = [(); size_of::<usize>()];
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 4] = [(); align_of::<usize>()];
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 136] = [(); size_of::<AsyncTaskSlot>()];
-#[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 8] = [(); align_of::<AsyncTaskSlot>()];
 
 /// Compile-time/backing-time footprint plan for one current-thread async runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1904,6 +1838,7 @@ fn current_async_runtime_virtual_backing(
             plan.spill,
             "fusion-executor-current-spill",
         )?),
+        slab_owner: None,
     })
 }
 
@@ -1918,6 +1853,8 @@ pub struct CurrentAsyncRuntimeBacking {
     pub registry: MemoryResourceHandle,
     /// Optional exact async spill-domain resource shared across future/result lifecycle envelopes.
     pub spill: Option<MemoryResourceHandle>,
+    /// Optional owned slab retaining the backing lifetime for partitioned explicit resources.
+    pub slab_owner: Option<ExtentLease>,
 }
 
 /// Public executor error.
@@ -2095,6 +2032,7 @@ impl Default for Reactor {
 const CURRENT_QUEUE_CAPACITY: usize = 256;
 const TASK_REGISTRY_CAPACITY: usize = 256;
 const JOIN_SET_CAPACITY: usize = 64;
+#[cfg(test)]
 const INLINE_ASYNC_FUTURE_BYTES: usize = 256;
 const DEFAULT_ASYNC_SPILL_BUDGET_PER_TASK_BYTES: usize = 1024;
 const REACTOR_EVENT_BATCH: usize = 16;
@@ -4249,6 +4187,7 @@ struct ExecutorCore {
     task_lifecycle: ExecutorCell<Option<AsyncTaskLifecycleInsightState>>,
     shutdown_requested: AtomicBool,
     external_inflight: AtomicUsize,
+    _owned_backing: Option<ExtentLease>,
 }
 
 impl fmt::Debug for ExecutorCore {
@@ -5181,6 +5120,31 @@ impl<T> JoinSet<T> {
         Ok(id)
     }
 
+    /// Spawns a task through the supplied executor with one explicit poll-stack contract and
+    /// tracks it in this join set.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest spawn failure, or `Overflow` if the join set is full.
+    pub fn spawn_with_poll_stack_bytes<F>(
+        &self,
+        executor: &Executor,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<TaskId, ExecutorError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let mut state = self.entries.lock().map_err(executor_error_from_sync)?;
+        let entry_index = state.first_free_index().ok_or_else(executor_overflow)?;
+        let handle = executor.spawn_with_poll_stack_bytes(poll_stack_bytes, future)?;
+        let id = handle.id();
+        state.entries[entry_index] = Some(handle);
+        state.len += 1;
+        Ok(id)
+    }
+
     /// Waits for the next tracked task to finish and returns its output.
     ///
     /// # Errors
@@ -5374,6 +5338,33 @@ impl CurrentAsyncRuntime {
                 .spill
                 .map(|range| partition_executor_bound_resource(&slab, range))
                 .transpose()?,
+            slab_owner: None,
+        };
+        Self::from_backing(config, backing)
+    }
+
+    pub(crate) fn from_owned_extent(
+        config: ExecutorConfig,
+        owned_backing: ExtentLease,
+    ) -> Result<Self, ExecutorError> {
+        let slab = MemoryResourceHandle::from(
+            BoundMemoryResource::static_allocatable_region(owned_backing.region())
+                .map_err(executor_error_from_resource)?,
+        );
+        let layout = Self::backing_plan_with_layout_policy(config, slab.info().layout)?
+            .combined_eager_for_base_alignment(executor_resource_base_alignment(&slab))?;
+        if slab.view().len() < layout.slab.bytes {
+            return Err(ExecutorError::Sync(SyncErrorKind::Overflow));
+        }
+        let backing = CurrentAsyncRuntimeBacking {
+            control: partition_executor_bound_resource(&slab, layout.control)?,
+            reactor: partition_executor_bound_resource(&slab, layout.reactor)?,
+            registry: partition_executor_bound_resource(&slab, layout.registry)?,
+            spill: layout
+                .spill
+                .map(|range| partition_executor_bound_resource(&slab, range))
+                .transpose()?,
+            slab_owner: Some(owned_backing),
         };
         Self::from_backing(config, backing)
     }
@@ -5568,6 +5559,25 @@ impl CurrentAsyncRuntime {
     {
         self.executor.block_on(future)
     }
+
+    /// Drives one future to completion on the current thread with one explicit poll-stack
+    /// contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor failure.
+    pub fn block_on_with_poll_stack_bytes<F>(
+        &self,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<F::Output, ExecutorError>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        self.executor
+            .block_on_with_poll_stack_bytes(poll_stack_bytes, future)
+    }
 }
 
 /// Hosted async runtime backed by system-thread carriers.
@@ -5715,6 +5725,25 @@ impl ThreadAsyncRuntime {
         F::Output: Send + 'static,
     {
         self.spawn(future)?.join()
+    }
+
+    /// Drives one future to completion on the hosted thread-backed runtime with one explicit
+    /// poll-stack contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor admission or scheduler failure.
+    pub fn block_on_with_poll_stack_bytes<F>(
+        &self,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<F::Output, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.spawn_with_poll_stack_bytes(poll_stack_bytes, future)?
+            .join()
     }
 
     /// Releases the owned carrier bootstrap and executor back to the caller.
@@ -5944,8 +5973,22 @@ impl Executor {
         backing: CurrentAsyncRuntimeBacking,
     ) -> Self {
         let reactor = Reactor::new();
-        let inner = match ExecutorBackingAllocators::from_current_backing(backing).and_then(
-            |mut allocators| {
+        let CurrentAsyncRuntimeBacking {
+            control,
+            reactor: reactor_resource,
+            registry,
+            spill,
+            slab_owner,
+        } = backing;
+        let inner =
+            match ExecutorBackingAllocators::from_current_backing(CurrentAsyncRuntimeBacking {
+                control,
+                reactor: reactor_resource,
+                registry,
+                spill,
+                slab_owner: None,
+            })
+            .and_then(|mut allocators| {
                 let (reactor_state, current_queue) =
                     ExecutorReactorState::new(config.capacity, fast_current, &allocators.reactor)?;
                 let registry =
@@ -5965,13 +6008,13 @@ impl Executor {
                     task_lifecycle: ExecutorCell::new(fast_current, None),
                     shutdown_requested: AtomicBool::new(false),
                     external_inflight: AtomicUsize::new(0),
+                    _owned_backing: slab_owner,
                 })?;
                 Ok(core)
-            },
-        ) {
-            Ok(core) => ExecutorInner::Ready(core),
-            Err(error) => ExecutorInner::Error(error),
-        };
+            }) {
+                Ok(core) => ExecutorInner::Ready(core),
+                Err(error) => ExecutorInner::Error(error),
+            };
         #[cfg(feature = "std")]
         if let ExecutorInner::Ready(core) = &inner
             && matches!(core.scheduler, SchedulerBinding::ThreadWorkers(_))
@@ -6043,6 +6086,7 @@ impl Executor {
                             task_lifecycle: ExecutorCell::new(fast_current, None),
                             shutdown_requested: AtomicBool::new(false),
                             external_inflight: AtomicUsize::new(0),
+                            _owned_backing: None,
                         },
                     )
                     .map_err(executor_error_from_alloc)
@@ -6117,7 +6161,8 @@ impl Executor {
     /// # Errors
     ///
     /// Returns `Unsupported` when the executor has not been bound to a concrete scheduler
-    /// for the selected mode, or `Stopped` when the bound scheduler has shut down.
+    /// for the selected mode, when the future has no honest generated or explicit poll-stack
+    /// contract, or `Stopped` when the bound scheduler has shut down.
     pub fn spawn<F>(&self, future: F) -> Result<TaskHandle<F::Output>, ExecutorError>
     where
         F: Future + Send + 'static,
@@ -6167,6 +6212,9 @@ impl Executor {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        if matches!(admission.poll_stack, AsyncPollStackContract::Unknown) {
+            return Err(ExecutorError::Unsupported);
+        }
         let core = self.core()?;
         let handle_core = self
             .core_lease()?
@@ -6223,7 +6271,8 @@ impl Executor {
     ///
     /// # Errors
     ///
-    /// Returns `Unsupported` when this executor is not current-thread driven.
+    /// Returns `Unsupported` when this executor is not current-thread driven, or when the future
+    /// has no honest generated or explicit poll-stack contract.
     pub fn spawn_local<F>(&self, future: F) -> Result<LocalTaskHandle<F::Output>, ExecutorError>
     where
         F: Future + 'static,
@@ -6281,6 +6330,9 @@ impl Executor {
         F: Future + 'static,
         F::Output: 'static,
     {
+        if matches!(admission.poll_stack, AsyncPollStackContract::Unknown) {
+            return Err(ExecutorError::Unsupported);
+        }
         let core = self.core()?;
         let SchedulerBinding::Current = &core.scheduler else {
             return Err(ExecutorError::Unsupported);
@@ -6341,7 +6393,8 @@ impl Executor {
     ///
     /// # Errors
     ///
-    /// Returns `Unsupported` when this executor is not in current-thread mode.
+    /// Returns `Unsupported` when this executor is not in current-thread mode, or when the future
+    /// has no honest generated or explicit poll-stack contract.
     pub fn block_on<F>(&self, future: F) -> Result<F::Output, ExecutorError>
     where
         F: Future + 'static,
@@ -6353,6 +6406,38 @@ impl Executor {
         };
 
         let handle = self.spawn_local(future)?;
+        while !handle.is_finished()? {
+            if !self.drive_once()?
+                && !core.drive_reactor_once(true)?
+                && system_thread().yield_now().is_err()
+            {
+                spin_loop();
+            }
+        }
+        handle.join()
+    }
+
+    /// Drives one future to completion on the current-thread executor with one explicit
+    /// poll-stack contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unsupported` when this executor is not in current-thread mode.
+    pub fn block_on_with_poll_stack_bytes<F>(
+        &self,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<F::Output, ExecutorError>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        let core = self.core()?;
+        let SchedulerBinding::Current = &core.scheduler else {
+            return Err(ExecutorError::Unsupported);
+        };
+
+        let handle = self.spawn_local_with_poll_stack_bytes(poll_stack_bytes, future)?;
         while !handle.is_finished()? {
             if !self.drive_once()?
                 && !core.drive_reactor_once(true)?
@@ -6984,6 +7069,7 @@ mod tests {
     }
 
     crate::declare_generated_async_poll_stack_contract!(ExplicitGeneratedPollStackFuture, 1792);
+    const TEST_ASYNC_POLL_STACK_BYTES: usize = 2048;
 
     #[cfg(feature = "std")]
     #[derive(Debug)]
@@ -7100,14 +7186,14 @@ mod tests {
         let executor = Executor::new(ExecutorConfig::new());
 
         let first = executor
-            .spawn(async { 7_u8 })
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async { 7_u8 })
             .expect("first task should spawn");
         let first_slot = first.inner.slot_index;
         let first_generation = first.inner.generation;
         assert_eq!(first.join().expect("first task should finish"), 7);
 
         let second = executor
-            .spawn(async { 9_u8 })
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async { 9_u8 })
             .expect("second task should spawn");
         assert_eq!(second.inner.slot_index, first_slot);
         assert!(second.inner.generation > first_generation);
@@ -7120,10 +7206,10 @@ mod tests {
         let join_set = JoinSet::<u8>::new();
 
         join_set
-            .spawn(&executor, async { 3_u8 })
+            .spawn_with_poll_stack_bytes(&executor, TEST_ASYNC_POLL_STACK_BYTES, async { 3_u8 })
             .expect("first join-set task should spawn");
         join_set
-            .spawn(&executor, async { 5_u8 })
+            .spawn_with_poll_stack_bytes(&executor, TEST_ASYNC_POLL_STACK_BYTES, async { 5_u8 })
             .expect("second join-set task should spawn");
 
         let first = join_set.join_next().expect("first task should complete");
@@ -7139,7 +7225,7 @@ mod tests {
         let task_polls = Arc::clone(&polls);
 
         let handle = executor
-            .spawn(async move {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async move {
                 task_polls.fetch_add(1, Ordering::AcqRel);
                 async_yield_now().await;
                 task_polls.fetch_add(1, Ordering::AcqRel);
@@ -7162,7 +7248,7 @@ mod tests {
             Executor::new(ExecutorConfig::thread_pool().with_mode(ExecutorMode::CurrentThread));
         let sample = async { [1_u16, 2, 3, 4] };
         let handle = executor
-            .spawn(async { [1_u16, 2, 3, 4] })
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async { [1_u16, 2, 3, 4] })
             .expect("task should spawn");
         let admission = handle.admission();
         assert_eq!(admission.carrier, ExecutorMode::CurrentThread);
@@ -7172,7 +7258,9 @@ mod tests {
         assert_eq!(admission.output_align, align_of::<[u16; 4]>());
         assert_eq!(
             admission.poll_stack,
-            AsyncPollStackContract::DerivedHeuristic { bytes: 512 }
+            AsyncPollStackContract::Explicit {
+                bytes: TEST_ASYNC_POLL_STACK_BYTES
+            }
         );
         assert_eq!(
             handle.join().expect("task should complete"),
@@ -7219,7 +7307,7 @@ mod tests {
         let executor = Executor::new(ExecutorConfig::new());
         let sample = async { [9_u8; 384] };
         let handle = executor
-            .spawn(async { [9_u8; 384] })
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async { [9_u8; 384] })
             .expect("task should spawn");
         let admission = handle.admission();
 
@@ -7267,28 +7355,23 @@ mod tests {
     }
 
     #[test]
-    fn future_layout_derives_one_poll_stack_heuristic_by_default() {
+    fn missing_generated_async_poll_stack_contract_is_rejected_by_default() {
         let executor = Executor::new(ExecutorConfig::new());
         let payload = [0_u8; 384];
-        let handle = executor
-            .spawn(async move {
+        assert!(matches!(
+            executor.spawn(async move {
                 let _ = payload[0];
                 5_u8
-            })
-            .expect("task should spawn");
-        assert!(handle.admission().future_bytes > INLINE_ASYNC_FUTURE_BYTES);
-        assert_eq!(
-            handle.admission().poll_stack,
-            AsyncPollStackContract::DerivedHeuristic { bytes: 2048 }
-        );
-        assert_eq!(handle.join().expect("task should complete"), 5);
+            }),
+            Err(ExecutorError::Unsupported)
+        ));
     }
 
     #[test]
     fn run_until_idle_drains_ready_current_thread_tasks() {
         let executor = Executor::new(ExecutorConfig::new());
         let handle = executor
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 async_yield_now().await;
                 11_u8
@@ -7309,7 +7392,7 @@ mod tests {
 
         let payload = [0_u8; 384];
         let handle = executor
-            .spawn(async move { payload.len() })
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async move { payload.len() })
             .expect("medium-sized future should spill into exact leased backing");
 
         assert_eq!(handle.join().expect("task should complete"), 384);
@@ -7321,7 +7404,10 @@ mod tests {
         let oversized = [0_u8; 64 * 1024];
 
         let handle = executor
-            .spawn(async move { oversized.len() })
+            .spawn_with_poll_stack_bytes(
+                TEST_ASYNC_POLL_STACK_BYTES,
+                async move { oversized.len() },
+            )
             .expect("larger future frames should use the shared spill domain when it has room");
 
         assert_eq!(
@@ -7355,7 +7441,7 @@ mod tests {
         let executor = Executor::new(ExecutorConfig::new());
 
         let handle = executor
-            .spawn(async move { [7_u8; 384] })
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async move { [7_u8; 384] })
             .expect("medium-sized outputs should spill into exact leased backing");
 
         let output = handle.join().expect("task should complete");
@@ -7438,7 +7524,7 @@ mod tests {
         let executor = Executor::new(ExecutorConfig::new());
 
         let handle = executor
-            .spawn(async move { [7_u8; 2048] })
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async move { [7_u8; 2048] })
             .expect("larger outputs should use the shared spill domain when it has room");
 
         let output = handle.join().expect("task should complete");
@@ -7463,7 +7549,7 @@ mod tests {
     fn dropping_executor_shuts_down_live_pending_slots() {
         let executor = Executor::new(ExecutorConfig::new());
         let handle = executor
-            .spawn(core::future::pending::<u8>())
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, core::future::pending::<u8>())
             .expect("pending task should spawn");
         let slot_index = handle.inner.slot_index;
         let generation = handle.inner.generation;
@@ -7521,7 +7607,7 @@ mod tests {
             .expect("executor should bind to thread pool");
 
         let handle = executor
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 21_u8
             })
@@ -7538,7 +7624,9 @@ mod tests {
         }
 
         let runtime = CurrentAsyncRuntime::new();
-        let handle = runtime.spawn(value()).expect("task should spawn");
+        let handle = runtime
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, value())
+            .expect("task should spawn");
         assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 2);
         assert_eq!(handle.join().expect("task should complete"), 34);
     }
@@ -7547,13 +7635,13 @@ mod tests {
     fn task_handle_is_awaitable_on_current_runtime() {
         let runtime = CurrentAsyncRuntime::new();
         let handle = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 13_u8
             })
             .expect("task should spawn");
         let result = runtime
-            .block_on(handle)
+            .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
             .expect("runtime should drive task join");
         assert_eq!(result.expect("task should complete"), 13);
     }
@@ -7591,7 +7679,7 @@ mod tests {
         let runtime = CurrentAsyncRuntime::new();
         let local = Rc::new(5_u8);
         let handle = runtime
-            .spawn_local({
+            .spawn_local_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, {
                 let local = Rc::clone(&local);
                 async move {
                     async_yield_now().await;
@@ -7600,7 +7688,7 @@ mod tests {
             })
             .expect("local task should spawn");
         let result = runtime
-            .block_on(handle)
+            .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
             .expect("runtime should drive local task join");
         assert_eq!(result.expect("local task should complete"), 7);
     }
@@ -7622,7 +7710,7 @@ mod tests {
             AsyncPollStackContract::Explicit { bytes: 1024 }
         );
         let result = runtime
-            .block_on(handle)
+            .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
             .expect("runtime should drive local task join");
         assert_eq!(result.expect("local task should complete"), 7);
     }
@@ -7638,7 +7726,7 @@ mod tests {
             AsyncPollStackContract::Explicit { bytes: 1792 }
         );
         let result = runtime
-            .block_on(handle)
+            .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
             .expect("runtime should drive generated local task");
         assert_eq!(result.expect("local task should complete"), 55);
     }
@@ -7655,7 +7743,7 @@ mod tests {
             .expect("task lifecycle consumer should attach");
 
         let handle = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 7_u8
             })
@@ -7664,7 +7752,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .block_on(handle)
+                .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
                 .expect("runtime should drive task")
                 .expect("task should complete"),
             7
@@ -7722,14 +7810,14 @@ mod tests {
     fn task_handle_abort_reports_cancelled() {
         let runtime = CurrentAsyncRuntime::new();
         let handle = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 21_u8
             })
             .expect("task should spawn");
         handle.abort().expect("task should abort cleanly");
         let result = runtime
-            .block_on(handle)
+            .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
             .expect("runtime should drive cancelled task join");
         assert!(matches!(result, Err(ExecutorError::Cancelled)));
     }
@@ -7740,7 +7828,7 @@ mod tests {
         let runtime = CurrentAsyncRuntime::new();
         let pipe = Arc::new(TestPipe::new());
         let handle = runtime
-            .spawn({
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, {
                 let pipe = Arc::clone(&pipe);
                 async move {
                     let readiness = async_wait_for_readiness(
@@ -7763,7 +7851,7 @@ mod tests {
         pipe.write_byte(37);
         assert_eq!(
             runtime
-                .block_on(handle)
+                .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
                 .expect("runtime should drive readiness task")
                 .expect("task should complete"),
             37
@@ -7775,7 +7863,7 @@ mod tests {
     fn current_runtime_sleep_for_completes() {
         let runtime = CurrentAsyncRuntime::new();
         let handle = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_sleep_for(Duration::from_millis(1))
                     .await
                     .expect("sleep should complete");
@@ -7785,7 +7873,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .block_on(handle)
+                .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
                 .expect("runtime should drive timer task")
                 .expect("task should complete"),
             99
@@ -7804,7 +7892,7 @@ mod tests {
             .checked_add_duration(start, Duration::from_millis(1))
             .expect("deadline should fit");
         let handle = runtime
-            .spawn(async move {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async move {
                 async_sleep_until_instant(deadline)
                     .await
                     .expect("sleep-until should complete");
@@ -7814,7 +7902,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .block_on(handle)
+                .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
                 .expect("runtime should drive timer task")
                 .expect("task should complete"),
             41
@@ -7826,7 +7914,7 @@ mod tests {
     fn current_task_handle_join_drives_timer_only_waits() {
         let executor = Executor::new_fast_current();
         let handle = executor
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_sleep_for(Duration::from_millis(1))
                     .await
                     .expect("sleep should complete");
@@ -7851,7 +7939,9 @@ mod tests {
             ..ThreadPoolConfig::new()
         })
         .expect("thread async runtime should build");
-        let handle = runtime.spawn(value()).expect("task should spawn");
+        let handle = runtime
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, value())
+            .expect("task should spawn");
         assert_eq!(handle.join().expect("task should complete"), 55);
     }
 
@@ -7908,7 +7998,7 @@ mod tests {
             .expect("task lifecycle consumer should attach");
 
         let handle = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 29_u8
             })
@@ -7954,20 +8044,20 @@ mod tests {
         })
         .expect("thread async runtime should build");
         let first = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 13_u8
             })
             .expect("first task should spawn");
         let second = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 21_u8
             })
             .expect("second task should spawn");
 
         let sum = runtime
-            .block_on(async move {
+            .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async move {
                 let first = first.await?;
                 let second = second.await?;
                 Ok::<u8, ExecutorError>(first + second)
@@ -8006,14 +8096,14 @@ mod tests {
         let runtime =
             CurrentAsyncRuntime::with_executor_config(ExecutorConfig::new().with_capacity(1));
         let _first = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 core::future::pending::<()>().await;
             })
             .expect("first task should fit in one-slot runtime");
 
         assert_eq!(
             runtime
-                .spawn(async { 1_u8 })
+                .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async { 1_u8 })
                 .expect_err("second task should exhaust one-slot runtime"),
             executor_busy()
         );
@@ -8029,7 +8119,7 @@ mod tests {
         let runtime = CurrentAsyncRuntime::from_backing(config, backing)
             .expect("runtime should build from explicit backing");
         let handle = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 29_u8
             })
@@ -8037,7 +8127,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .block_on(handle)
+                .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
                 .expect("runtime should drive explicit-backed task")
                 .expect("task should complete"),
             29
@@ -8105,7 +8195,7 @@ mod tests {
         let runtime = CurrentAsyncRuntime::from_bound_slab(config, slab)
             .expect("runtime should build from one bound slab");
         let handle = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 31_u8
             })
@@ -8113,7 +8203,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .block_on(handle)
+                .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
                 .expect("runtime should drive bound-slab task")
                 .expect("task should complete"),
             31
@@ -8135,7 +8225,7 @@ mod tests {
         let runtime = CurrentAsyncRuntime::from_bound_slab(config, slab)
             .expect("runtime should build from exact-aligned slab");
         let handle = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 37_u8
             })
@@ -8143,7 +8233,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .block_on(handle)
+                .block_on_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, handle)
                 .expect("runtime should drive exact-aligned bound-slab task")
                 .expect("task should complete"),
             37
@@ -8163,14 +8253,14 @@ mod tests {
         )
         .expect("thread async runtime should build");
         let _first = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 core::future::pending::<()>().await;
             })
             .expect("first task should fit in one-slot runtime");
 
         assert_eq!(
             runtime
-                .spawn(async { 2_u8 })
+                .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async { 2_u8 })
                 .expect_err("second task should exhaust one-slot runtime"),
             executor_busy()
         );
@@ -8187,7 +8277,7 @@ mod tests {
             })
             .expect("thread async runtime should build");
             let handle = runtime
-                .spawn(async {
+                .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                     async_yield_now().await;
                     8_u8
                 })
@@ -8215,9 +8305,12 @@ mod tests {
         for iteration in 0..64 {
             let mut handles = Vec::with_capacity(TASKS);
             for task_index in 0..TASKS {
-                let handle = match runtime.spawn(async {
-                    async_yield_now().await;
-                }) {
+                let handle = match runtime.spawn_with_poll_stack_bytes(
+                    TEST_ASYNC_POLL_STACK_BYTES,
+                    async {
+                        async_yield_now().await;
+                    },
+                ) {
                     Ok(handle) => handle,
                     Err(error) => {
                         let core = runtime
@@ -8263,7 +8356,7 @@ mod tests {
         .expect("thread async runtime should build");
         let pipe = Arc::new(TestPipe::new());
         let handle = runtime
-            .spawn({
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, {
                 let pipe = Arc::clone(&pipe);
                 async move {
                     let readiness = async_wait_for_readiness(
@@ -8293,7 +8386,7 @@ mod tests {
         })
         .expect("thread async runtime should build");
         let handle = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_sleep_for(Duration::from_millis(1))
                     .await
                     .expect("sleep should complete");
@@ -8353,7 +8446,7 @@ mod tests {
             .expect("task lifecycle consumer should attach");
 
         let handle = runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
                 31_u8
             })
@@ -8395,7 +8488,7 @@ mod tests {
         for _ in 0..32 {
             let runtime = FiberAsyncRuntime::fixed(2).expect("fiber async runtime should build");
             let handle = runtime
-                .spawn(async {
+                .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
                     async_yield_now().await;
                     6_u8
                 })
@@ -8410,7 +8503,9 @@ mod tests {
     fn fiber_async_runtime_sleep_for_completes() {
         let runtime = FiberAsyncRuntime::fixed(2).expect("fiber async runtime should build");
         let handle = runtime
-            .spawn(async { async_sleep_for(Duration::from_millis(1)).await })
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
+                async_sleep_for(Duration::from_millis(1)).await
+            })
             .expect("task should spawn");
         assert!(matches!(handle.join(), Ok(Err(ExecutorError::Unsupported))));
     }
@@ -8421,7 +8516,7 @@ mod tests {
         let runtime = FiberAsyncRuntime::fixed(2).expect("fiber async runtime should build");
         let pipe = Arc::new(TestPipe::new());
         let handle = runtime
-            .spawn({
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, {
                 let pipe = Arc::clone(&pipe);
                 async move {
                     async_wait_for_readiness(

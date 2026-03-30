@@ -12,6 +12,7 @@ use fusion_std::thread::{ExecutorConfig, ThreadAsyncRuntime, ThreadPoolConfig, a
 
 const DEFAULT_SAMPLES: usize = 100;
 const PROBE_TASK_CAPACITY: usize = 16;
+const PROBE_ASYNC_POLL_STACK_BYTES: usize = 2048;
 
 fn main() {
     if let Err(error) = run() {
@@ -167,10 +168,10 @@ fn spawn_probe_task(
 ) -> Result<fusion_std::thread::TaskHandle<()>, String> {
     match kind {
         AsyncBatchKind::Noop => runtime
-            .spawn(async {})
+            .spawn_with_poll_stack_bytes(PROBE_ASYNC_POLL_STACK_BYTES, async {})
             .map_err(|error| format!("noop async batch spawn failed: {error:?}")),
         AsyncBatchKind::YieldOnce => runtime
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(PROBE_ASYNC_POLL_STACK_BYTES, async {
                 async_yield_now().await;
             })
             .map_err(|error| format!("yield-once async batch spawn failed: {error:?}")),

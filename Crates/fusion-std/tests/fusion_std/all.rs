@@ -295,16 +295,16 @@ fn executor_current_thread_and_pool_paths_are_real() {
     assert_eq!(current.mode(), ExecutorMode::CurrentThread);
     assert_eq!(
         current
-            .block_on(async { 5_u8 })
+            .block_on_with_poll_stack_bytes(2048, async { 5_u8 })
             .expect("current-thread executor should drive one future"),
         5
     );
     let local = current
-        .spawn_local(async { 7_u8 })
+        .spawn_local_with_poll_stack_bytes(2048, async { 7_u8 })
         .expect("current-thread executor should admit local future");
     assert_eq!(
         current
-            .block_on(local)
+            .block_on_with_poll_stack_bytes(2048, local)
             .expect("current-thread executor should drive local future")
             .expect("local future should complete"),
         7
@@ -325,7 +325,7 @@ fn executor_current_thread_and_pool_paths_are_real() {
     .on_pool(&carrier)
     .expect("executor should bind to the carrier pool");
     let pool_task = pool_executor
-        .spawn(async { 11_u8 })
+        .spawn_with_poll_stack_bytes(2048, async { 11_u8 })
         .expect("thread-pool executor should spawn work");
     assert_eq!(
         pool_task

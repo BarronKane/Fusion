@@ -4,24 +4,35 @@ use super::{
     AsyncRuntimeMemoryFootprint,
     CurrentAsyncRuntime,
     CurrentAsyncRuntimeCombinedBackingPlan,
+    CurrentFiberHandle,
     CurrentFiberPool,
     CurrentFiberPoolCombinedBackingPlan,
     Executor,
     ExecutorConfig,
+    ExecutorError,
     ExecutorPlanningSupport,
     FiberPlanningSupport,
     FiberPoolBootstrap,
     FiberPoolMemoryFootprint,
     FiberStackBacking,
+    FiberStackClass,
     GreenGrowth,
     GreenPool,
     GreenPoolConfig,
     GreenScheduling,
+    TaskHandle,
     ThreadPool,
     ThreadPoolConfig,
+    generated_default_fiber_stack_bytes,
 };
+use crate::sync::SyncErrorKind;
+use core::cell::UnsafeCell;
+use core::future::Future;
+use core::mem::MaybeUninit;
 use core::num::NonZeroUsize;
 use fusion_pal::sys::mem::MemBase;
+use fusion_sys::alloc::ExtentLease;
+use fusion_sys::fiber::{FiberError, FiberErrorKind, FiberSystem};
 pub use fusion_sys::mem::resource::AllocatorLayoutPolicy;
 use fusion_sys::mem::resource::{
     BoundMemoryResource,
@@ -30,6 +41,13 @@ use fusion_sys::mem::resource::{
     MemoryResourceHandle,
     ResourceBackingKind,
     ResourceRange,
+};
+use fusion_sys::sync::{Once, OnceInitError};
+use fusion_sys::thread::{
+    RuntimeBackingError,
+    RuntimeBackingErrorKind,
+    allocate_owned_runtime_slab,
+    uses_explicit_bound_runtime_backing,
 };
 
 /// Global sizing strategy for runtime-owned slabs, arenas, and derived envelopes.
@@ -119,6 +137,268 @@ pub struct CurrentFiberAsyncRuntime {
     executor: CurrentAsyncRuntime,
 }
 
+/// Small current-thread once cell for board-local or app-local lazy runtime singletons.
+///
+/// This is intentionally narrower than a general-purpose once lock because current-thread
+/// runtimes are frequently `!Send` / `!Sync`, yet still need one static lazy entry point.
+struct CurrentThreadOnce<T> {
+    once: Once,
+    value: UnsafeCell<MaybeUninit<T>>,
+}
+
+impl<T> CurrentThreadOnce<T> {
+    const fn new() -> Self {
+        Self {
+            once: Once::new(),
+            value: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    fn get_or_try_init<F, E>(&'static self, init: F) -> Result<&'static T, OnceInitError<E>>
+    where
+        F: FnOnce() -> Result<T, E>,
+    {
+        if self.once.is_completed() {
+            // SAFETY: completion only happens after the initializer writes the value.
+            return Ok(unsafe { (*self.value.get()).assume_init_ref() });
+        }
+
+        let value_ptr = self.value.get();
+        self.once.call_once_try(|| {
+            let value = init()?;
+            // SAFETY: the winning initializer owns exclusive write access until completion.
+            unsafe { (*value_ptr).write(value) };
+            Ok(())
+        })?;
+
+        // SAFETY: completion above guarantees initialization happened exactly once.
+        Ok(unsafe { (*self.value.get()).assume_init_ref() })
+    }
+}
+
+// SAFETY: this cell is intended only for current-thread lazy singletons. It must not be treated
+// as a general cross-thread sharing primitive for arbitrary `T`.
+unsafe impl<T> Sync for CurrentThreadOnce<T> {}
+
+fn selected_stack_size_with_optional_floor(
+    stack_floor_bytes: Option<usize>,
+) -> Result<NonZeroUsize, FiberError> {
+    let requested = generated_default_fiber_stack_bytes()?.max(stack_floor_bytes.unwrap_or(0));
+    let requested = NonZeroUsize::new(requested).ok_or_else(FiberError::invalid)?;
+    Ok(FiberStackClass::from_stack_bytes(requested)?.size_bytes())
+}
+
+fn current_thread_default_guard_pages() -> usize {
+    usize::from(FiberSystem::new().support().context.guard_required)
+}
+
+fn executor_error_from_fiber(error: FiberError) -> ExecutorError {
+    match error.kind() {
+        FiberErrorKind::Unsupported => ExecutorError::Unsupported,
+        FiberErrorKind::Invalid => ExecutorError::Sync(SyncErrorKind::Invalid),
+        FiberErrorKind::ResourceExhausted => ExecutorError::Sync(SyncErrorKind::Overflow),
+        FiberErrorKind::DeadlineExceeded | FiberErrorKind::StateConflict => {
+            ExecutorError::Sync(SyncErrorKind::Busy)
+        }
+        FiberErrorKind::Context(_) => ExecutorError::Sync(SyncErrorKind::Busy),
+    }
+}
+
+fn fiber_error_from_executor(error: ExecutorError) -> FiberError {
+    match error {
+        ExecutorError::Unsupported => FiberError::unsupported(),
+        ExecutorError::Stopped | ExecutorError::Cancelled => FiberError::state_conflict(),
+        ExecutorError::Sync(kind) => match kind {
+            SyncErrorKind::Invalid => FiberError::invalid(),
+            SyncErrorKind::Overflow => FiberError::resource_exhausted(),
+            _ => FiberError::state_conflict(),
+        },
+        ExecutorError::TaskPanicked => FiberError::state_conflict(),
+    }
+}
+
+fn executor_error_from_current_runtime(error: CurrentFiberAsyncRuntimeError) -> ExecutorError {
+    match error {
+        CurrentFiberAsyncRuntimeError::Fiber(error) => executor_error_from_fiber(error),
+        CurrentFiberAsyncRuntimeError::Executor(error) => error,
+    }
+}
+
+/// Tiny lazy current-thread fiber+async runtime façade for board-local front doors.
+///
+/// This exists for targets that want a `thread::spawn()`-clean consumer surface while the exact
+/// generated metadata pipeline still depends on build-time sidecars rather than compiler-native
+/// artifacts.
+pub struct CurrentFiberAsyncSingleton<const MAX_FIBERS: usize, const ASYNC_CAPACITY: usize> {
+    stack_floor_bytes: Option<usize>,
+    guard_pages: Option<usize>,
+    runtime: CurrentThreadOnce<CurrentFiberAsyncRuntime>,
+}
+
+impl<const MAX_FIBERS: usize, const ASYNC_CAPACITY: usize>
+    CurrentFiberAsyncSingleton<MAX_FIBERS, ASYNC_CAPACITY>
+{
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            stack_floor_bytes: None,
+            guard_pages: None,
+            runtime: CurrentThreadOnce::new(),
+        }
+    }
+
+    /// Installs one optional policy floor above the machine- and metadata-derived stack minimum.
+    ///
+    /// This is not backend truth. It exists only as an escape hatch while generated task metadata
+    /// still stops at crate boundaries.
+    #[must_use]
+    pub const fn with_stack_floor(mut self, stack_floor_bytes: usize) -> Self {
+        self.stack_floor_bytes = Some(stack_floor_bytes);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_guard_pages(mut self, guard_pages: usize) -> Self {
+        self.guard_pages = Some(guard_pages);
+        self
+    }
+
+    fn bootstrap(&self) -> Result<CurrentFiberAsyncBootstrap<'static>, FiberError> {
+        let guard_pages = match self.guard_pages {
+            Some(guard_pages) => guard_pages,
+            None => current_thread_default_guard_pages(),
+        };
+        Ok(CurrentFiberAsyncBootstrap::uniform(
+            MAX_FIBERS,
+            selected_stack_size_with_optional_floor(self.stack_floor_bytes)?,
+            ASYNC_CAPACITY,
+        )
+        .with_guard_pages(guard_pages)
+        .with_sizing_strategy(default_runtime_sizing_strategy()))
+    }
+
+    pub fn runtime(&'static self) -> Result<&'static CurrentFiberAsyncRuntime, ExecutorError> {
+        self.runtime
+            .get_or_try_init(|| {
+                self.bootstrap()
+                    .map_err(executor_error_from_fiber)?
+                    .build_current()
+                    .map_err(executor_error_from_current_runtime)
+            })
+            .map_err(|error| match error {
+                OnceInitError::Sync(_) => ExecutorError::Sync(SyncErrorKind::Busy),
+                OnceInitError::Init(error) => error,
+            })
+    }
+
+    pub fn spawn_fiber<F, T>(&'static self, job: F) -> Result<CurrentFiberHandle<T>, FiberError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: 'static,
+    {
+        self.runtime()
+            .map_err(fiber_error_from_executor)?
+            .fibers()
+            .spawn(job)
+    }
+
+    pub fn spawn_fiber_with_stack<const STACK_BYTES: usize, F, T>(
+        &'static self,
+        job: F,
+    ) -> Result<CurrentFiberHandle<T>, FiberError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: 'static,
+    {
+        self.runtime()
+            .map_err(fiber_error_from_executor)?
+            .fibers()
+            .spawn_with_stack::<STACK_BYTES, _, _>(job)
+    }
+
+    pub fn drive_once(&'static self) -> Result<bool, FiberError> {
+        self.runtime()
+            .map_err(fiber_error_from_executor)?
+            .fibers()
+            .drive_once()
+    }
+
+    /// Spawns one async task through the lazily owned current-thread runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor failure, including `Unsupported` when the future has no
+    /// generated poll-stack metadata and the caller did not supply one explicit contract.
+    pub fn spawn_async<F>(&'static self, future: F) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.runtime()?.executor().spawn(future)
+    }
+
+    /// Spawns one async task with one explicit poll-stack contract through the lazily owned
+    /// current-thread runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor failure.
+    pub fn spawn_async_with_poll_stack_bytes<F>(
+        &'static self,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<TaskHandle<F::Output>, ExecutorError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.runtime()?
+            .executor()
+            .spawn_with_poll_stack_bytes(poll_stack_bytes, future)
+    }
+
+    /// Drives one future to completion through the lazily owned current-thread runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor failure, including `Unsupported` when the future has no
+    /// generated poll-stack metadata and the caller did not supply one explicit contract.
+    pub fn block_on<F>(&'static self, future: F) -> Result<F::Output, ExecutorError>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        self.runtime()?.executor().block_on(future)
+    }
+
+    /// Drives one future to completion with one explicit poll-stack contract through the lazily
+    /// owned current-thread runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor failure.
+    pub fn block_on_with_poll_stack_bytes<F>(
+        &'static self,
+        poll_stack_bytes: usize,
+        future: F,
+    ) -> Result<F::Output, ExecutorError>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        self.runtime()?
+            .executor()
+            .block_on_with_poll_stack_bytes(poll_stack_bytes, future)
+    }
+
+    pub fn shutdown_fibers(&'static self) -> Result<(), FiberError> {
+        self.runtime()
+            .map_err(fiber_error_from_executor)?
+            .fibers()
+            .shutdown()
+    }
+}
+
 /// Exact configured memory footprint for one combined current-thread fiber + async bundle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CurrentFiberAsyncRuntimeMemoryFootprint {
@@ -141,6 +421,7 @@ impl CurrentFiberAsyncRuntimeMemoryFootprint {
 pub struct CurrentAsyncRuntimeBuilder {
     config: ExecutorConfig,
     slab: Option<MemoryResourceHandle>,
+    owned_backing: Option<ExtentLease>,
 }
 
 /// Split current-thread fiber + async bootstrap result.
@@ -194,9 +475,13 @@ impl CurrentAsyncRuntimeBuilder {
     ///
     /// Returns any honest current-thread async bootstrap failure.
     pub fn build(self) -> Result<CurrentAsyncRuntime, CurrentFiberAsyncRuntimeError> {
-        match self.slab {
-            Some(slab) => Ok(CurrentAsyncRuntime::from_bound_slab(self.config, slab)?),
-            None => Ok(CurrentAsyncRuntime::with_executor_config(self.config)),
+        match (self.slab, self.owned_backing) {
+            (Some(slab), _) => Ok(CurrentAsyncRuntime::from_bound_slab(self.config, slab)?),
+            (None, Some(owned_backing)) => Ok(CurrentAsyncRuntime::from_owned_extent(
+                self.config,
+                owned_backing,
+            )?),
+            (None, None) => Ok(CurrentAsyncRuntime::with_executor_config(self.config)),
         }
     }
 
@@ -211,12 +496,16 @@ impl CurrentAsyncRuntimeBuilder {
     /// Returns `Unsupported` if this builder does not carry one explicit backing slab, or any
     /// honest explicit-backed current-thread async bootstrap failure.
     pub fn build_explicit(self) -> Result<CurrentAsyncRuntime, CurrentFiberAsyncRuntimeError> {
-        let Some(slab) = self.slab else {
-            return Err(CurrentFiberAsyncRuntimeError::Executor(
+        match (self.slab, self.owned_backing) {
+            (Some(slab), _) => Ok(CurrentAsyncRuntime::from_bound_slab(self.config, slab)?),
+            (None, Some(owned_backing)) => Ok(CurrentAsyncRuntime::from_owned_extent(
+                self.config,
+                owned_backing,
+            )?),
+            (None, None) => Err(CurrentFiberAsyncRuntimeError::Executor(
                 super::ExecutorError::Unsupported,
-            ));
-        };
-        Ok(CurrentAsyncRuntime::from_bound_slab(self.config, slab)?)
+            )),
+        }
     }
 }
 
@@ -343,23 +632,6 @@ impl CurrentFiberAsyncBootstrap<'static> {
         ))
     }
 
-    /// Returns one deterministic target-oriented bootstrap using generated fiber stack metadata,
-    /// no guard pages, and the crate-default sizing policy.
-    ///
-    /// This is the board-facing path for explicit static runtime backing on targets like RP2350.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when generated fiber stack metadata is unavailable.
-    pub fn generated_static_target(
-        max_fibers: usize,
-        async_capacity: usize,
-    ) -> Result<Self, CurrentFiberAsyncRuntimeError> {
-        Ok(Self::auto(max_fibers, async_capacity)?
-            .with_guard_pages(0)
-            .with_sizing_strategy(default_runtime_sizing_strategy()))
-    }
-
     /// Returns one deterministic bootstrap with one explicit uniform fiber stack size.
     #[must_use]
     pub const fn uniform(
@@ -371,19 +643,6 @@ impl CurrentFiberAsyncBootstrap<'static> {
             FiberPoolBootstrap::uniform(max_fibers, stack_size),
             ExecutorConfig::new().with_capacity(async_capacity),
         )
-    }
-
-    /// Returns one deterministic target-oriented bootstrap with one explicit uniform fiber stack
-    /// size, no guard pages, and the crate-default sizing policy.
-    #[must_use]
-    pub const fn uniform_static_target(
-        max_fibers: usize,
-        stack_size: NonZeroUsize,
-        async_capacity: usize,
-    ) -> Self {
-        Self::uniform(max_fibers, stack_size, async_capacity)
-            .with_guard_pages(0)
-            .with_sizing_strategy(default_runtime_sizing_strategy())
     }
 }
 
@@ -488,19 +747,6 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
             fiber_planning,
             ExecutorPlanningSupport::selected_target(),
             layout_policy,
-        )
-    }
-
-    /// Returns the one-slab backing plan for one Cortex-M explicit-static target runtime bundle.
-    ///
-    /// This is the build-time honest path for RP2350-style examples that want one exact owning
-    /// slab without re-spelling the planning and layout surfaces in every build script.
-    pub fn cortex_m_exact_static_backing_plan(
-        self,
-    ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
-        self.backing_plan_with_fiber_planning_support_and_allocator_layout_policy(
-            FiberPlanningSupport::cortex_m(),
-            AllocatorLayoutPolicy::exact_static(),
         )
     }
 
@@ -633,12 +879,30 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
     pub fn build_current_parts(
         self,
     ) -> Result<CurrentFiberAsyncParts, CurrentFiberAsyncRuntimeError> {
+        if uses_explicit_bound_runtime_backing() {
+            let fibers = self.fibers.build_current()?;
+            let layout = CurrentAsyncRuntime::backing_plan(self.executor)?;
+            let combined = layout.combined_eager()?;
+            let slab = allocate_owned_runtime_slab(combined.slab.bytes, combined.slab.align)
+                .map_err(current_runtime_error_from_owned_backing)?;
+            if let Some(slab) = slab {
+                return Ok(CurrentFiberAsyncParts {
+                    fibers,
+                    executor: CurrentAsyncRuntimeBuilder {
+                        config: self.executor,
+                        slab: None,
+                        owned_backing: Some(slab.lease),
+                    },
+                });
+            }
+        }
         let fibers = self.fibers.build_current()?;
         Ok(CurrentFiberAsyncParts {
             fibers,
             executor: CurrentAsyncRuntimeBuilder {
                 config: self.executor,
                 slab: None,
+                owned_backing: None,
             },
         })
     }
@@ -690,6 +954,7 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
             executor: CurrentAsyncRuntimeBuilder {
                 config: self.executor,
                 slab: Some(partition_runtime_bound_resource(&slab, layout.executor)?),
+                owned_backing: None,
             },
         })
     }
@@ -739,6 +1004,24 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
         );
         self.from_bound_slab_parts(slab)
     }
+}
+
+fn current_runtime_error_from_owned_backing(
+    error: RuntimeBackingError,
+) -> CurrentFiberAsyncRuntimeError {
+    let executor_error = match error.kind() {
+        RuntimeBackingErrorKind::Unsupported => super::ExecutorError::Unsupported,
+        RuntimeBackingErrorKind::Invalid => {
+            super::ExecutorError::Sync(crate::sync::SyncErrorKind::Invalid)
+        }
+        RuntimeBackingErrorKind::ResourceExhausted => {
+            super::ExecutorError::Sync(crate::sync::SyncErrorKind::Overflow)
+        }
+        RuntimeBackingErrorKind::StateConflict => {
+            super::ExecutorError::Sync(crate::sync::SyncErrorKind::Busy)
+        }
+    };
+    CurrentFiberAsyncRuntimeError::Executor(executor_error)
 }
 
 /// Runtime profile selecting broad safety and elasticity policy.
@@ -1123,6 +1406,7 @@ mod tests {
         let hosted_like = bootstrap
             .backing_plan_with_fiber_planning_support_and_allocator_layout_policy(
                 FiberPlanningSupport::same_carrier(
+                    352,
                     16,
                     128,
                     fusion_sys::fiber::ContextStackDirection::Down,
@@ -1133,7 +1417,13 @@ mod tests {
             .expect("hosted-like plan should build");
         let cortex_m = bootstrap
             .backing_plan_with_fiber_planning_support_and_allocator_layout_policy(
-                FiberPlanningSupport::cortex_m(),
+                FiberPlanningSupport::same_carrier(
+                    0,
+                    8,
+                    0,
+                    fusion_sys::fiber::ContextStackDirection::Down,
+                    false,
+                ),
                 AllocatorLayoutPolicy::exact_static(),
             )
             .expect("cortex-m plan should build");
@@ -1157,13 +1447,15 @@ mod tests {
             .expect("combined runtime should build from one bound slab");
         let (fibers, executor) = runtime.into_parts();
 
-        let handle = fibers.spawn(|| 7_u8).expect("fiber should spawn");
+        let handle = fibers
+            .spawn_with_stack::<4096, _, _>(|| 7_u8)
+            .expect("fiber should spawn");
         assert_eq!(handle.join().expect("fiber join should complete"), 7);
         let executor = executor
             .build_explicit()
             .expect("executor should build from split backing");
         let task = executor
-            .spawn(async {
+            .spawn_with_poll_stack_bytes(2048, async {
                 async_yield_now().await;
                 41_u8
             })
@@ -1171,7 +1463,7 @@ mod tests {
 
         assert_eq!(
             executor
-                .block_on(task)
+                .block_on_with_poll_stack_bytes(2048, task)
                 .expect("runtime should drive async task")
                 .expect("async task should complete"),
             41
@@ -1200,17 +1492,19 @@ mod tests {
             .expect("combined runtime should build from exact-aligned slab");
         let (fibers, executor) = runtime.into_parts();
 
-        let handle = fibers.spawn(|| 9_u8).expect("fiber should spawn");
+        let handle = fibers
+            .spawn_with_stack::<4096, _, _>(|| 9_u8)
+            .expect("fiber should spawn");
         assert_eq!(handle.join().expect("fiber join should complete"), 9);
         let executor = executor
             .build_explicit()
             .expect("executor should build from exact-aligned split backing");
         let task = executor
-            .spawn(async { 43_u8 })
+            .spawn_with_poll_stack_bytes(2048, async { 43_u8 })
             .expect("async task should spawn");
         assert_eq!(
             executor
-                .block_on(task)
+                .block_on_with_poll_stack_bytes(2048, task)
                 .expect("runtime should drive task")
                 .expect("task should complete"),
             43

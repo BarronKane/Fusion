@@ -85,7 +85,12 @@ use crate::pal::hosted::windows as platform;
 
 /// Public execution-context module re-exported from the selected platform backend.
 pub mod execution_context {
-    pub use super::platform::context::{PlatformContext, PlatformSavedContext, system_context};
+    pub use super::platform::context::{
+        PlatformContext,
+        PlatformSavedContext,
+        system_context,
+        system_context_support,
+    };
     pub use crate::contract::pal::runtime::context::*;
 }
 /// Public atomic substrate module re-exported from the selected platform backend.

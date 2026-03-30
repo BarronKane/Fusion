@@ -1405,8 +1405,26 @@ impl SymbolResolutionContext<'_> {
         let frame_stack = self
             .resolve_symbol_frame_stack(symbol, caller)
             .ok_or_else(|| format!("missing stack-size entry for symbol `{symbol}`"))?;
-        if visiting.iter().any(|entry| entry == symbol) {
-            return Ok(0);
+        if let Some(cycle_start) = visiting.iter().position(|entry| entry == symbol) {
+            if let Some((contract_symbol, contract_stack_bytes)) =
+                resolve_unknown_symbol_contract(symbol, self.symbol_index, self.contracts)
+            {
+                let stack_bytes = frame_stack.max(contract_stack_bytes);
+                self.unknown_symbol_report.observe(
+                    symbol,
+                    self.symbol_index,
+                    Some(contract_symbol.as_str()),
+                    Some(stack_bytes),
+                    caller,
+                    Some(self.root_type_name),
+                );
+                self.aggregated_stack_sizes
+                    .insert(symbol.to_owned(), stack_bytes);
+                return Ok(stack_bytes);
+            }
+            let mut cycle = visiting[cycle_start..].to_vec();
+            cycle.push(symbol.to_owned());
+            return Err(format!("call-graph cycle detected: {}", cycle.join(" -> ")));
         }
         visiting.push(symbol.to_owned());
 
@@ -2069,6 +2087,53 @@ mod tests {
         .expect_err("cycles should fail");
 
         assert!(error.contains("call-graph cycle detected: root -> mid -> root"));
+    }
+
+    #[test]
+    fn uses_contracts_to_break_recursive_cycles() {
+        let stack_sizes = parse_stack_sizes(
+            "_RNvCsdX_panic = 64\n\
+             mid = 32\n",
+        )
+        .expect("stack sizes should parse");
+        let call_graph = parse_call_graph(
+            "_RNvCsdX_panic = mid\n\
+             mid = _RNvCsdX_panic\n",
+        )
+        .expect("call graph should parse");
+        let index = parse_llvm_nm_symbol_index(
+            "_RNvCsdX_panic\nmid\n",
+            "core::panicking::panic_fmt::h1234567890abcdef\ntest::mid::h1234567890abcdef\n",
+        )
+        .expect("llvm-nm output should parse");
+        let contracts = load_contracts_from_str("core::panicking::panic_* = 512\n")
+            .expect("contracts should parse");
+        let mut report = UnknownSymbolReport::default();
+        let mut aggregated = BTreeMap::new();
+
+        let resolved = resolve_stack_for_test(
+            "_RNvCsdX_panic",
+            "test::RootTask",
+            &stack_sizes,
+            &call_graph,
+            Some(&index),
+            &contracts,
+            &mut report,
+            &mut aggregated,
+        )
+        .expect("contracted cycle should resolve");
+
+        assert_eq!(resolved, 64 + (32 + 512));
+        assert_eq!(aggregated.get("_RNvCsdX_panic"), Some(&resolved));
+        let observation = report
+            .observations
+            .get("_RNvCsdX_panic")
+            .expect("cycle break should record contracted symbol");
+        assert_eq!(
+            observation.matched_contract_symbol.as_deref(),
+            Some("core::panicking::panic_*")
+        );
+        assert_eq!(observation.contract_stack_bytes, Some(512));
     }
 
     #[test]

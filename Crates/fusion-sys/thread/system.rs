@@ -8,6 +8,7 @@ use fusion_pal::sys::mem::{
     MemCaps,
     MemCatalog,
     MemCatalogCaps,
+    MemResourceAttrs,
     system_mem,
 };
 use fusion_pal::sys::thread::{PlatformThread, system_thread as pal_system_thread};
@@ -28,6 +29,24 @@ use super::{
     ThreadSupport,
     ThreadTermination,
 };
+use crate::alloc::{
+    AllocError,
+    AllocErrorKind,
+    AllocPolicy,
+    Allocator,
+    AllocatorDomainId,
+    ExtentLease,
+    MemoryPoolExtentRequest,
+};
+use crate::mem::resource::{
+    BoundMemoryResource,
+    BoundResourceSpec,
+    MemoryResourceHandle,
+    ResourceError,
+    ResourceInfo,
+    ResourceState,
+};
+use crate::sync::{OnceInitError, OnceLock};
 use crate::thread::handle::ThreadHandle;
 
 /// Preferred runtime-backing realization reported by PAL/sys truth.
@@ -53,6 +72,193 @@ pub struct RuntimeConstructionSupport {
     /// Preferred backing realization for truthful runtime bootstrap on this platform.
     pub preferred_backing: RuntimeBackingPreference,
 }
+
+/// Error kind for explicit runtime-backing acquisition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeBackingErrorKind {
+    /// Explicit runtime backing is unsupported on the selected platform.
+    Unsupported,
+    /// The request or selected platform resource was invalid.
+    Invalid,
+    /// The platform had no remaining runtime backing capacity.
+    ResourceExhausted,
+    /// The selected runtime-backing path hit a synchronization/state conflict.
+    StateConflict,
+}
+
+/// Error returned when the system runtime-backing path cannot be realized honestly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RuntimeBackingError {
+    kind: RuntimeBackingErrorKind,
+}
+
+impl RuntimeBackingError {
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self {
+            kind: RuntimeBackingErrorKind::Unsupported,
+        }
+    }
+
+    #[must_use]
+    pub const fn invalid() -> Self {
+        Self {
+            kind: RuntimeBackingErrorKind::Invalid,
+        }
+    }
+
+    #[must_use]
+    pub const fn resource_exhausted() -> Self {
+        Self {
+            kind: RuntimeBackingErrorKind::ResourceExhausted,
+        }
+    }
+
+    #[must_use]
+    pub const fn state_conflict() -> Self {
+        Self {
+            kind: RuntimeBackingErrorKind::StateConflict,
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> RuntimeBackingErrorKind {
+        self.kind
+    }
+}
+
+impl From<ResourceError> for RuntimeBackingError {
+    fn from(value: ResourceError) -> Self {
+        match value.kind {
+            crate::mem::resource::ResourceErrorKind::InvalidRequest
+            | crate::mem::resource::ResourceErrorKind::InvalidRange => Self::invalid(),
+            crate::mem::resource::ResourceErrorKind::OutOfMemory => Self::resource_exhausted(),
+            crate::mem::resource::ResourceErrorKind::UnsupportedRequest
+            | crate::mem::resource::ResourceErrorKind::UnsupportedOperation
+            | crate::mem::resource::ResourceErrorKind::ContractViolation => Self::unsupported(),
+            crate::mem::resource::ResourceErrorKind::Platform(_)
+            | crate::mem::resource::ResourceErrorKind::SynchronizationFailure(_) => {
+                Self::state_conflict()
+            }
+        }
+    }
+}
+
+impl From<AllocError> for RuntimeBackingError {
+    fn from(value: AllocError) -> Self {
+        match value.kind {
+            AllocErrorKind::InvalidRequest | AllocErrorKind::InvalidDomain => Self::invalid(),
+            AllocErrorKind::Unsupported | AllocErrorKind::PolicyDenied => Self::unsupported(),
+            AllocErrorKind::Busy | AllocErrorKind::SynchronizationFailure(_) => {
+                Self::state_conflict()
+            }
+            AllocErrorKind::MetadataExhausted
+            | AllocErrorKind::CapacityExhausted
+            | AllocErrorKind::OutOfMemory
+            | AllocErrorKind::ResourceFailure(_)
+            | AllocErrorKind::PoolFailure(_) => Self::resource_exhausted(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RuntimeBackingAllocator {
+    allocator: Allocator<1, 1>,
+    domain: AllocatorDomainId,
+    resource_info: ResourceInfo,
+    resource_state: ResourceState,
+}
+
+impl RuntimeBackingAllocator {
+    fn initialize() -> Result<Self, RuntimeBackingError> {
+        let mem = system_mem();
+        if !mem
+            .catalog_support()
+            .caps
+            .contains(MemCatalogCaps::RESOURCE_INVENTORY)
+        {
+            return Err(RuntimeBackingError::unsupported());
+        }
+
+        let mut selected = None;
+        for index in 0..mem.resource_count() {
+            let Some(resource) = mem.resource(index) else {
+                continue;
+            };
+            if resource.cpu_range.is_none()
+                || resource.usable_now_len == 0
+                || !resource
+                    .envelope
+                    .attrs
+                    .contains(MemResourceAttrs::ALLOCATABLE)
+            {
+                continue;
+            }
+            if selected.as_ref().is_none_or(
+                |current: &(usize, fusion_pal::sys::mem::MemCatalogResource)| {
+                    resource.usable_now_len > current.1.usable_now_len
+                },
+            ) {
+                selected = Some((index, resource));
+            }
+        }
+
+        let (_, resource) = selected.ok_or_else(RuntimeBackingError::unsupported)?;
+        let bound = BoundMemoryResource::from_catalog_resource(resource)?;
+        let resolved = bound.resolved();
+        let allocator = Allocator::<1, 1>::from_resource_with_policy(
+            MemoryResourceHandle::from(bound),
+            AllocPolicy::critical_safe(),
+        )
+        .map_err(RuntimeBackingError::from)?;
+        let domain = allocator
+            .default_domain()
+            .ok_or_else(RuntimeBackingError::invalid)?;
+        Ok(Self {
+            allocator,
+            domain,
+            resource_info: resolved.info,
+            resource_state: resolved.initial_state,
+        })
+    }
+
+    fn allocate_slab(
+        &self,
+        bytes: usize,
+        align: usize,
+    ) -> Result<OwnedRuntimeSlab, RuntimeBackingError> {
+        let lease = self
+            .allocator
+            .extent(self.domain, MemoryPoolExtentRequest { len: bytes, align })
+            .map_err(RuntimeBackingError::from)?;
+        let spec = BoundResourceSpec {
+            range: lease.region(),
+            domain: self.resource_info.domain,
+            backing: crate::mem::resource::ResourceBackingKind::Partition,
+            attrs: self.resource_info.attrs,
+            geometry: self.resource_info.geometry,
+            layout: self.resource_info.layout,
+            contract: self.resource_info.contract,
+            support: self.resource_info.support,
+            additional_hazards: self.resource_info.hazards,
+            initial_state: self.resource_state,
+        };
+        let handle = MemoryResourceHandle::from(
+            BoundMemoryResource::new(spec).map_err(RuntimeBackingError::from)?,
+        );
+        Ok(OwnedRuntimeSlab { handle, lease })
+    }
+}
+
+/// One exact owned runtime slab leased from the system-selected explicit-backing domain.
+pub struct OwnedRuntimeSlab {
+    /// Partitionable runtime-backing view for higher-level runtime construction.
+    pub handle: MemoryResourceHandle,
+    /// Lease that keeps the backing region alive until dropped.
+    pub lease: ExtentLease,
+}
+
+static CURRENT_RUNTIME_ALLOCATOR: OnceLock<RuntimeBackingAllocator> = OnceLock::new();
 
 /// Returns the coarse runtime-construction truth for the active platform.
 #[must_use]
@@ -80,6 +286,41 @@ pub fn system_runtime_construction_support() -> RuntimeConstructionSupport {
         can_inventory_owned_regions,
         preferred_backing,
     }
+}
+
+/// Returns whether the active platform should prefer explicit bound regions for runtime backing.
+#[must_use]
+pub fn uses_explicit_bound_runtime_backing() -> bool {
+    let support = system_runtime_construction_support();
+    !support.can_acquire_runtime_backing
+        && support.can_bind_explicit_backing
+        && matches!(
+            support.preferred_backing,
+            RuntimeBackingPreference::ExplicitBound | RuntimeBackingPreference::Mixed
+        )
+}
+
+/// Attempts to lease one exact owned runtime slab from the system-selected explicit-backing lane.
+///
+/// Returns `Ok(None)` when the current platform should not use the explicit-bound runtime path.
+///
+/// # Errors
+///
+/// Returns any honest catalog, allocator, or synchronization failure while realizing the slab.
+pub fn allocate_owned_runtime_slab(
+    bytes: usize,
+    align: usize,
+) -> Result<Option<OwnedRuntimeSlab>, RuntimeBackingError> {
+    if !uses_explicit_bound_runtime_backing() {
+        return Ok(None);
+    }
+    let allocator = CURRENT_RUNTIME_ALLOCATOR
+        .get_or_try_init(RuntimeBackingAllocator::initialize)
+        .map_err(|error| match error {
+            OnceInitError::Sync(_) => RuntimeBackingError::state_conflict(),
+            OnceInitError::Init(error) => error,
+        })?;
+    allocator.allocate_slab(bytes, align).map(Some)
 }
 
 /// fusion-sys thread provider wrapper around the selected fusion-pal backend.

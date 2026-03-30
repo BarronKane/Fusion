@@ -9,6 +9,7 @@ use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use core::time::Duration;
 
 use cortex_m_rt::{ExceptionFrame, entry, exception};
+use fusion_example_rp2350_on_device::runtime::{drive_once, spawn_with_stack};
 use fusion_example_rp2350_on_device::pcu::{
     PcuPioOnDeviceEvent,
     PcuPioOnDeviceFailure,
@@ -24,11 +25,6 @@ use fusion_std::gpio::{Gpio, GpioDriveStrength, GpioPin};
 use fusion_std::pcu::PCU;
 use fusion_std::thread::yield_now;
 use fusion_sys::thread::system_monotonic_time;
-
-mod backend {
-    include!(concat!(env!("OUT_DIR"), "/rp2350_backing.rs"));
-}
-use backend::{drive_once, spawn};
 
 const DISPLAY_DATA_PIN: u8 = 12;
 const DISPLAY_ENABLE_PIN: u8 = 13;
@@ -98,33 +94,43 @@ fn refresh_cycles(duration: Duration) -> usize {
 }
 
 fn blocking_display_pause(display: &mut PicoDisplay, duration: Duration) {
-    for _ in 0..refresh_cycles(duration) {
+    let mut remaining = refresh_cycles(duration);
+    while remaining != 0 {
         display.refresh_next().expect("display scan should refresh");
         system_monotonic_time()
             .sleep_for(DISPLAY_REFRESH_PERIOD)
             .expect("display pause should complete");
+        remaining -= 1;
     }
 }
 
 fn panic_display_pause(display: &mut PicoDisplay, duration: Duration) {
-    for _ in 0..refresh_cycles(duration) {
+    let mut remaining = refresh_cycles(duration);
+    while remaining != 0 {
         let _ = display.refresh_next();
         if system_monotonic_time()
             .sleep_for(DISPLAY_REFRESH_PERIOD)
             .is_ok()
         {
+            remaining -= 1;
             continue;
         }
-        for _ in 0..50_000 {
+        let mut spins = 50_000usize;
+        while spins != 0 {
             core::hint::spin_loop();
+            spins -= 1;
         }
+        remaining -= 1;
     }
 }
 
 fn startup_sequence(display: &mut PicoDisplay) {
-    for value in [0x0001, 0x0002, 0x0003, 0x0000] {
-        display.set_hex(value);
+    const STARTUP_CODES: [u16; 4] = [0x0001, 0x0002, 0x0003, 0x0000];
+    let mut index = 0usize;
+    while index < STARTUP_CODES.len() {
+        display.set_hex(STARTUP_CODES[index]);
         blocking_display_pause(display, STARTUP_PHASE_PERIOD);
+        index += 1;
     }
 }
 
@@ -160,13 +166,27 @@ fn startup_pcu_self_test(display: &mut PicoDisplay) {
 }
 
 fn quiesce_nonessential_irqs() {
-    for &irqn in QUIESCE_IRQS {
+    let mut index = 0usize;
+    while index < QUIESCE_IRQS.len() {
+        let irqn = QUIESCE_IRQS[index];
         let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_disable(irqn);
         let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_clear_pending(irqn);
         if fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge_supported(irqn) {
             let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge(irqn);
         }
+        index += 1;
     }
+}
+
+fn is_quiesce_irq(irqn: u16) -> bool {
+    let mut index = 0usize;
+    while index < QUIESCE_IRQS.len() {
+        if QUIESCE_IRQS[index] == irqn {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 fn display_exception_loop(code: u16) -> ! {
@@ -363,9 +383,10 @@ fn main() -> ! {
     publish_counter_display(0, 0);
     publish_counter_display(2, 0);
 
-    let _left = spawn(move || run_counter_fiber(0, 0, LEFT_FIZZBUZZ_PERIOD))
+    let _left = spawn_with_stack::<4096, _, _>(move || run_counter_fiber(0, 0, LEFT_FIZZBUZZ_PERIOD))
         .expect("left counter fiber should spawn");
-    let _right = spawn(move || run_counter_fiber(1, 2, RIGHT_FIZZBUZZ_PERIOD))
+    let _right =
+        spawn_with_stack::<4096, _, _>(move || run_counter_fiber(1, 2, RIGHT_FIZZBUZZ_PERIOD))
         .expect("right counter fiber should spawn");
 
     loop {
@@ -399,7 +420,7 @@ unsafe fn DefaultHandler(irqn: i16) {
     if fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge_supported(irqn)
         && fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge(irqn).is_ok()
     {
-        if QUIESCE_IRQS.contains(&irqn) {
+        if is_quiesce_irq(irqn) {
             let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_disable(irqn);
             let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_clear_pending(irqn);
         }

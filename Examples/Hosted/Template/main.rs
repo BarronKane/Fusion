@@ -10,6 +10,8 @@ use fusion_std::thread::{
     ThreadPoolConfig,
 };
 
+const TEMPLATE_ASYNC_POLL_STACK_BYTES: usize = 2048;
+
 fn main() {
     // Sync primitives.
     let mutex = Mutex::new(42u32);
@@ -54,7 +56,8 @@ fn main() {
         mode: ExecutorMode::CurrentThread,
         ..ExecutorConfig::new()
     });
-    let handle = executor.spawn(async { 5u32 });
+    let handle =
+        executor.spawn_with_poll_stack_bytes(TEMPLATE_ASYNC_POLL_STACK_BYTES, async { 5u32 });
     if let Ok(handle) = handle {
         let _ = core::hint::black_box(handle.join());
     }
@@ -67,7 +70,8 @@ fn main() {
         });
         let executor = executor.on_pool(pool);
         if let Ok(ref executor) = executor {
-            let handle = executor.spawn(async { 10u32 });
+            let handle = executor
+                .spawn_with_poll_stack_bytes(TEMPLATE_ASYNC_POLL_STACK_BYTES, async { 10u32 });
             if let Ok(handle) = handle {
                 let _ = core::hint::black_box(handle.join());
             }
@@ -82,7 +86,8 @@ fn main() {
         });
         let executor = executor.on_green(green);
         if let Ok(ref executor) = executor {
-            let handle = executor.spawn(async { 15u32 });
+            let handle = executor
+                .spawn_with_poll_stack_bytes(TEMPLATE_ASYNC_POLL_STACK_BYTES, async { 15u32 });
             if let Ok(handle) = handle {
                 let _ = core::hint::black_box(handle.join());
             }
@@ -95,9 +100,18 @@ fn main() {
         mode: ExecutorMode::CurrentThread,
         ..ExecutorConfig::new()
     });
-    let _ = join_set.spawn(&executor, async { 1u32 });
-    let _ = join_set.spawn(&executor, async { 2u32 });
-    let _ = join_set.spawn(&executor, async { 3u32 });
+    let _ =
+        join_set.spawn_with_poll_stack_bytes(&executor, TEMPLATE_ASYNC_POLL_STACK_BYTES, async {
+            1u32
+        });
+    let _ =
+        join_set.spawn_with_poll_stack_bytes(&executor, TEMPLATE_ASYNC_POLL_STACK_BYTES, async {
+            2u32
+        });
+    let _ =
+        join_set.spawn_with_poll_stack_bytes(&executor, TEMPLATE_ASYNC_POLL_STACK_BYTES, async {
+            3u32
+        });
     while let Ok(val) = join_set.join_next() {
         core::hint::black_box(val);
     }

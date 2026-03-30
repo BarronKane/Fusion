@@ -44,6 +44,9 @@ fn run() -> Result<(), String> {
     let roots_path = materialize_roots(&workspace_root, &target_dir, &config, &artifact)?;
     let async_poll_stack_roots_path =
         materialize_async_poll_stack_roots(&target_dir, &config, &artifact)?;
+    if async_poll_stack_roots_path.is_none() {
+        write_empty_async_poll_stack_sidecars(&config)?;
+    }
     run_analyzer(
         &workspace_root,
         &config,
@@ -52,6 +55,26 @@ fn run() -> Result<(), String> {
         &artifact,
         &auxiliary_artifacts,
     )?;
+    Ok(())
+}
+
+fn write_empty_async_poll_stack_sidecars(config: &PipelineConfig) -> Result<(), String> {
+    fs::write(&config.async_poll_stack_output_path, "").map_err(|error| {
+        format!(
+            "failed to write empty async poll-stack metadata {}: {error}",
+            config.async_poll_stack_output_path.display()
+        )
+    })?;
+    fs::write(
+        &config.async_poll_stack_rust_path,
+        "#[allow(dead_code)]\nconst GENERATED_ASYNC_POLL_STACK_TASKS: &[GeneratedAsyncPollStackMetadataEntry] = &[];\n",
+    )
+    .map_err(|error| {
+        format!(
+            "failed to write empty async poll-stack Rust sidecar {}: {error}",
+            config.async_poll_stack_rust_path.display()
+        )
+    })?;
     Ok(())
 }
 

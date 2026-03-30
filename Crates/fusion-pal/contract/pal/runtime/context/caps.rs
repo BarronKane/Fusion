@@ -77,6 +77,11 @@ pub struct ContextSupport {
     pub caps: ContextCaps,
     /// Overall strength of the context-switch guarantee.
     pub guarantee: ContextGuarantee,
+    /// Backend/runtime bytes that must be added to predicted task stack usage before admission.
+    ///
+    /// This is the structural tax of the machine and low-level context runtime itself, not an
+    /// application-policy floor for missing task metadata.
+    pub structural_stack_overhead_bytes: usize,
     /// Minimum alignment required for the top-of-stack handoff.
     pub min_stack_alignment: usize,
     /// Architectural red-zone size below the active stack pointer in bytes.
@@ -106,6 +111,7 @@ impl ContextSupport {
         Self {
             caps: ContextCaps::empty(),
             guarantee: ContextGuarantee::Unsupported,
+            structural_stack_overhead_bytes: 0,
             min_stack_alignment: 1,
             red_zone_bytes: 0,
             stack_direction: ContextStackDirection::Unknown,

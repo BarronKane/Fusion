@@ -44,6 +44,7 @@ use fusion_std::thread::{
     TieredGreenPool,
     TieredGreenPoolConfig,
     TieredTaskAttributes,
+    admit_generated_fiber_task_stack_bytes,
     generated_explicit_task_contract_attributes,
     wait_for_readiness,
     yield_now as green_yield_now,
@@ -180,14 +181,21 @@ fusion_std::declare_generated_fiber_task_contract!(
     FiberTaskPriority::new(10),
 );
 
-const EXTERNAL_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [
-    match FiberStackClassConfig::new(
-        match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
-            Ok(class) => class,
-            Err(_) => panic!("valid class"),
-        },
-        2,
+const EXTERNAL_GENERATED_ADMITTED_STACK_BYTES: NonZeroUsize =
+    match admit_generated_fiber_task_stack_bytes(
+        NonZeroUsize::new(8 * 1024).expect("non-zero generated stack"),
     ) {
+        Ok(stack_bytes) => stack_bytes,
+        Err(_) => panic!("generated stack bytes should admit"),
+    };
+const EXTERNAL_GENERATED_CLASS: FiberStackClass =
+    match FiberStackClass::from_stack_bytes(EXTERNAL_GENERATED_ADMITTED_STACK_BYTES) {
+        Ok(class) => class,
+        Err(_) => panic!("generated class should be valid"),
+    };
+
+const EXTERNAL_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [
+    match FiberStackClassConfig::new(EXTERNAL_GENERATED_CLASS, 2) {
         Ok(class) => class,
         Err(_) => panic!("valid class config"),
     },
@@ -203,6 +211,9 @@ fusion_std::assert_generated_fiber_task_supported!(
     EXTERNAL_GENERATED_CONFIG,
     ExternalGeneratedContractTask
 );
+
+const TEST_MIN_FIBER_ATTRIBUTES: FiberTaskAttributes =
+    FiberTaskAttributes::new(FiberStackClass::MIN);
 
 #[cfg(feature = "critical-safe")]
 struct FeatureStrictGeneratedContractTask(u32);
@@ -224,14 +235,23 @@ fusion_std::declare_generated_fiber_task_contract!(
 );
 
 #[cfg(feature = "critical-safe")]
-const STRICT_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [
-    match FiberStackClassConfig::new(
-        match FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero class")) {
-            Ok(class) => class,
-            Err(_) => panic!("valid class"),
-        },
-        2,
+const STRICT_GENERATED_ADMITTED_STACK_BYTES: NonZeroUsize =
+    match admit_generated_fiber_task_stack_bytes(
+        NonZeroUsize::new(8 * 1024).expect("non-zero strict generated stack"),
     ) {
+        Ok(stack_bytes) => stack_bytes,
+        Err(_) => panic!("generated stack bytes should admit"),
+    };
+#[cfg(feature = "critical-safe")]
+const STRICT_GENERATED_CLASS: FiberStackClass =
+    match FiberStackClass::from_stack_bytes(STRICT_GENERATED_ADMITTED_STACK_BYTES) {
+        Ok(class) => class,
+        Err(_) => panic!("generated class should be valid"),
+    };
+
+#[cfg(feature = "critical-safe")]
+const STRICT_GENERATED_CLASSES: [FiberStackClassConfig; 1] = [
+    match FiberStackClassConfig::new(STRICT_GENERATED_CLASS, 2) {
         Ok(class) => class,
         Err(_) => panic!("valid class config"),
     },
@@ -268,7 +288,7 @@ fn automatic_green_pool_bootstraps_and_runs_work() {
         GreenPool::automatic().expect("automatic green pool should reuse the shared runtime");
 
     let task = automatic_a
-        .spawn(|| 17_u32)
+        .spawn_with_attrs(TEST_MIN_FIBER_ATTRIBUTES, || 17_u32)
         .expect("automatic green pool should accept work");
     assert_eq!(
         task.join()
@@ -277,7 +297,7 @@ fn automatic_green_pool_bootstraps_and_runs_work() {
     );
 
     let second = automatic_b
-        .spawn(|| 23_u32)
+        .spawn_with_attrs(TEST_MIN_FIBER_ATTRIBUTES, || 23_u32)
         .expect("shared automatic green pool should also accept work");
     assert_eq!(
         second
@@ -320,12 +340,7 @@ fn downstream_generated_contract_first_spawn_works_without_runtime_metadata_over
     let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
     let classes = [
         FiberStackClassConfig::new(FiberStackClass::MIN, 4).expect("valid class config"),
-        FiberStackClassConfig::new(
-            FiberStackClass::new(NonZeroUsize::new(8 * 1024).expect("non-zero generated class"))
-                .expect("generated class should be valid"),
-            2,
-        )
-        .expect("valid class config"),
+        FiberStackClassConfig::new(EXTERNAL_GENERATED_CLASS, 2).expect("valid class config"),
     ];
     let green = GreenPool::new(
         &GreenPoolConfig::classed(&classes).expect("classed green config should build"),
@@ -413,7 +428,7 @@ fn executor_green_pool_and_runtime_paths_are_real() {
     let runs = Arc::new(AtomicU32::new(0));
     let runs_for_green = Arc::clone(&runs);
     let green_job = green
-        .spawn(move || {
+        .spawn_with_attrs(TEST_MIN_FIBER_ATTRIBUTES, move || {
             runs_for_green.fetch_add(1, Ordering::AcqRel);
             green_yield_now().expect("green task should yield cooperatively");
             runs_for_green.fetch_add(1, Ordering::AcqRel);
@@ -431,7 +446,7 @@ fn executor_green_pool_and_runtime_paths_are_real() {
     .on_green(&green)
     .expect("executor should bind to the green pool");
     let green_task = green_executor
-        .spawn(async { 13_u8 })
+        .spawn_with_poll_stack_bytes(2048, async { 13_u8 })
         .expect("green-backed executor should spawn work");
     assert_eq!(
         green_task
@@ -467,7 +482,7 @@ fn executor_green_pool_and_runtime_paths_are_real() {
 
     let runtime_task = runtime
         .executor()
-        .spawn(async { 17_u8 })
+        .spawn_with_poll_stack_bytes(2048, async { 17_u8 })
         .expect("runtime executor should spawn onto the green pool");
     assert_eq!(
         runtime_task
@@ -511,6 +526,14 @@ fn deterministic_runtime_accepts_priority_class_backed_green_pools() {
             8,
         )
         .expect("valid class config"),
+        FiberStackClassConfig::new(
+            FiberStackClass::new(
+                NonZeroUsize::new(16 * 1024).expect("non-zero async dispatch stack class"),
+            )
+            .expect("async dispatch stack class should be valid"),
+            4,
+        )
+        .expect("valid class config"),
     ];
     let priority_green = GreenPoolConfig::classed(&priority_classes)
         .expect("classed green config should build")
@@ -530,7 +553,7 @@ fn deterministic_runtime_accepts_priority_class_backed_green_pools() {
     .expect("deterministic runtime should accept strict-priority class-backed green pools");
     let priority_task = priority_runtime
         .executor()
-        .spawn(async { 19_u8 })
+        .spawn_with_poll_stack_bytes(2048, async { 19_u8 })
         .expect("priority runtime executor should spawn onto the green pool");
     assert_eq!(
         priority_task
@@ -705,7 +728,7 @@ fn green_pool_supports_guarded_stacks_and_rejects_oversized_jobs() {
     let runs = Arc::new(AtomicU32::new(0));
     let runs_for_job = Arc::clone(&runs);
     let handle = guarded
-        .spawn(move || {
+        .spawn_with_attrs(TEST_MIN_FIBER_ATTRIBUTES, move || {
             runs_for_job.fetch_add(1, Ordering::AcqRel);
         })
         .expect("guarded green pool should spawn a bounded job");
@@ -723,9 +746,17 @@ fn green_pool_supports_guarded_stacks_and_rejects_oversized_jobs() {
     let oversized = [0_u8; 1024];
     assert_eq!(
         guarded
-            .spawn(move || {
-                std::hint::black_box(oversized);
-            })
+            .spawn_with_attrs(
+                FiberTaskAttributes::new(
+                    FiberStackClass::new(
+                        NonZeroUsize::new(2 * 1024 * 1024).expect("non-zero oversized class"),
+                    )
+                    .expect("oversized class should be valid"),
+                ),
+                move || {
+                    std::hint::black_box(oversized);
+                },
+            )
             .expect_err("oversized green jobs should be rejected honestly")
             .kind(),
         fusion_sys::fiber::FiberError::unsupported().kind()
@@ -757,7 +788,7 @@ fn elastic_fiber_pool_builds_and_runs_jobs() {
     .expect("elastic green pool should build");
 
     let handle = fibers
-        .spawn(|| 7_u32)
+        .spawn_with_attrs(TEST_MIN_FIBER_ATTRIBUTES, || 7_u32)
         .expect("elastic green pool should spawn");
     assert_eq!(handle.join().expect("elastic fiber should finish"), 7);
 
@@ -798,7 +829,7 @@ fn elastic_fiber_pool_accepts_manual_huge_page_advice() {
     .expect("huge-page-advised elastic green pool should build");
 
     let handle = fibers
-        .spawn(|| 9_u32)
+        .spawn_with_attrs(TEST_MIN_FIBER_ATTRIBUTES, || 9_u32)
         .expect("huge-page-advised elastic pool should spawn");
     assert_eq!(
         handle
@@ -857,7 +888,7 @@ fn fiber_pool_stack_stats_follow_telemetry_policy() {
     let started_for_job = Arc::clone(&started);
     let gate_for_job = Arc::clone(&gate);
     let handle = enabled
-        .spawn(move || {
+        .spawn_with_attrs(TEST_MIN_FIBER_ATTRIBUTES, move || {
             started_for_job.store(1, Ordering::Release);
             while gate_for_job.load(Ordering::Acquire) == 0 {
                 green_yield_now().expect("fiber should yield cooperatively");
@@ -922,9 +953,9 @@ fn green_pool_supports_typed_child_results_and_cooperative_join() {
         .expect("green pool should clone honestly");
 
     let parent = fibers
-        .spawn(move || {
+        .spawn_with_attrs(TEST_MIN_FIBER_ATTRIBUTES, move || {
             let child = child_pool
-                .spawn(|| 21_u32)
+                .spawn_with_attrs(TEST_MIN_FIBER_ATTRIBUTES, || 21_u32)
                 .expect("child fiber should spawn");
             child
                 .join()
@@ -999,7 +1030,7 @@ fn fibers_wait_on_pipe_readiness_and_resume_cleanly() {
     let pipe = Arc::new(TestPipe::new());
 
     let server = fibers
-        .spawn({
+        .spawn_with_attrs(TEST_MIN_FIBER_ATTRIBUTES, {
             let pipe = Arc::clone(&pipe);
             move || {
                 wait_for_readiness(
@@ -1043,7 +1074,7 @@ fn fibers_reject_readiness_park_while_cooperative_mutex_is_held() {
     let lock = Arc::new(FusionMutex::new(()));
 
     let task = fibers
-        .spawn({
+        .spawn_with_attrs(TEST_MIN_FIBER_ATTRIBUTES, {
             let pipe = Arc::clone(&pipe);
             let lock = Arc::clone(&lock);
             move || -> Result<(), FiberError> {

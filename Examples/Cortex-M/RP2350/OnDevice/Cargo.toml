@@ -12,6 +12,7 @@ path = "lib.rs"
 
 [dependencies]
 fusion-std = { workspace = true, features = ["soc-rp2350"] }
+fusion-sys = { workspace = true, features = ["soc-rp2350"] }
 
 [lints]
 workspace = true
