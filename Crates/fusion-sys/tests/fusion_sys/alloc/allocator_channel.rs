@@ -1,5 +1,8 @@
+use core::pin::pin;
+
 use fusion_sys::alloc::{AllocErrorKind, Allocator, AllocatorControlRequest};
 use fusion_sys::channel::{ChannelReceive, ChannelSend};
+use fusion_sys::fiber::{FiberMetadataMessage, FiberStack, FiberYield};
 use fusion_sys::transport::{TransportAttachmentControl, TransportAttachmentRequest};
 
 #[test]
@@ -164,5 +167,106 @@ fn allocator_channel_service_advertises_domains_and_serves_audits() {
             assert_eq!(reason, AllocErrorKind::InvalidDomain);
         }
         other => panic!("unexpected rejected status: {other:?}"),
+    }
+}
+
+#[test]
+fn allocator_channel_service_can_run_on_managed_fiber() {
+    let allocator = Allocator::<4, 4>::system_default().expect("allocator should build");
+    let default_domain = allocator
+        .default_domain()
+        .expect("default domain should exist");
+    let service: fusion_sys::alloc::AllocatorChannelService<'_, 4, 4, 64, 4, 4, 4> =
+        fusion_sys::alloc::AllocatorChannelService::new(&allocator)
+            .expect("allocator channel service should build");
+    let mut service = pin!(service);
+    let mut stack_words = vec![0_u128; 2048].into_boxed_slice();
+    let stack = FiberStack::from_slice(stack_words.as_mut()).expect("stack should be valid");
+    let mut fiber =
+        fusion_sys::alloc::AllocatorChannelService::spawn_managed::<8, 8>(service.as_mut(), stack)
+            .expect("managed allocator service fiber should build");
+
+    let fiber_consumer = fiber
+        .metadata_channel()
+        .attach_consumer(TransportAttachmentRequest::same_courier())
+        .expect("fiber metadata consumer should attach");
+    let metadata_consumer = fiber
+        .state()
+        .metadata_channel()
+        .attach_consumer(TransportAttachmentRequest::same_courier())
+        .expect("metadata consumer should attach");
+    let control_producer = fiber
+        .state()
+        .control_channel()
+        .attach_producer(TransportAttachmentRequest::same_courier())
+        .expect("control producer should attach");
+    let status_consumer = fiber
+        .state()
+        .status_channel()
+        .attach_consumer(TransportAttachmentRequest::same_courier())
+        .expect("status consumer should attach");
+
+    assert_eq!(
+        fiber
+            .metadata_channel()
+            .try_receive(fiber_consumer)
+            .expect("fiber metadata receive should succeed"),
+        Some(FiberMetadataMessage::Created { fiber: fiber.id() })
+    );
+
+    assert!(matches!(
+        fiber.resume().expect("service fiber should yield"),
+        FiberYield::Yielded
+    ));
+
+    assert_eq!(
+        fiber
+            .metadata_channel()
+            .try_receive(fiber_consumer)
+            .expect("fiber metadata receive should succeed"),
+        Some(FiberMetadataMessage::Started { fiber: fiber.id() })
+    );
+
+    let metadata = fiber
+        .state()
+        .metadata_channel()
+        .try_receive(metadata_consumer)
+        .expect("metadata receive should succeed")
+        .expect("metadata message should exist");
+    match metadata {
+        fusion_sys::alloc::AllocatorDomainMetadataMessage::Advertised(info) => {
+            assert_eq!(info.id, default_domain);
+        }
+        other => panic!("unexpected metadata message: {other:?}"),
+    }
+
+    fiber
+        .state()
+        .control_channel()
+        .try_send(
+            control_producer,
+            AllocatorControlRequest::ReadDomainAudit {
+                domain: default_domain,
+            },
+        )
+        .expect("audit request should send");
+
+    assert!(matches!(
+        fiber.resume().expect("service fiber should yield"),
+        FiberYield::Yielded
+    ));
+
+    let status = fiber
+        .state()
+        .status_channel()
+        .try_receive(status_consumer)
+        .expect("status receive should succeed")
+        .expect("status should exist");
+    match status {
+        fusion_sys::alloc::AllocatorControlStatusMessage::DomainAudit { domain, audit } => {
+            assert_eq!(domain, default_domain);
+            assert_eq!(audit.info.id, default_domain);
+        }
+        other => panic!("unexpected audit status: {other:?}"),
     }
 }

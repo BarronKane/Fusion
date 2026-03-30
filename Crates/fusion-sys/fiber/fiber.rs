@@ -6,8 +6,11 @@
 
 use core::cell::UnsafeCell;
 use core::fmt;
+use core::marker::PhantomData;
 use core::num::NonZeroUsize;
+use core::pin::Pin;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub use fusion_pal::sys::execution_context::{
     ContextAuthoritySet,
@@ -29,8 +32,26 @@ pub use fusion_pal::sys::execution_context::{
     system_context,
 };
 
+use crate::channel::{ChannelError, ChannelSend, LocalChannel};
+use crate::protocol::{
+    Protocol,
+    ProtocolBootstrapKind,
+    ProtocolCaps,
+    ProtocolDebugView,
+    ProtocolDescriptor,
+    ProtocolId,
+    ProtocolImplementationKind,
+    ProtocolTransportRequirements,
+    ProtocolVersion,
+};
 use crate::sync::{OnceLock, SyncError, SyncErrorKind, ThinMutex};
 use crate::thread::{ThreadErrorKind, ThreadId, ThreadSystem};
+use crate::transport::{
+    TransportAttachmentControl,
+    TransportAttachmentRequest,
+    TransportError,
+    TransportErrorKind,
+};
 
 #[cfg(feature = "sys-cortex-m")]
 const MAX_ACTIVE_FIBERS: usize = 8;
@@ -177,6 +198,95 @@ impl FiberReturn {
 /// Fiber entry signature used by the low-level stackful runtime.
 pub type FiberEntry = unsafe fn(*mut ()) -> FiberReturn;
 
+/// Safe typed entry contract for one pinned subsystem fiber state object.
+pub trait FiberRunnable {
+    /// Runs the fiber body on one pinned state object until it yields or completes.
+    fn run(self: Pin<&mut Self>) -> FiberReturn;
+}
+
+/// Stable identifier for one managed Fusion fiber.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FiberId(usize);
+
+impl FiberId {
+    #[must_use]
+    pub const fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// Coarse lifecycle metadata surfaced automatically by one managed fiber.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FiberMetadataMessage {
+    /// One managed fiber was created and now owns one metadata channel.
+    Created { fiber: FiberId },
+    /// One managed fiber started executing for the first time.
+    Started { fiber: FiberId },
+    /// One managed fiber completed with one terminal return value.
+    Completed { fiber: FiberId, result: FiberReturn },
+    /// One managed fiber failed to resume or otherwise faulted at the substrate boundary.
+    Faulted {
+        fiber: FiberId,
+        reason: FiberErrorKind,
+    },
+    /// One managed fiber was dropped before terminal completion.
+    Abandoned {
+        fiber: FiberId,
+        lifecycle: FiberState,
+    },
+}
+
+/// Managed-fiber metadata protocol carried over the automatic fiber metadata channel.
+pub struct FiberMetadataProtocol;
+
+impl Protocol for FiberMetadataProtocol {
+    type Message = FiberMetadataMessage;
+
+    const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
+        id: ProtocolId(0x4655_5349_4f4e_5f46_4942_4552_4d44_0001),
+        version: ProtocolVersion::new(1, 0, 0),
+        caps: ProtocolCaps::DEBUG_VIEW,
+        bootstrap: ProtocolBootstrapKind::Immediate,
+        debug_view: ProtocolDebugView::Structured,
+        transport: ProtocolTransportRequirements::message_local(),
+        implementation: ProtocolImplementationKind::Native,
+    };
+}
+
+/// Automatic metadata channel carried by one managed fiber.
+pub type FiberMetadataChannel<const CAPACITY: usize, const MAX_CONSUMERS: usize = 8> =
+    LocalChannel<FiberMetadataProtocol, CAPACITY, MAX_CONSUMERS>;
+
+/// One typed stackful fiber over caller-owned pinned state.
+///
+/// This quarantines the raw `*mut ()` trampoline inside `fusion-sys::fiber` so subsystem code
+/// does not have to reimplement it every time it wants one managed fiber.
+#[derive(Debug)]
+pub struct PinnedFiber<'state, T: FiberRunnable> {
+    state: NonNull<T>,
+    fiber: Fiber,
+    _marker: PhantomData<Pin<&'state mut T>>,
+}
+
+/// One subsystem-facing managed fiber with an automatic metadata channel.
+pub struct ManagedFiber<
+    'state,
+    T: FiberRunnable,
+    const META_CAPACITY: usize = 16,
+    const MAX_CONSUMERS: usize = 8,
+> {
+    id: FiberId,
+    started: bool,
+    fiber: Option<PinnedFiber<'state, T>>,
+    metadata: FiberMetadataChannel<META_CAPACITY, MAX_CONSUMERS>,
+    metadata_producer: usize,
+}
+
 /// Yield outcome observed when resuming a fiber.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FiberYield {
@@ -213,6 +323,17 @@ impl FiberStack {
             base,
             len: NonZeroUsize::new(len).ok_or_else(FiberError::invalid)?,
         })
+    }
+
+    /// Creates one concrete stack reservation from one live typed slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns `invalid` when the supplied slice is empty.
+    pub fn from_slice<T>(storage: &mut [T]) -> Result<Self, FiberError> {
+        let base =
+            NonNull::new(storage.as_mut_ptr().cast::<u8>()).ok_or_else(FiberError::invalid)?;
+        Self::new(base, core::mem::size_of_val(storage))
     }
 }
 
@@ -385,6 +506,194 @@ impl Default for FiberSystem {
     }
 }
 
+impl<'state, T: FiberRunnable> PinnedFiber<'state, T> {
+    /// Creates one typed stackful fiber over caller-owned pinned state.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest low-level fiber construction failure.
+    pub fn new(state: Pin<&'state mut T>, stack: FiberStack) -> Result<Self, FiberError> {
+        let state_ptr = NonNull::from(state.as_ref().get_ref());
+        let fiber = Fiber::new(stack, pinned_fiber_entry::<T>, state_ptr.as_ptr().cast())?;
+        Ok(Self {
+            state: state_ptr,
+            fiber,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Returns one shared view of the pinned fiber state.
+    #[must_use]
+    pub fn state(&self) -> &T {
+        // SAFETY: the state pointer comes from one live pinned reference held for `'state`.
+        unsafe { self.state.as_ref() }
+    }
+
+    /// Returns one pinned mutable view of the fiber state.
+    #[must_use]
+    pub fn state_mut(&mut self) -> Pin<&mut T> {
+        // SAFETY: the state remains pinned for `'state` and `&mut self` guarantees exclusivity.
+        unsafe { Pin::new_unchecked(self.state.as_mut()) }
+    }
+
+    /// Returns the lifecycle state of the underlying low-level fiber.
+    #[must_use]
+    pub fn fiber_state(&self) -> FiberState {
+        self.fiber.state()
+    }
+
+    /// Resumes the underlying fiber once.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest low-level fiber resumption failure.
+    pub fn resume(&mut self) -> Result<FiberYield, FiberError> {
+        self.fiber.resume()
+    }
+
+    /// Returns the owned stack reservation once the fiber has completed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state-conflict error when the fiber has not completed yet.
+    pub fn into_stack(self) -> Result<FiberStack, FiberError> {
+        self.fiber.into_stack()
+    }
+}
+
+impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: usize>
+    ManagedFiber<'state, T, META_CAPACITY, MAX_CONSUMERS>
+{
+    /// Creates one managed fiber with an automatic metadata channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest fiber or metadata-channel construction failure.
+    pub fn new(state: Pin<&'state mut T>, stack: FiberStack) -> Result<Self, FiberError> {
+        let fiber = PinnedFiber::new(state, stack)?;
+        let metadata = FiberMetadataChannel::<META_CAPACITY, MAX_CONSUMERS>::new()
+            .map_err(fiber_error_from_channel)?;
+        let metadata_producer = metadata
+            .attach_producer(TransportAttachmentRequest::same_courier())
+            .map_err(fiber_error_from_transport)?;
+        let managed = Self {
+            id: next_fiber_id(),
+            started: false,
+            fiber: Some(fiber),
+            metadata,
+            metadata_producer,
+        };
+        managed.publish_metadata(FiberMetadataMessage::Created { fiber: managed.id });
+        Ok(managed)
+    }
+
+    /// Returns the stable managed-fiber identifier.
+    #[must_use]
+    pub const fn id(&self) -> FiberId {
+        self.id
+    }
+
+    /// Returns the automatic metadata channel owned by this fiber.
+    #[must_use]
+    pub const fn metadata_channel(&self) -> &FiberMetadataChannel<META_CAPACITY, MAX_CONSUMERS> {
+        &self.metadata
+    }
+
+    /// Returns one shared view of the pinned fiber state.
+    #[must_use]
+    pub fn state(&self) -> &T {
+        self.fiber
+            .as_ref()
+            .expect("managed fiber state should remain present until stack extraction")
+            .state()
+    }
+
+    /// Returns one pinned mutable view of the managed fiber state.
+    #[must_use]
+    pub fn state_mut(&mut self) -> Pin<&mut T> {
+        self.fiber
+            .as_mut()
+            .expect("managed fiber state should remain present until stack extraction")
+            .state_mut()
+    }
+
+    /// Returns the lifecycle state of the underlying low-level fiber.
+    #[must_use]
+    pub fn fiber_state(&self) -> FiberState {
+        self.fiber
+            .as_ref()
+            .expect("managed fiber state should remain present until stack extraction")
+            .fiber_state()
+    }
+
+    /// Resumes the managed fiber once and emits coarse lifecycle metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest low-level fiber resumption failure.
+    pub fn resume(&mut self) -> Result<FiberYield, FiberError> {
+        if !self.started {
+            self.publish_metadata(FiberMetadataMessage::Started { fiber: self.id });
+            self.started = true;
+        }
+
+        match self
+            .fiber
+            .as_mut()
+            .expect("managed fiber state should remain present until stack extraction")
+            .resume()
+        {
+            Ok(FiberYield::Yielded) => Ok(FiberYield::Yielded),
+            Ok(FiberYield::Completed(result)) => {
+                self.publish_metadata(FiberMetadataMessage::Completed {
+                    fiber: self.id,
+                    result,
+                });
+                Ok(FiberYield::Completed(result))
+            }
+            Err(error) => {
+                self.publish_metadata(FiberMetadataMessage::Faulted {
+                    fiber: self.id,
+                    reason: error.kind(),
+                });
+                Err(error)
+            }
+        }
+    }
+
+    /// Returns the owned stack reservation once the managed fiber has completed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state-conflict error when the fiber has not completed yet.
+    pub fn into_stack(mut self) -> Result<FiberStack, FiberError> {
+        self.fiber
+            .take()
+            .expect("managed fiber should still own one pinned fiber at stack extraction")
+            .into_stack()
+    }
+
+    fn publish_metadata(&self, message: FiberMetadataMessage) {
+        let _ = self.metadata.try_send(self.metadata_producer, message);
+    }
+}
+
+impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: usize> Drop
+    for ManagedFiber<'state, T, META_CAPACITY, MAX_CONSUMERS>
+{
+    fn drop(&mut self) {
+        if let Some(fiber) = self.fiber.as_ref() {
+            let lifecycle = fiber.fiber_state();
+            if lifecycle != FiberState::Completed {
+                self.publish_metadata(FiberMetadataMessage::Abandoned {
+                    fiber: self.id,
+                    lifecycle,
+                });
+            }
+        }
+    }
+}
+
 impl Fiber {
     /// Creates a low-level fiber on the supplied stack.
     ///
@@ -425,6 +734,37 @@ impl Fiber {
             };
         fiber.bootstrap_slot = Some(bootstrap_slot);
         Ok(fiber)
+    }
+
+    /// Creates one typed stackful fiber over caller-owned pinned state.
+    ///
+    /// This is the safe subsystem-facing bootstrap above the raw `FiberEntry(*mut ())` ABI.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest low-level fiber construction failure.
+    pub fn spawn_pinned<'state, T: FiberRunnable>(
+        stack: FiberStack,
+        state: Pin<&'state mut T>,
+    ) -> Result<PinnedFiber<'state, T>, FiberError> {
+        PinnedFiber::new(state, stack)
+    }
+
+    /// Creates one managed typed stackful fiber with an automatic metadata channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest low-level fiber or metadata-channel construction failure.
+    pub fn spawn_managed<
+        'state,
+        T: FiberRunnable,
+        const META_CAPACITY: usize,
+        const MAX_CONSUMERS: usize,
+    >(
+        stack: FiberStack,
+        state: Pin<&'state mut T>,
+    ) -> Result<ManagedFiber<'state, T, META_CAPACITY, MAX_CONSUMERS>, FiberError> {
+        ManagedFiber::new(state, stack)
     }
 
     /// Resumes the fiber on the current carrier thread.
@@ -550,6 +890,16 @@ pub fn current_context() -> Result<*mut (), FiberError> {
         return Err(FiberError::state_conflict());
     }
     Ok(active.arg)
+}
+
+unsafe fn pinned_fiber_entry<T: FiberRunnable>(arg: *mut ()) -> FiberReturn {
+    let state = unsafe { Pin::new_unchecked(&mut *arg.cast::<T>()) };
+    T::run(state)
+}
+
+fn next_fiber_id() -> FiberId {
+    static NEXT_FIBER_ID: AtomicUsize = AtomicUsize::new(1);
+    FiberId::new(NEXT_FIBER_ID.fetch_add(1, Ordering::Relaxed))
 }
 
 unsafe fn fiber_entry_trampoline(context: *mut ()) -> ! {
@@ -722,6 +1072,33 @@ const fn fiber_error_from_thread(error: crate::thread::ThreadError) -> FiberErro
         ThreadErrorKind::Busy | ThreadErrorKind::Timeout | ThreadErrorKind::StateConflict => {
             FiberError::state_conflict()
         }
+    }
+}
+
+const fn fiber_error_from_transport(error: TransportError) -> FiberError {
+    match error.kind() {
+        TransportErrorKind::Unsupported => FiberError::unsupported(),
+        TransportErrorKind::Invalid => FiberError::invalid(),
+        TransportErrorKind::ResourceExhausted => FiberError::resource_exhausted(),
+        TransportErrorKind::Busy
+        | TransportErrorKind::PermissionDenied
+        | TransportErrorKind::StateConflict
+        | TransportErrorKind::NotAttached
+        | TransportErrorKind::Platform(_) => FiberError::state_conflict(),
+    }
+}
+
+const fn fiber_error_from_channel(error: ChannelError) -> FiberError {
+    match error.kind() {
+        crate::channel::ChannelErrorKind::Unsupported => FiberError::unsupported(),
+        crate::channel::ChannelErrorKind::Invalid
+        | crate::channel::ChannelErrorKind::ProtocolMismatch => FiberError::invalid(),
+        crate::channel::ChannelErrorKind::ResourceExhausted => FiberError::resource_exhausted(),
+        crate::channel::ChannelErrorKind::Busy
+        | crate::channel::ChannelErrorKind::PermissionDenied
+        | crate::channel::ChannelErrorKind::StateConflict
+        | crate::channel::ChannelErrorKind::TransportDenied
+        | crate::channel::ChannelErrorKind::Platform(_) => FiberError::state_conflict(),
     }
 }
 

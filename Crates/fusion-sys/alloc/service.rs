@@ -1,8 +1,18 @@
 //! Local allocator-domain audit service speaking through one-way channels.
 
 use core::array;
+use core::pin::Pin;
 
 use crate::channel::{ChannelError, ChannelErrorKind, ChannelReceive, ChannelSend, LocalChannel};
+use crate::fiber::{
+    Fiber,
+    FiberError,
+    FiberReturn,
+    FiberRunnable,
+    FiberStack,
+    ManagedFiber,
+    yield_now,
+};
 use crate::transport::{
     TransportAttachmentControl,
     TransportAttachmentRequest,
@@ -186,6 +196,18 @@ impl<
         &self,
     ) -> &LocalChannel<AllocatorControlStatusProtocol, STATUS_CAPACITY> {
         &self.status_channel
+    }
+
+    /// Spawns this service on one managed fiber with an automatic metadata channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest low-level fiber construction failure.
+    pub fn spawn_managed<'state, const META_CAPACITY: usize, const MAX_CONSUMERS: usize>(
+        state: Pin<&'state mut Self>,
+        stack: FiberStack,
+    ) -> Result<ManagedFiber<'state, Self, META_CAPACITY, MAX_CONSUMERS>, FiberError> {
+        Fiber::spawn_managed(stack, state)
     }
 
     /// Pumps pending metadata and control requests once.
@@ -404,6 +426,38 @@ impl<
                     return Ok(());
                 }
                 Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
+impl<
+    'a,
+    const DOMAINS: usize,
+    const RESOURCES: usize,
+    const EXTENTS: usize,
+    const METADATA_CAPACITY: usize,
+    const CONTROL_CAPACITY: usize,
+    const STATUS_CAPACITY: usize,
+> FiberRunnable
+    for AllocatorChannelService<
+        'a,
+        DOMAINS,
+        RESOURCES,
+        EXTENTS,
+        METADATA_CAPACITY,
+        CONTROL_CAPACITY,
+        STATUS_CAPACITY,
+    >
+{
+    fn run(mut self: Pin<&mut Self>) -> FiberReturn {
+        let service = self.as_mut().get_mut();
+        loop {
+            if service.pump().is_err() {
+                return FiberReturn::new(1);
+            }
+            if yield_now().is_err() {
+                return FiberReturn::new(2);
             }
         }
     }

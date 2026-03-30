@@ -133,10 +133,11 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     /// Returns `InsightError::not_enabled()` when `debug-insights` is disabled, or an honest
     /// insight-channel failure if the internal producer attachment cannot be established.
     pub fn new(capture: InsightCaptureMode) -> Result<Self, InsightError> {
-        let channel = LocalInsightChannel::<InsightTimelineProtocol<Meta>, CAPACITY, MAX_CONSUMERS>::new(
-            InsightChannelClass::Timeline,
-            capture,
-        )?;
+        let channel =
+            LocalInsightChannel::<InsightTimelineProtocol<Meta>, CAPACITY, MAX_CONSUMERS>::new(
+                InsightChannelClass::Timeline,
+                capture,
+            )?;
         let producer = channel
             .attach_producer(TransportAttachmentRequest::same_courier())
             .map_err(|error| InsightError::from(ChannelError::from(error)))?;
@@ -169,7 +170,8 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
                         .unwrap_or(self.channel.observation_epoch());
                     let _ = self.channel.clear_pending_messages();
                     if self.active_span_count.get() == 0 {
-                        self.capture_state.set(InsightTimelineCaptureState::Inactive);
+                        self.capture_state
+                            .set(InsightTimelineCaptureState::Inactive);
                     } else {
                         self.capture_state
                             .set(InsightTimelineCaptureState::Draining { epoch });
@@ -206,7 +208,8 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
                 InsightTimelineCaptureState::Draining { .. }
             )
         {
-            self.capture_state.set(InsightTimelineCaptureState::Inactive);
+            self.capture_state
+                .set(InsightTimelineCaptureState::Inactive);
         }
     }
 
@@ -240,8 +243,11 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
         };
 
         let span = InsightTimelineSpanId(self.next_span_id.get());
-        self.next_span_id.set(self.next_span_id.get().wrapping_add(1));
-        let parent = parent.filter(|token| token.epoch == epoch).map(InsightTimelineSpanToken::id);
+        self.next_span_id
+            .set(self.next_span_id.get().wrapping_add(1));
+        let parent = parent
+            .filter(|token| token.epoch == epoch)
+            .map(InsightTimelineSpanToken::id);
 
         match self.channel.try_send_if_observed(self.producer, || {
             InsightTimelineRecord::SpanOpened {
@@ -328,9 +334,15 @@ mod tests {
         let timeline =
             LocalInsightTimeline::<&'static str, 8>::new(InsightCaptureMode::Lossy).unwrap();
 
-        assert_eq!(timeline.capture_state(), InsightTimelineCaptureState::Inactive);
+        assert_eq!(
+            timeline.capture_state(),
+            InsightTimelineCaptureState::Inactive
+        );
         assert_eq!(timeline.begin_span(None, "cold").unwrap(), None);
-        assert_eq!(timeline.capture_state(), InsightTimelineCaptureState::Inactive);
+        assert_eq!(
+            timeline.capture_state(),
+            InsightTimelineCaptureState::Inactive
+        );
     }
 
     #[cfg(feature = "debug-insights")]
@@ -387,8 +399,14 @@ mod tests {
                 span: root.id(),
             })
         );
-        assert_eq!(timeline.try_receive(consumer).expect("receive should work"), None);
-        assert_eq!(timeline.capture_state(), InsightTimelineCaptureState::Active { epoch: 1 });
+        assert_eq!(
+            timeline.try_receive(consumer).expect("receive should work"),
+            None
+        );
+        assert_eq!(
+            timeline.capture_state(),
+            InsightTimelineCaptureState::Active { epoch: 1 }
+        );
     }
 
     #[cfg(feature = "debug-insights")]
@@ -414,7 +432,10 @@ mod tests {
         assert_eq!(timeline.begin_span(None, "blocked").unwrap(), None);
 
         timeline.end_span(span).expect("end should work");
-        assert_eq!(timeline.capture_state(), InsightTimelineCaptureState::Inactive);
+        assert_eq!(
+            timeline.capture_state(),
+            InsightTimelineCaptureState::Inactive
+        );
     }
 
     #[cfg(feature = "debug-insights")]
@@ -440,7 +461,10 @@ mod tests {
         let second_consumer = timeline
             .attach_consumer(TransportAttachmentRequest::same_courier())
             .expect("second consumer should attach");
-        assert_eq!(timeline.capture_state(), InsightTimelineCaptureState::Active { epoch: 3 });
+        assert_eq!(
+            timeline.capture_state(),
+            InsightTimelineCaptureState::Active { epoch: 3 }
+        );
 
         timeline
             .end_span(stale)
@@ -451,7 +475,9 @@ mod tests {
             .expect("begin should work")
             .expect("fresh span should open");
         assert_eq!(
-            timeline.try_receive(second_consumer).expect("receive should work"),
+            timeline
+                .try_receive(second_consumer)
+                .expect("receive should work"),
             Some(InsightTimelineRecord::SpanOpened {
                 epoch: fresh.epoch(),
                 span: fresh.id(),

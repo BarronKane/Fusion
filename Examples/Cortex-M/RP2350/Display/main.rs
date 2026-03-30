@@ -25,8 +25,10 @@ use fusion_std::pcu::PCU;
 use fusion_std::thread::yield_now;
 use fusion_sys::thread::system_monotonic_time;
 
-mod support;
-use support::main_fibers;
+mod backend {
+    include!(concat!(env!("OUT_DIR"), "/rp2350_backing.rs"));
+}
+use backend::{drive_once, spawn};
 
 const DISPLAY_DATA_PIN: u8 = 12;
 const DISPLAY_ENABLE_PIN: u8 = 13;
@@ -361,13 +363,9 @@ fn main() -> ! {
     publish_counter_display(0, 0);
     publish_counter_display(2, 0);
 
-    let fibers = main_fibers();
-
-    let _left = fibers
-        .spawn(move || run_counter_fiber(0, 0, LEFT_FIZZBUZZ_PERIOD))
+    let _left = spawn(move || run_counter_fiber(0, 0, LEFT_FIZZBUZZ_PERIOD))
         .expect("left counter fiber should spawn");
-    let _right = fibers
-        .spawn(move || run_counter_fiber(1, 2, RIGHT_FIZZBUZZ_PERIOD))
+    let _right = spawn(move || run_counter_fiber(1, 2, RIGHT_FIZZBUZZ_PERIOD))
         .expect("right counter fiber should spawn");
 
     loop {
@@ -377,7 +375,7 @@ fn main() -> ! {
             display_exception_loop(0xE400);
         }
         set_panic_display_code(0x3200);
-        if fibers.drive_once().is_err() {
+        if drive_once().is_err() {
             display_exception_loop(0xE401);
         }
         set_panic_display_code(0x3300);

@@ -514,6 +514,133 @@ impl Drop for AssignedPoolExtent {
     }
 }
 
+#[derive(Debug)]
+struct ExtentLeaseState {
+    payload_offset: usize,
+    len: usize,
+    align: usize,
+}
+
+/// One exact owned pool extent leased from an allocator domain.
+///
+/// This is the public owned exact-backing surface for callers that need stable directly-usable
+/// bytes without routing through slab or arena policy. Dropping the lease returns the extent to
+/// the owning allocator domain.
+pub struct ExtentLease {
+    control: ControlLease<ExtentLeaseState>,
+}
+
+impl ExtentLease {
+    fn payload_offset_for_request(request: MemoryPoolExtentRequest) -> Result<usize, AllocError> {
+        let payload_align = request
+            .align
+            .max(ControlLease::<ExtentLeaseState>::backing_align());
+        let header_bytes = ControlLease::<ExtentLeaseState>::backing_size();
+        let mask = payload_align
+            .checked_sub(1)
+            .ok_or_else(AllocError::invalid_request)?;
+        header_bytes
+            .checked_add(mask)
+            .map(|value| value & !mask)
+            .ok_or_else(AllocError::invalid_request)
+    }
+
+    pub(crate) fn extent_request(
+        request: MemoryPoolExtentRequest,
+    ) -> Result<MemoryPoolExtentRequest, AllocError> {
+        if request.len == 0 || request.align == 0 || !request.align.is_power_of_two() {
+            return Err(AllocError::invalid_request());
+        }
+        let payload_offset = Self::payload_offset_for_request(request)?;
+        let len = payload_offset
+            .checked_add(request.len)
+            .ok_or_else(AllocError::invalid_request)?;
+        Ok(MemoryPoolExtentRequest {
+            len,
+            align: request
+                .align
+                .max(ControlLease::<ExtentLeaseState>::backing_align()),
+        })
+    }
+
+    pub(crate) fn new(
+        extent: AssignedPoolExtent,
+        request: MemoryPoolExtentRequest,
+    ) -> Result<Self, AllocError> {
+        let payload_offset = Self::payload_offset_for_request(request)?;
+        let region = extent.region();
+        let payload_base = region
+            .base
+            .checked_add(payload_offset)
+            .ok_or_else(AllocError::invalid_request)?;
+        if region.len < payload_offset.saturating_add(request.len)
+            || !payload_base.get().is_multiple_of(request.align)
+        {
+            return Err(AllocError::invalid_request());
+        }
+        let control = ControlLease::new(
+            extent,
+            ExtentLeaseState {
+                payload_offset,
+                len: request.len,
+                align: request.align,
+            },
+        )?;
+        Ok(Self { control })
+    }
+
+    /// Returns the owned payload region backing this extent.
+    #[must_use]
+    pub fn region(&self) -> Region {
+        Region {
+            base: self
+                .control
+                .region()
+                .base
+                .checked_add(self.control.payload_offset)
+                .expect("extent payload base should remain within the owned region"),
+            len: self.control.len,
+        }
+    }
+
+    /// Returns the requested usable length in bytes for this extent.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.control.len
+    }
+
+    /// Returns whether this extent requested zero bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.control.len == 0
+    }
+
+    /// Returns the requested alignment in bytes for this extent.
+    #[must_use]
+    pub fn align(&self) -> usize {
+        self.control.align
+    }
+
+    /// Returns the stable writable base pointer for this extent payload.
+    #[must_use]
+    pub fn as_non_null(&self) -> NonNull<u8> {
+        self.region()
+            .base
+            .as_non_null::<u8>()
+            .expect("leased extent payload base should never be null")
+    }
+}
+
+impl core::fmt::Debug for ExtentLease {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ExtentLease")
+            .field("region", &self.region())
+            .field("len", &self.len())
+            .field("align", &self.align())
+            .finish_non_exhaustive()
+    }
+}
+
 pub(crate) const fn pool_control_backing_request<const MEMBERS: usize, const EXTENTS: usize>()
 -> Result<MemoryPoolExtentRequest, AllocError> {
     let len = size_of::<PoolControlBlock<MEMBERS, EXTENTS>>();

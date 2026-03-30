@@ -12,8 +12,10 @@ use fusion_std::gpio::{Gpio, GpioDriveStrength, GpioPin};
 use fusion_std::thread::async_sleep_for;
 use fusion_sys::thread::system_monotonic_time;
 
-mod support;
-use support::main_runtime;
+mod backend {
+    include!(concat!(env!("OUT_DIR"), "/rp2350_backing.rs"));
+}
+use backend::block_on;
 
 const BLUE_LED_PIN: u8 = 28;
 const RED_LED_PIN: u8 = 27;
@@ -106,27 +108,8 @@ fn main() -> ! {
     leds.off().expect("LEDs should start off");
     startup_dance(leds);
 
-    let runtime = main_runtime();
-    let (fibers, runtime) = runtime.into_parts();
-
-    let runner = fibers
-        .spawn(move || {
-            let runtime = runtime
-                .build_explicit()
-                .expect("fiber-owned async runtime should build");
-            runtime
-                .block_on(fizzbuzz_loop(leds))
-                .expect("fiber-owned async runtime should drive fizzbuzz loop");
-        })
-        .expect("fiber-owned async loop should spawn");
-
-    let _: () = runner
-        .join()
-        .expect("current-thread fiber join should drive the async loop");
-
-    loop {
-        cortex_m::asm::wfi();
-    }
+    block_on(fizzbuzz_loop(leds))
+        .expect("current-thread async runtime should drive fizzbuzz loop");
 }
 
 #[exception]

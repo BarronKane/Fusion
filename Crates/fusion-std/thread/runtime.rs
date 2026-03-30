@@ -1,6 +1,7 @@
 //! Domain 5: public runtime orchestration surface.
 
 use super::{
+    AsyncRuntimeMemoryFootprint,
     CurrentAsyncRuntime,
     CurrentAsyncRuntimeCombinedBackingPlan,
     CurrentFiberPool,
@@ -10,6 +11,7 @@ use super::{
     ExecutorPlanningSupport,
     FiberPlanningSupport,
     FiberPoolBootstrap,
+    FiberPoolMemoryFootprint,
     FiberStackBacking,
     GreenGrowth,
     GreenPool,
@@ -117,6 +119,23 @@ pub struct CurrentFiberAsyncRuntime {
     executor: CurrentAsyncRuntime,
 }
 
+/// Exact configured memory footprint for one combined current-thread fiber + async bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CurrentFiberAsyncRuntimeMemoryFootprint {
+    /// Fiber-pool footprint.
+    pub fibers: FiberPoolMemoryFootprint,
+    /// Async-runtime footprint.
+    pub executor: AsyncRuntimeMemoryFootprint,
+}
+
+impl CurrentFiberAsyncRuntimeMemoryFootprint {
+    /// Returns the total configured bytes reserved by the combined runtime.
+    #[must_use]
+    pub const fn total_bytes(self) -> usize {
+        self.fibers.total_bytes() + self.executor.total_bytes()
+    }
+}
+
 /// One deferred current-thread async runtime builder.
 #[derive(Debug)]
 pub struct CurrentAsyncRuntimeBuilder {
@@ -148,6 +167,23 @@ impl CurrentFiberAsyncRuntime {
     #[must_use]
     pub fn into_parts(self) -> (CurrentFiberPool, CurrentAsyncRuntime) {
         (self.fibers, self.executor)
+    }
+
+    /// Returns the exact configured memory footprint for this combined runtime bundle.
+    ///
+    /// This is the selected-target planning view of the bundle's owned fiber and async domains.
+    /// It intentionally describes configured backing shape, not transient live queue occupancy.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest async sizing failure while materializing the configured executor view.
+    pub fn configured_memory_footprint(
+        &self,
+    ) -> Result<CurrentFiberAsyncRuntimeMemoryFootprint, CurrentFiberAsyncRuntimeError> {
+        Ok(CurrentFiberAsyncRuntimeMemoryFootprint {
+            fibers: self.fibers.memory_footprint(),
+            executor: self.executor.configured_memory_footprint()?,
+        })
     }
 }
 
@@ -307,6 +343,23 @@ impl CurrentFiberAsyncBootstrap<'static> {
         ))
     }
 
+    /// Returns one deterministic target-oriented bootstrap using generated fiber stack metadata,
+    /// no guard pages, and the crate-default sizing policy.
+    ///
+    /// This is the board-facing path for explicit static runtime backing on targets like RP2350.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when generated fiber stack metadata is unavailable.
+    pub fn generated_static_target(
+        max_fibers: usize,
+        async_capacity: usize,
+    ) -> Result<Self, CurrentFiberAsyncRuntimeError> {
+        Ok(Self::auto(max_fibers, async_capacity)?
+            .with_guard_pages(0)
+            .with_sizing_strategy(default_runtime_sizing_strategy()))
+    }
+
     /// Returns one deterministic bootstrap with one explicit uniform fiber stack size.
     #[must_use]
     pub const fn uniform(
@@ -318,6 +371,19 @@ impl CurrentFiberAsyncBootstrap<'static> {
             FiberPoolBootstrap::uniform(max_fibers, stack_size),
             ExecutorConfig::new().with_capacity(async_capacity),
         )
+    }
+
+    /// Returns one deterministic target-oriented bootstrap with one explicit uniform fiber stack
+    /// size, no guard pages, and the crate-default sizing policy.
+    #[must_use]
+    pub const fn uniform_static_target(
+        max_fibers: usize,
+        stack_size: NonZeroUsize,
+        async_capacity: usize,
+    ) -> Self {
+        Self::uniform(max_fibers, stack_size, async_capacity)
+            .with_guard_pages(0)
+            .with_sizing_strategy(default_runtime_sizing_strategy())
     }
 }
 
@@ -420,8 +486,21 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
     ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
         self.backing_plan_with_planning_support_and_allocator_layout_policy(
             fiber_planning,
-            ExecutorPlanningSupport::compiled_binary(),
+            ExecutorPlanningSupport::selected_target(),
             layout_policy,
+        )
+    }
+
+    /// Returns the one-slab backing plan for one Cortex-M explicit-static target runtime bundle.
+    ///
+    /// This is the build-time honest path for RP2350-style examples that want one exact owning
+    /// slab without re-spelling the planning and layout surfaces in every build script.
+    pub fn cortex_m_exact_static_backing_plan(
+        self,
+    ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
+        self.backing_plan_with_fiber_planning_support_and_allocator_layout_policy(
+            FiberPlanningSupport::cortex_m(),
+            AllocatorLayoutPolicy::exact_static(),
         )
     }
 
@@ -450,10 +529,8 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
     ) -> Result<CurrentFiberAsyncRuntimeBackingPlan, CurrentFiberAsyncRuntimeError> {
         self.backing_plan_for_base_alignment_with_planning_support_and_allocator_layout_policy(
             base_align,
-            FiberPlanningSupport::from_fiber_support(
-                fusion_sys::fiber::FiberSystem::new().support(),
-            ),
-            ExecutorPlanningSupport::compiled_binary(),
+            FiberPlanningSupport::selected_runtime(),
+            ExecutorPlanningSupport::selected_target(),
             layout_policy,
         )
     }
@@ -469,7 +546,7 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
         self.backing_plan_for_base_alignment_with_planning_support_and_allocator_layout_policy(
             base_align,
             fiber_planning,
-            ExecutorPlanningSupport::compiled_binary(),
+            ExecutorPlanningSupport::selected_target(),
             layout_policy,
         )
     }
@@ -1140,6 +1217,36 @@ mod tests {
         );
 
         fibers
+            .shutdown()
+            .expect("combined current runtime should shut down fibers");
+    }
+
+    #[test]
+    fn current_runtime_reports_configured_memory_footprint() {
+        let bootstrap = CurrentFiberAsyncBootstrap::uniform(
+            1,
+            NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
+            2,
+        )
+        .with_guard_pages(0);
+        let layout = bootstrap.backing_plan().expect("backing plan should build");
+        let slab = aligned_bound_resource(layout.slab.bytes, layout.slab.align);
+        let runtime = bootstrap
+            .from_bound_slab(slab)
+            .expect("combined runtime should build from one bound slab");
+        let footprint = runtime
+            .configured_memory_footprint()
+            .expect("configured runtime footprint should build");
+
+        assert!(footprint.fibers.total_bytes() > 0);
+        assert!(footprint.executor.total_bytes() > 0);
+        assert_eq!(
+            footprint.total_bytes(),
+            footprint.fibers.total_bytes() + footprint.executor.total_bytes()
+        );
+
+        runtime
+            .fibers()
             .shutdown()
             .expect("combined current runtime should shut down fibers");
     }

@@ -34,8 +34,9 @@ use core::fmt;
 use core::future::Future;
 use core::hint::spin_loop;
 use core::marker::PhantomData;
-use core::mem::{MaybeUninit, align_of, size_of};
-use core::pin::Pin;
+use core::mem::{align_of, size_of};
+use core::num::NonZeroUsize;
+use core::pin::{Pin, pin};
 use core::ptr::NonNull;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use core::time::Duration;
@@ -43,19 +44,21 @@ use core::time::Duration;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use crate::sync::{Mutex as SyncMutex, Semaphore, SyncError, SyncErrorKind};
-use fusion_pal::sys::cpu::CachePadded;
 use fusion_pal::sys::mem::MemBase;
 use fusion_sys::alloc::{
     AllocError,
     AllocErrorKind,
-    AllocationStrategy,
     Allocator,
     ArenaInitError,
     ArenaSlice,
     BoundedArena,
     ControlLease,
-    Slab,
+    ExtentLease,
+    MemoryPoolExtentRequest,
 };
+use fusion_sys::channel::ChannelError;
+#[cfg(feature = "debug-insights")]
+use fusion_sys::channel::ChannelReceive;
 use fusion_sys::event::EventSystem;
 pub use fusion_sys::event::{
     EventCompletion,
@@ -75,6 +78,12 @@ pub use fusion_sys::event::{
     EventSupport,
 };
 use fusion_sys::fiber::{FiberError, FiberErrorKind};
+use fusion_sys::insight::{
+    InsightCaptureMode,
+    InsightChannelClass,
+    InsightSupport,
+    LocalInsightChannel,
+};
 use fusion_sys::mem::resource::{
     AllocatorLayoutPolicy,
     BoundMemoryResource,
@@ -105,10 +114,15 @@ use fusion_sys::thread::{
     ThreadStartMode,
     ThreadSystem,
 };
+#[cfg(feature = "debug-insights")]
+use fusion_sys::transport::TransportAttachmentControl;
+use fusion_sys::transport::{TransportAttachmentRequest, TransportError};
 
 #[cfg(feature = "std")]
 use super::HostedFiberRuntime;
 use super::{
+    ExplicitFiberTask,
+    FiberTaskAttributes,
     GreenPool,
     RuntimeSizingStrategy,
     ThreadPool,
@@ -125,6 +139,25 @@ use std::sync::Arc;
 use std::thread::{Builder as StdThreadBuilder, JoinHandle};
 #[cfg(feature = "std")]
 use std::vec::Vec;
+
+const GREEN_EXECUTOR_DISPATCH_STACK_BYTES: NonZeroUsize =
+    NonZeroUsize::new(16 * 1024).expect("green executor dispatch stack must be non-zero");
+
+struct GreenExecutorDispatchTask {
+    core: ControlLease<ExecutorCore>,
+    slot_index: usize,
+    generation: u64,
+}
+
+impl ExplicitFiberTask for GreenExecutorDispatchTask {
+    type Output = ();
+
+    const STACK_BYTES: NonZeroUsize = GREEN_EXECUTOR_DISPATCH_STACK_BYTES;
+
+    fn run(self) -> Self::Output {
+        run_scheduled_green_slot_lease(self.core, self.slot_index, self.generation);
+    }
+}
 
 /// Public executor operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -148,14 +181,15 @@ pub struct AsyncTaskAdmission {
     pub future_bytes: usize,
     /// Concrete future frame alignment in bytes.
     pub future_align: usize,
-    /// Effective future storage class selected for the task.
-    pub future_storage_class: AsyncStorageClass,
     /// Concrete output storage size in bytes.
     pub output_bytes: usize,
     /// Concrete output storage alignment in bytes.
     pub output_align: usize,
-    /// Effective output storage class selected for the task.
-    pub output_storage_class: AsyncStorageClass,
+    /// Exact task-backing bytes required to host the future frame and eventual output over the
+    /// task lifecycle without coarse storage classes.
+    pub exact_backing_bytes: usize,
+    /// Exact task-backing alignment required across the future/output lifecycle.
+    pub exact_backing_align: usize,
     /// Distinct poll-stack contract carried alongside the future frame layout.
     pub poll_stack: AsyncPollStackContract,
 }
@@ -166,31 +200,26 @@ impl AsyncTaskAdmission {
         F: Future + 'static,
         F::Output: 'static,
     {
-        let future_storage_class = async_storage_class_for_layout(
-            size_of::<F>(),
-            align_of::<F>(),
-            INLINE_ASYNC_FUTURE_BYTES,
-            ASYNC_FUTURE_CLASS_MEDIUM_BYTES,
-            ASYNC_FUTURE_CLASS_LARGE_BYTES,
-        );
-        let output_storage_class = async_storage_class_for_layout(
-            size_of::<F::Output>(),
-            align_of::<F::Output>(),
-            INLINE_ASYNC_RESULT_BYTES,
-            ASYNC_RESULT_CLASS_MEDIUM_BYTES,
-            ASYNC_RESULT_CLASS_LARGE_BYTES,
-        );
-        let poll_stack = generated_async_poll_stack_contract::<F>().unwrap_or_else(|| {
-            AsyncPollStackContract::from_future_storage_class(future_storage_class)
-        });
+        let exact_backing_bytes = if size_of::<F>() >= size_of::<F::Output>() {
+            size_of::<F>()
+        } else {
+            size_of::<F::Output>()
+        };
+        let exact_backing_align = if align_of::<F>() >= align_of::<F::Output>() {
+            align_of::<F>()
+        } else {
+            align_of::<F::Output>()
+        };
+        let poll_stack = generated_async_poll_stack_contract::<F>()
+            .unwrap_or_else(|| AsyncPollStackContract::from_future_layout_bytes(size_of::<F>()));
         Self {
             carrier,
             future_bytes: size_of::<F>(),
             future_align: align_of::<F>(),
-            future_storage_class,
             output_bytes: size_of::<F::Output>(),
             output_align: align_of::<F::Output>(),
-            output_storage_class,
+            exact_backing_bytes,
+            exact_backing_align,
             poll_stack,
         }
     }
@@ -201,19 +230,6 @@ impl AsyncTaskAdmission {
     }
 }
 
-/// Effective slab class selected for one async frame or result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AsyncStorageClass {
-    /// Stored inline inside the task slot.
-    Inline,
-    /// Stored in the medium slab-backed class.
-    Medium,
-    /// Stored in the large slab-backed class.
-    Large,
-    /// Does not fit one supported storage class honestly.
-    Unsupported,
-}
-
 /// Separate poll-stack contract for one async task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AsyncPollStackContract {
@@ -221,20 +237,21 @@ pub enum AsyncPollStackContract {
     Unknown,
     /// One build-generated poll-stack budget was emitted for this exact future type.
     Generated { bytes: usize },
-    /// One generated heuristic poll-stack budget was derived from the admitted future frame class.
+    /// One generated heuristic poll-stack budget was derived from the exact future frame layout.
     DerivedHeuristic { bytes: usize },
     /// One explicit poll-stack byte budget was attached to the task admission.
     Explicit { bytes: usize },
 }
 
 impl AsyncPollStackContract {
-    const fn from_future_storage_class(class: AsyncStorageClass) -> Self {
-        match class {
-            AsyncStorageClass::Inline => Self::DerivedHeuristic { bytes: 512 },
-            AsyncStorageClass::Medium => Self::DerivedHeuristic { bytes: 1024 },
-            AsyncStorageClass::Large => Self::DerivedHeuristic { bytes: 2048 },
-            AsyncStorageClass::Unsupported => Self::Unknown,
+    const fn from_future_layout_bytes(bytes: usize) -> Self {
+        if bytes <= INLINE_ASYNC_FUTURE_BYTES {
+            return Self::DerivedHeuristic { bytes: 512 };
         }
+        if bytes <= DEFAULT_ASYNC_SPILL_BUDGET_PER_TASK_BYTES {
+            return Self::DerivedHeuristic { bytes: 2048 };
+        }
+        Self::Unknown
     }
 
     const fn from_bytes(bytes: usize) -> Self {
@@ -304,9 +321,9 @@ impl Future for GeneratedAsyncPollStackMetadataAnchorFuture {
 pub extern "Rust" fn generated_async_poll_stack_metadata_anchor() -> bool {
     let waker = unsafe { Waker::from_raw(noop_async_task_raw_waker()) };
     let mut context = Context::from_waker(&waker);
-    let mut future = GeneratedAsyncPollStackMetadataAnchorFuture;
+    let mut future = pin!(GeneratedAsyncPollStackMetadataAnchorFuture);
     matches!(
-        generated_async_poll_stack_root(unsafe { Pin::new_unchecked(&mut future) }, &mut context),
+        generated_async_poll_stack_root(future.as_mut(), &mut context),
         Poll::Ready(())
     )
 }
@@ -398,11 +415,9 @@ impl ExecutorDomainAllocator {
             .map_err(executor_error_from_alloc)
     }
 
-    fn slab<const SIZE: usize, const COUNT: usize>(
-        &self,
-    ) -> Result<Slab<SIZE, COUNT>, ExecutorError> {
+    fn extent(&self, request: MemoryPoolExtentRequest) -> Result<ExtentLease, ExecutorError> {
         self.allocator
-            .slab::<SIZE, COUNT>(self.domain)
+            .extent(self.domain, request)
             .map_err(executor_error_from_alloc)
     }
 }
@@ -412,10 +427,7 @@ struct ExecutorBackingAllocators {
     control: ExecutorDomainAllocator,
     reactor: ExecutorDomainAllocator,
     registry: ExecutorDomainAllocator,
-    future_medium: Option<ExecutorDomainAllocator>,
-    future_large: Option<ExecutorDomainAllocator>,
-    result_medium: Option<ExecutorDomainAllocator>,
-    result_large: Option<ExecutorDomainAllocator>,
+    spill: Option<ExecutorDomainAllocator>,
 }
 
 impl ExecutorBackingAllocators {
@@ -428,47 +440,26 @@ impl ExecutorBackingAllocators {
             control: ExecutorDomainAllocator::from_resource(backing.control)?,
             reactor: ExecutorDomainAllocator::from_resource(backing.reactor)?,
             registry: ExecutorDomainAllocator::from_resource(backing.registry)?,
-            future_medium: backing
-                .future_medium
-                .map(ExecutorDomainAllocator::from_resource)
-                .transpose()?,
-            future_large: backing
-                .future_large
-                .map(ExecutorDomainAllocator::from_resource)
-                .transpose()?,
-            result_medium: backing
-                .result_medium
-                .map(ExecutorDomainAllocator::from_resource)
-                .transpose()?,
-            result_large: backing
-                .result_large
+            spill: backing
+                .spill
                 .map(ExecutorDomainAllocator::from_resource)
                 .transpose()?,
         })
     }
 }
 
-const fn async_storage_class_for_layout(
-    bytes: usize,
-    align: usize,
-    inline_bytes: usize,
-    medium_bytes: usize,
-    large_bytes: usize,
-) -> AsyncStorageClass {
-    if bytes <= inline_bytes && align <= align_of::<InlineAsyncFutureBytes>() {
-        return AsyncStorageClass::Inline;
-    }
-    if bytes <= medium_bytes && align <= async_storage_class_slot_align(medium_bytes) {
-        return AsyncStorageClass::Medium;
-    }
-    if bytes <= large_bytes && align <= async_storage_class_slot_align(large_bytes) {
-        return AsyncStorageClass::Large;
-    }
-    AsyncStorageClass::Unsupported
+const fn default_async_spill_align() -> usize {
+    1usize << DEFAULT_ASYNC_SPILL_BUDGET_PER_TASK_BYTES.trailing_zeros()
 }
 
-const fn async_storage_class_slot_align(bytes: usize) -> usize {
-    1usize << bytes.trailing_zeros()
+const fn executor_exact_backing_len(bytes: usize) -> usize {
+    if bytes == 0 { 1 } else { bytes }
+}
+
+fn executor_async_spill_capacity_bytes(capacity: usize) -> Result<usize, ExecutorError> {
+    capacity
+        .checked_mul(DEFAULT_ASYNC_SPILL_BUDGET_PER_TASK_BYTES)
+        .ok_or_else(executor_overflow)
 }
 
 fn apply_executor_sizing_strategy(
@@ -526,12 +517,220 @@ struct CurrentAsyncTaskContext {
     generation: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AsyncTaskSchedulerTag {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AsyncTaskSchedulerTag {
     Current = 1,
     ThreadWorkers = 2,
     GreenPool = 3,
     Unsupported = 4,
+}
+
+const ASYNC_TASK_LIFECYCLE_INSIGHT_CAPACITY: usize = 128;
+
+/// One async task lifecycle record emitted by the executor insight lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AsyncTaskLifecycleRecord {
+    Spawned {
+        task: TaskId,
+        slot_index: usize,
+        generation: u64,
+        scheduler: AsyncTaskSchedulerTag,
+        admission: AsyncTaskAdmission,
+    },
+    PolledPending {
+        task: TaskId,
+        slot_index: usize,
+        generation: u64,
+        scheduler: AsyncTaskSchedulerTag,
+    },
+    PolledReady {
+        task: TaskId,
+        slot_index: usize,
+        generation: u64,
+        scheduler: AsyncTaskSchedulerTag,
+    },
+    Completed {
+        task: TaskId,
+        slot_index: usize,
+        generation: u64,
+        scheduler: AsyncTaskSchedulerTag,
+    },
+    Failed {
+        task: TaskId,
+        slot_index: usize,
+        generation: u64,
+        scheduler: AsyncTaskSchedulerTag,
+        error: ExecutorError,
+    },
+    Cancelled {
+        task: TaskId,
+        slot_index: usize,
+        generation: u64,
+        scheduler: AsyncTaskSchedulerTag,
+    },
+}
+
+/// Protocol for async task lifecycle insight records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AsyncTaskLifecycleProtocol;
+
+impl fusion_sys::protocol::Protocol for AsyncTaskLifecycleProtocol {
+    type Message = AsyncTaskLifecycleRecord;
+
+    const DESCRIPTOR: fusion_sys::protocol::ProtocolDescriptor =
+        fusion_sys::protocol::ProtocolDescriptor {
+            id: fusion_sys::protocol::ProtocolId(0x4655_5349_4f4e_4153_594e_435f_544c_0001),
+            version: fusion_sys::protocol::ProtocolVersion::new(1, 0, 0),
+            caps: fusion_sys::protocol::ProtocolCaps::DEBUG_VIEW,
+            bootstrap: fusion_sys::protocol::ProtocolBootstrapKind::Immediate,
+            debug_view: fusion_sys::protocol::ProtocolDebugView::Structured,
+            transport: fusion_sys::protocol::ProtocolTransportRequirements::message_local(),
+            implementation: fusion_sys::protocol::ProtocolImplementationKind::Native,
+        };
+}
+
+#[cfg(feature = "debug-insights")]
+struct AsyncTaskLifecycleInsightState {
+    channel: LocalInsightChannel<AsyncTaskLifecycleProtocol, ASYNC_TASK_LIFECYCLE_INSIGHT_CAPACITY>,
+    producer: usize,
+}
+
+#[cfg(feature = "debug-insights")]
+impl AsyncTaskLifecycleInsightState {
+    fn new() -> Result<Self, ExecutorError> {
+        let channel = LocalInsightChannel::<
+            AsyncTaskLifecycleProtocol,
+            ASYNC_TASK_LIFECYCLE_INSIGHT_CAPACITY,
+        >::new(InsightChannelClass::Timeline, InsightCaptureMode::Lossy)
+        .map_err(|_| ExecutorError::Unsupported)?;
+        let producer = channel
+            .attach_producer(TransportAttachmentRequest::same_courier())
+            .map_err(|_| ExecutorError::Unsupported)?;
+        Ok(Self { channel, producer })
+    }
+
+    fn emit_if_observed(&self, record: AsyncTaskLifecycleRecord) {
+        let _ = self.channel.try_send_if_observed(self.producer, || record);
+    }
+}
+
+/// Consumer-facing async task lifecycle insight view for one executor.
+pub struct AsyncTaskLifecycleInsight<'a> {
+    #[cfg_attr(not(feature = "debug-insights"), allow(dead_code))]
+    core: Option<&'a ExecutorCore>,
+}
+
+impl<'a> AsyncTaskLifecycleInsight<'a> {
+    /// Returns the configured support surface for async task lifecycle insight.
+    #[must_use]
+    pub const fn support(&self) -> InsightSupport {
+        LocalInsightChannel::<
+            AsyncTaskLifecycleProtocol,
+            ASYNC_TASK_LIFECYCLE_INSIGHT_CAPACITY,
+        >::configured_support(InsightChannelClass::Timeline, InsightCaptureMode::Lossy)
+    }
+
+    /// Returns `true` when one consumer is currently attached.
+    #[must_use]
+    pub fn is_observed(&self) -> bool {
+        #[cfg(feature = "debug-insights")]
+        {
+            let Some(core) = self.core else {
+                return false;
+            };
+            core.task_lifecycle
+                .with_ref(|state| {
+                    state
+                        .as_ref()
+                        .is_some_and(|state| state.channel.is_observed())
+                })
+                .unwrap_or(false)
+        }
+        #[cfg(not(feature = "debug-insights"))]
+        {
+            false
+        }
+    }
+
+    /// Attaches one consumer to the async task lifecycle insight lane.
+    pub fn attach_consumer(
+        &self,
+        request: TransportAttachmentRequest,
+    ) -> Result<usize, TransportError> {
+        #[cfg(feature = "debug-insights")]
+        {
+            let Some(core) = self.core else {
+                return Err(TransportError::unsupported());
+            };
+            core.ensure_task_lifecycle_insight()
+                .map_err(|_| TransportError::unsupported())?;
+            core.task_lifecycle
+                .with_ref(|state| {
+                    state
+                        .as_ref()
+                        .ok_or_else(TransportError::unsupported)?
+                        .channel
+                        .attach_consumer(request)
+                })
+                .map_err(|_| TransportError::unsupported())?
+        }
+        #[cfg(not(feature = "debug-insights"))]
+        {
+            let _ = request;
+            Err(TransportError::unsupported())
+        }
+    }
+
+    /// Detaches one consumer from the async task lifecycle insight lane.
+    pub fn detach_consumer(&self, consumer: usize) -> Result<(), TransportError> {
+        #[cfg(feature = "debug-insights")]
+        {
+            let Some(core) = self.core else {
+                return Err(TransportError::unsupported());
+            };
+            core.task_lifecycle
+                .with_ref(|state| {
+                    state
+                        .as_ref()
+                        .ok_or_else(TransportError::unsupported)?
+                        .channel
+                        .detach_consumer(consumer)
+                })
+                .map_err(|_| TransportError::unsupported())?
+        }
+        #[cfg(not(feature = "debug-insights"))]
+        {
+            let _ = consumer;
+            Err(TransportError::unsupported())
+        }
+    }
+
+    /// Receives one pending async task lifecycle record, if present.
+    pub fn try_receive(
+        &self,
+        consumer: usize,
+    ) -> Result<Option<AsyncTaskLifecycleRecord>, ChannelError> {
+        #[cfg(feature = "debug-insights")]
+        {
+            let Some(core) = self.core else {
+                return Err(ChannelError::unsupported());
+            };
+            core.task_lifecycle
+                .with_ref(|state| {
+                    state
+                        .as_ref()
+                        .ok_or_else(ChannelError::unsupported)?
+                        .channel
+                        .try_receive(consumer)
+                })
+                .map_err(|_| ChannelError::unsupported())?
+        }
+        #[cfg(not(feature = "debug-insights"))]
+        {
+            let _ = consumer;
+            Err(ChannelError::unsupported())
+        }
+    }
 }
 
 impl AsyncTaskSchedulerTag {
@@ -1203,7 +1402,7 @@ impl ExecutorPlanningSupport {
     #[must_use]
     pub const fn cortex_m() -> Self {
         Self {
-            control_bytes: 5016,
+            control_bytes: 3640,
             control_align: 8,
             reactor_wait_entry_bytes: 32,
             reactor_wait_entry_align: 8,
@@ -1215,8 +1414,21 @@ impl ExecutorPlanningSupport {
             reactor_pending_entry_align: 1,
             registry_free_entry_bytes: 4,
             registry_free_entry_align: 4,
-            registry_slot_bytes: 1024,
-            registry_slot_align: 64,
+            registry_slot_bytes: 136,
+            registry_slot_align: 8,
+        }
+    }
+
+    /// Returns the default planning support for the selected build target/runtime lane.
+    #[must_use]
+    pub const fn selected_target() -> Self {
+        #[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
+        {
+            Self::cortex_m()
+        }
+        #[cfg(not(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm")))]
+        {
+            Self::compiled_binary()
         }
     }
 
@@ -1299,7 +1511,7 @@ impl ExecutorPlanningSupport {
 }
 
 #[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 5016] = [(); match ControlLease::<ExecutorCore>::extent_request() {
+const _: [(); 3640] = [(); match ControlLease::<ExecutorCore>::extent_request() {
     Ok(request) => request.len,
     Err(_) => 0,
 }];
@@ -1325,9 +1537,9 @@ const _: [(); 4] = [(); size_of::<usize>()];
 #[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
 const _: [(); 4] = [(); align_of::<usize>()];
 #[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 1024] = [(); size_of::<AsyncTaskSlot>()];
+const _: [(); 136] = [(); size_of::<AsyncTaskSlot>()];
 #[cfg(all(not(feature = "std"), feature = "sys-cortex-m", target_arch = "arm"))]
-const _: [(); 64] = [(); align_of::<AsyncTaskSlot>()];
+const _: [(); 8] = [(); align_of::<AsyncTaskSlot>()];
 
 /// Compile-time/backing-time footprint plan for one current-thread async runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1338,14 +1550,8 @@ pub struct CurrentAsyncRuntimeBackingPlan {
     pub reactor: ExecutorBackingRequest,
     /// Task registry backing.
     pub registry: ExecutorBackingRequest,
-    /// Optional medium future-frame slab backing.
-    pub future_medium: ExecutorBackingRequest,
-    /// Optional large future-frame slab backing.
-    pub future_large: ExecutorBackingRequest,
-    /// Optional medium result-frame slab backing.
-    pub result_medium: ExecutorBackingRequest,
-    /// Optional large result-frame slab backing.
-    pub result_large: ExecutorBackingRequest,
+    /// Optional exact async spill-domain backing shared across future/result lifecycle envelopes.
+    pub spill: ExecutorBackingRequest,
 }
 
 /// Packed one-slab layout for one current-thread async runtime.
@@ -1359,14 +1565,70 @@ pub struct CurrentAsyncRuntimeCombinedBackingPlan {
     pub reactor: ResourceRange,
     /// Task registry range inside the slab.
     pub registry: ResourceRange,
-    /// Optional medium future slab range inside the slab.
-    pub future_medium: Option<ResourceRange>,
-    /// Optional large future slab range inside the slab.
-    pub future_large: Option<ResourceRange>,
-    /// Optional medium result slab range inside the slab.
-    pub result_medium: Option<ResourceRange>,
-    /// Optional large result slab range inside the slab.
-    pub result_large: Option<ResourceRange>,
+    /// Optional exact async spill-domain range inside the slab.
+    pub spill: Option<ResourceRange>,
+}
+
+/// Exact configured memory footprint for one async runtime backing shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AsyncRuntimeMemoryFootprint {
+    /// Executor control/state bytes.
+    pub control_bytes: usize,
+    /// Reactor bookkeeping bytes.
+    pub reactor_bytes: usize,
+    /// Task registry bytes.
+    pub registry_bytes: usize,
+    /// Optional exact async spill-domain bytes.
+    pub spill_bytes: usize,
+    /// Extra packed-slab padding bytes introduced by alignment.
+    pub packing_padding_bytes: usize,
+}
+
+impl AsyncRuntimeMemoryFootprint {
+    /// Returns the logical domain bytes before any owning-slab packing padding.
+    #[must_use]
+    pub const fn domain_bytes(self) -> usize {
+        self.control_bytes + self.reactor_bytes + self.registry_bytes + self.spill_bytes
+    }
+
+    /// Returns the total reserved bytes for this async runtime shape.
+    #[must_use]
+    pub const fn total_bytes(self) -> usize {
+        self.domain_bytes() + self.packing_padding_bytes
+    }
+}
+
+impl CurrentAsyncRuntimeBackingPlan {
+    /// Returns the exact configured footprint for this per-domain backing plan.
+    #[must_use]
+    pub const fn memory_footprint(self) -> AsyncRuntimeMemoryFootprint {
+        AsyncRuntimeMemoryFootprint {
+            control_bytes: self.control.bytes,
+            reactor_bytes: self.reactor.bytes,
+            registry_bytes: self.registry.bytes,
+            spill_bytes: self.spill.bytes,
+            packing_padding_bytes: 0,
+        }
+    }
+}
+
+impl CurrentAsyncRuntimeCombinedBackingPlan {
+    /// Returns the exact packed footprint for this one-slab backing plan.
+    #[must_use]
+    pub const fn memory_footprint(self) -> AsyncRuntimeMemoryFootprint {
+        let spill_bytes = match self.spill {
+            Some(range) => range.len,
+            None => 0,
+        };
+        let domain_bytes = self.control.len + self.reactor.len + self.registry.len + spill_bytes;
+        AsyncRuntimeMemoryFootprint {
+            control_bytes: self.control.len,
+            reactor_bytes: self.reactor.len,
+            registry_bytes: self.registry.len,
+            spill_bytes,
+            packing_padding_bytes: self.slab.bytes.saturating_sub(domain_bytes),
+        }
+    }
 }
 
 fn executor_align_up_packed(offset: usize, align: usize) -> Result<usize, ExecutorError> {
@@ -1442,17 +1704,8 @@ impl CurrentAsyncRuntimeBackingPlan {
         if self.registry.align > max_align {
             max_align = self.registry.align;
         }
-        if self.future_medium.align > max_align {
-            max_align = self.future_medium.align;
-        }
-        if self.future_large.align > max_align {
-            max_align = self.future_large.align;
-        }
-        if self.result_medium.align > max_align {
-            max_align = self.result_medium.align;
-        }
-        if self.result_large.align > max_align {
-            max_align = self.result_large.align;
+        if self.spill.align > max_align {
+            max_align = self.spill.align;
         }
 
         let mut cursor = if base_align >= max_align {
@@ -1472,21 +1725,9 @@ impl CurrentAsyncRuntimeBackingPlan {
         cursor = registry_offset
             .checked_add(self.registry.bytes)
             .ok_or_else(executor_overflow)?;
-        let future_medium_offset = executor_align_up_packed(cursor, self.future_medium.align)?;
-        cursor = future_medium_offset
-            .checked_add(self.future_medium.bytes)
-            .ok_or_else(executor_overflow)?;
-        let future_large_offset = executor_align_up_packed(cursor, self.future_large.align)?;
-        cursor = future_large_offset
-            .checked_add(self.future_large.bytes)
-            .ok_or_else(executor_overflow)?;
-        let result_medium_offset = executor_align_up_packed(cursor, self.result_medium.align)?;
-        cursor = result_medium_offset
-            .checked_add(self.result_medium.bytes)
-            .ok_or_else(executor_overflow)?;
-        let result_large_offset = executor_align_up_packed(cursor, self.result_large.align)?;
-        let total_bytes = result_large_offset
-            .checked_add(self.result_large.bytes)
+        let spill_offset = executor_align_up_packed(cursor, self.spill.align)?;
+        let total_bytes = spill_offset
+            .checked_add(self.spill.bytes)
             .ok_or_else(executor_overflow)?;
 
         Ok(CurrentAsyncRuntimeCombinedBackingPlan {
@@ -1497,22 +1738,7 @@ impl CurrentAsyncRuntimeBackingPlan {
             control: ResourceRange::new(control_offset, self.control.bytes),
             reactor: ResourceRange::new(reactor_offset, self.reactor.bytes),
             registry: ResourceRange::new(registry_offset, self.registry.bytes),
-            future_medium: Some(ResourceRange::new(
-                future_medium_offset,
-                self.future_medium.bytes,
-            )),
-            future_large: Some(ResourceRange::new(
-                future_large_offset,
-                self.future_large.bytes,
-            )),
-            result_medium: Some(ResourceRange::new(
-                result_medium_offset,
-                self.result_medium.bytes,
-            )),
-            result_large: Some(ResourceRange::new(
-                result_large_offset,
-                self.result_large.bytes,
-            )),
+            spill: Some(ResourceRange::new(spill_offset, self.spill.bytes)),
         })
     }
 
@@ -1520,52 +1746,14 @@ impl CurrentAsyncRuntimeBackingPlan {
         self,
         base_align: usize,
     ) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
-        let mut max_align = self.control.align;
-        if self.reactor.align > max_align {
-            max_align = self.reactor.align;
-        }
-        if self.registry.align > max_align {
-            max_align = self.registry.align;
-        }
-
-        let mut cursor = if base_align >= max_align {
-            0
-        } else {
-            max_align.saturating_sub(1)
-        };
-        let control_offset = executor_align_up_packed(cursor, self.control.align)?;
-        cursor = control_offset
-            .checked_add(self.control.bytes)
-            .ok_or_else(executor_overflow)?;
-        let reactor_offset = executor_align_up_packed(cursor, self.reactor.align)?;
-        cursor = reactor_offset
-            .checked_add(self.reactor.bytes)
-            .ok_or_else(executor_overflow)?;
-        let registry_offset = executor_align_up_packed(cursor, self.registry.align)?;
-        let total_bytes = registry_offset
-            .checked_add(self.registry.bytes)
-            .ok_or_else(executor_overflow)?;
-
-        Ok(CurrentAsyncRuntimeCombinedBackingPlan {
-            slab: ExecutorBackingRequest {
-                bytes: total_bytes,
-                align: max_align,
-            },
-            control: ResourceRange::new(control_offset, self.control.bytes),
-            reactor: ResourceRange::new(reactor_offset, self.reactor.bytes),
-            registry: ResourceRange::new(registry_offset, self.registry.bytes),
-            future_medium: None,
-            future_large: None,
-            result_medium: None,
-            result_large: None,
-        })
+        self.combined_with_base_alignment(base_align)
     }
 
     /// Returns the explicit backing plan for one current-thread runtime configuration.
     ///
-    /// The medium/large future/result slab requests are part of the plan even though those slabs
-    /// still materialize lazily; explicit-backed callers can reserve them up front so runtime
-    /// construction never has to improvise another acquisition story later.
+    /// The optional async spill domain is part of the full plan so hosted or explicitly
+    /// provisioned runtimes can reserve exact-envelope backing up front instead of improvising
+    /// another acquisition story later.
     pub fn for_config(config: ExecutorConfig) -> Result<Self, ExecutorError> {
         Self::for_config_with_layout_policy(
             config,
@@ -1584,7 +1772,7 @@ impl CurrentAsyncRuntimeBackingPlan {
         Self::for_config_with_layout_policy_and_planning_support(
             config,
             layout_policy,
-            ExecutorPlanningSupport::compiled_binary(),
+            ExecutorPlanningSupport::selected_target(),
         )
     }
 
@@ -1630,46 +1818,12 @@ impl CurrentAsyncRuntimeBackingPlan {
             )?,
             sizing,
         )?;
-        let future_medium = apply_executor_sizing_strategy(
+        let spill = apply_executor_sizing_strategy(
             ExecutorBackingRequest::from_extent_request_with_layout_policy(
-                Slab::<ASYNC_FUTURE_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>::extent_request_with_layout_policy(
-                    async_storage_class_slot_align(ASYNC_FUTURE_CLASS_MEDIUM_BYTES),
-                    layout_policy,
-                )
-                .map_err(executor_error_from_alloc)?,
-                layout_policy,
-            )?,
-            sizing,
-        )?;
-        let future_large = apply_executor_sizing_strategy(
-            ExecutorBackingRequest::from_extent_request_with_layout_policy(
-                Slab::<ASYNC_FUTURE_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>::extent_request_with_layout_policy(
-                    async_storage_class_slot_align(ASYNC_FUTURE_CLASS_LARGE_BYTES),
-                    layout_policy,
-                )
-                .map_err(executor_error_from_alloc)?,
-                layout_policy,
-            )?,
-            sizing,
-        )?;
-        let result_medium = apply_executor_sizing_strategy(
-            ExecutorBackingRequest::from_extent_request_with_layout_policy(
-                Slab::<ASYNC_RESULT_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>::extent_request_with_layout_policy(
-                    async_storage_class_slot_align(ASYNC_RESULT_CLASS_MEDIUM_BYTES),
-                    layout_policy,
-                )
-                .map_err(executor_error_from_alloc)?,
-                layout_policy,
-            )?,
-            sizing,
-        )?;
-        let result_large = apply_executor_sizing_strategy(
-            ExecutorBackingRequest::from_extent_request_with_layout_policy(
-                Slab::<ASYNC_RESULT_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>::extent_request_with_layout_policy(
-                    async_storage_class_slot_align(ASYNC_RESULT_CLASS_LARGE_BYTES),
-                    layout_policy,
-                )
-                .map_err(executor_error_from_alloc)?,
+                fusion_sys::alloc::MemoryPoolExtentRequest {
+                    len: executor_async_spill_capacity_bytes(config.capacity)?,
+                    align: default_async_spill_align(),
+                },
                 layout_policy,
             )?,
             sizing,
@@ -1679,10 +1833,7 @@ impl CurrentAsyncRuntimeBackingPlan {
             control,
             reactor,
             registry,
-            future_medium,
-            future_large,
-            result_medium,
-            result_large,
+            spill,
         })
     }
 
@@ -1705,8 +1856,8 @@ impl CurrentAsyncRuntimeBackingPlan {
 
     /// Packs only the eagerly required current-thread async domains into one owning slab.
     ///
-    /// Lazy medium/large future and result slabs stay omitted so explicit-backed bare-metal
-    /// runtimes do not reserve those bytes unless the caller deliberately wants them.
+    /// Exact task backing is now part of the honest runtime floor, so the eager plan includes the
+    /// shared async spill domain as well.
     pub fn combined_eager(self) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
         self.combined_eager_with_base_alignment(1)
     }
@@ -1749,21 +1900,9 @@ fn current_async_runtime_virtual_backing(
             plan.registry,
             "fusion-executor-current-registry",
         )?,
-        future_medium: Some(current_async_runtime_virtual_resource(
-            plan.future_medium,
-            "fusion-executor-current-future-medium",
-        )?),
-        future_large: Some(current_async_runtime_virtual_resource(
-            plan.future_large,
-            "fusion-executor-current-future-large",
-        )?),
-        result_medium: Some(current_async_runtime_virtual_resource(
-            plan.result_medium,
-            "fusion-executor-current-result-medium",
-        )?),
-        result_large: Some(current_async_runtime_virtual_resource(
-            plan.result_large,
-            "fusion-executor-current-result-large",
+        spill: Some(current_async_runtime_virtual_resource(
+            plan.spill,
+            "fusion-executor-current-spill",
         )?),
     })
 }
@@ -1777,14 +1916,8 @@ pub struct CurrentAsyncRuntimeBacking {
     pub reactor: MemoryResourceHandle,
     /// Task registry resource.
     pub registry: MemoryResourceHandle,
-    /// Medium future-frame slab resource.
-    pub future_medium: Option<MemoryResourceHandle>,
-    /// Large future-frame slab resource.
-    pub future_large: Option<MemoryResourceHandle>,
-    /// Medium result-frame slab resource.
-    pub result_medium: Option<MemoryResourceHandle>,
-    /// Large result-frame slab resource.
-    pub result_large: Option<MemoryResourceHandle>,
+    /// Optional exact async spill-domain resource shared across future/result lifecycle envelopes.
+    pub spill: Option<MemoryResourceHandle>,
 }
 
 /// Public executor error.
@@ -1958,15 +2091,12 @@ impl Default for Reactor {
     }
 }
 
+#[cfg(feature = "std")]
 const CURRENT_QUEUE_CAPACITY: usize = 256;
 const TASK_REGISTRY_CAPACITY: usize = 256;
 const JOIN_SET_CAPACITY: usize = 64;
 const INLINE_ASYNC_FUTURE_BYTES: usize = 256;
-const ASYNC_FUTURE_CLASS_MEDIUM_BYTES: usize = 512;
-const ASYNC_FUTURE_CLASS_LARGE_BYTES: usize = 1024;
-const INLINE_ASYNC_RESULT_BYTES: usize = 256;
-const ASYNC_RESULT_CLASS_MEDIUM_BYTES: usize = 512;
-const ASYNC_RESULT_CLASS_LARGE_BYTES: usize = 1024;
+const DEFAULT_ASYNC_SPILL_BUDGET_PER_TASK_BYTES: usize = 1024;
 const REACTOR_EVENT_BATCH: usize = 16;
 
 const SLOT_EMPTY: u8 = 0;
@@ -2142,6 +2272,7 @@ struct CurrentQueueState {
     len: usize,
 }
 
+#[cfg(feature = "std")]
 #[derive(Debug)]
 struct HostedReadyQueueState {
     entries: [Option<CurrentJob>; CURRENT_QUEUE_CAPACITY],
@@ -2834,6 +2965,7 @@ impl CurrentQueueState {
     }
 }
 
+#[cfg(feature = "std")]
 impl HostedReadyQueueState {
     const fn new() -> Self {
         Self {
@@ -2903,20 +3035,21 @@ impl FixedIndexStack {
         self.len += 1;
         Ok(())
     }
+
+    fn contains(&self, value: usize) -> bool {
+        self.entries[..self.len].iter().any(|entry| *entry == value)
+    }
 }
 
-type InlineAsyncFutureBytes = CachePadded<[u8; INLINE_ASYNC_FUTURE_BYTES]>;
-
 type InlineAsyncPollFn = unsafe fn(
-    *mut u8,
+    &mut InlineAsyncFutureStorage,
     &ExecutorCell<InlineAsyncResultStorage>,
-    &AsyncTaskResultStore,
+    &AsyncTaskSpillStore,
     &mut Context<'_>,
 ) -> Result<Poll<()>, ExecutorError>;
 
 struct InlineAsyncFutureStorage {
-    storage: MaybeUninit<InlineAsyncFutureBytes>,
-    allocation: Option<AsyncFutureFrameAllocation>,
+    allocation: Option<ExtentLease>,
     poll: Option<InlineAsyncPollFn>,
     drop: Option<unsafe fn(*mut u8)>,
     occupied: bool,
@@ -2933,7 +3066,6 @@ impl fmt::Debug for InlineAsyncFutureStorage {
 impl InlineAsyncFutureStorage {
     const fn empty() -> Self {
         Self {
-            storage: MaybeUninit::uninit(),
             allocation: None,
             poll: None,
             drop: None,
@@ -2941,18 +3073,9 @@ impl InlineAsyncFutureStorage {
         }
     }
 
-    const fn supports_inline<F>() -> bool
-    where
-        F: Future + 'static,
-    {
-        size_of::<F>() <= size_of::<InlineAsyncFutureBytes>()
-            && align_of::<F>() <= align_of::<InlineAsyncFutureBytes>()
-    }
-
     fn store_future<F>(
         &mut self,
-        future_store: &AsyncTaskFutureStore,
-        result_store: &AsyncTaskResultStore,
+        spill_store: &AsyncTaskSpillStore,
         future: F,
     ) -> Result<(), ExecutorError>
     where
@@ -2962,18 +3085,14 @@ impl InlineAsyncFutureStorage {
         if self.occupied {
             return Err(executor_invalid());
         }
-        if !InlineAsyncResultStorage::supports::<F::Output>(result_store) {
-            return Err(ExecutorError::Unsupported);
-        }
-
-        let target = if Self::supports_inline::<F>() {
-            self.storage.as_mut_ptr().cast::<F>()
-        } else {
-            let mut allocation = future_store.allocate_for::<F>()?;
-            let ptr = allocation.ptr().cast::<F>();
-            self.allocation = Some(allocation);
-            ptr
-        };
+        self.allocation = Some(spill_store.allocate_task_envelope::<F>()?);
+        let target = self
+            .allocation
+            .as_ref()
+            .ok_or_else(executor_invalid)?
+            .as_non_null()
+            .as_ptr()
+            .cast::<F>();
         unsafe {
             target.write(future);
         }
@@ -2986,37 +3105,41 @@ impl InlineAsyncFutureStorage {
     fn poll_in_place(
         &mut self,
         result: &ExecutorCell<InlineAsyncResultStorage>,
-        result_store: &AsyncTaskResultStore,
+        spill_store: &AsyncTaskSpillStore,
         context: &mut Context<'_>,
     ) -> Result<Poll<()>, ExecutorError> {
         if !self.occupied {
             return Err(executor_invalid());
         }
         let poll = self.poll.ok_or_else(executor_invalid)?;
-        unsafe { poll(self.storage_ptr(), result, result_store, context) }
+        unsafe { poll(self, result, spill_store, context) }
     }
 
-    fn clear(&mut self, future_store: &AsyncTaskFutureStore) -> Result<(), ExecutorError> {
+    fn clear(&mut self, spill_store: &AsyncTaskSpillStore) -> Result<(), ExecutorError> {
         self.drop_value_only();
         if let Some(allocation) = self.allocation.take() {
-            future_store.deallocate(allocation)?;
+            spill_store.deallocate(allocation)?;
         }
         self.poll = None;
         Ok(())
     }
 
     fn storage_ptr(&mut self) -> *mut u8 {
-        match self.allocation.as_mut() {
-            Some(allocation) => allocation.ptr(),
-            None => self.storage.as_mut_ptr().cast::<u8>(),
-        }
+        self.allocation
+            .as_ref()
+            .expect("async futures always live inside one exact lifecycle envelope")
+            .as_non_null()
+            .as_ptr()
+    }
+
+    fn take_allocation(&mut self) -> Option<ExtentLease> {
+        self.allocation.take()
     }
 
     fn drop_value_only(&mut self) {
         if !self.occupied {
             self.poll = None;
             self.drop = None;
-            self.allocation = None;
             return;
         }
 
@@ -3037,126 +3160,52 @@ impl Drop for InlineAsyncFutureStorage {
 }
 
 #[derive(Debug)]
-struct AsyncTaskFutureStore {
-    medium_allocator: Option<ExecutorDomainAllocator>,
-    medium: ExecutorCell<Option<Slab<ASYNC_FUTURE_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>>>,
-    large_allocator: Option<ExecutorDomainAllocator>,
-    large: ExecutorCell<Option<Slab<ASYNC_FUTURE_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>>>,
+struct AsyncTaskSpillStore {
+    allocator: Option<ExecutorDomainAllocator>,
 }
 
-impl AsyncTaskFutureStore {
-    fn new(
-        fast: bool,
-        medium_allocator: Option<ExecutorDomainAllocator>,
-        large_allocator: Option<ExecutorDomainAllocator>,
-    ) -> Self {
-        Self {
-            medium_allocator,
-            medium: ExecutorCell::new(fast, None),
-            large_allocator,
-            large: ExecutorCell::new(fast, None),
-        }
+impl AsyncTaskSpillStore {
+    fn new(_fast: bool, allocator: Option<ExecutorDomainAllocator>) -> Self {
+        Self { allocator }
     }
 
-    fn allocate_for<F>(&self) -> Result<AsyncFutureFrameAllocation, ExecutorError>
+    fn supports_layout(&self, _len: usize, _align: usize) -> bool {
+        self.allocator.is_some()
+    }
+
+    fn allocate_for_layout(&self, len: usize, align: usize) -> Result<ExtentLease, ExecutorError> {
+        let len = executor_exact_backing_len(len);
+        if !self.supports_layout(len, align) {
+            return Err(ExecutorError::Unsupported);
+        }
+        self.allocator
+            .as_ref()
+            .ok_or(ExecutorError::Unsupported)?
+            .extent(MemoryPoolExtentRequest { len, align })
+    }
+
+    fn allocate_for<T: 'static>(&self) -> Result<ExtentLease, ExecutorError> {
+        self.allocate_for_layout(size_of::<T>(), align_of::<T>())
+    }
+
+    fn allocate_task_envelope<F>(&self) -> Result<ExtentLease, ExecutorError>
     where
         F: Future + 'static,
+        F::Output: 'static,
     {
-        let len = size_of::<F>();
-        let align = align_of::<F>();
-        let request = fusion_sys::alloc::AllocRequest {
-            len,
-            align,
-            zeroed: false,
-        };
-        if len <= ASYNC_FUTURE_CLASS_MEDIUM_BYTES
-            && align <= async_storage_class_slot_align(ASYNC_FUTURE_CLASS_MEDIUM_BYTES)
-        {
-            return self.medium.with(|medium| {
-                if medium.is_none() {
-                    *medium = Some(
-                        self.medium_allocator
-                            .as_ref()
-                            .ok_or(ExecutorError::Unsupported)?
-                            .slab::<ASYNC_FUTURE_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>()?,
-                    );
-                }
-                medium
-                    .as_ref()
-                    .ok_or_else(executor_invalid)?
-                    .allocate(&request)
-                    .map(AsyncFutureFrameAllocation::Medium)
-                    .map_err(executor_error_from_alloc)
-            })?;
-        }
-        if len <= ASYNC_FUTURE_CLASS_LARGE_BYTES
-            && align <= async_storage_class_slot_align(ASYNC_FUTURE_CLASS_LARGE_BYTES)
-        {
-            return self.large.with(|large| {
-                if large.is_none() {
-                    *large = Some(
-                        self.large_allocator
-                            .as_ref()
-                            .ok_or(ExecutorError::Unsupported)?
-                            .slab::<ASYNC_FUTURE_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>()?,
-                    );
-                }
-                large
-                    .as_ref()
-                    .ok_or_else(executor_invalid)?
-                    .allocate(&request)
-                    .map(AsyncFutureFrameAllocation::Large)
-                    .map_err(executor_error_from_alloc)
-            })?;
-        }
-        Err(ExecutorError::Unsupported)
+        let len = executor_exact_backing_len(size_of::<F>().max(size_of::<F::Output>()));
+        let align = align_of::<F>().max(align_of::<F::Output>());
+        self.allocate_for_layout(len, align)
     }
 
-    fn deallocate(&self, allocation: AsyncFutureFrameAllocation) -> Result<(), ExecutorError> {
-        match allocation {
-            AsyncFutureFrameAllocation::Medium(allocation) => self.medium.with(|medium| {
-                medium
-                    .as_ref()
-                    .ok_or_else(executor_invalid)?
-                    .deallocate(allocation)
-                    .map_err(executor_error_from_alloc)
-            })?,
-            AsyncFutureFrameAllocation::Large(allocation) => self.large.with(|large| {
-                large
-                    .as_ref()
-                    .ok_or_else(executor_invalid)?
-                    .deallocate(allocation)
-                    .map_err(executor_error_from_alloc)
-            })?,
-        }
+    fn deallocate(&self, allocation: ExtentLease) -> Result<(), ExecutorError> {
+        drop(allocation);
+        Ok(())
     }
 }
-
-#[derive(Debug)]
-enum AsyncFutureFrameAllocation {
-    Medium(fusion_sys::alloc::AllocResult),
-    Large(fusion_sys::alloc::AllocResult),
-}
-
-impl AsyncFutureFrameAllocation {
-    fn ptr(&mut self) -> *mut u8 {
-        match self {
-            Self::Medium(allocation) | Self::Large(allocation) => allocation.ptr.as_ptr(),
-        }
-    }
-}
-
-// SAFETY: frame allocations are owned linearly by one task slot, and moving the allocation token
-// between scheduler threads does not invalidate the underlying slab-backed storage.
-unsafe impl Send for AsyncFutureFrameAllocation {}
-// SAFETY: shared references do not permit mutation; slot-level synchronization still governs use.
-unsafe impl Sync for AsyncFutureFrameAllocation {}
-
-type InlineAsyncResultBytes = CachePadded<[u8; INLINE_ASYNC_RESULT_BYTES]>;
 
 struct InlineAsyncResultStorage {
-    storage: MaybeUninit<InlineAsyncResultBytes>,
-    allocation: Option<AsyncResultFrameAllocation>,
+    allocation: Option<ExtentLease>,
     drop: Option<unsafe fn(*mut u8)>,
     type_id: Option<TypeId>,
     occupied: bool,
@@ -3173,7 +3222,6 @@ impl fmt::Debug for InlineAsyncResultStorage {
 impl InlineAsyncResultStorage {
     const fn empty() -> Self {
         Self {
-            storage: MaybeUninit::uninit(),
             allocation: None,
             drop: None,
             type_id: None,
@@ -3181,35 +3229,21 @@ impl InlineAsyncResultStorage {
         }
     }
 
-    const fn supports_inline<T: 'static>() -> bool {
-        size_of::<T>() <= size_of::<InlineAsyncResultBytes>()
-            && align_of::<T>() <= align_of::<InlineAsyncResultBytes>()
-    }
-
-    fn supports<T: 'static>(result_store: &AsyncTaskResultStore) -> bool {
-        Self::supports_inline::<T>() || result_store.supports::<T>()
-    }
-
-    fn store<T: 'static>(
+    fn store_with_allocation<T: 'static>(
         &mut self,
-        result_store: &AsyncTaskResultStore,
+        spill_store: &AsyncTaskSpillStore,
+        carried_allocation: Option<ExtentLease>,
         value: T,
     ) -> Result<(), ExecutorError> {
         if self.occupied {
             return Err(executor_invalid());
         }
-        if !Self::supports::<T>(result_store) {
-            return Err(ExecutorError::Unsupported);
-        }
-
-        let target = if Self::supports_inline::<T>() {
-            self.storage.as_mut_ptr().cast::<T>()
-        } else {
-            let mut allocation = result_store.allocate_for::<T>()?;
-            let ptr = allocation.ptr().cast::<T>();
-            self.allocation = Some(allocation);
-            ptr
+        let allocation = match carried_allocation {
+            Some(allocation) => allocation,
+            None => spill_store.allocate_for::<T>()?,
         };
+        let target = allocation.as_non_null().as_ptr().cast::<T>();
+        self.allocation = Some(allocation);
         unsafe {
             target.write(value);
         }
@@ -3219,10 +3253,7 @@ impl InlineAsyncResultStorage {
         Ok(())
     }
 
-    fn take<T: 'static>(
-        &mut self,
-        result_store: &AsyncTaskResultStore,
-    ) -> Result<T, ExecutorError> {
+    fn take<T: 'static>(&mut self, spill_store: &AsyncTaskSpillStore) -> Result<T, ExecutorError> {
         if !self.occupied || self.type_id != Some(TypeId::of::<T>()) {
             return Err(executor_invalid());
         }
@@ -3232,25 +3263,26 @@ impl InlineAsyncResultStorage {
         self.occupied = false;
         let value = unsafe { self.storage_ptr().cast::<T>().read() };
         if let Some(allocation) = self.allocation.take() {
-            result_store.deallocate(allocation)?;
+            spill_store.deallocate(allocation)?;
         }
         Ok(value)
     }
 
-    fn clear(&mut self, result_store: &AsyncTaskResultStore) -> Result<(), ExecutorError> {
+    fn clear(&mut self, spill_store: &AsyncTaskSpillStore) -> Result<(), ExecutorError> {
         self.drop_value_only();
         if let Some(allocation) = self.allocation.take() {
-            result_store.deallocate(allocation)?;
+            spill_store.deallocate(allocation)?;
         }
         self.type_id = None;
         Ok(())
     }
 
     fn storage_ptr(&mut self) -> *mut u8 {
-        match self.allocation.as_mut() {
-            Some(allocation) => allocation.ptr(),
-            None => self.storage.as_mut_ptr().cast::<u8>(),
-        }
+        self.allocation
+            .as_ref()
+            .expect("async results always live inside one exact lifecycle envelope")
+            .as_non_null()
+            .as_ptr()
     }
 
     fn drop_value_only(&mut self) {
@@ -3276,127 +3308,10 @@ impl Drop for InlineAsyncResultStorage {
     }
 }
 
-#[derive(Debug)]
-struct AsyncTaskResultStore {
-    medium_allocator: Option<ExecutorDomainAllocator>,
-    medium: ExecutorCell<Option<Slab<ASYNC_RESULT_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>>>,
-    large_allocator: Option<ExecutorDomainAllocator>,
-    large: ExecutorCell<Option<Slab<ASYNC_RESULT_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>>>,
-}
-
-impl AsyncTaskResultStore {
-    fn new(
-        fast: bool,
-        medium_allocator: Option<ExecutorDomainAllocator>,
-        large_allocator: Option<ExecutorDomainAllocator>,
-    ) -> Self {
-        Self {
-            medium_allocator,
-            medium: ExecutorCell::new(fast, None),
-            large_allocator,
-            large: ExecutorCell::new(fast, None),
-        }
-    }
-
-    fn supports<T: 'static>(&self) -> bool {
-        let len = size_of::<T>();
-        let align = align_of::<T>();
-        (len <= ASYNC_RESULT_CLASS_MEDIUM_BYTES
-            && align <= async_storage_class_slot_align(ASYNC_RESULT_CLASS_MEDIUM_BYTES))
-            || (len <= ASYNC_RESULT_CLASS_LARGE_BYTES
-                && align <= async_storage_class_slot_align(ASYNC_RESULT_CLASS_LARGE_BYTES))
-    }
-
-    fn allocate_for<T: 'static>(&self) -> Result<AsyncResultFrameAllocation, ExecutorError> {
-        let request = fusion_sys::alloc::AllocRequest {
-            len: size_of::<T>(),
-            align: align_of::<T>(),
-            zeroed: false,
-        };
-        if request.len <= ASYNC_RESULT_CLASS_MEDIUM_BYTES
-            && request.align <= async_storage_class_slot_align(ASYNC_RESULT_CLASS_MEDIUM_BYTES)
-        {
-            return self.medium.with(|medium| {
-                if medium.is_none() {
-                    *medium = Some(
-                        self.medium_allocator
-                            .as_ref()
-                            .ok_or(ExecutorError::Unsupported)?
-                            .slab::<ASYNC_RESULT_CLASS_MEDIUM_BYTES, TASK_REGISTRY_CAPACITY>()?,
-                    );
-                }
-                medium
-                    .as_ref()
-                    .ok_or_else(executor_invalid)?
-                    .allocate(&request)
-                    .map(AsyncResultFrameAllocation::Medium)
-                    .map_err(executor_error_from_alloc)
-            })?;
-        }
-        if request.len <= ASYNC_RESULT_CLASS_LARGE_BYTES
-            && request.align <= async_storage_class_slot_align(ASYNC_RESULT_CLASS_LARGE_BYTES)
-        {
-            return self.large.with(|large| {
-                if large.is_none() {
-                    *large = Some(
-                        self.large_allocator
-                            .as_ref()
-                            .ok_or(ExecutorError::Unsupported)?
-                            .slab::<ASYNC_RESULT_CLASS_LARGE_BYTES, TASK_REGISTRY_CAPACITY>()?,
-                    );
-                }
-                large
-                    .as_ref()
-                    .ok_or_else(executor_invalid)?
-                    .allocate(&request)
-                    .map(AsyncResultFrameAllocation::Large)
-                    .map_err(executor_error_from_alloc)
-            })?;
-        }
-        Err(ExecutorError::Unsupported)
-    }
-
-    fn deallocate(&self, allocation: AsyncResultFrameAllocation) -> Result<(), ExecutorError> {
-        match allocation {
-            AsyncResultFrameAllocation::Medium(allocation) => self.medium.with(|medium| {
-                medium
-                    .as_ref()
-                    .ok_or_else(executor_invalid)?
-                    .deallocate(allocation)
-                    .map_err(executor_error_from_alloc)
-            })?,
-            AsyncResultFrameAllocation::Large(allocation) => self.large.with(|large| {
-                large
-                    .as_ref()
-                    .ok_or_else(executor_invalid)?
-                    .deallocate(allocation)
-                    .map_err(executor_error_from_alloc)
-            })?,
-        }
-    }
-}
-
-#[derive(Debug)]
-enum AsyncResultFrameAllocation {
-    Medium(fusion_sys::alloc::AllocResult),
-    Large(fusion_sys::alloc::AllocResult),
-}
-
-impl AsyncResultFrameAllocation {
-    fn ptr(&mut self) -> *mut u8 {
-        match self {
-            Self::Medium(allocation) | Self::Large(allocation) => allocation.ptr.as_ptr(),
-        }
-    }
-}
-
-unsafe impl Send for AsyncResultFrameAllocation {}
-unsafe impl Sync for AsyncResultFrameAllocation {}
-
 unsafe fn poll_inline_async_future<F>(
-    ptr: *mut u8,
+    future_storage: &mut InlineAsyncFutureStorage,
     result: &ExecutorCell<InlineAsyncResultStorage>,
-    result_store: &AsyncTaskResultStore,
+    spill_store: &AsyncTaskSpillStore,
     context: &mut Context<'_>,
 ) -> Result<Poll<()>, ExecutorError>
 where
@@ -3405,12 +3320,15 @@ where
 {
     // SAFETY: executor futures live inside arena-backed task slots whose addresses remain stable
     // for the lifetime of the live slot lease; the arena never relocates allocations.
-    let future = unsafe { Pin::new_unchecked(&mut *ptr.cast::<F>()) };
+    let future = unsafe { Pin::new_unchecked(&mut *future_storage.storage_ptr().cast::<F>()) };
 
     #[cfg(feature = "std")]
     match poll_future_contained(future, context) {
         Ok(Poll::Ready(output)) => {
-            result.with(|result| result.store(result_store, output))??;
+            future_storage.drop_value_only();
+            let allocation = future_storage.take_allocation();
+            result
+                .with(|result| result.store_with_allocation(spill_store, allocation, output))??;
             Ok(Poll::Ready(()))
         }
         Ok(Poll::Pending) => Ok(Poll::Pending),
@@ -3420,7 +3338,10 @@ where
     #[cfg(not(feature = "std"))]
     match poll_future_contained(future, context) {
         Poll::Ready(output) => {
-            result.with(|result| result.store(result_store, output))??;
+            future_storage.drop_value_only();
+            let allocation = future_storage.take_allocation();
+            result
+                .with(|result| result.store_with_allocation(spill_store, allocation, output))??;
             Ok(Poll::Ready(()))
         }
         Poll::Pending => Ok(Poll::Pending),
@@ -3476,6 +3397,8 @@ impl AsyncTaskWakerData {
 struct AsyncTaskSlot {
     generation: AtomicUsize,
     core: ExecutorCell<Option<ControlLease<ExecutorCore>>>,
+    #[cfg(feature = "debug-insights")]
+    task_id: ExecutorCell<Option<TaskId>>,
     future: ExecutorCell<InlineAsyncFutureStorage>,
     result: ExecutorCell<InlineAsyncResultStorage>,
     state: AtomicU8,
@@ -3508,6 +3431,8 @@ impl AsyncTaskSlot {
         Ok(Self {
             generation: AtomicUsize::new(0),
             core: ExecutorCell::new(fast, None),
+            #[cfg(feature = "debug-insights")]
+            task_id: ExecutorCell::new(fast, None),
             future: ExecutorCell::new(fast, InlineAsyncFutureStorage::empty()),
             result: ExecutorCell::new(fast, InlineAsyncResultStorage::empty()),
             state: AtomicU8::new(SLOT_EMPTY),
@@ -3612,8 +3537,7 @@ impl AsyncTaskSlot {
 
     fn initialize_for_allocation(
         &self,
-        future_store: &AsyncTaskFutureStore,
-        result_store: &AsyncTaskResultStore,
+        spill_store: &AsyncTaskSpillStore,
     ) -> Result<u64, ExecutorError> {
         if self.state() != SLOT_EMPTY {
             return Err(executor_invalid());
@@ -3627,9 +3551,11 @@ impl AsyncTaskSlot {
             .map_err(|_| executor_overflow())?;
         let generation = previous.checked_add(1).ok_or_else(executor_overflow)? as u64;
 
-        self.future.with(|future| future.clear(future_store))??;
-        self.result.with(|result| result.clear(result_store))??;
+        self.future.with(|future| future.clear(spill_store))??;
+        self.result.with(|result| result.clear(spill_store))??;
         self.error.with(|error| *error = None)?;
+        #[cfg(feature = "debug-insights")]
+        self.task_id.with(|task_id| *task_id = None)?;
         self.join_waker.with(|waker| *waker = None)?;
         self.drain_completed()?;
         self.clear_run_state();
@@ -3642,8 +3568,7 @@ impl AsyncTaskSlot {
 
     fn store_future<F>(
         &self,
-        future_store: &AsyncTaskFutureStore,
-        result_store: &AsyncTaskResultStore,
+        spill_store: &AsyncTaskSpillStore,
         future: F,
     ) -> Result<(), ExecutorError>
     where
@@ -3651,7 +3576,18 @@ impl AsyncTaskSlot {
         F::Output: 'static,
     {
         self.future
-            .with(|slot| slot.store_future(future_store, result_store, future))?
+            .with(|slot| slot.store_future(spill_store, future))?
+    }
+
+    #[cfg(feature = "debug-insights")]
+    fn set_task_id(&self, task_id: TaskId) -> Result<(), ExecutorError> {
+        self.task_id.with(|slot| *slot = Some(task_id))?;
+        Ok(())
+    }
+
+    #[cfg(feature = "debug-insights")]
+    fn task_id(&self) -> Option<TaskId> {
+        self.task_id.with_ref(|slot| *slot).ok().flatten()
     }
 
     fn create_waker(&self, generation: u64) -> Result<Waker, ExecutorError> {
@@ -3680,7 +3616,7 @@ impl AsyncTaskSlot {
 
     fn poll_in_place(
         &self,
-        result_store: &AsyncTaskResultStore,
+        spill_store: &AsyncTaskSpillStore,
         generation: u64,
         context: &mut Context<'_>,
     ) -> Result<Poll<()>, ExecutorError> {
@@ -3688,12 +3624,12 @@ impl AsyncTaskSlot {
             return Ok(Poll::Ready(()));
         }
         self.future
-            .with(|future| future.poll_in_place(&self.result, result_store, context))?
+            .with(|future| future.poll_in_place(&self.result, spill_store, context))?
     }
 
     fn complete(
         &self,
-        future_store: &AsyncTaskFutureStore,
+        spill_store: &AsyncTaskSpillStore,
         generation: u64,
     ) -> Result<(), ExecutorError> {
         if self.generation() != generation {
@@ -3712,7 +3648,7 @@ impl AsyncTaskSlot {
             return Ok(());
         }
 
-        self.future.with(|future| future.clear(future_store))??;
+        self.future.with(|future| future.clear(spill_store))??;
         self.error.with(|error| *error = None)?;
         self.clear_run_state();
         self.wake_join_waker()?;
@@ -3722,8 +3658,7 @@ impl AsyncTaskSlot {
 
     fn fail(
         &self,
-        future_store: &AsyncTaskFutureStore,
-        result_store: &AsyncTaskResultStore,
+        spill_store: &AsyncTaskSpillStore,
         generation: u64,
         error: ExecutorError,
     ) -> Result<(), ExecutorError> {
@@ -3743,8 +3678,8 @@ impl AsyncTaskSlot {
             return Ok(());
         }
 
-        self.future.with(|future| future.clear(future_store))??;
-        self.result.with(|result| result.clear(result_store))??;
+        self.future.with(|future| future.clear(spill_store))??;
+        self.result.with(|result| result.clear(spill_store))??;
         self.error.with(|slot| *slot = Some(error))?;
         self.clear_run_state();
         self.wake_join_waker()?;
@@ -3754,16 +3689,10 @@ impl AsyncTaskSlot {
 
     fn cancel(
         &self,
-        future_store: &AsyncTaskFutureStore,
-        result_store: &AsyncTaskResultStore,
+        spill_store: &AsyncTaskSpillStore,
         generation: u64,
     ) -> Result<(), ExecutorError> {
-        self.fail(
-            future_store,
-            result_store,
-            generation,
-            ExecutorError::Cancelled,
-        )
+        self.fail(spill_store, generation, ExecutorError::Cancelled)
     }
 
     fn clear_core_if_no_wakers(&self, generation: u64) -> Result<bool, ExecutorError> {
@@ -3780,8 +3709,7 @@ impl AsyncTaskSlot {
 
     fn force_shutdown(
         &self,
-        future_store: &AsyncTaskFutureStore,
-        result_store: &AsyncTaskResultStore,
+        spill_store: &AsyncTaskSpillStore,
         generation: u64,
     ) -> Result<(), ExecutorError> {
         if self.generation() != generation {
@@ -3790,12 +3718,7 @@ impl AsyncTaskSlot {
 
         match self.state() {
             SLOT_PENDING => {
-                let _ = self.fail(
-                    future_store,
-                    result_store,
-                    generation,
-                    ExecutorError::Stopped,
-                );
+                let _ = self.fail(spill_store, generation, ExecutorError::Stopped);
             }
             SLOT_READY | SLOT_FAILED | SLOT_EMPTY => {}
             _ => return Err(executor_invalid()),
@@ -3815,14 +3738,14 @@ impl AsyncTaskSlot {
 
     fn take_result<T: 'static>(
         &self,
-        result_store: &AsyncTaskResultStore,
+        spill_store: &AsyncTaskSpillStore,
         generation: u64,
     ) -> Result<T, ExecutorError> {
         if self.generation() != generation {
             return Err(ExecutorError::Stopped);
         }
         match self.state() {
-            SLOT_READY => self.result.with(|result| result.take::<T>(result_store))?,
+            SLOT_READY => self.result.with(|result| result.take::<T>(spill_store))?,
             SLOT_FAILED => Err(self
                 .error
                 .with(Option::take)?
@@ -3853,17 +3776,18 @@ impl AsyncTaskSlot {
 
     fn reset_empty(
         &self,
-        future_store: &AsyncTaskFutureStore,
-        result_store: &AsyncTaskResultStore,
+        spill_store: &AsyncTaskSpillStore,
         generation: u64,
     ) -> Result<(), ExecutorError> {
         if self.generation() != generation {
             return Err(ExecutorError::Stopped);
         }
 
-        self.future.with(|future| future.clear(future_store))??;
-        self.result.with(|result| result.clear(result_store))??;
+        self.future.with(|future| future.clear(spill_store))??;
+        self.result.with(|result| result.clear(spill_store))??;
         self.error.with(|error| *error = None)?;
+        #[cfg(feature = "debug-insights")]
+        self.task_id.with(|task_id| *task_id = None)?;
         self.join_waker.with(|waker| *waker = None)?;
         self.drain_completed()?;
         self.clear_run_state();
@@ -3960,8 +3884,7 @@ impl AsyncTaskSlot {
 struct AsyncTaskRegistry {
     slots: ArenaSlice<AsyncTaskSlot>,
     free: ExecutorCell<FixedIndexStack>,
-    future_store: AsyncTaskFutureStore,
-    result_store: AsyncTaskResultStore,
+    spill_store: AsyncTaskSpillStore,
     _arena: BoundedArena,
 }
 
@@ -3994,16 +3917,7 @@ impl AsyncTaskRegistry {
         Ok(Self {
             slots,
             free: ExecutorCell::new(fast, free),
-            future_store: AsyncTaskFutureStore::new(
-                fast,
-                allocators.future_medium.take(),
-                allocators.future_large.take(),
-            ),
-            result_store: AsyncTaskResultStore::new(
-                fast,
-                allocators.result_medium.take(),
-                allocators.result_large.take(),
-            ),
+            spill_store: AsyncTaskSpillStore::new(fast, allocators.spill.take()),
             _arena: arena,
         })
     }
@@ -4019,7 +3933,7 @@ impl AsyncTaskRegistry {
             .ok_or_else(executor_busy)?;
         let generation = self
             .slot(slot_index)?
-            .initialize_for_allocation(&self.future_store, &self.result_store)?;
+            .initialize_for_allocation(&self.spill_store)?;
         Ok((slot_index, generation))
     }
 
@@ -4028,7 +3942,14 @@ impl AsyncTaskRegistry {
         if slot.generation() != generation || slot.state() != SLOT_EMPTY {
             return Err(executor_invalid());
         }
-        self.free.with(|free| free.push(slot_index))?
+        self.free.with(|free| {
+            if free.contains(slot_index) {
+                // Teardown can converge through multiple honest paths, such as handle detachment
+                // racing the final task-waker release after the slot has already been reset.
+                return Ok(());
+            }
+            free.push(slot_index)
+        })?
     }
 }
 
@@ -4039,8 +3960,8 @@ impl Drop for AsyncTaskRegistry {
             if generation == 0 {
                 continue;
             }
-            let _ = slot.force_shutdown(&self.future_store, &self.result_store, generation);
-            let _ = slot.reset_empty(&self.future_store, &self.result_store, generation);
+            let _ = slot.force_shutdown(&self.spill_store, generation);
+            let _ = slot.reset_empty(&self.spill_store, generation);
         }
     }
 }
@@ -4324,6 +4245,8 @@ struct ExecutorCore {
     scheduler: SchedulerBinding,
     next_id: AtomicUsize,
     registry: ExecutorRegistry,
+    #[cfg(feature = "debug-insights")]
+    task_lifecycle: ExecutorCell<Option<AsyncTaskLifecycleInsightState>>,
     shutdown_requested: AtomicBool,
     external_inflight: AtomicUsize,
 }
@@ -4377,6 +4300,30 @@ impl ExecutorCore {
 
     fn registry(&self) -> Result<&AsyncTaskRegistry, ExecutorError> {
         self.registry.get()
+    }
+
+    #[cfg(feature = "debug-insights")]
+    fn ensure_task_lifecycle_insight(&self) -> Result<(), ExecutorError> {
+        self.task_lifecycle.with(|state| {
+            if state.is_none() {
+                *state = Some(AsyncTaskLifecycleInsightState::new()?);
+            }
+            Ok::<(), ExecutorError>(())
+        })?
+    }
+
+    #[cfg(feature = "debug-insights")]
+    fn emit_task_lifecycle(&self, record: AsyncTaskLifecycleRecord) {
+        let _ = self.task_lifecycle.with_ref(|state| {
+            if let Some(state) = state.as_ref() {
+                state.emit_if_observed(record);
+            }
+        });
+    }
+
+    #[cfg_attr(not(feature = "debug-insights"), allow(dead_code))]
+    fn scheduler_tag(&self) -> AsyncTaskSchedulerTag {
+        AsyncTaskSchedulerTag::from_scheduler(&self.scheduler)
     }
 
     fn register_readiness_wait(
@@ -4528,12 +4475,7 @@ impl ExecutorCore {
         let tracked = self.scheduler.uses_external_carrier();
         if tracked && let Err(error) = self.begin_external_schedule() {
             slot.clear_run_state();
-            let _ = slot.fail(
-                &registry.future_store,
-                &registry.result_store,
-                generation,
-                error,
-            );
+            let _ = slot.fail(&registry.spill_store, generation, error);
             let _ = self.recycle_slot_if_possible(slot_index, generation);
             return Err(error);
         }
@@ -4565,8 +4507,10 @@ impl ExecutorCore {
                             .map_err(executor_error_from_alloc)
                     })??,
                 };
-                pool.spawn(move || {
-                    run_scheduled_green_slot_lease(scheduled_core, slot_index, generation)
+                pool.spawn_explicit(GreenExecutorDispatchTask {
+                    core: scheduled_core,
+                    slot_index,
+                    generation,
                 })
                 .map(|_| ())
                 .map_err(|_| ExecutorError::Stopped)
@@ -4579,12 +4523,7 @@ impl ExecutorCore {
                 self.finish_external_schedule();
             }
             slot.clear_run_state();
-            let _ = slot.fail(
-                &registry.future_store,
-                &registry.result_store,
-                generation,
-                error,
-            );
+            let _ = slot.fail(&registry.spill_store, generation, error);
             let _ = self.recycle_slot_if_possible(slot_index, generation);
             return Err(error);
         }
@@ -4611,6 +4550,10 @@ impl ExecutorCore {
             .with_ref(|core| core.as_ref().and_then(|lease| lease.try_clone().ok()))
             .ok()
             .flatten();
+        #[cfg(feature = "debug-insights")]
+        let task_id = slot.task_id();
+        #[cfg(feature = "debug-insights")]
+        let scheduler = self.scheduler_tag();
 
         let context_guard = AsyncTaskContextGuard::install(self, slot_index, generation);
         let poll = {
@@ -4619,7 +4562,7 @@ impl ExecutorCore {
                 return AsyncSlotRunDisposition::Terminal;
             };
             let mut context = Context::from_waker(&waker);
-            slot.poll_in_place(&registry.result_store, generation, &mut context)
+            slot.poll_in_place(&registry.spill_store, generation, &mut context)
         };
         let self_requeue = take_current_async_requeue();
         #[cfg(feature = "std")]
@@ -4628,12 +4571,39 @@ impl ExecutorCore {
 
         match poll {
             Ok(Poll::Ready(())) => {
+                #[cfg(feature = "debug-insights")]
+                if let Some(task) = task_id {
+                    self.emit_task_lifecycle(AsyncTaskLifecycleRecord::PolledReady {
+                        task,
+                        slot_index,
+                        generation,
+                        scheduler,
+                    });
+                }
                 let _ = slot.finish_pending_run();
-                let _ = slot.complete(&registry.future_store, generation);
+                let _ = slot.complete(&registry.spill_store, generation);
+                #[cfg(feature = "debug-insights")]
+                if let Some(task) = task_id {
+                    self.emit_task_lifecycle(AsyncTaskLifecycleRecord::Completed {
+                        task,
+                        slot_index,
+                        generation,
+                        scheduler,
+                    });
+                }
                 let _ = self.recycle_slot_if_possible(slot_index, generation);
                 AsyncSlotRunDisposition::Terminal
             }
             Ok(Poll::Pending) => {
+                #[cfg(feature = "debug-insights")]
+                if let Some(task) = task_id {
+                    self.emit_task_lifecycle(AsyncTaskLifecycleRecord::PolledPending {
+                        task,
+                        slot_index,
+                        generation,
+                        scheduler,
+                    });
+                }
                 if self_requeue {
                     slot.mark_self_requeue();
                 }
@@ -4659,12 +4629,17 @@ impl ExecutorCore {
             }
             Err(error) => {
                 let _ = slot.finish_pending_run();
-                let _ = slot.fail(
-                    &registry.future_store,
-                    &registry.result_store,
-                    generation,
-                    error,
-                );
+                let _ = slot.fail(&registry.spill_store, generation, error);
+                #[cfg(feature = "debug-insights")]
+                if let Some(task) = task_id {
+                    self.emit_task_lifecycle(AsyncTaskLifecycleRecord::Failed {
+                        task,
+                        slot_index,
+                        generation,
+                        scheduler,
+                        error,
+                    });
+                }
                 let _ = self.recycle_slot_if_possible(slot_index, generation);
                 AsyncSlotRunDisposition::Terminal
             }
@@ -4694,7 +4669,7 @@ impl ExecutorCore {
             return Ok(());
         }
         self.clear_wait(slot_index, generation)?;
-        slot.reset_empty(&registry.future_store, &registry.result_store, generation)?;
+        slot.reset_empty(&registry.spill_store, generation)?;
         registry.release_slot(slot_index, generation)
     }
 
@@ -4729,7 +4704,7 @@ impl ExecutorCore {
             }
             let slot_index = slot.waker.slot_index;
             let _ = self.clear_wait(slot_index, generation);
-            let _ = slot.force_shutdown(&registry.future_store, &registry.result_store, generation);
+            let _ = slot.force_shutdown(&registry.spill_store, generation);
         }
         #[cfg(feature = "std")]
         self.join_reactor_driver();
@@ -4898,7 +4873,7 @@ impl<T> TaskHandleInner<T> {
             }
         }
 
-        let result = slot.take_result::<T>(&registry.result_store, self.generation);
+        let result = slot.take_result::<T>(&registry.spill_store, self.generation);
         self.active = false;
         let _ = self.core.detach_handle(self.slot_index, self.generation);
         result
@@ -4908,11 +4883,17 @@ impl<T> TaskHandleInner<T> {
         let slot = self.core.registry()?.slot(self.slot_index)?;
         let _ = self.core.clear_wait(self.slot_index, self.generation);
         let registry = self.core.registry()?;
-        slot.cancel(
-            &registry.future_store,
-            &registry.result_store,
-            self.generation,
-        )?;
+        slot.cancel(&registry.spill_store, self.generation)?;
+        #[cfg(feature = "debug-insights")]
+        if let Some(task) = slot.task_id() {
+            self.core
+                .emit_task_lifecycle(AsyncTaskLifecycleRecord::Cancelled {
+                    task,
+                    slot_index: self.slot_index,
+                    generation: self.generation,
+                    scheduler: self.core.scheduler_tag(),
+                });
+        }
         self.core
             .recycle_slot_if_possible(self.slot_index, self.generation)
     }
@@ -4941,7 +4922,7 @@ impl<T> TaskHandleInner<T> {
                     Ok(registry) => registry,
                     Err(error) => return Poll::Ready(Err(error)),
                 };
-                let result = slot.take_result::<T>(&registry.result_store, self.generation);
+                let result = slot.take_result::<T>(&registry.spill_store, self.generation);
                 self.active = false;
                 let _ = self.core.detach_handle(self.slot_index, self.generation);
                 Poll::Ready(result)
@@ -5389,10 +5370,10 @@ impl CurrentAsyncRuntime {
             control: partition_executor_bound_resource(&slab, layout.control)?,
             reactor: partition_executor_bound_resource(&slab, layout.reactor)?,
             registry: partition_executor_bound_resource(&slab, layout.registry)?,
-            future_medium: None,
-            future_large: None,
-            result_medium: None,
-            result_large: None,
+            spill: layout
+                .spill
+                .map(|range| partition_executor_bound_resource(&slab, range))
+                .transpose()?,
         };
         Self::from_backing(config, backing)
     }
@@ -5426,6 +5407,42 @@ impl CurrentAsyncRuntime {
     #[must_use]
     pub const fn executor(&self) -> &Executor {
         &self.executor
+    }
+
+    /// Returns the consumer-facing async task lifecycle insight lane for this runtime.
+    #[must_use]
+    pub fn task_lifecycle_insight(&self) -> AsyncTaskLifecycleInsight<'_> {
+        self.executor.task_lifecycle_insight()
+    }
+
+    /// Returns the executor configuration backing this current-thread runtime.
+    #[must_use]
+    pub const fn config(&self) -> ExecutorConfig {
+        self.executor.config
+    }
+
+    /// Returns the exact configured backing plan for this runtime.
+    ///
+    /// This reports the honest current runtime shape under the selected planning surface. It is a
+    /// configured footprint view, not a guess at which future/result slabs have become active at
+    /// this exact instant.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest sizing or metadata-overflow failure while shaping the runtime domains.
+    pub fn configured_backing_plan(&self) -> Result<CurrentAsyncRuntimeBackingPlan, ExecutorError> {
+        Self::backing_plan(self.executor.config)
+    }
+
+    /// Returns the exact configured memory footprint for this runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest sizing or metadata-overflow failure while shaping the runtime domains.
+    pub fn configured_memory_footprint(
+        &self,
+    ) -> Result<AsyncRuntimeMemoryFootprint, ExecutorError> {
+        Ok(self.configured_backing_plan()?.memory_footprint())
     }
 
     /// Spawns one ordinary Rust future onto the current-thread runtime.
@@ -5633,6 +5650,12 @@ impl ThreadAsyncRuntime {
             .expect("thread async runtime executor should exist while borrowed")
     }
 
+    /// Returns the consumer-facing async task lifecycle insight lane for this hosted runtime.
+    #[must_use]
+    pub fn task_lifecycle_insight(&self) -> AsyncTaskLifecycleInsight<'_> {
+        self.executor().task_lifecycle_insight()
+    }
+
     /// Spawns one ordinary Rust future onto the thread-backed runtime.
     ///
     /// # Errors
@@ -5775,7 +5798,9 @@ impl FiberAsyncRuntime {
         total_fibers: usize,
         executor_config: ExecutorConfig,
     ) -> Result<Self, ExecutorError> {
-        let fibers = HostedFiberRuntime::fixed(total_fibers).map_err(executor_error_from_fiber)?;
+        let stack_size = hosted_green_executor_stack_size().map_err(executor_error_from_fiber)?;
+        let fibers = HostedFiberRuntime::fixed_with_stack(stack_size, total_fibers)
+            .map_err(executor_error_from_fiber)?;
         Self::from_hosted_fibers_with_executor_config(fibers, executor_config)
     }
 
@@ -5789,6 +5814,13 @@ impl FiberAsyncRuntime {
     #[must_use]
     pub const fn executor(&self) -> &Executor {
         &self.executor
+    }
+
+    /// Returns the consumer-facing async task lifecycle insight lane for this fiber-backed
+    /// runtime.
+    #[must_use]
+    pub fn task_lifecycle_insight(&self) -> AsyncTaskLifecycleInsight<'_> {
+        self.executor.task_lifecycle_insight()
     }
 
     /// Spawns one ordinary Rust future onto the fiber-backed runtime.
@@ -5929,6 +5961,8 @@ impl Executor {
                     scheduler,
                     next_id: AtomicUsize::new(1),
                     registry,
+                    #[cfg(feature = "debug-insights")]
+                    task_lifecycle: ExecutorCell::new(fast_current, None),
                     shutdown_requested: AtomicBool::new(false),
                     external_inflight: AtomicUsize::new(0),
                 })?;
@@ -6005,6 +6039,8 @@ impl Executor {
                             scheduler,
                             next_id: AtomicUsize::new(1),
                             registry,
+                            #[cfg(feature = "debug-insights")]
+                            task_lifecycle: ExecutorCell::new(fast_current, None),
                             shutdown_requested: AtomicBool::new(false),
                             external_inflight: AtomicUsize::new(0),
                         },
@@ -6066,6 +6102,14 @@ impl Executor {
     #[must_use]
     pub const fn reactor(&self) -> &Reactor {
         &self.reactor
+    }
+
+    /// Returns the consumer-facing async task lifecycle insight lane for this executor.
+    #[must_use]
+    pub fn task_lifecycle_insight(&self) -> AsyncTaskLifecycleInsight<'_> {
+        AsyncTaskLifecycleInsight {
+            core: self.core().ok(),
+        }
     }
 
     /// Spawns a `Send` future onto the executor.
@@ -6134,16 +6178,16 @@ impl Executor {
         let slot = registry.slot(slot_index)?;
         if let Err(error) = slot.bind_core(self.core_lease()?, generation) {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(&registry.future_store, &registry.result_store, generation)?;
+            slot.reset_empty(&registry.spill_store, generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
+        #[cfg(feature = "debug-insights")]
+        slot.set_task_id(id)?;
 
-        if let Err(error) =
-            slot.store_future(&registry.future_store, &registry.result_store, future)
-        {
+        if let Err(error) = slot.store_future(&registry.spill_store, future) {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(&registry.future_store, &registry.result_store, generation)?;
+            slot.reset_empty(&registry.spill_store, generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
@@ -6153,6 +6197,14 @@ impl Executor {
             let _ = core.recycle_slot_if_possible(slot_index, generation);
             return Err(error);
         }
+        #[cfg(feature = "debug-insights")]
+        core.emit_task_lifecycle(AsyncTaskLifecycleRecord::Spawned {
+            task: id,
+            slot_index,
+            generation,
+            scheduler: core.scheduler_tag(),
+            admission,
+        });
 
         Ok(TaskHandle {
             inner: TaskHandleInner {
@@ -6243,16 +6295,16 @@ impl Executor {
         let slot = registry.slot(slot_index)?;
         if let Err(error) = slot.bind_core(self.core_lease()?, generation) {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(&registry.future_store, &registry.result_store, generation)?;
+            slot.reset_empty(&registry.spill_store, generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
+        #[cfg(feature = "debug-insights")]
+        slot.set_task_id(id)?;
 
-        if let Err(error) =
-            slot.store_future(&registry.future_store, &registry.result_store, future)
-        {
+        if let Err(error) = slot.store_future(&registry.spill_store, future) {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(&registry.future_store, &registry.result_store, generation)?;
+            slot.reset_empty(&registry.spill_store, generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
@@ -6262,6 +6314,14 @@ impl Executor {
             let _ = core.recycle_slot_if_possible(slot_index, generation);
             return Err(error);
         }
+        #[cfg(feature = "debug-insights")]
+        core.emit_task_lifecycle(AsyncTaskLifecycleRecord::Spawned {
+            task: id,
+            slot_index,
+            generation,
+            scheduler: core.scheduler_tag(),
+            admission,
+        });
 
         Ok(LocalTaskHandle {
             inner: TaskHandleInner {
@@ -6375,6 +6435,11 @@ impl Executor {
         if !matches!(self.config.mode, ExecutorMode::GreenPool) {
             return Err(ExecutorError::Unsupported);
         }
+        green
+            .validate_task_attributes(
+                green_executor_dispatch_task_attributes().map_err(executor_error_from_fiber)?,
+            )
+            .map_err(executor_error_from_fiber)?;
 
         let executor = Self::with_scheduler(
             self.config,
@@ -6480,12 +6545,8 @@ fn run_scheduled_green_slot_lease(
                     if let Ok(registry) = core.registry()
                         && let Ok(slot) = registry.slot(slot_index)
                     {
-                        let _ = slot.fail(
-                            &registry.future_store,
-                            &registry.result_store,
-                            generation,
-                            ExecutorError::Stopped,
-                        );
+                        let _ =
+                            slot.fail(&registry.spill_store, generation, ExecutorError::Stopped);
                         let _ = core.recycle_slot_if_possible(slot_index, generation);
                     }
                     break;
@@ -6494,6 +6555,20 @@ fn run_scheduled_green_slot_lease(
         }
     }
     core.finish_external_schedule();
+}
+
+#[cfg(feature = "std")]
+fn hosted_green_executor_stack_size() -> Result<NonZeroUsize, FiberError> {
+    green_executor_dispatch_stack_size()
+}
+
+fn green_executor_dispatch_task_attributes() -> Result<FiberTaskAttributes, FiberError> {
+    Ok(GreenExecutorDispatchTask::ATTRIBUTES)
+}
+
+#[cfg(feature = "std")]
+fn green_executor_dispatch_stack_size() -> Result<NonZeroUsize, FiberError> {
+    Ok(GreenExecutorDispatchTask::STACK_BYTES)
 }
 
 #[cfg(feature = "std")]
@@ -6857,6 +6932,47 @@ mod tests {
         assert!(custom.control.bytes > compiled.control.bytes);
     }
 
+    #[test]
+    fn backing_plan_memory_footprint_matches_domain_requests() {
+        let config = ExecutorConfig::new().with_capacity(2);
+        let plan = CurrentAsyncRuntime::backing_plan(config).expect("backing plan should build");
+        let footprint = plan.memory_footprint();
+
+        assert_eq!(footprint.control_bytes, plan.control.bytes);
+        assert_eq!(footprint.reactor_bytes, plan.reactor.bytes);
+        assert_eq!(footprint.registry_bytes, plan.registry.bytes);
+        assert_eq!(footprint.spill_bytes, plan.spill.bytes);
+        assert_eq!(footprint.packing_padding_bytes, 0);
+        assert_eq!(
+            footprint.total_bytes(),
+            plan.control.bytes + plan.reactor.bytes + plan.registry.bytes + plan.spill.bytes
+        );
+    }
+
+    #[test]
+    fn combined_backing_plan_memory_footprint_captures_padding() {
+        let config = ExecutorConfig::new().with_capacity(2);
+        let combined = CurrentAsyncRuntime::backing_plan_with_layout_policy(
+            config,
+            AllocatorLayoutPolicy::exact_static(),
+        )
+        .expect("backing plan should build")
+        .combined_eager()
+        .expect("combined eager plan should build");
+        let footprint = combined.memory_footprint();
+        let domain_bytes = combined.control.len
+            + combined.reactor.len
+            + combined.registry.len
+            + combined.spill.map_or(0, |range| range.len);
+
+        assert_eq!(footprint.domain_bytes(), domain_bytes);
+        assert_eq!(footprint.total_bytes(), combined.slab.bytes);
+        assert_eq!(
+            footprint.packing_padding_bytes,
+            combined.slab.bytes.saturating_sub(domain_bytes)
+        );
+    }
+
     struct ExplicitGeneratedPollStackFuture;
 
     impl Future for ExplicitGeneratedPollStackFuture {
@@ -7065,7 +7181,7 @@ mod tests {
     }
 
     #[test]
-    fn task_handle_reports_storage_classes_and_poll_stack_contract() {
+    fn task_handle_reports_exact_backing_and_poll_stack_contract() {
         let executor = Executor::new(ExecutorConfig::new());
         let sample_payload = [0_u8; 384];
         let sample = async move {
@@ -7082,13 +7198,39 @@ mod tests {
             })
             .expect("task should spawn");
         let admission = handle.admission();
-        assert_eq!(admission.future_storage_class, AsyncStorageClass::Medium);
-        assert_eq!(admission.output_storage_class, AsyncStorageClass::Medium);
+        assert_eq!(admission.future_bytes, size_of_val(&sample));
+        assert_eq!(admission.future_align, align_of_val(&sample));
+        assert_eq!(admission.output_bytes, size_of::<[u8; 384]>());
+        assert_eq!(admission.output_align, align_of::<[u8; 384]>());
+        assert_eq!(admission.exact_backing_bytes, size_of_val(&sample));
+        assert_eq!(
+            admission.exact_backing_align,
+            align_of_val(&sample).max(align_of::<[u8; 384]>())
+        );
         assert_eq!(
             admission.poll_stack,
             AsyncPollStackContract::Explicit { bytes: 1536 }
         );
         assert_eq!(handle.join().expect("task should complete"), [7_u8; 384]);
+    }
+
+    #[test]
+    fn exact_backing_tracks_larger_output_shape() {
+        let executor = Executor::new(ExecutorConfig::new());
+        let sample = async { [9_u8; 384] };
+        let handle = executor
+            .spawn(async { [9_u8; 384] })
+            .expect("task should spawn");
+        let admission = handle.admission();
+
+        assert_eq!(admission.future_bytes, size_of_val(&sample));
+        assert_eq!(admission.output_bytes, size_of::<[u8; 384]>());
+        assert_eq!(admission.exact_backing_bytes, size_of::<[u8; 384]>());
+        assert_eq!(
+            admission.exact_backing_align,
+            align_of_val(&sample).max(align_of::<[u8; 384]>())
+        );
+        assert_eq!(handle.join().expect("task should complete"), [9_u8; 384]);
     }
 
     #[test]
@@ -7125,7 +7267,7 @@ mod tests {
     }
 
     #[test]
-    fn classed_future_storage_derives_one_poll_stack_heuristic_by_default() {
+    fn future_layout_derives_one_poll_stack_heuristic_by_default() {
         let executor = Executor::new(ExecutorConfig::new());
         let payload = [0_u8; 384];
         let handle = executor
@@ -7134,13 +7276,10 @@ mod tests {
                 5_u8
             })
             .expect("task should spawn");
-        assert_eq!(
-            handle.admission().future_storage_class,
-            AsyncStorageClass::Medium
-        );
+        assert!(handle.admission().future_bytes > INLINE_ASYNC_FUTURE_BYTES);
         assert_eq!(
             handle.admission().poll_stack,
-            AsyncPollStackContract::DerivedHeuristic { bytes: 1024 }
+            AsyncPollStackContract::DerivedHeuristic { bytes: 2048 }
         );
         assert_eq!(handle.join().expect("task should complete"), 5);
     }
@@ -7162,7 +7301,7 @@ mod tests {
     }
 
     #[test]
-    fn classed_future_storage_accepts_medium_future_frames() {
+    fn exact_future_spill_accepts_medium_future_frames() {
         let executor = Executor::new(ExecutorConfig::new());
         let sample_payload = [0_u8; 384];
         let sample = async move { sample_payload.len() };
@@ -7171,30 +7310,53 @@ mod tests {
         let payload = [0_u8; 384];
         let handle = executor
             .spawn(async move { payload.len() })
-            .expect("medium-sized future should spill into classed storage");
+            .expect("medium-sized future should spill into exact leased backing");
 
         assert_eq!(handle.join().expect("task should complete"), 384);
     }
 
     #[test]
-    fn oversized_futures_are_rejected_honestly() {
+    fn larger_futures_can_exceed_default_per_task_spill_budget_when_domain_has_room() {
         let executor = Executor::new(ExecutorConfig::new());
+        let oversized = [0_u8; 64 * 1024];
+
+        let handle = executor
+            .spawn(async move { oversized.len() })
+            .expect("larger future frames should use the shared spill domain when it has room");
+
+        assert_eq!(
+            handle.admission().exact_backing_bytes,
+            handle
+                .admission()
+                .future_bytes
+                .max(handle.admission().output_bytes)
+        );
+        assert!(handle.admission().exact_backing_bytes > DEFAULT_ASYNC_SPILL_BUDGET_PER_TASK_BYTES);
+        assert_eq!(
+            handle.join().expect("task should complete"),
+            oversized.len()
+        );
+    }
+
+    #[test]
+    fn futures_without_one_spill_domain_are_rejected_honestly() {
+        let spill_store = AsyncTaskSpillStore::new(true, None);
         let oversized = [0_u8; 2048];
+        let mut future = InlineAsyncFutureStorage::empty();
 
         assert!(matches!(
-            executor.spawn(async move { oversized.len() }),
+            future.store_future(&spill_store, async move { oversized.len() }),
             Err(ExecutorError::Unsupported)
         ));
     }
 
     #[test]
-    fn classed_result_storage_accepts_medium_outputs() {
+    fn exact_result_spill_accepts_medium_outputs() {
         let executor = Executor::new(ExecutorConfig::new());
-        assert!(size_of::<[u8; 384]>() > INLINE_ASYNC_RESULT_BYTES);
 
         let handle = executor
             .spawn(async move { [7_u8; 384] })
-            .expect("medium-sized outputs should spill into classed result storage");
+            .expect("medium-sized outputs should spill into exact leased backing");
 
         let output = handle.join().expect("task should complete");
         assert_eq!(output.len(), 384);
@@ -7202,11 +7364,97 @@ mod tests {
     }
 
     #[test]
-    fn oversized_results_are_rejected_honestly() {
+    fn future_and_result_share_one_exact_spill_envelope() {
+        let request = ExecutorBackingRequest::from_extent_request(MemoryPoolExtentRequest {
+            len: DEFAULT_ASYNC_SPILL_BUDGET_PER_TASK_BYTES * 2,
+            align: default_async_spill_align(),
+        })
+        .expect("spill domain request should size honestly");
+        let spill_store = AsyncTaskSpillStore::new(
+            true,
+            Some(
+                ExecutorDomainAllocator::acquire_virtual(
+                    request,
+                    "fusion-executor-test-shared-spill",
+                )
+                .expect("spill domain should build"),
+            ),
+        );
+        let spill_stats = || {
+            let allocator = spill_store
+                .allocator
+                .as_ref()
+                .expect("spill allocator should exist");
+            allocator
+                .allocator
+                .domain_pool_stats(allocator.domain)
+                .expect("spill pool stats should read")
+                .expect("spill pool should exist")
+        };
+
+        let mut future = InlineAsyncFutureStorage::empty();
+        let result = ExecutorCell::new(true, InlineAsyncResultStorage::empty());
+
+        future
+            .store_future(&spill_store, async { [9_u8; 384] })
+            .expect("future should reserve one spill envelope for its spilled output");
+        let reserved_ptr = future
+            .allocation
+            .as_ref()
+            .expect("reserved spill envelope should exist")
+            .as_non_null();
+        assert_eq!(spill_stats().leased_extent_count, 1);
+
+        let waker = unsafe { Waker::from_raw(noop_async_task_raw_waker()) };
+        let mut context = Context::from_waker(&waker);
+        assert_eq!(
+            future
+                .poll_in_place(&result, &spill_store, &mut context)
+                .expect("poll should succeed"),
+            Poll::Ready(())
+        );
+
+        let result_ptr = result
+            .with_ref(|slot| {
+                slot.allocation
+                    .as_ref()
+                    .map(|allocation| allocation.as_non_null())
+            })
+            .expect("result storage should synchronize")
+            .expect("result should retain the shared spill envelope");
+        assert_eq!(result_ptr, reserved_ptr);
+        assert_eq!(spill_stats().leased_extent_count, 1);
+
+        let output = result
+            .with(|slot| slot.take::<[u8; 384]>(&spill_store))
+            .expect("result storage should synchronize")
+            .expect("result should take cleanly");
+        assert!(output.iter().all(|byte| *byte == 9));
+        assert_eq!(spill_stats().leased_extent_count, 0);
+    }
+
+    #[test]
+    fn larger_results_can_exceed_default_per_task_spill_budget_when_domain_has_room() {
         let executor = Executor::new(ExecutorConfig::new());
 
+        let handle = executor
+            .spawn(async move { [7_u8; 2048] })
+            .expect("larger outputs should use the shared spill domain when it has room");
+
+        let output = handle.join().expect("task should complete");
+        assert_eq!(output.len(), 2048);
+        assert!(output.iter().all(|byte| *byte == 7));
+    }
+
+    #[test]
+    fn results_without_one_spill_domain_are_rejected_honestly() {
+        let spill_store = AsyncTaskSpillStore::new(true, None);
+        let result = ExecutorCell::new(true, InlineAsyncResultStorage::empty());
+
         assert!(matches!(
-            executor.spawn(async move { [0_u8; 2048] }),
+            result
+                .with(|slot| slot.store_with_allocation(&spill_store, None, [0_u8; 2048]))
+                .expect("result storage should synchronize"),
             Err(ExecutorError::Unsupported)
         ));
     }
@@ -7246,7 +7494,11 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn executor_binds_to_hosted_fiber_runtime() {
-        let runtime = HostedFiberRuntime::fixed(2).expect("hosted fiber runtime should build");
+        let runtime = HostedFiberRuntime::fixed_with_stack(
+            hosted_green_executor_stack_size().expect("green executor stack size should resolve"),
+            2,
+        )
+        .expect("hosted fiber runtime should build");
         let executor = Executor::new(ExecutorConfig::green_pool())
             .on_hosted_fibers(&runtime)
             .expect("executor should bind to hosted fibers");
@@ -7389,6 +7641,81 @@ mod tests {
             .block_on(handle)
             .expect("runtime should drive generated local task");
         assert_eq!(result.expect("local task should complete"), 55);
+    }
+
+    #[cfg(feature = "debug-insights")]
+    #[test]
+    fn current_runtime_task_lifecycle_insight_reports_spawn_poll_and_complete() {
+        use fusion_sys::transport::TransportAttachmentRequest;
+
+        let runtime = CurrentAsyncRuntime::new();
+        let insight = runtime.task_lifecycle_insight();
+        let consumer = insight
+            .attach_consumer(TransportAttachmentRequest::same_courier())
+            .expect("task lifecycle consumer should attach");
+
+        let handle = runtime
+            .spawn(async {
+                async_yield_now().await;
+                7_u8
+            })
+            .expect("task should spawn");
+        let task = handle.id();
+
+        assert_eq!(
+            runtime
+                .block_on(handle)
+                .expect("runtime should drive task")
+                .expect("task should complete"),
+            7
+        );
+
+        let mut records = Vec::new();
+        while let Some(record) = insight
+            .try_receive(consumer)
+            .expect("task lifecycle receive should succeed")
+        {
+            records.push(record);
+        }
+
+        assert!(matches!(
+            records.first(),
+            Some(AsyncTaskLifecycleRecord::Spawned {
+                task: first_task,
+                scheduler: AsyncTaskSchedulerTag::Current,
+                ..
+            }) if *first_task == task
+        ));
+        assert!(records.iter().any(|record| {
+            matches!(
+                record,
+                AsyncTaskLifecycleRecord::PolledPending {
+                    task: event_task,
+                    scheduler: AsyncTaskSchedulerTag::Current,
+                    ..
+                } if *event_task == task
+            )
+        }));
+        assert!(records.iter().any(|record| {
+            matches!(
+                record,
+                AsyncTaskLifecycleRecord::PolledReady {
+                    task: event_task,
+                    scheduler: AsyncTaskSchedulerTag::Current,
+                    ..
+                } if *event_task == task
+            )
+        }));
+        assert!(records.iter().any(|record| {
+            matches!(
+                record,
+                AsyncTaskLifecycleRecord::Completed {
+                    task: event_task,
+                    scheduler: AsyncTaskSchedulerTag::Current,
+                    ..
+                } if *event_task == task
+            )
+        }));
     }
 
     #[test]
@@ -7564,6 +7891,59 @@ mod tests {
         assert_eq!(handle.join().expect("task should complete"), 55);
     }
 
+    #[cfg(all(feature = "std", feature = "debug-insights"))]
+    #[test]
+    fn thread_async_runtime_task_lifecycle_insight_reports_thread_workers_scheduler() {
+        use fusion_sys::transport::TransportAttachmentRequest;
+
+        let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
+            min_threads: 1,
+            max_threads: 1,
+            ..ThreadPoolConfig::new()
+        })
+        .expect("thread async runtime should build");
+        let insight = runtime.task_lifecycle_insight();
+        let consumer = insight
+            .attach_consumer(TransportAttachmentRequest::same_courier())
+            .expect("task lifecycle consumer should attach");
+
+        let handle = runtime
+            .spawn(async {
+                async_yield_now().await;
+                29_u8
+            })
+            .expect("task should spawn");
+        let task = handle.id();
+        assert_eq!(handle.join().expect("task should complete"), 29);
+
+        let mut records = Vec::new();
+        while let Some(record) = insight
+            .try_receive(consumer)
+            .expect("task lifecycle receive should succeed")
+        {
+            records.push(record);
+        }
+
+        assert!(matches!(
+            records.first(),
+            Some(AsyncTaskLifecycleRecord::Spawned {
+                task: first_task,
+                scheduler: AsyncTaskSchedulerTag::ThreadWorkers,
+                ..
+            }) if *first_task == task
+        ));
+        assert!(records.iter().any(|record| {
+            matches!(
+                record,
+                AsyncTaskLifecycleRecord::Completed {
+                    task: event_task,
+                    scheduler: AsyncTaskSchedulerTag::ThreadWorkers,
+                    ..
+                } if *event_task == task
+            )
+        }));
+    }
+
     #[cfg(feature = "std")]
     #[test]
     fn thread_runtime_block_on_awaits_task_handles() {
@@ -7678,10 +8058,7 @@ mod tests {
         assert!(rounded.control.bytes >= exact.control.bytes);
         assert!(rounded.reactor.bytes >= exact.reactor.bytes);
         assert!(rounded.registry.bytes >= exact.registry.bytes);
-        assert!(rounded.future_medium.bytes >= exact.future_medium.bytes);
-        assert!(rounded.future_large.bytes >= exact.future_large.bytes);
-        assert!(rounded.result_medium.bytes >= exact.result_medium.bytes);
-        assert!(rounded.result_large.bytes >= exact.result_large.bytes);
+        assert!(rounded.spill.bytes >= exact.spill.bytes);
         assert!(rounded.control.bytes.is_power_of_two());
         assert!(rounded.reactor.bytes.is_power_of_two());
         assert!(rounded.registry.bytes.is_power_of_two());
@@ -7703,15 +8080,15 @@ mod tests {
         assert!(rounded.registry.view().len() >= exact.registry.view().len());
         assert!(
             rounded
-                .future_medium
+                .spill
                 .as_ref()
-                .expect("medium future backing should exist")
+                .expect("async spill backing should exist")
                 .view()
                 .len()
                 >= exact
-                    .future_medium
+                    .spill
                     .as_ref()
-                    .expect("medium future backing should exist")
+                    .expect("async spill backing should exist")
                     .view()
                     .len()
         );
@@ -7929,11 +8306,25 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn fiber_async_runtime_binds_owned_hosted_fibers() {
-        let hosted = HostedFiberRuntime::fixed(2).expect("hosted fiber runtime should build");
+        let hosted = HostedFiberRuntime::fixed_with_stack(
+            hosted_green_executor_stack_size().expect("green executor stack size should resolve"),
+            2,
+        )
+        .expect("hosted fiber runtime should build");
         let runtime =
             FiberAsyncRuntime::from_hosted_fibers(hosted).expect("fiber async runtime should bind");
         assert_eq!(runtime.executor().mode(), ExecutorMode::GreenPool);
         drop(runtime);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn fiber_async_runtime_rejects_undersized_hosted_fibers() {
+        let hosted = HostedFiberRuntime::fixed(2).expect("hosted fiber runtime should build");
+        assert!(matches!(
+            FiberAsyncRuntime::from_hosted_fibers(hosted),
+            Err(ExecutorError::Unsupported)
+        ));
     }
 
     #[cfg(feature = "std")]
@@ -7948,6 +8339,54 @@ mod tests {
             AsyncPollStackContract::Explicit { bytes: 1792 }
         );
         assert_eq!(handle.join().expect("task should complete"), 55);
+    }
+
+    #[cfg(all(feature = "std", feature = "debug-insights"))]
+    #[test]
+    fn fiber_async_runtime_task_lifecycle_insight_reports_green_pool_scheduler() {
+        use fusion_sys::transport::TransportAttachmentRequest;
+
+        let runtime = FiberAsyncRuntime::fixed(2).expect("fiber async runtime should build");
+        let insight = runtime.task_lifecycle_insight();
+        let consumer = insight
+            .attach_consumer(TransportAttachmentRequest::same_courier())
+            .expect("task lifecycle consumer should attach");
+
+        let handle = runtime
+            .spawn(async {
+                async_yield_now().await;
+                31_u8
+            })
+            .expect("task should spawn");
+        let task = handle.id();
+        assert_eq!(handle.join().expect("task should complete"), 31);
+
+        let mut records = Vec::new();
+        while let Some(record) = insight
+            .try_receive(consumer)
+            .expect("task lifecycle receive should succeed")
+        {
+            records.push(record);
+        }
+
+        assert!(matches!(
+            records.first(),
+            Some(AsyncTaskLifecycleRecord::Spawned {
+                task: first_task,
+                scheduler: AsyncTaskSchedulerTag::GreenPool,
+                ..
+            }) if *first_task == task
+        ));
+        assert!(records.iter().any(|record| {
+            matches!(
+                record,
+                AsyncTaskLifecycleRecord::Completed {
+                    task: event_task,
+                    scheduler: AsyncTaskSchedulerTag::GreenPool,
+                    ..
+                } if *event_task == task
+            )
+        }));
     }
 
     #[cfg(feature = "std")]

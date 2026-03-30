@@ -7,11 +7,7 @@ use fusion_sys::alloc::{
     Allocator,
     CriticalSafetyRequirements,
 };
-use fusion_sys::mem::resource::{
-    MemoryDomain,
-    ResourceAttrs,
-    ResourceBackingKind,
-};
+use fusion_sys::mem::resource::{MemoryDomain, ResourceAttrs, ResourceBackingKind};
 
 use super::support::{bound_resource, bound_resource_with_region, byte_geometry, shifted_region};
 
@@ -207,6 +203,29 @@ fn allocator_can_write_domain_ids_and_audits() {
     assert_eq!(written, 1);
     assert_eq!(audits[0].info.id, expected);
     assert!(audits[0].pool_stats.is_some());
+}
+
+#[test]
+fn allocator_can_lease_exact_extent_from_domain() {
+    let allocator = Allocator::<2, 2>::system_default().expect("allocator should build");
+    let default_domain = allocator
+        .default_domain()
+        .expect("default domain should exist");
+
+    let extent = allocator
+        .extent(
+            default_domain,
+            fusion_sys::alloc::MemoryPoolExtentRequest {
+                len: 384,
+                align: 32,
+            },
+        )
+        .expect("exact extent should lease");
+
+    assert_eq!(extent.len(), 384);
+    assert_eq!(extent.align(), 32);
+    assert!(extent.region().len >= 384);
+    assert!(extent.region().base.get().is_multiple_of(32));
 }
 
 #[test]

@@ -212,7 +212,6 @@ fn run_case(system: &Pcu, case: PcuPioSmokeCase) -> Result<(), PcuPioOnDeviceFai
     let descriptor = builder.descriptor(&kernel);
 
     let plan = system
-        .raw()
         .plan(descriptor)
         .map_err(|error| PcuPioOnDeviceFailure {
             code: case.code,
@@ -223,7 +222,6 @@ fn run_case(system: &Pcu, case: PcuPioSmokeCase) -> Result<(), PcuPioOnDeviceFai
             error_kind: Some(error.kind()),
         })?;
     let prepared = system
-        .raw()
         .prepare(plan)
         .map_err(|error| PcuPioOnDeviceFailure {
             code: case.code,

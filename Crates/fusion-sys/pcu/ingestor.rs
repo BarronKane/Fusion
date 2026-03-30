@@ -19,17 +19,18 @@ use core::array;
 use core::fmt;
 use core::marker::PhantomData;
 use core::pin::Pin;
-use core::ptr::NonNull;
 
 use crate::channel::{ChannelError, ChannelErrorKind, ChannelReceive, ChannelSend, LocalChannel};
 use crate::fiber::{
     Fiber,
-    FiberEntry,
     FiberError,
     FiberErrorKind,
+    FiberMetadataChannel,
     FiberReturn,
+    FiberRunnable,
     FiberStack,
     FiberYield,
+    ManagedFiber,
     yield_now,
 };
 use crate::protocol::{
@@ -697,7 +698,8 @@ pub struct PcuExecutorIngestor<
     const STATUS_CAPACITY: usize,
     const METADATA_CAPACITY: usize,
 > {
-    state: NonNull<
+    fiber: ManagedFiber<
+        'state,
         PcuExecutorIngestorState<
             'kernel,
             'data,
@@ -708,7 +710,6 @@ pub struct PcuExecutorIngestor<
             METADATA_CAPACITY,
         >,
     >,
-    fiber: Fiber,
     _marker: PhantomData<
         &'state mut PcuExecutorIngestorState<
             'kernel,
@@ -762,20 +763,8 @@ impl<
         >,
         stack: FiberStack,
     ) -> Result<Self, PcuIngestorError> {
-        let state_ptr = unsafe { NonNull::from(Pin::get_unchecked_mut(state)) };
-        let fiber = Fiber::new(
-            stack,
-            pcu_ingestor_entry::<
-                MAX_KERNELS,
-                MAX_PARAMETERS,
-                SUBMISSION_CAPACITY,
-                STATUS_CAPACITY,
-                METADATA_CAPACITY,
-            > as FiberEntry,
-            state_ptr.as_ptr().cast(),
-        )?;
+        let fiber = Fiber::spawn_managed(stack, state)?;
         Ok(Self {
-            state: state_ptr,
             fiber,
             _marker: PhantomData,
         })
@@ -794,9 +783,13 @@ impl<
         STATUS_CAPACITY,
         METADATA_CAPACITY,
     > {
-        // SAFETY: the ingestor was constructed from one live pinned state reference that outlives
-        // the ingestor itself.
-        unsafe { self.state.as_ref() }
+        self.fiber.state()
+    }
+
+    /// Returns the automatic fiber metadata channel owned by this ingestor fiber.
+    #[must_use]
+    pub const fn fiber_metadata_channel(&self) -> &FiberMetadataChannel<16, 8> {
+        self.fiber.metadata_channel()
     }
 
     /// Resumes the ingestor fiber once.
@@ -809,7 +802,7 @@ impl<
     }
 }
 
-unsafe fn pcu_ingestor_entry<
+impl<
     'kernel,
     'data,
     const MAX_KERNELS: usize,
@@ -817,56 +810,56 @@ unsafe fn pcu_ingestor_entry<
     const SUBMISSION_CAPACITY: usize,
     const STATUS_CAPACITY: usize,
     const METADATA_CAPACITY: usize,
->(
-    arg: *mut (),
-) -> FiberReturn {
-    let state = unsafe {
-        &mut *arg.cast::<PcuExecutorIngestorState<
-            'kernel,
-            'data,
-            MAX_KERNELS,
-            MAX_PARAMETERS,
-            SUBMISSION_CAPACITY,
-            STATUS_CAPACITY,
-            METADATA_CAPACITY,
-        >>()
-    };
+> FiberRunnable
+    for PcuExecutorIngestorState<
+        'kernel,
+        'data,
+        MAX_KERNELS,
+        MAX_PARAMETERS,
+        SUBMISSION_CAPACITY,
+        STATUS_CAPACITY,
+        METADATA_CAPACITY,
+    >
+{
+    fn run(mut self: Pin<&mut Self>) -> FiberReturn {
+        let state = self.as_mut().get_mut();
 
-    loop {
-        if !state.publish_metadata_if_needed() {
-            if yield_now().is_err() {
-                return FiberReturn::new(1);
-            }
-            continue;
-        }
-
-        match state
-            .submission_channel
-            .try_receive(state.submission_consumer)
-        {
-            Ok(Some(request)) => {
-                if state.handle_submission(request).is_err() {
-                    return FiberReturn::new(2);
+        loop {
+            if !state.publish_metadata_if_needed() {
+                if yield_now().is_err() {
+                    return FiberReturn::new(1);
                 }
+                continue;
             }
-            Ok(None) => {}
-            Err(_) => return FiberReturn::new(3),
-        }
 
-        if yield_now().is_err() {
-            return FiberReturn::new(4);
+            match state
+                .submission_channel
+                .try_receive(state.submission_consumer)
+            {
+                Ok(Some(request)) => {
+                    if state.handle_submission(request).is_err() {
+                        return FiberReturn::new(2);
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => return FiberReturn::new(3),
+            }
+
+            if yield_now().is_err() {
+                return FiberReturn::new(4);
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use core::mem;
     use core::num::NonZeroU32;
     use core::pin::pin;
-    use core::ptr::NonNull;
 
     use super::*;
+    use crate::channel::ChannelReceive;
+    use crate::fiber::{FiberMetadataMessage, FiberState};
     use crate::pcu::{
         PcuParameterSlot,
         PcuParameterValue,
@@ -876,7 +869,7 @@ mod tests {
         PcuStreamPattern,
         PcuStreamValueType,
     };
-    use crate::transport::TransportAttachmentControl;
+    use crate::transport::{TransportAttachmentControl, TransportAttachmentRequest};
 
     #[test]
     fn fiber_ingestor_publishes_metadata_and_executes_one_stream_submission() {
@@ -909,21 +902,40 @@ mod tests {
         let mut output = [0_u32; 2];
 
         let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
-        let stack = FiberStack::new(
-            NonNull::new(stack_words.as_mut_ptr().cast::<u8>())
-                .expect("stack allocation should not be null"),
-            stack_words.len() * mem::size_of::<u128>(),
-        )
-        .expect("stack should be valid");
+        let stack = FiberStack::from_slice(stack_words.as_mut()).expect("stack should be valid");
 
         let mut state = pin!(state);
         let mut ingestor =
             PcuExecutorIngestor::new(state.as_mut(), stack).expect("ingestor fiber should build");
+        let fiber_consumer = ingestor
+            .fiber_metadata_channel()
+            .attach_consumer(TransportAttachmentRequest::same_courier())
+            .expect("fiber metadata consumer should attach");
+
+        assert_eq!(
+            ingestor
+                .fiber_metadata_channel()
+                .try_receive(fiber_consumer)
+                .expect("fiber metadata read should succeed"),
+            Some(FiberMetadataMessage::Created {
+                fiber: ingestor.fiber.id()
+            })
+        );
+        assert_eq!(ingestor.fiber.fiber_state(), FiberState::Created);
 
         assert!(matches!(
             ingestor.pump().expect("metadata pump should yield"),
             FiberYield::Yielded
         ));
+        assert_eq!(
+            ingestor
+                .fiber_metadata_channel()
+                .try_receive(fiber_consumer)
+                .expect("fiber metadata read should succeed"),
+            Some(FiberMetadataMessage::Started {
+                fiber: ingestor.fiber.id()
+            })
+        );
         assert_eq!(
             ingestor
                 .state()
@@ -1042,12 +1054,7 @@ mod tests {
         )];
 
         let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
-        let stack = FiberStack::new(
-            NonNull::new(stack_words.as_mut_ptr().cast::<u8>())
-                .expect("stack allocation should not be null"),
-            stack_words.len() * mem::size_of::<u128>(),
-        )
-        .expect("stack should be valid");
+        let stack = FiberStack::from_slice(stack_words.as_mut()).expect("stack should be valid");
 
         let mut state = pin!(state);
         let mut ingestor =
@@ -1145,12 +1152,7 @@ mod tests {
         let mut output = [0_u32; 1];
 
         let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
-        let stack = FiberStack::new(
-            NonNull::new(stack_words.as_mut_ptr().cast::<u8>())
-                .expect("stack allocation should not be null"),
-            stack_words.len() * mem::size_of::<u128>(),
-        )
-        .expect("stack should be valid");
+        let stack = FiberStack::from_slice(stack_words.as_mut()).expect("stack should be valid");
 
         let mut state = pin!(state);
         let mut ingestor =
@@ -1208,12 +1210,7 @@ mod tests {
             .expect("ingestor state should build");
 
         let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
-        let stack = FiberStack::new(
-            NonNull::new(stack_words.as_mut_ptr().cast::<u8>())
-                .expect("stack allocation should not be null"),
-            stack_words.len() * mem::size_of::<u128>(),
-        )
-        .expect("stack should be valid");
+        let stack = FiberStack::from_slice(stack_words.as_mut()).expect("stack should be valid");
 
         let mut state = pin!(state);
         let mut ingestor =
@@ -1291,12 +1288,7 @@ mod tests {
         let mut output_b = [0_u32; 2];
 
         let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
-        let stack = FiberStack::new(
-            NonNull::new(stack_words.as_mut_ptr().cast::<u8>())
-                .expect("stack allocation should not be null"),
-            stack_words.len() * mem::size_of::<u128>(),
-        )
-        .expect("stack should be valid");
+        let stack = FiberStack::from_slice(stack_words.as_mut()).expect("stack should be valid");
 
         let mut state = pin!(state);
         let mut ingestor =

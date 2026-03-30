@@ -272,7 +272,7 @@ pub struct FiberYieldBudgetEvent {
 }
 
 /// Approximate pool-level stack telemetry snapshot.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FiberStackStats {
     /// Total growth events across live fibers in the pool.
     pub total_growth_events: u64,
@@ -373,6 +373,12 @@ impl FiberPlanningSupport {
     #[must_use]
     pub const fn cortex_m() -> Self {
         Self::same_carrier(8, 0, ContextStackDirection::Down, false)
+    }
+
+    /// Returns the default planning surface for the selected runtime lane.
+    #[must_use]
+    pub fn selected_runtime() -> Self {
+        Self::from_fiber_support(FiberSystem::new().support())
     }
 
     /// Returns one planning surface derived from the live low-level fiber support.
@@ -1380,8 +1386,8 @@ impl FiberPoolConfig<'static> {
     pub const fn new() -> Self {
         Self {
             stack_backing: FiberStackBacking::Elastic {
-                initial_size: unsafe { NonZeroUsize::new_unchecked(4 * 1024) },
-                max_size: unsafe { NonZeroUsize::new_unchecked(256 * 1024) },
+                initial_size: non_zero_usize(4 * 1024),
+                max_size: non_zero_usize(256 * 1024),
             },
             sizing: default_runtime_sizing_strategy(),
             classes: &[],
@@ -1454,6 +1460,13 @@ impl FiberPoolConfig<'static> {
             reactor_policy: GreenReactorPolicy::Automatic,
             huge_pages: HugePagePolicy::Disabled,
         })
+    }
+}
+
+const fn non_zero_usize(value: usize) -> NonZeroUsize {
+    match NonZeroUsize::new(value) {
+        Some(value) => value,
+        None => panic!("fiber stack sizes must be non-zero"),
     }
 }
 
@@ -1849,6 +1862,20 @@ impl FiberPoolBootstrap<'static> {
         ))
     }
 
+    /// Returns one deterministic target-oriented bootstrap using generated fiber stack metadata,
+    /// no guard pages, and the crate-default sizing policy.
+    ///
+    /// This is the board-facing path for explicit static pools on targets like RP2350.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when generated stack metadata is unavailable.
+    pub fn generated_static_target(max_fibers: usize) -> Result<Self, FiberError> {
+        Ok(Self::auto(max_fibers)?
+            .with_guard_pages(0)
+            .with_sizing_strategy(default_runtime_sizing_strategy()))
+    }
+
     /// Returns one deterministic fixed-stack bootstrap using the largest generated fiber-task
     /// contract visible to the current crate and one explicit growth chunk.
     ///
@@ -1868,6 +1895,15 @@ impl FiberPoolBootstrap<'static> {
     #[must_use]
     pub const fn uniform(max_fibers: usize, stack_size: NonZeroUsize) -> Self {
         Self::fixed_with_stack(stack_size, max_fibers)
+    }
+
+    /// Returns one deterministic target-oriented bootstrap with one explicit uniform stack size,
+    /// no guard pages, and the crate-default sizing policy.
+    #[must_use]
+    pub const fn uniform_static_target(max_fibers: usize, stack_size: NonZeroUsize) -> Self {
+        Self::uniform(max_fibers, stack_size)
+            .with_guard_pages(0)
+            .with_sizing_strategy(default_runtime_sizing_strategy())
     }
 
     /// Returns one deterministic fixed-stack bootstrap with one explicit uniform stack size and
@@ -1961,6 +1997,20 @@ impl<'a> FiberPoolBootstrap<'a> {
         self
     }
 
+    /// Returns one copy of this bootstrap with explicit guard-page count.
+    #[must_use]
+    pub const fn with_guard_pages(mut self, guard_pages: usize) -> Self {
+        self.config = self.config.with_guard_pages(guard_pages);
+        self
+    }
+
+    /// Returns one copy of this bootstrap with explicit sizing strategy.
+    #[must_use]
+    pub const fn with_sizing_strategy(mut self, sizing: RuntimeSizingStrategy) -> Self {
+        self.config = self.config.with_sizing_strategy(sizing);
+        self
+    }
+
     /// Returns one copy of this bootstrap with explicit scheduling.
     #[must_use]
     pub const fn with_scheduling(mut self, scheduling: GreenScheduling) -> Self {
@@ -1974,6 +2024,22 @@ impl<'a> FiberPoolBootstrap<'a> {
         &self.config
     }
 
+    /// Returns the combined owning-slab backing plan for one Cortex-M current-thread pool.
+    ///
+    /// This is the build-time honest path for RP2350-style examples that want one exact static
+    /// slab without re-spelling the planning surface in every build script.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest sizing or partitioning failure.
+    pub fn cortex_m_backing_plan(self) -> Result<CurrentFiberPoolCombinedBackingPlan, FiberError> {
+        CurrentFiberPool::backing_plan_with_planning_support(
+            &self.config,
+            FiberPlanningSupport::cortex_m(),
+        )?
+        .combined()
+    }
+
     /// Builds one manually-driven current-thread pool from this bootstrap.
     ///
     /// # Errors
@@ -1981,6 +2047,36 @@ impl<'a> FiberPoolBootstrap<'a> {
     /// Returns one honest runtime error when the selected backend cannot realize the pool.
     pub fn build_current(self) -> Result<CurrentFiberPool, FiberError> {
         CurrentFiberPool::new(&self.config)
+    }
+
+    /// Builds one current-thread fiber pool from one caller-owned bound slab.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest sizing, partitioning, or bootstrap failure.
+    pub fn from_bound_slab(
+        self,
+        slab: MemoryResourceHandle,
+    ) -> Result<CurrentFiberPool, FiberError> {
+        CurrentFiberPool::from_bound_slab(&self.config, slab)
+    }
+
+    /// Builds one current-thread fiber pool from one caller-owned static byte slab.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee the supplied pointer/length pair names one valid writable static
+    /// extent for the whole lifetime of the pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest binding, sizing, partitioning, or bootstrap failure.
+    pub unsafe fn from_static_slab(
+        self,
+        ptr: *mut u8,
+        len: usize,
+    ) -> Result<CurrentFiberPool, FiberError> {
+        unsafe { CurrentFiberPool::from_static_slab(&self.config, ptr, len) }
     }
 
     /// Builds one carrier-backed green pool from this bootstrap.
@@ -2331,12 +2427,28 @@ impl<T: Copy + PartialEq> PartialEq for MappedVec<T> {
 
 impl<T: Copy + Eq> Eq for MappedVec<T> {}
 
+impl<T: Copy> Clone for MappedVec<T> {
+    fn clone(&self) -> Self {
+        let mut next = Self::new();
+        if self.is_empty() {
+            return next;
+        }
+        next.grow_for(self.len)
+            .expect("mapped vec clone should grow for existing length");
+        for item in self.as_slice() {
+            next.push_copy(item)
+                .expect("mapped vec clone should copy existing items");
+        }
+        next
+    }
+}
+
 // SAFETY: `MappedVec<T>` owns its mapping and only exposes shared/mutable access according to `T`.
 unsafe impl<T: Copy + Send> Send for MappedVec<T> {}
 // SAFETY: see above.
 unsafe impl<T: Copy + Sync> Sync for MappedVec<T> {}
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FiberStackDistribution {
     entries: MappedVec<(u32, usize)>,
 }

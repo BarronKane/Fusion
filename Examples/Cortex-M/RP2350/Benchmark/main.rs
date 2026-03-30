@@ -8,8 +8,10 @@ use cortex_m_rt::{entry, exception};
 use fusion_std::thread::{async_yield_now, yield_now as fiber_yield_now};
 use fusion_sys::thread::system_monotonic_time;
 
-mod support;
-use support::benchmark_runtime;
+mod backend {
+    include!(concat!(env!("OUT_DIR"), "/rp2350_backing.rs"));
+}
+use backend::{block_on_async, shutdown_fibers, spawn_async, spawn_fiber};
 
 const ITERATIONS: u32 = 512;
 
@@ -104,8 +106,6 @@ fn run_benchmarks() {
         FUSION_RP2350_BENCH_OUTPUT.reserved = 2;
     }
 
-    let runtime = benchmark_runtime();
-    let (fibers, runtime) = runtime.into_parts();
     unsafe {
         FUSION_RP2350_BENCH_OUTPUT.reserved = 3;
     }
@@ -114,9 +114,7 @@ fn run_benchmarks() {
             unsafe {
                 FUSION_RP2350_BENCH_OUTPUT.reserved = 0x1000 + iteration;
             }
-            let handle = fibers
-                .spawn(|| black_box(1_u32))
-                .expect("noop fiber should spawn");
+            let handle = spawn_fiber(|| black_box(1_u32)).expect("noop fiber should spawn");
             unsafe {
                 FUSION_RP2350_BENCH_OUTPUT.reserved = 0x2000 + iteration;
             }
@@ -136,12 +134,11 @@ fn run_benchmarks() {
             unsafe {
                 FUSION_RP2350_BENCH_OUTPUT.reserved = 0x4000 + iteration;
             }
-            let handle = fibers
-                .spawn(|| {
-                    fiber_yield_now().expect("yielding fiber should yield");
-                    black_box(1_u32)
-                })
-                .expect("yielding fiber should spawn");
+            let handle = spawn_fiber(|| {
+                fiber_yield_now().expect("yielding fiber should yield");
+                black_box(1_u32)
+            })
+            .expect("yielding fiber should spawn");
             unsafe {
                 FUSION_RP2350_BENCH_OUTPUT.reserved = 0x5000 + iteration;
             }
@@ -155,22 +152,14 @@ fn run_benchmarks() {
     unsafe {
         FUSION_RP2350_BENCH_OUTPUT.reserved = 5;
     }
-    fibers
-        .shutdown()
-        .expect("benchmark fiber pool should shut down cleanly");
-    let runtime = runtime
-        .build_explicit()
-        .expect("benchmark async runtime should build from one owning slab");
+    shutdown_fibers().expect("benchmark fiber pool should shut down cleanly");
     unsafe {
         FUSION_RP2350_BENCH_OUTPUT.reserved = 6;
     }
     let total = measure_nanos(|| {
         for _ in 0..ITERATIONS {
-            let handle = runtime
-                .spawn(async { black_box(1_u32) })
-                .expect("async noop should spawn");
-            let _ = runtime
-                .block_on(handle)
+            let handle = spawn_async(async { black_box(1_u32) }).expect("async noop should spawn");
+            let _ = block_on_async(handle)
                 .expect("runtime should drive noop async task")
                 .expect("noop async task should complete");
         }
@@ -182,14 +171,12 @@ fn run_benchmarks() {
 
     let total = measure_nanos(|| {
         for _ in 0..ITERATIONS {
-            let handle = runtime
-                .spawn(async {
-                    async_yield_now().await;
-                    black_box(1_u32)
-                })
-                .expect("yielding async task should spawn");
-            let _ = runtime
-                .block_on(handle)
+            let handle = spawn_async(async {
+                async_yield_now().await;
+                black_box(1_u32)
+            })
+            .expect("yielding async task should spawn");
+            let _ = block_on_async(handle)
                 .expect("runtime should drive yielding async task")
                 .expect("yielding async task should complete");
         }

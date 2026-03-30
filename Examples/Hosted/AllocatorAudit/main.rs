@@ -1,5 +1,3 @@
-use core::ptr::NonNull;
-
 use fusion_sys::alloc::{
     AllocModeSet,
     Allocator,
@@ -21,11 +19,13 @@ use fusion_sys::alloc::{
 use fusion_sys::channel::{ChannelReceive, ChannelSend};
 use fusion_sys::fiber::{
     ContextCaps,
-    Fiber,
+    FiberMetadataMessage,
     FiberReturn,
+    FiberRunnable,
     FiberStack,
     FiberSystem,
     FiberYield,
+    ManagedFiber,
     yield_now,
 };
 use fusion_sys::insight::{InsightCaptureMode, InsightChannelClass, LocalInsightChannel};
@@ -138,67 +138,69 @@ impl DemoState {
     }
 }
 
-unsafe fn allocator_demo_fiber(arg: *mut ()) -> FiberReturn {
-    let state = unsafe { &mut *arg.cast::<DemoState>() };
+impl FiberRunnable for DemoState {
+    fn run(mut self: core::pin::Pin<&mut Self>) -> FiberReturn {
+        let state = self.as_mut().get_mut();
 
-    if let Err(error) = state
-        .timeline
-        .try_send_if_observed(state.timeline_producer, || DemoTimelineEvent::FiberStarted)
-    {
-        eprintln!("allocator_audit: failed to emit startup insight: {error}");
-        return FiberReturn::new(1);
-    }
-
-    loop {
-        let pump_result = match state.phase {
-            DemoPhase::Metadata => {
-                let result = state.pump_and_emit(DemoTimelineEvent::MetadataPump);
-                state.phase = DemoPhase::Audit;
-                result
-            }
-            DemoPhase::Audit => {
-                let result = state.pump_and_emit(DemoTimelineEvent::AuditPump);
-                state.phase = DemoPhase::PoolStats;
-                result
-            }
-            DemoPhase::PoolStats => {
-                let result = state.pump_and_emit(DemoTimelineEvent::PoolStatsPump);
-                state.phase = DemoPhase::PoolMembers;
-                result
-            }
-            DemoPhase::PoolMembers => {
-                let result = state.pump_and_emit(DemoTimelineEvent::PoolMembersPump);
-                state.phase = DemoPhase::PoolExtents;
-                result
-            }
-            DemoPhase::PoolExtents => {
-                let result = state.pump_and_emit(DemoTimelineEvent::PoolExtentsPump);
-                state.phase = DemoPhase::Republish;
-                result
-            }
-            DemoPhase::Republish => {
-                let result = state.pump_and_emit(DemoTimelineEvent::RepublishPump);
-                state.phase = DemoPhase::Complete;
-                result
-            }
-            DemoPhase::Complete => {
-                let result = state.pump_and_emit(DemoTimelineEvent::FiberCompleted);
-                if let Err(error) = result {
-                    eprintln!("allocator_audit: {error}");
-                    return FiberReturn::new(1);
-                }
-                return FiberReturn::new(0);
-            }
-        };
-
-        if let Err(error) = pump_result {
-            eprintln!("allocator_audit: {error}");
+        if let Err(error) = state
+            .timeline
+            .try_send_if_observed(state.timeline_producer, || DemoTimelineEvent::FiberStarted)
+        {
+            eprintln!("allocator_audit: failed to emit startup insight: {error}");
             return FiberReturn::new(1);
         }
 
-        if let Err(error) = yield_now() {
-            eprintln!("allocator_audit: fiber yield failed: {error}");
-            return FiberReturn::new(1);
+        loop {
+            let pump_result = match state.phase {
+                DemoPhase::Metadata => {
+                    let result = state.pump_and_emit(DemoTimelineEvent::MetadataPump);
+                    state.phase = DemoPhase::Audit;
+                    result
+                }
+                DemoPhase::Audit => {
+                    let result = state.pump_and_emit(DemoTimelineEvent::AuditPump);
+                    state.phase = DemoPhase::PoolStats;
+                    result
+                }
+                DemoPhase::PoolStats => {
+                    let result = state.pump_and_emit(DemoTimelineEvent::PoolStatsPump);
+                    state.phase = DemoPhase::PoolMembers;
+                    result
+                }
+                DemoPhase::PoolMembers => {
+                    let result = state.pump_and_emit(DemoTimelineEvent::PoolMembersPump);
+                    state.phase = DemoPhase::PoolExtents;
+                    result
+                }
+                DemoPhase::PoolExtents => {
+                    let result = state.pump_and_emit(DemoTimelineEvent::PoolExtentsPump);
+                    state.phase = DemoPhase::Republish;
+                    result
+                }
+                DemoPhase::Republish => {
+                    let result = state.pump_and_emit(DemoTimelineEvent::RepublishPump);
+                    state.phase = DemoPhase::Complete;
+                    result
+                }
+                DemoPhase::Complete => {
+                    let result = state.pump_and_emit(DemoTimelineEvent::FiberCompleted);
+                    if let Err(error) = result {
+                        eprintln!("allocator_audit: {error}");
+                        return FiberReturn::new(1);
+                    }
+                    return FiberReturn::new(0);
+                }
+            };
+
+            if let Err(error) = pump_result {
+                eprintln!("allocator_audit: {error}");
+                return FiberReturn::new(1);
+            }
+
+            if let Err(error) = yield_now() {
+                eprintln!("allocator_audit: fiber yield failed: {error}");
+                return FiberReturn::new(1);
+            }
         }
     }
 }
@@ -521,6 +523,56 @@ fn print_fiber_yield(label: &str, outcome: FiberYield) {
     }
 }
 
+fn print_fiber_metadata_message(message: FiberMetadataMessage) {
+    match message {
+        FiberMetadataMessage::Created { fiber } => {
+            println!("fiber.metadata: created({})", fiber.get());
+        }
+        FiberMetadataMessage::Started { fiber } => {
+            println!("fiber.metadata: started({})", fiber.get());
+        }
+        FiberMetadataMessage::Completed { fiber, result } => {
+            println!(
+                "fiber.metadata: completed({}, code={})",
+                fiber.get(),
+                result.code
+            );
+        }
+        FiberMetadataMessage::Faulted { fiber, reason } => {
+            println!("fiber.metadata: faulted({}, reason={reason})", fiber.get());
+        }
+        FiberMetadataMessage::Abandoned { fiber, lifecycle } => {
+            println!(
+                "fiber.metadata: abandoned({}, state={})",
+                fiber.get(),
+                fiber_state_name(lifecycle)
+            );
+        }
+    }
+}
+
+fn fiber_state_name(state: fusion_sys::fiber::FiberState) -> &'static str {
+    match state {
+        fusion_sys::fiber::FiberState::Created => "created",
+        fusion_sys::fiber::FiberState::Running => "running",
+        fusion_sys::fiber::FiberState::Suspended => "suspended",
+        fusion_sys::fiber::FiberState::Completed => "completed",
+    }
+}
+
+fn drain_fiber_metadata(channel: &fusion_sys::fiber::FiberMetadataChannel<16>, consumer: usize) {
+    loop {
+        match channel.try_receive(consumer) {
+            Ok(Some(message)) => print_fiber_metadata_message(message),
+            Ok(None) => break,
+            Err(error) => {
+                eprintln!("allocator_audit: fiber metadata receive failed: {error}");
+                break;
+            }
+        }
+    }
+}
+
 fn drain_metadata(
     channel: &fusion_sys::channel::LocalChannel<AllocatorDomainMetadataProtocol, 8>,
     consumer: usize,
@@ -648,7 +700,7 @@ fn main() {
         .attach_consumer(TransportAttachmentRequest::same_courier())
         .expect("status consumer should attach");
 
-    let mut state = Box::new(DemoState {
+    let mut state = Box::pin(DemoState {
         allocator,
         service,
         default_domain,
@@ -661,31 +713,31 @@ fn main() {
     let mut member_cache: Vec<(MemoryPoolMemberId, MemoryPoolMemberInfo)> = Vec::new();
 
     let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
-    let stack = FiberStack::new(
-        NonNull::new(stack_words.as_mut_ptr().cast::<u8>()).expect("stack pointer should exist"),
-        stack_words.len() * core::mem::size_of::<u128>(),
-    )
-    .expect("fiber stack should build");
-
-    let state_ptr = (&mut *state as *mut DemoState).cast::<()>();
-    let mut fiber = Fiber::new(stack, allocator_demo_fiber, state_ptr)
+    let stack = FiberStack::from_slice(&mut stack_words).expect("fiber stack should build");
+    let mut fiber = ManagedFiber::<_, 16>::new(state.as_mut(), stack)
         .expect("allocator demo fiber should build");
+    let fiber_metadata_consumer = fiber
+        .metadata_channel()
+        .attach_consumer(TransportAttachmentRequest::same_courier())
+        .expect("fiber metadata consumer should attach");
 
     print_rule("Allocator Audit Demo");
     println!("domain: {}", allocator_domain_id_value(default_domain));
+    println!("fiber: id={} state=created", fiber.id().get());
     println!(
         "timeline insight: availability={} class={} capture={}",
-        insight_availability_name(state.timeline.insight_support().availability),
-        insight_channel_class_name(state.timeline.class()),
-        insight_capture_mode_name(state.timeline.capture())
+        insight_availability_name(fiber.state().timeline.insight_support().availability),
+        insight_channel_class_name(fiber.state().timeline.class()),
+        insight_capture_mode_name(fiber.state().timeline.capture())
     );
     println!(
         "state insight: availability={} class={} capture={}",
-        insight_availability_name(state.audit.insight_support().availability),
-        insight_channel_class_name(state.audit.class()),
-        insight_capture_mode_name(state.audit.capture())
+        insight_availability_name(fiber.state().audit.insight_support().availability),
+        insight_channel_class_name(fiber.state().audit.class()),
+        insight_capture_mode_name(fiber.state().audit.capture())
     );
-    state
+    fiber
+        .state()
         .service
         .control_channel()
         .try_send(
@@ -695,7 +747,8 @@ fn main() {
             },
         )
         .expect("initial pool-members request should send");
-    state
+    fiber
+        .state()
         .service
         .control_channel()
         .try_send(
@@ -705,20 +758,23 @@ fn main() {
             },
         )
         .expect("initial pool-extents request should send");
+    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
 
     let first = fiber.resume().expect("metadata fiber pump should resume");
     print_rule("Fiber Step 1");
     print_fiber_yield("fiber", first);
-    drain_metadata(state.service.metadata_channel(), metadata_consumer);
+    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
+    drain_metadata(fiber.state().service.metadata_channel(), metadata_consumer);
     drain_status(
-        state.service.status_channel(),
+        fiber.state().service.status_channel(),
         status_consumer,
         &mut member_cache,
     );
-    drain_timeline(&state.timeline, timeline_consumer);
-    drain_audit(&state.audit, audit_consumer);
+    drain_timeline(&fiber.state().timeline, timeline_consumer);
+    drain_audit(&fiber.state().audit, audit_consumer);
 
-    state
+    fiber
+        .state()
         .service
         .control_channel()
         .try_send(
@@ -731,15 +787,17 @@ fn main() {
     let second = fiber.resume().expect("audit fiber pump should resume");
     print_rule("Fiber Step 2");
     print_fiber_yield("fiber", second);
+    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
     drain_status(
-        state.service.status_channel(),
+        fiber.state().service.status_channel(),
         status_consumer,
         &mut member_cache,
     );
-    drain_timeline(&state.timeline, timeline_consumer);
-    drain_audit(&state.audit, audit_consumer);
+    drain_timeline(&fiber.state().timeline, timeline_consumer);
+    drain_audit(&fiber.state().audit, audit_consumer);
 
-    state
+    fiber
+        .state()
         .service
         .control_channel()
         .try_send(
@@ -752,41 +810,45 @@ fn main() {
     let third = fiber.resume().expect("pool-stats fiber pump should resume");
     print_rule("Fiber Step 3");
     print_fiber_yield("fiber", third);
+    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
     drain_status(
-        state.service.status_channel(),
+        fiber.state().service.status_channel(),
         status_consumer,
         &mut member_cache,
     );
-    drain_timeline(&state.timeline, timeline_consumer);
-    drain_audit(&state.audit, audit_consumer);
+    drain_timeline(&fiber.state().timeline, timeline_consumer);
+    drain_audit(&fiber.state().audit, audit_consumer);
 
     let fourth = fiber
         .resume()
         .expect("pool-members fiber pump should resume");
     print_rule("Fiber Step 4");
     print_fiber_yield("fiber", fourth);
+    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
     drain_status(
-        state.service.status_channel(),
+        fiber.state().service.status_channel(),
         status_consumer,
         &mut member_cache,
     );
-    drain_timeline(&state.timeline, timeline_consumer);
-    drain_audit(&state.audit, audit_consumer);
+    drain_timeline(&fiber.state().timeline, timeline_consumer);
+    drain_audit(&fiber.state().audit, audit_consumer);
 
     let fifth = fiber
         .resume()
         .expect("pool-extents fiber pump should resume");
     print_rule("Fiber Step 5");
     print_fiber_yield("fiber", fifth);
+    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
     drain_status(
-        state.service.status_channel(),
+        fiber.state().service.status_channel(),
         status_consumer,
         &mut member_cache,
     );
-    drain_timeline(&state.timeline, timeline_consumer);
-    drain_audit(&state.audit, audit_consumer);
+    drain_timeline(&fiber.state().timeline, timeline_consumer);
+    drain_audit(&fiber.state().audit, audit_consumer);
 
-    state
+    fiber
+        .state()
         .service
         .control_channel()
         .try_send(control_producer, AllocatorControlRequest::RepublishDomains)
@@ -794,29 +856,32 @@ fn main() {
     let sixth = fiber.resume().expect("republish fiber pump should resume");
     print_rule("Fiber Step 6");
     print_fiber_yield("fiber", sixth);
-    drain_metadata(state.service.metadata_channel(), metadata_consumer);
+    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
+    drain_metadata(fiber.state().service.metadata_channel(), metadata_consumer);
     drain_status(
-        state.service.status_channel(),
+        fiber.state().service.status_channel(),
         status_consumer,
         &mut member_cache,
     );
-    drain_timeline(&state.timeline, timeline_consumer);
-    drain_audit(&state.audit, audit_consumer);
+    drain_timeline(&fiber.state().timeline, timeline_consumer);
+    drain_audit(&fiber.state().audit, audit_consumer);
 
     let final_outcome = fiber.resume().expect("final fiber pump should complete");
     print_rule("Fiber Final");
     print_fiber_yield("fiber", final_outcome);
+    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
     drain_status(
-        state.service.status_channel(),
+        fiber.state().service.status_channel(),
         status_consumer,
         &mut member_cache,
     );
-    drain_timeline(&state.timeline, timeline_consumer);
-    drain_audit(&state.audit, audit_consumer);
+    drain_timeline(&fiber.state().timeline, timeline_consumer);
+    drain_audit(&fiber.state().audit, audit_consumer);
 
     match final_outcome {
         FiberYield::Completed(FiberReturn { code: 0 }) => {
-            match state
+            match fiber
+                .state()
                 .service
                 .status_channel()
                 .try_receive(status_consumer)
@@ -825,7 +890,8 @@ fn main() {
                 Some(AllocatorControlStatusMessage::MetadataRepublishScheduled) | None => {}
                 Some(other) => print_status_message(other, &mut member_cache),
             }
-            match state
+            match fiber
+                .state()
                 .service
                 .metadata_channel()
                 .try_receive(metadata_consumer)

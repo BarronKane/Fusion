@@ -27,6 +27,7 @@ use super::{
     AllocatorDomainKind,
     AssignedPoolExtent,
     BoundedArena,
+    ExtentLease,
     HeapAllocator,
     Immortal,
     MemoryPool,
@@ -387,6 +388,28 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             .domain_record(id)
             .ok_or_else(AllocError::invalid_domain)?;
         record.pool.as_ref().map(PoolHandle::stats).transpose()
+    }
+
+    /// Leases one exact pool extent from the supplied allocator domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the domain does not exist, owns no realized pool, or cannot satisfy
+    /// the requested exact extent honestly.
+    pub fn extent(
+        &self,
+        id: AllocatorDomainId,
+        request: MemoryPoolExtentRequest,
+    ) -> Result<ExtentLease, AllocError> {
+        if request.len == 0 || request.align == 0 || !request.align.is_power_of_two() {
+            return Err(AllocError::invalid_request());
+        }
+        let backing_request = ExtentLease::extent_request(request)?;
+        let record = self
+            .domain_record(id)
+            .ok_or_else(AllocError::invalid_domain)?;
+        let extent = record.assign_extent(&backing_request)?;
+        Ok(ExtentLease::new(extent, request)?)
     }
 
     /// Returns one pool-member snapshot for `domain` by stable stream index.

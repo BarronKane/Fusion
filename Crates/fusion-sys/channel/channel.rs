@@ -3,10 +3,10 @@
 pub use fusion_pal::sys::channel::*;
 
 use core::array;
-use core::cell::RefCell;
 use core::marker::PhantomData;
 
 use crate::protocol::Protocol;
+use crate::sync::{Mutex, SyncError, SyncErrorKind};
 use crate::transport::{
     TransportAccessRequirement,
     TransportAttachmentControl,
@@ -38,7 +38,7 @@ use crate::transport::{
 /// - promotes to SPMC when a second consumer attaches
 /// - destructive queue semantics in SPMC mode
 pub struct LocalChannel<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize = 8> {
-    state: RefCell<LocalChannelState<P::Message, CAPACITY, MAX_CONSUMERS>>,
+    state: Mutex<LocalChannelState<P::Message, CAPACITY, MAX_CONSUMERS>>,
     _protocol: PhantomData<P>,
 }
 
@@ -99,7 +99,7 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
         ))
         .map_err(ChannelError::from)?;
         Ok(Self {
-            state: RefCell::new(LocalChannelState::new()),
+            state: Mutex::new(LocalChannelState::new()),
             _protocol: PhantomData,
         })
     }
@@ -147,8 +147,9 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     pub(crate) fn clear_pending_messages(&self) -> Result<usize, ChannelError> {
         let mut state = self
             .state
-            .try_borrow_mut()
-            .map_err(|_| ChannelError::busy())?;
+            .try_lock()
+            .map_err(channel_error_from_sync)?
+            .ok_or_else(ChannelError::busy)?;
         let dropped = state.len;
         if dropped == 0 {
             return Ok(0);
@@ -168,7 +169,10 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportBa
     for LocalChannel<P, CAPACITY, MAX_CONSUMERS>
 {
     fn support(&self) -> TransportSupport {
-        let state = self.state.borrow();
+        let state = self
+            .state
+            .lock()
+            .expect("local channel state lock should acquire for support");
         Self::transport_support(state.mode())
     }
 
@@ -177,11 +181,20 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportBa
     }
 
     fn producer_count(&self) -> usize {
-        usize::from(self.state.borrow().producer.is_some())
+        usize::from(
+            self.state
+                .lock()
+                .expect("local channel state lock should acquire for producer count")
+                .producer
+                .is_some(),
+        )
     }
 
     fn consumer_count(&self) -> usize {
-        self.state.borrow().consumer_count()
+        self.state
+            .lock()
+            .expect("local channel state lock should acquire for consumer count")
+            .consumer_count()
     }
 }
 
@@ -198,8 +211,9 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAt
         Self::validate_attach_request(request)?;
         let mut state = self
             .state
-            .try_borrow_mut()
-            .map_err(|_| TransportError::busy())?;
+            .try_lock()
+            .map_err(transport_error_from_sync)?
+            .ok_or_else(TransportError::busy)?;
         if state.producer.is_some() {
             return Err(TransportError::busy());
         }
@@ -216,8 +230,9 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAt
         Self::validate_attach_request(request)?;
         let mut state = self
             .state
-            .try_borrow_mut()
-            .map_err(|_| TransportError::busy())?;
+            .try_lock()
+            .map_err(transport_error_from_sync)?
+            .ok_or_else(TransportError::busy)?;
         let Some(slot_index) = state.consumers.iter().position(|slot| slot.is_none()) else {
             return Err(TransportError::resource_exhausted());
         };
@@ -230,8 +245,9 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAt
     fn detach_producer(&self, attachment: Self::ProducerAttachment) -> Result<(), TransportError> {
         let mut state = self
             .state
-            .try_borrow_mut()
-            .map_err(|_| TransportError::busy())?;
+            .try_lock()
+            .map_err(transport_error_from_sync)?
+            .ok_or_else(TransportError::busy)?;
         match state.producer {
             Some(token) if token == attachment => {
                 state.producer = None;
@@ -244,8 +260,9 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAt
     fn detach_consumer(&self, attachment: Self::ConsumerAttachment) -> Result<(), TransportError> {
         let mut state = self
             .state
-            .try_borrow_mut()
-            .map_err(|_| TransportError::busy())?;
+            .try_lock()
+            .map_err(transport_error_from_sync)?
+            .ok_or_else(TransportError::busy)?;
         let Some(slot) = state
             .consumers
             .iter_mut()
@@ -264,7 +281,10 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelBase
     type Protocol = P;
 
     fn channel_support(&self) -> ChannelSupport {
-        let state = self.state.borrow();
+        let state = self
+            .state
+            .lock()
+            .expect("local channel state lock should acquire for support");
         let mode = state.mode();
         ChannelSupport {
             caps: ChannelCaps::WRITE
@@ -292,8 +312,9 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelSend
     ) -> Result<(), ChannelError> {
         let mut state = self
             .state
-            .try_borrow_mut()
-            .map_err(|_| ChannelError::busy())?;
+            .try_lock()
+            .map_err(channel_error_from_sync)?
+            .ok_or_else(ChannelError::busy)?;
         if state.producer != Some(producer) {
             return Err(ChannelError::transport_denied());
         }
@@ -317,8 +338,9 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelRece
     ) -> Result<Option<<Self::Protocol as Protocol>::Message>, ChannelError> {
         let mut state = self
             .state
-            .try_borrow_mut()
-            .map_err(|_| ChannelError::busy())?;
+            .try_lock()
+            .map_err(channel_error_from_sync)?
+            .ok_or_else(ChannelError::busy)?;
         if !state
             .consumers
             .iter()
@@ -337,6 +359,26 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelRece
     }
 }
 
+const fn channel_error_from_sync(error: SyncError) -> ChannelError {
+    match error.kind {
+        SyncErrorKind::Unsupported => ChannelError::unsupported(),
+        SyncErrorKind::Invalid | SyncErrorKind::Overflow => ChannelError::invalid(),
+        SyncErrorKind::Busy => ChannelError::busy(),
+        SyncErrorKind::PermissionDenied => ChannelError::permission_denied(),
+        SyncErrorKind::Platform(code) => ChannelError::platform(code),
+    }
+}
+
+const fn transport_error_from_sync(error: SyncError) -> TransportError {
+    match error.kind {
+        SyncErrorKind::Unsupported => TransportError::unsupported(),
+        SyncErrorKind::Invalid | SyncErrorKind::Overflow => TransportError::invalid(),
+        SyncErrorKind::Busy => TransportError::busy(),
+        SyncErrorKind::PermissionDenied => TransportError::permission_denied(),
+        SyncErrorKind::Platform(code) => TransportError::platform(code),
+    }
+}
+
 #[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     use super::*;
@@ -351,6 +393,8 @@ mod tests {
         ProtocolVersion,
     };
     use crate::transport::TransportErrorKind;
+    use std::sync::Arc;
+    use std::thread;
 
     struct LocalWordProtocol;
 
@@ -483,5 +527,32 @@ mod tests {
             result,
             Err(error) if error.kind() == ChannelErrorKind::ProtocolMismatch
         ));
+    }
+
+    #[test]
+    fn local_channel_cross_thread_send_receive_round_trip() {
+        let channel =
+            Arc::new(LocalChannel::<LocalWordProtocol, 4>::new().expect("channel should build"));
+        let producer = channel
+            .attach_producer(TransportAttachmentRequest::cross_courier())
+            .expect("producer should attach");
+        let consumer = channel
+            .attach_consumer(TransportAttachmentRequest::cross_courier())
+            .expect("consumer should attach");
+        let sender = Arc::clone(&channel);
+
+        let thread = thread::spawn(move || {
+            sender
+                .try_send(producer, 0xABCD_1234)
+                .expect("cross-thread send should succeed");
+        });
+
+        thread.join().expect("sender thread should finish");
+        assert_eq!(
+            channel
+                .try_receive(consumer)
+                .expect("cross-thread receive should succeed"),
+            Some(0xABCD_1234)
+        );
     }
 }

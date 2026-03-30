@@ -5,6 +5,7 @@ use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use fusion_sys::channel::ChannelReceive;
 use fusion_sys::fiber::{
     ContextCaps,
     ContextErrorKind,
@@ -12,14 +13,18 @@ use fusion_sys::fiber::{
     ContextStackLayout,
     ContextSwitch,
     Fiber,
+    FiberMetadataMessage,
     FiberReturn,
+    FiberRunnable,
     FiberStack,
     FiberSystem,
     FiberYield,
+    ManagedFiber,
     PlatformSavedContext,
     system_context,
     yield_now,
 };
+use fusion_sys::transport::{TransportAttachmentControl, TransportAttachmentRequest};
 use std::thread;
 use std::vec;
 
@@ -57,6 +62,20 @@ unsafe fn cooperative_fiber(context: *mut ()) -> FiberReturn {
     FiberReturn::new(99)
 }
 
+struct TypedYieldState<'a> {
+    progress: &'a AtomicUsize,
+}
+
+impl FiberRunnable for TypedYieldState<'_> {
+    fn run(self: core::pin::Pin<&mut Self>) -> FiberReturn {
+        let state = self.get_mut();
+        state.progress.store(1, Ordering::Release);
+        yield_now().expect("typed fiber should yield back to its caller");
+        state.progress.store(2, Ordering::Release);
+        FiberReturn::new(77)
+    }
+}
+
 #[test]
 fn fiber_support_surface_is_exposed() {
     let support = FiberSystem::new().support();
@@ -78,8 +97,8 @@ fn raw_context_make_and_swap_follow_backend_truth() {
 
     let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
     let stack_layout = ContextStackLayout {
-        // SAFETY: the stack buffer is a live local allocation for the duration of the test.
-        base: unsafe { NonNull::new_unchecked(stack_words.as_mut_ptr().cast::<u8>()) },
+        base: NonNull::new(stack_words.as_mut_ptr().cast::<u8>())
+            .expect("stack buffer should have a non-null base"),
         len: NonZeroUsize::new(stack_words.len() * mem::size_of::<u128>())
             .expect("stack length should be non-zero"),
     };
@@ -133,11 +152,7 @@ fn fiber_primitive_yields_and_completes_follow_backend_truth() {
     let support = FiberSystem::new().support();
 
     let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
-    let stack = FiberStack::new(
-        unsafe { NonNull::new_unchecked(stack_words.as_mut_ptr().cast::<u8>()) },
-        stack_words.len() * mem::size_of::<u128>(),
-    )
-    .expect("stack should be valid");
+    let stack = FiberStack::from_slice(&mut stack_words).expect("stack should be valid");
     let progress = AtomicUsize::new(0);
 
     if !support.context.caps.contains(ContextCaps::MAKE) {
@@ -183,11 +198,7 @@ fn suspended_fiber_can_resume_on_another_thread_when_reported() {
     }
 
     let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
-    let stack = FiberStack::new(
-        unsafe { NonNull::new_unchecked(stack_words.as_mut_ptr().cast::<u8>()) },
-        stack_words.len() * mem::size_of::<u128>(),
-    )
-    .expect("stack should be valid");
+    let stack = FiberStack::from_slice(&mut stack_words).expect("stack should be valid");
     let progress = AtomicUsize::new(0);
 
     let mut fiber = Fiber::new(
@@ -213,6 +224,93 @@ fn suspended_fiber_can_resume_on_another_thread_when_reported() {
             .expect("resuming suspended fiber on another thread should not panic")
             .expect("cross-carrier resume should complete"),
         FiberYield::Completed(FiberReturn::new(99))
+    );
+    assert_eq!(progress.load(Ordering::Acquire), 2);
+}
+
+#[test]
+fn typed_pinned_fiber_yields_and_completes() {
+    let support = FiberSystem::new().support();
+    if !support.context.caps.contains(ContextCaps::MAKE) {
+        return;
+    }
+
+    let progress = AtomicUsize::new(0);
+    let mut state = core::pin::pin!(TypedYieldState {
+        progress: &progress,
+    });
+    let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
+    let stack = FiberStack::from_slice(&mut stack_words).expect("stack should be valid");
+
+    let mut fiber = Fiber::spawn_pinned(stack, state.as_mut()).expect("typed fiber should build");
+    assert_eq!(
+        fiber.resume().expect("first resume should yield"),
+        FiberYield::Yielded
+    );
+    assert_eq!(progress.load(Ordering::Acquire), 1);
+    assert_eq!(
+        fiber.resume().expect("second resume should complete"),
+        FiberYield::Completed(FiberReturn::new(77))
+    );
+    assert_eq!(progress.load(Ordering::Acquire), 2);
+}
+
+#[test]
+fn managed_fiber_emits_automatic_metadata() {
+    let support = FiberSystem::new().support();
+    if !support.context.caps.contains(ContextCaps::MAKE) {
+        return;
+    }
+
+    let progress = AtomicUsize::new(0);
+    let mut state = core::pin::pin!(TypedYieldState {
+        progress: &progress,
+    });
+    let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
+    let stack = FiberStack::from_slice(&mut stack_words).expect("stack should be valid");
+
+    let mut fiber =
+        ManagedFiber::<_, 8>::new(state.as_mut(), stack).expect("managed fiber should build");
+    let consumer = fiber
+        .metadata_channel()
+        .attach_consumer(TransportAttachmentRequest::same_courier())
+        .expect("metadata consumer should attach");
+    let fiber_id = fiber.id();
+
+    assert_eq!(
+        fiber
+            .metadata_channel()
+            .try_receive(consumer)
+            .expect("created metadata should read"),
+        Some(FiberMetadataMessage::Created { fiber: fiber_id })
+    );
+
+    assert_eq!(
+        fiber.resume().expect("first resume should yield"),
+        FiberYield::Yielded
+    );
+    assert_eq!(
+        fiber
+            .metadata_channel()
+            .try_receive(consumer)
+            .expect("started metadata should read"),
+        Some(FiberMetadataMessage::Started { fiber: fiber_id })
+    );
+    assert_eq!(progress.load(Ordering::Acquire), 1);
+
+    assert_eq!(
+        fiber.resume().expect("second resume should complete"),
+        FiberYield::Completed(FiberReturn::new(77))
+    );
+    assert_eq!(
+        fiber
+            .metadata_channel()
+            .try_receive(consumer)
+            .expect("completed metadata should read"),
+        Some(FiberMetadataMessage::Completed {
+            fiber: fiber_id,
+            result: FiberReturn::new(77),
+        })
     );
     assert_eq!(progress.load(Ordering::Acquire), 2);
 }

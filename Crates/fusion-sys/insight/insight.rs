@@ -8,8 +8,8 @@ mod timeline;
 pub use fusion_pal::sys::insight::*;
 pub use timeline::*;
 
-use core::cell::Cell;
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 #[cfg(feature = "debug-insights")]
 use crate::channel::LocalChannel;
@@ -37,9 +37,10 @@ pub struct LocalInsightChannel<P: Protocol, const CAPACITY: usize, const MAX_CON
     capture: InsightCaptureMode,
     #[cfg(feature = "debug-insights")]
     inner: LocalChannel<P, CAPACITY, MAX_CONSUMERS>,
-    observation_state: Cell<InsightObservationState>,
-    observation_epoch: Cell<u64>,
-    pending_transition: Cell<Option<InsightObservationTransition>>,
+    observation_count: AtomicUsize,
+    observation_state: AtomicU8,
+    observation_epoch: AtomicUsize,
+    pending_transition: AtomicU8,
     _protocol: PhantomData<P>,
 }
 
@@ -96,9 +97,12 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
                 class,
                 capture,
                 inner,
-                observation_state: Cell::new(InsightObservationState::Inactive),
-                observation_epoch: Cell::new(0),
-                pending_transition: Cell::new(None),
+                observation_count: AtomicUsize::new(0),
+                observation_state: AtomicU8::new(observation_state_code(
+                    InsightObservationState::Inactive,
+                )),
+                observation_epoch: AtomicUsize::new(0),
+                pending_transition: AtomicU8::new(0),
                 _protocol: PhantomData,
             })
         }
@@ -110,24 +114,29 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     }
 
     #[cfg(feature = "debug-insights")]
-    fn refresh_observation_state(&self) {
-        let next_state = if self.inner.consumer_count() == 0 {
-            InsightObservationState::Inactive
-        } else {
-            InsightObservationState::Active
-        };
-        let current_state = self.observation_state.get();
-        if current_state == next_state {
-            return;
-        }
+    fn activate_observation(&self) {
+        self.observation_state.store(
+            observation_state_code(InsightObservationState::Active),
+            Ordering::Release,
+        );
+        self.observation_epoch.fetch_add(1, Ordering::AcqRel);
+        self.pending_transition.store(
+            observation_transition_code(Some(InsightObservationTransition::Activated)),
+            Ordering::Release,
+        );
+    }
 
-        self.observation_state.set(next_state);
-        self.observation_epoch
-            .set(self.observation_epoch.get().wrapping_add(1));
-        self.pending_transition.set(Some(match next_state {
-            InsightObservationState::Inactive => InsightObservationTransition::Deactivated,
-            InsightObservationState::Active => InsightObservationTransition::Activated,
-        }));
+    #[cfg(feature = "debug-insights")]
+    fn deactivate_observation(&self) {
+        self.observation_state.store(
+            observation_state_code(InsightObservationState::Inactive),
+            Ordering::Release,
+        );
+        self.observation_epoch.fetch_add(1, Ordering::AcqRel);
+        self.pending_transition.store(
+            observation_transition_code(Some(InsightObservationTransition::Deactivated)),
+            Ordering::Release,
+        );
     }
 
     /// Returns the truthful insight support surface for this configured channel.
@@ -151,7 +160,7 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     /// Returns the current observer lifecycle state.
     #[must_use]
     pub fn observation_state(&self) -> InsightObservationState {
-        self.observation_state.get()
+        decode_observation_state(self.observation_state.load(Ordering::Acquire))
     }
 
     /// Returns the current observer lifecycle epoch.
@@ -160,32 +169,26 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     /// can latch capture sessions without mistaking every attach for a new trace.
     #[must_use]
     pub fn observation_epoch(&self) -> u64 {
-        self.observation_epoch.get()
+        self.observation_epoch.load(Ordering::Acquire) as u64
     }
 
     /// Returns one pending observer lifecycle transition, if one has occurred since the last poll.
     #[must_use]
     pub fn take_observation_transition(&self) -> Option<InsightObservationTransition> {
-        let transition = self.pending_transition.get();
-        self.pending_transition.set(None);
-        transition
+        decode_observation_transition(self.pending_transition.swap(0, Ordering::AcqRel))
     }
 
     /// Returns `true` when at least one consumer is currently attached.
     #[must_use]
     pub fn is_observed(&self) -> bool {
-        self.observation_state() == InsightObservationState::Active
+        self.observation_count.load(Ordering::Acquire) != 0
     }
 
     /// Builds and sends one insight payload only when the channel is currently observed.
     ///
     /// Returns `Ok(false)` when no consumer is attached, so the caller can skip all expensive
     /// capture work in release builds with insight enabled but inactive.
-    pub fn try_send_if_observed<F>(
-        &self,
-        producer: usize,
-        build: F,
-    ) -> Result<bool, ChannelError>
+    pub fn try_send_if_observed<F>(&self, producer: usize, build: F) -> Result<bool, ChannelError>
     where
         F: FnOnce() -> P::Message,
     {
@@ -278,7 +281,9 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAt
         #[cfg(feature = "debug-insights")]
         {
             let attachment = self.inner.attach_consumer(request)?;
-            self.refresh_observation_state();
+            if self.observation_count.fetch_add(1, Ordering::AcqRel) == 0 {
+                self.activate_observation();
+            }
             Ok(attachment)
         }
         #[cfg(not(feature = "debug-insights"))]
@@ -304,7 +309,11 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAt
         #[cfg(feature = "debug-insights")]
         {
             self.inner.detach_consumer(attachment)?;
-            self.refresh_observation_state();
+            let previous = self.observation_count.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous != 0, "insight consumer count underflow");
+            if previous == 1 {
+                self.deactivate_observation();
+            }
             Ok(())
         }
         #[cfg(not(feature = "debug-insights"))]
@@ -312,6 +321,38 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAt
             let _ = attachment;
             Err(TransportError::unsupported())
         }
+    }
+}
+
+#[cfg(feature = "debug-insights")]
+const fn observation_state_code(state: InsightObservationState) -> u8 {
+    match state {
+        InsightObservationState::Inactive => 0,
+        InsightObservationState::Active => 1,
+    }
+}
+
+const fn decode_observation_state(code: u8) -> InsightObservationState {
+    match code {
+        1 => InsightObservationState::Active,
+        _ => InsightObservationState::Inactive,
+    }
+}
+
+#[cfg(feature = "debug-insights")]
+const fn observation_transition_code(transition: Option<InsightObservationTransition>) -> u8 {
+    match transition {
+        None => 0,
+        Some(InsightObservationTransition::Activated) => 1,
+        Some(InsightObservationTransition::Deactivated) => 2,
+    }
+}
+
+const fn decode_observation_transition(code: u8) -> Option<InsightObservationTransition> {
+    match code {
+        1 => Some(InsightObservationTransition::Activated),
+        2 => Some(InsightObservationTransition::Deactivated),
+        _ => None,
     }
 }
 
@@ -391,7 +432,6 @@ mod tests {
         ProtocolTransportRequirements,
         ProtocolVersion,
     };
-
     struct LocalWordProtocol;
 
     impl Protocol for LocalWordProtocol {
@@ -560,7 +600,10 @@ mod tests {
         )
         .expect("debug-insights channel should build");
 
-        assert_eq!(channel.observation_state(), InsightObservationState::Inactive);
+        assert_eq!(
+            channel.observation_state(),
+            InsightObservationState::Inactive
+        );
         assert_eq!(channel.observation_epoch(), 0);
         assert_eq!(channel.take_observation_transition(), None);
 
@@ -592,12 +635,53 @@ mod tests {
         channel
             .detach_consumer(second)
             .expect("second consumer should detach");
-        assert_eq!(channel.observation_state(), InsightObservationState::Inactive);
+        assert_eq!(
+            channel.observation_state(),
+            InsightObservationState::Inactive
+        );
         assert_eq!(channel.observation_epoch(), 2);
         assert_eq!(
             channel.take_observation_transition(),
             Some(InsightObservationTransition::Deactivated)
         );
         assert_eq!(channel.take_observation_transition(), None);
+    }
+
+    #[cfg(all(feature = "debug-insights", feature = "std", not(target_os = "none")))]
+    #[test]
+    fn local_insight_channel_cross_thread_send_observes_and_delivers() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let channel = Arc::new(
+            LocalInsightChannel::<LocalWordProtocol, 4>::new(
+                InsightChannelClass::Timeline,
+                InsightCaptureMode::Lossy,
+            )
+            .expect("debug-insights channel should build"),
+        );
+        let producer = channel
+            .attach_producer(crate::transport::TransportAttachmentRequest::cross_courier())
+            .expect("producer should attach");
+        let consumer = channel
+            .attach_consumer(crate::transport::TransportAttachmentRequest::cross_courier())
+            .expect("consumer should attach");
+        let sender = Arc::clone(&channel);
+
+        let thread = thread::spawn(move || {
+            assert!(
+                sender
+                    .try_send_if_observed(producer, || 0xCAFE_BABE)
+                    .expect("cross-thread lazy send should succeed"),
+            );
+        });
+
+        thread.join().expect("sender thread should finish");
+        assert_eq!(
+            channel
+                .try_receive(consumer)
+                .expect("receive should succeed"),
+            Some(0xCAFE_BABE)
+        );
     }
 }

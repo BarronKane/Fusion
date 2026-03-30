@@ -4,9 +4,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use fusion_std::thread::{
-    CurrentFiberPool,
-    FiberPlanningSupport,
-    FiberPoolConfig,
+    FiberPoolBootstrap,
     FiberStackClass,
     RuntimeSizingStrategy,
     generated_default_fiber_stack_bytes,
@@ -33,7 +31,40 @@ fn main() {
          #[allow(dead_code)] pub const DISPLAY_FIBER_COUNT: usize = {fiber_count};\n\
          #[allow(dead_code)] pub const FIBER_POOL_SLAB_ALIGN: usize = {fiber_align};\n\
          #[allow(dead_code)] pub const FIBER_POOL_SLAB_BYTES: usize = {fiber_bytes};\n\
-         #[repr(align({fiber_align}))] pub struct FiberPoolAlignedBacking(pub [u8; FIBER_POOL_SLAB_BYTES]);\n",
+         #[allow(dead_code)] #[repr(align({fiber_align}))] struct FiberPoolAlignedBacking([u8; FIBER_POOL_SLAB_BYTES]);\n\
+         static DISPLAY_FIBERS_INIT: fusion_std::sync::ThinMutex = fusion_std::sync::ThinMutex::new();\n\
+         static DISPLAY_FIBERS_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);\n\
+         static mut FIBER_POOL_SLAB_BACKING: FiberPoolAlignedBacking = FiberPoolAlignedBacking([0; FIBER_POOL_SLAB_BYTES]);\n\
+         static mut DISPLAY_FIBERS_STORAGE: core::mem::MaybeUninit<fusion_std::thread::CurrentFiberPool> = core::mem::MaybeUninit::uninit();\n\
+         fn fibers() -> &'static fusion_std::thread::CurrentFiberPool {{\n\
+             if !DISPLAY_FIBERS_READY.load(core::sync::atomic::Ordering::Acquire) {{\n\
+                 let _guard = DISPLAY_FIBERS_INIT.lock().expect(\"rp2350 display fiber init lock should acquire\");\n\
+                 if !DISPLAY_FIBERS_READY.load(core::sync::atomic::Ordering::Relaxed) {{\n\
+                     let fibers = unsafe {{\n\
+                         fusion_std::thread::FiberPoolBootstrap::uniform_static_target(\n\
+                             DISPLAY_FIBER_COUNT,\n\
+                             core::num::NonZeroUsize::new(DISPLAY_FIBER_STACK_BYTES)\n\
+                                 .expect(\"display fiber stack should be non-zero\"),\n\
+                         )\n\
+                         .from_static_slab((&raw mut FIBER_POOL_SLAB_BACKING).cast::<u8>(), FIBER_POOL_SLAB_BYTES)\n\
+                     }}\n\
+                     .expect(\"display fiber pool should build from explicit static backing\");\n\
+                     unsafe {{ core::ptr::addr_of_mut!(DISPLAY_FIBERS_STORAGE).write(core::mem::MaybeUninit::new(fibers)); }}\n\
+                     DISPLAY_FIBERS_READY.store(true, core::sync::atomic::Ordering::Release);\n\
+                 }}\n\
+             }}\n\
+             unsafe {{ (&*core::ptr::addr_of!(DISPLAY_FIBERS_STORAGE)).assume_init_ref() }}\n\
+         }}\n\
+         pub fn spawn<F, T>(job: F) -> Result<fusion_std::thread::CurrentFiberHandle<T>, fusion_sys::fiber::FiberError>\n\
+         where\n\
+             F: FnOnce() -> T + Send + 'static,\n\
+             T: 'static,\n\
+         {{\n\
+             fibers().spawn(job)\n\
+         }}\n\
+         pub fn drive_once() -> Result<bool, fusion_sys::fiber::FiberError> {{\n\
+             fibers().drive_once()\n\
+         }}\n",
         fiber_count = DISPLAY_FIBER_COUNT,
         fiber_align = fiber_slab.align,
         fiber_bytes = fiber_slab.bytes,
@@ -57,19 +88,14 @@ fn rp2350_fiber_sizing() -> RuntimeSizingStrategy {
 }
 
 fn fiber_pool_slab_request(stack_bytes: usize, sizing: RuntimeSizingStrategy) -> SlabRequest {
-    let config = FiberPoolConfig::fixed(
-        NonZeroUsize::new(stack_bytes).expect("display fiber stack should be non-zero"),
+    let combined = FiberPoolBootstrap::uniform_static_target(
         DISPLAY_FIBER_COUNT,
+        NonZeroUsize::new(stack_bytes).expect("display fiber stack should be non-zero"),
     )
-    .with_guard_pages(0)
-    .with_sizing_strategy(sizing);
-    let combined = CurrentFiberPool::backing_plan_with_planning_support(
-        &config,
-        FiberPlanningSupport::cortex_m(),
-    )
+    .with_sizing_strategy(sizing)
+    .cortex_m_backing_plan()
     .expect("exact static display fiber-pool backing plan should build")
-    .combined()
-    .expect("display fiber-pool backing should combine");
+    ;
     SlabRequest {
         bytes: combined.slab.bytes,
         align: combined.slab.align,
