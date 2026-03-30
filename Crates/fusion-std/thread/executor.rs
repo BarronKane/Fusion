@@ -3889,6 +3889,24 @@ impl AsyncTaskRegistry {
             free.push(slot_index)
         })?
     }
+
+    fn available_slots(&self) -> Result<usize, ExecutorError> {
+        self.free.with_ref(|free| free.len)
+    }
+
+    fn unfinished_task_count(&self) -> Result<usize, ExecutorError> {
+        let mut count = 0usize;
+        for slot in &self.slots {
+            let generation = slot.generation();
+            if generation == 0 {
+                continue;
+            }
+            if !slot.is_finished(generation)? {
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
+    }
 }
 
 impl Drop for AsyncTaskRegistry {
@@ -5412,6 +5430,27 @@ impl CurrentAsyncRuntime {
         self.executor.config
     }
 
+    /// Returns the number of immediately available task slots in this runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the executor registry cannot be observed honestly.
+    pub fn available_task_slots(&self) -> Result<usize, ExecutorError> {
+        self.executor.available_task_slots()
+    }
+
+    /// Returns the number of unfinished tasks still owned by this runtime.
+    ///
+    /// Finished-but-unjoined tasks do not count here; this is the quiescence-facing view used by
+    /// higher layers to decide whether a runtime can be replaced honestly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the executor registry cannot be observed honestly.
+    pub fn unfinished_task_count(&self) -> Result<usize, ExecutorError> {
+        self.executor.unfinished_task_count()
+    }
+
     /// Returns the exact configured backing plan for this runtime.
     ///
     /// This reports the honest current runtime shape under the selected planning surface. It is a
@@ -5545,6 +5584,14 @@ impl CurrentAsyncRuntime {
     /// Returns any honest executor failure.
     pub fn run_until_idle(&self) -> Result<usize, ExecutorError> {
         self.executor.run_until_idle()
+    }
+
+    pub(crate) fn drive_reactor_once(&self, wait: bool) -> Result<bool, ExecutorError> {
+        let core = self.executor.core()?;
+        let SchedulerBinding::Current = &core.scheduler else {
+            return Err(ExecutorError::Unsupported);
+        };
+        core.drive_reactor_once(wait)
     }
 
     /// Drives one future to completion on the current thread.
@@ -6140,6 +6187,14 @@ impl Executor {
     #[must_use]
     pub const fn mode(&self) -> ExecutorMode {
         self.config.mode
+    }
+
+    fn available_task_slots(&self) -> Result<usize, ExecutorError> {
+        self.core()?.registry()?.available_slots()
+    }
+
+    fn unfinished_task_count(&self) -> Result<usize, ExecutorError> {
+        self.core()?.registry()?.unfinished_task_count()
     }
 
     /// Returns the public reactor wrapper.

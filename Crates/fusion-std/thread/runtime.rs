@@ -28,10 +28,18 @@ use super::{
 use crate::sync::SyncErrorKind;
 use core::cell::UnsafeCell;
 use core::future::Future;
-use core::mem::MaybeUninit;
+use core::hint::spin_loop;
+use core::mem::{align_of, size_of};
 use core::num::NonZeroUsize;
+use core::ptr::NonNull;
 use fusion_pal::sys::mem::MemBase;
-use fusion_sys::alloc::ExtentLease;
+use fusion_sys::alloc::{
+    AllocError,
+    AllocErrorKind,
+    Allocator,
+    ExtentLease,
+    MemoryPoolExtentRequest,
+};
 use fusion_sys::fiber::{FiberError, FiberErrorKind, FiberSystem};
 pub use fusion_sys::mem::resource::AllocatorLayoutPolicy;
 use fusion_sys::mem::resource::{
@@ -42,11 +50,11 @@ use fusion_sys::mem::resource::{
     ResourceBackingKind,
     ResourceRange,
 };
-use fusion_sys::sync::{Once, OnceInitError};
 use fusion_sys::thread::{
     RuntimeBackingError,
     RuntimeBackingErrorKind,
     allocate_owned_runtime_slab,
+    system_thread,
     uses_explicit_bound_runtime_backing,
 };
 
@@ -137,49 +145,6 @@ pub struct CurrentFiberAsyncRuntime {
     executor: CurrentAsyncRuntime,
 }
 
-/// Small current-thread once cell for board-local or app-local lazy runtime singletons.
-///
-/// This is intentionally narrower than a general-purpose once lock because current-thread
-/// runtimes are frequently `!Send` / `!Sync`, yet still need one static lazy entry point.
-struct CurrentThreadOnce<T> {
-    once: Once,
-    value: UnsafeCell<MaybeUninit<T>>,
-}
-
-impl<T> CurrentThreadOnce<T> {
-    const fn new() -> Self {
-        Self {
-            once: Once::new(),
-            value: UnsafeCell::new(MaybeUninit::uninit()),
-        }
-    }
-
-    fn get_or_try_init<F, E>(&'static self, init: F) -> Result<&'static T, OnceInitError<E>>
-    where
-        F: FnOnce() -> Result<T, E>,
-    {
-        if self.once.is_completed() {
-            // SAFETY: completion only happens after the initializer writes the value.
-            return Ok(unsafe { (*self.value.get()).assume_init_ref() });
-        }
-
-        let value_ptr = self.value.get();
-        self.once.call_once_try(|| {
-            let value = init()?;
-            // SAFETY: the winning initializer owns exclusive write access until completion.
-            unsafe { (*value_ptr).write(value) };
-            Ok(())
-        })?;
-
-        // SAFETY: completion above guarantees initialization happened exactly once.
-        Ok(unsafe { (*self.value.get()).assume_init_ref() })
-    }
-}
-
-// SAFETY: this cell is intended only for current-thread lazy singletons. It must not be treated
-// as a general cross-thread sharing primitive for arbitrary `T`.
-unsafe impl<T> Sync for CurrentThreadOnce<T> {}
-
 fn selected_stack_size_with_optional_floor(
     stack_floor_bytes: Option<usize>,
 ) -> Result<NonZeroUsize, FiberError> {
@@ -224,27 +189,240 @@ fn executor_error_from_current_runtime(error: CurrentFiberAsyncRuntimeError) -> 
     }
 }
 
+fn executor_error_from_runtime_sync(error: crate::sync::SyncError) -> ExecutorError {
+    match error.kind {
+        SyncErrorKind::Unsupported => ExecutorError::Unsupported,
+        SyncErrorKind::Invalid => ExecutorError::Sync(SyncErrorKind::Invalid),
+        SyncErrorKind::Overflow => ExecutorError::Sync(SyncErrorKind::Overflow),
+        SyncErrorKind::Busy | SyncErrorKind::PermissionDenied | SyncErrorKind::Platform(_) => {
+            ExecutorError::Sync(SyncErrorKind::Busy)
+        }
+    }
+}
+
+fn executor_error_from_alloc(error: AllocError) -> ExecutorError {
+    match error.kind {
+        AllocErrorKind::Unsupported | AllocErrorKind::PolicyDenied => ExecutorError::Unsupported,
+        AllocErrorKind::InvalidRequest | AllocErrorKind::InvalidDomain => executor_invalid(),
+        AllocErrorKind::Busy | AllocErrorKind::SynchronizationFailure(_) => executor_busy(),
+        AllocErrorKind::MetadataExhausted
+        | AllocErrorKind::CapacityExhausted
+        | AllocErrorKind::OutOfMemory
+        | AllocErrorKind::ResourceFailure(_)
+        | AllocErrorKind::PoolFailure(_) => executor_overflow(),
+    }
+}
+
+const fn executor_invalid() -> ExecutorError {
+    ExecutorError::Sync(SyncErrorKind::Invalid)
+}
+
+const fn executor_busy() -> ExecutorError {
+    ExecutorError::Sync(SyncErrorKind::Busy)
+}
+
+const fn executor_overflow() -> ExecutorError {
+    ExecutorError::Sync(SyncErrorKind::Overflow)
+}
+
+fn next_runtime_capacity(current: usize, required_minimum: usize) -> Result<usize, ExecutorError> {
+    let mut next = current.max(1);
+    if required_minimum <= next {
+        return next.checked_mul(2).ok_or_else(executor_overflow);
+    }
+    while next < required_minimum {
+        next = next.checked_mul(2).ok_or_else(executor_overflow)?;
+    }
+    Ok(next)
+}
+
+fn initial_runtime_capacity(
+    limit: Option<usize>,
+    requested_capacity: Option<usize>,
+) -> Option<usize> {
+    let requested = requested_capacity.unwrap_or(1).max(1);
+    match limit {
+        Some(limit) if requested > limit => None,
+        Some(_) | None => Some(requested),
+    }
+}
+
+fn next_bounded_runtime_capacity(
+    current: usize,
+    required_minimum: usize,
+    limit: Option<usize>,
+) -> Result<Option<usize>, ExecutorError> {
+    if let Some(limit) = limit
+        && required_minimum > limit
+    {
+        return Ok(None);
+    }
+    let next = if current == 0 {
+        required_minimum.max(1)
+    } else {
+        next_runtime_capacity(current, required_minimum)?
+    };
+    Ok(Some(match limit {
+        Some(limit) => next.min(limit),
+        None => next,
+    }))
+}
+
+#[derive(Debug)]
+struct CurrentFiberRuntimeSlotState {
+    runtime: Option<CurrentFiberPool>,
+    configured_capacity: usize,
+    effective_stack_floor_bytes: usize,
+    borrows: usize,
+}
+
+struct CurrentFiberRuntimeSlot {
+    lock: fusion_sys::sync::ThinMutex,
+    state: UnsafeCell<CurrentFiberRuntimeSlotState>,
+}
+
+impl CurrentFiberRuntimeSlot {
+    const fn new() -> Self {
+        Self {
+            lock: fusion_sys::sync::ThinMutex::new(),
+            state: UnsafeCell::new(CurrentFiberRuntimeSlotState {
+                runtime: None,
+                configured_capacity: 0,
+                effective_stack_floor_bytes: 0,
+                borrows: 0,
+            }),
+        }
+    }
+}
+
+// SAFETY: this slot only exposes thread-affine current-thread fiber state. Internal mutation is
+// serialized through the thin mutex, and borrowed runtimes are pinned in place until the borrow
+// count returns to zero.
+unsafe impl Sync for CurrentFiberRuntimeSlot {}
+
+struct CurrentFiberPoolBorrow<'a> {
+    slot: &'a CurrentFiberRuntimeSlot,
+    runtime: *const CurrentFiberPool,
+    configured_capacity: usize,
+}
+
+impl CurrentFiberPoolBorrow<'_> {
+    const fn configured_capacity(&self) -> usize {
+        self.configured_capacity
+    }
+}
+
+impl core::ops::Deref for CurrentFiberPoolBorrow<'_> {
+    type Target = CurrentFiberPool;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: borrows increment the slot borrow count under lock, and the runtime is not
+        // replaced while any borrow is live.
+        unsafe { &*self.runtime }
+    }
+}
+
+impl Drop for CurrentFiberPoolBorrow<'_> {
+    fn drop(&mut self) {
+        if let Ok(_guard) = self.slot.lock.lock() {
+            // SAFETY: the thin mutex serializes mutation of the singleton fiber slot.
+            let state = unsafe { &mut *self.slot.state.get() };
+            debug_assert!(
+                state.borrows != 0,
+                "fiber runtime borrow count should not underflow"
+            );
+            if state.borrows != 0 {
+                state.borrows -= 1;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CurrentAsyncRuntimeSegment {
+    runtime: CurrentAsyncRuntime,
+    next: Option<NonNull<CurrentAsyncRuntimeSegment>>,
+    _backing: ExtentLease,
+}
+
+#[derive(Debug)]
+struct CurrentAsyncRuntimeSlotState {
+    head: Option<NonNull<CurrentAsyncRuntimeSegment>>,
+    total_capacity: usize,
+}
+
+struct CurrentAsyncRuntimeSlot {
+    lock: fusion_sys::sync::ThinMutex,
+    state: UnsafeCell<CurrentAsyncRuntimeSlotState>,
+}
+
+impl CurrentAsyncRuntimeSlot {
+    const fn new() -> Self {
+        Self {
+            lock: fusion_sys::sync::ThinMutex::new(),
+            state: UnsafeCell::new(CurrentAsyncRuntimeSlotState {
+                head: None,
+                total_capacity: 0,
+            }),
+        }
+    }
+}
+
+// SAFETY: this slot only exposes thread-affine current-thread async state. Internal mutation is
+// serialized through the thin mutex, and appended segments remain stable for the singleton's life.
+unsafe impl Sync for CurrentAsyncRuntimeSlot {}
+
 /// Tiny lazy current-thread fiber+async runtime façade for board-local front doors.
 ///
 /// This exists for targets that want a `thread::spawn()`-clean consumer surface while the exact
 /// generated metadata pipeline still depends on build-time sidecars rather than compiler-native
 /// artifacts.
-pub struct CurrentFiberAsyncSingleton<const MAX_FIBERS: usize, const ASYNC_CAPACITY: usize> {
+pub struct CurrentFiberAsyncSingleton {
+    fiber_capacity_limit: Option<usize>,
+    async_capacity_limit: Option<usize>,
     stack_floor_bytes: Option<usize>,
     guard_pages: Option<usize>,
-    runtime: CurrentThreadOnce<CurrentFiberAsyncRuntime>,
+    fibers: CurrentFiberRuntimeSlot,
+    executor: CurrentAsyncRuntimeSlot,
 }
 
-impl<const MAX_FIBERS: usize, const ASYNC_CAPACITY: usize>
-    CurrentFiberAsyncSingleton<MAX_FIBERS, ASYNC_CAPACITY>
-{
+impl CurrentFiberAsyncSingleton {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            fiber_capacity_limit: None,
+            async_capacity_limit: None,
             stack_floor_bytes: None,
             guard_pages: None,
-            runtime: CurrentThreadOnce::new(),
+            fibers: CurrentFiberRuntimeSlot::new(),
+            executor: CurrentAsyncRuntimeSlot::new(),
         }
+    }
+
+    /// Installs one explicit current-thread fiber capacity cap.
+    ///
+    /// This is runtime policy only. It does not describe backend structural minimums.
+    #[must_use]
+    pub const fn with_fiber_capacity(mut self, fiber_capacity: usize) -> Self {
+        self.fiber_capacity_limit = Some(if fiber_capacity == 0 {
+            1
+        } else {
+            fiber_capacity
+        });
+        self
+    }
+
+    /// Installs one explicit current-thread async task capacity cap.
+    ///
+    /// This is runtime policy only. It does not describe backend structural minimums.
+    #[must_use]
+    pub const fn with_async_capacity(mut self, async_capacity: usize) -> Self {
+        self.async_capacity_limit = Some(if async_capacity == 0 {
+            1
+        } else {
+            async_capacity
+        });
+        self
     }
 
     /// Installs one optional policy floor above the machine- and metadata-derived stack minimum.
@@ -263,32 +441,386 @@ impl<const MAX_FIBERS: usize, const ASYNC_CAPACITY: usize>
         self
     }
 
-    fn bootstrap(&self) -> Result<CurrentFiberAsyncBootstrap<'static>, FiberError> {
+    fn fiber_bootstrap_with_policy(
+        &self,
+        fiber_capacity: usize,
+        stack_floor_bytes: usize,
+    ) -> Result<FiberPoolBootstrap<'static>, FiberError> {
         let guard_pages = match self.guard_pages {
             Some(guard_pages) => guard_pages,
             None => current_thread_default_guard_pages(),
         };
-        Ok(CurrentFiberAsyncBootstrap::uniform(
-            MAX_FIBERS,
-            selected_stack_size_with_optional_floor(self.stack_floor_bytes)?,
-            ASYNC_CAPACITY,
+        FiberPoolBootstrap::uniform_growing(
+            selected_stack_size_with_optional_floor(Some(stack_floor_bytes))?,
+            fiber_capacity,
+            1,
         )
-        .with_guard_pages(guard_pages)
-        .with_sizing_strategy(default_runtime_sizing_strategy()))
+        .map(|bootstrap| {
+            bootstrap
+                .with_guard_pages(guard_pages)
+                .with_sizing_strategy(default_runtime_sizing_strategy())
+        })
     }
 
-    pub fn runtime(&'static self) -> Result<&'static CurrentFiberAsyncRuntime, ExecutorError> {
-        self.runtime
-            .get_or_try_init(|| {
-                self.bootstrap()
-                    .map_err(executor_error_from_fiber)?
-                    .build_current()
-                    .map_err(executor_error_from_current_runtime)
-            })
-            .map_err(|error| match error {
-                OnceInitError::Sync(_) => ExecutorError::Sync(SyncErrorKind::Busy),
-                OnceInitError::Init(error) => error,
-            })
+    fn build_fiber_runtime_with_policy(
+        &self,
+        fiber_capacity: usize,
+        stack_floor_bytes: usize,
+    ) -> Result<CurrentFiberPool, FiberError> {
+        self.fiber_bootstrap_with_policy(fiber_capacity, stack_floor_bytes)?
+            .build_current()
+    }
+
+    fn build_async_runtime_with_policy(
+        &self,
+        async_capacity: usize,
+    ) -> Result<CurrentAsyncRuntime, ExecutorError> {
+        let config = ExecutorConfig::new().with_capacity(async_capacity.max(1));
+        if uses_explicit_bound_runtime_backing() {
+            let layout = CurrentAsyncRuntime::backing_plan(config)?;
+            let combined = layout.combined_eager()?;
+            if let Some(slab) =
+                allocate_owned_runtime_slab(combined.slab.bytes, combined.slab.align)
+                    .map_err(current_runtime_error_from_owned_backing)
+                    .map_err(executor_error_from_current_runtime)?
+            {
+                return CurrentAsyncRuntime::from_owned_extent(config, slab.lease);
+            }
+        }
+        Ok(CurrentAsyncRuntime::with_executor_config(config))
+    }
+
+    fn allocate_runtime_node_backing(
+        bytes: usize,
+        align: usize,
+    ) -> Result<ExtentLease, ExecutorError> {
+        if let Some(slab) = allocate_owned_runtime_slab(bytes, align)
+            .map_err(current_runtime_error_from_owned_backing)
+            .map_err(executor_error_from_current_runtime)?
+        {
+            return Ok(slab.lease);
+        }
+        let allocator = Allocator::<1, 1>::system_default_with_capacity(bytes)
+            .map_err(executor_error_from_alloc)?;
+        let domain = allocator.default_domain().ok_or_else(executor_invalid)?;
+        allocator
+            .extent(domain, MemoryPoolExtentRequest { len: bytes, align })
+            .map_err(executor_error_from_alloc)
+    }
+
+    fn fiber_runtime_borrow(
+        &'static self,
+        requested_capacity: Option<usize>,
+        requested_stack_floor_bytes: Option<usize>,
+    ) -> Result<CurrentFiberPoolBorrow<'static>, FiberError> {
+        let _guard =
+            self.fibers.lock.lock().map_err(|error| {
+                fiber_error_from_executor(executor_error_from_runtime_sync(error))
+            })?;
+        // SAFETY: the thin mutex serializes access to the singleton fiber slot state.
+        let state = unsafe { &mut *self.fibers.state.get() };
+        if state.runtime.is_none() {
+            state.configured_capacity =
+                initial_runtime_capacity(self.fiber_capacity_limit, requested_capacity)
+                    .ok_or_else(FiberError::resource_exhausted)?;
+            state.effective_stack_floor_bytes = self
+                .stack_floor_bytes
+                .unwrap_or(0)
+                .max(requested_stack_floor_bytes.unwrap_or(0));
+            state.runtime = Some(self.build_fiber_runtime_with_policy(
+                state.configured_capacity,
+                state.effective_stack_floor_bytes,
+            )?);
+        }
+        state.borrows = state
+            .borrows
+            .checked_add(1)
+            .ok_or_else(FiberError::resource_exhausted)?;
+        let runtime = state
+            .runtime
+            .as_ref()
+            .map(core::ptr::from_ref)
+            .ok_or_else(FiberError::invalid)?;
+        Ok(CurrentFiberPoolBorrow {
+            slot: &self.fibers,
+            runtime,
+            configured_capacity: state.configured_capacity,
+        })
+    }
+
+    fn fiber_runtime_if_initialized(
+        &'static self,
+    ) -> Result<Option<CurrentFiberPoolBorrow<'static>>, FiberError> {
+        let _guard =
+            self.fibers.lock.lock().map_err(|error| {
+                fiber_error_from_executor(executor_error_from_runtime_sync(error))
+            })?;
+        // SAFETY: the thin mutex serializes access to the singleton fiber slot state.
+        let state = unsafe { &mut *self.fibers.state.get() };
+        let Some(runtime) = state.runtime.as_ref().map(core::ptr::from_ref) else {
+            return Ok(None);
+        };
+        state.borrows = state
+            .borrows
+            .checked_add(1)
+            .ok_or_else(FiberError::resource_exhausted)?;
+        Ok(Some(CurrentFiberPoolBorrow {
+            slot: &self.fibers,
+            runtime,
+            configured_capacity: state.configured_capacity,
+        }))
+    }
+
+    fn try_reconfigure_fiber_runtime(
+        &'static self,
+        requested_fiber_capacity: Option<usize>,
+        requested_stack_floor_bytes: Option<usize>,
+    ) -> Result<bool, FiberError> {
+        let _guard =
+            self.fibers.lock.lock().map_err(|error| {
+                fiber_error_from_executor(executor_error_from_runtime_sync(error))
+            })?;
+        // SAFETY: the thin mutex serializes access to the singleton fiber slot state.
+        let state = unsafe { &mut *self.fibers.state.get() };
+
+        if state.borrows != 0 {
+            return Ok(false);
+        }
+
+        if let Some(runtime) = state.runtime.as_ref()
+            && runtime.active_count() != 0
+        {
+            return Ok(false);
+        }
+
+        let next_fiber_capacity = match requested_fiber_capacity {
+            Some(required) if required > state.configured_capacity => {
+                next_bounded_runtime_capacity(
+                    state.configured_capacity,
+                    required,
+                    self.fiber_capacity_limit,
+                )
+                .map_err(fiber_error_from_executor)?
+                .ok_or_else(FiberError::resource_exhausted)?
+            }
+            _ if state.runtime.is_none() => {
+                initial_runtime_capacity(self.fiber_capacity_limit, requested_fiber_capacity)
+                    .ok_or_else(FiberError::resource_exhausted)?
+            }
+            _ => state.configured_capacity,
+        };
+        let next_stack_floor_bytes = state
+            .effective_stack_floor_bytes
+            .max(requested_stack_floor_bytes.unwrap_or(0));
+
+        if state.runtime.is_some()
+            && next_fiber_capacity == state.configured_capacity
+            && next_stack_floor_bytes == state.effective_stack_floor_bytes
+        {
+            return Ok(false);
+        }
+
+        state.runtime = Some(
+            self.build_fiber_runtime_with_policy(next_fiber_capacity, next_stack_floor_bytes)?,
+        );
+        state.configured_capacity = next_fiber_capacity;
+        state.effective_stack_floor_bytes = next_stack_floor_bytes;
+        Ok(true)
+    }
+
+    fn ensure_fiber_admission(
+        &'static self,
+        task: super::FiberTaskAttributes,
+    ) -> Result<(), FiberError> {
+        loop {
+            let requested_stack_floor_bytes = task
+                .execution
+                .is_fiber()
+                .then(|| task.stack_class.size_bytes().get());
+            let runtime = self.fiber_runtime_borrow(None, requested_stack_floor_bytes)?;
+            let validation = runtime.validate_task_attributes(task);
+            let available_slots = match validation {
+                Ok(()) => runtime.available_slots()?,
+                Err(_) => 0,
+            };
+            if validation.is_ok() && available_slots != 0 {
+                return Ok(());
+            }
+            let requested_fiber_capacity =
+                (available_slots == 0).then(|| runtime.configured_capacity().saturating_add(1));
+            drop(runtime);
+            let requested_stack_floor_bytes = match validation {
+                Ok(()) => None,
+                Err(error)
+                    if error.kind() == FiberErrorKind::Unsupported && task.execution.is_fiber() =>
+                {
+                    requested_stack_floor_bytes
+                }
+                Err(error) => return Err(error),
+            };
+            if !self.try_reconfigure_fiber_runtime(
+                requested_fiber_capacity,
+                requested_stack_floor_bytes,
+            )? {
+                return Err(match requested_stack_floor_bytes {
+                    Some(_) => FiberError::unsupported(),
+                    None => FiberError::resource_exhausted(),
+                });
+            }
+        }
+    }
+
+    fn next_async_segment_capacity(&self, total_capacity: usize) -> Option<usize> {
+        let requested = if total_capacity == 0 {
+            1
+        } else {
+            total_capacity
+        };
+        match self.async_capacity_limit {
+            Some(limit) if total_capacity >= limit => None,
+            Some(limit) => Some(requested.min(limit - total_capacity)),
+            None => Some(requested),
+        }
+    }
+
+    fn append_async_runtime_segment(
+        &self,
+        state: &mut CurrentAsyncRuntimeSlotState,
+        capacity: usize,
+    ) -> Result<NonNull<CurrentAsyncRuntimeSegment>, ExecutorError> {
+        let runtime = self.build_async_runtime_with_policy(capacity)?;
+        let backing = Self::allocate_runtime_node_backing(
+            size_of::<CurrentAsyncRuntimeSegment>(),
+            align_of::<CurrentAsyncRuntimeSegment>(),
+        )?;
+        let ptr = NonNull::new(backing.region().base.cast::<CurrentAsyncRuntimeSegment>())
+            .ok_or_else(executor_invalid)?;
+        // SAFETY: the leased backing is unique, correctly aligned for the node type, and large
+        // enough to host exactly one segment node.
+        unsafe {
+            ptr.as_ptr().write(CurrentAsyncRuntimeSegment {
+                runtime,
+                next: state.head,
+                _backing: backing,
+            });
+        }
+        state.head = Some(ptr);
+        state.total_capacity = state
+            .total_capacity
+            .checked_add(capacity)
+            .ok_or_else(executor_overflow)?;
+        Ok(ptr)
+    }
+
+    fn async_runtime_for_spawn(
+        &'static self,
+    ) -> Result<&'static CurrentAsyncRuntime, ExecutorError> {
+        let _guard = self
+            .executor
+            .lock
+            .lock()
+            .map_err(executor_error_from_runtime_sync)?;
+        // SAFETY: the thin mutex serializes access to the singleton async slot state. Segment
+        // nodes are append-only and remain stable for the singleton's lifetime.
+        let state = unsafe { &mut *self.executor.state.get() };
+
+        let mut segment = state.head;
+        while let Some(node) = segment {
+            // SAFETY: append-only segment nodes remain live and stable while linked from the slot.
+            let node_ref = unsafe { node.as_ref() };
+            if node_ref.runtime.available_task_slots()? != 0 {
+                return Ok(&node_ref.runtime);
+            }
+            segment = node_ref.next;
+        }
+
+        let capacity = self
+            .next_async_segment_capacity(state.total_capacity)
+            .ok_or_else(executor_busy)?;
+        let node = self.append_async_runtime_segment(state, capacity)?;
+        // SAFETY: the newly appended node is now linked into the append-only segment chain.
+        Ok(unsafe { &node.as_ref().runtime })
+    }
+
+    fn async_segment_head_snapshot(
+        &'static self,
+    ) -> Result<Option<NonNull<CurrentAsyncRuntimeSegment>>, ExecutorError> {
+        let _guard = self
+            .executor
+            .lock
+            .lock()
+            .map_err(executor_error_from_runtime_sync)?;
+        // SAFETY: the thin mutex serializes access to the singleton async slot state. Segment
+        // nodes are append-only and remain stable for the singleton's lifetime.
+        let state = unsafe { &*self.executor.state.get() };
+        Ok(state.head)
+    }
+
+    /// Drives one ready async task across every realized singleton async segment.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor failure from the realized segments.
+    pub fn drive_async_once(&'static self) -> Result<bool, ExecutorError> {
+        let mut segment = self.async_segment_head_snapshot()?;
+        let mut progressed = false;
+        while let Some(node) = segment {
+            // SAFETY: append-only segment nodes remain live and stable while linked from the slot.
+            let node_ref = unsafe { node.as_ref() };
+            progressed |= node_ref.runtime.drive_once()?;
+            segment = node_ref.next;
+        }
+        Ok(progressed)
+    }
+
+    /// Drains every realized singleton async segment until no task remains runnable.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor failure from the realized segments.
+    pub fn run_async_until_idle(&'static self) -> Result<usize, ExecutorError> {
+        let mut total = 0_usize;
+        loop {
+            let mut segment = self.async_segment_head_snapshot()?;
+            let mut progressed = 0_usize;
+            while let Some(node) = segment {
+                // SAFETY: append-only segment nodes remain live and stable while linked from the
+                // singleton slot.
+                let node_ref = unsafe { node.as_ref() };
+                progressed = progressed.saturating_add(node_ref.runtime.run_until_idle()?);
+                segment = node_ref.next;
+            }
+            if progressed == 0 {
+                return Ok(total);
+            }
+            total = total.saturating_add(progressed);
+        }
+    }
+
+    fn drive_async_reactors_once(&'static self, wait: bool) -> Result<bool, ExecutorError> {
+        let mut segment = self.async_segment_head_snapshot()?;
+        let mut progressed = false;
+        while let Some(node) = segment {
+            // SAFETY: append-only segment nodes remain live and stable while linked from the slot.
+            let node_ref = unsafe { node.as_ref() };
+            let segment_wait =
+                wait && !progressed && node_ref.runtime.unfinished_task_count()? != 0;
+            progressed |= node_ref.runtime.drive_reactor_once(segment_wait)?;
+            segment = node_ref.next;
+        }
+        Ok(progressed)
+    }
+
+    #[cfg(test)]
+    fn async_total_capacity(&'static self) -> Result<usize, ExecutorError> {
+        let _guard = self
+            .executor
+            .lock
+            .lock()
+            .map_err(executor_error_from_runtime_sync)?;
+        // SAFETY: the thin mutex serializes access to the singleton async slot state.
+        let state = unsafe { &*self.executor.state.get() };
+        Ok(state.total_capacity)
     }
 
     pub fn spawn_fiber<F, T>(&'static self, job: F) -> Result<CurrentFiberHandle<T>, FiberError>
@@ -296,10 +828,17 @@ impl<const MAX_FIBERS: usize, const ASYNC_CAPACITY: usize>
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
     {
-        self.runtime()
-            .map_err(fiber_error_from_executor)?
-            .fibers()
-            .spawn(job)
+        let task = self
+            .fiber_runtime_borrow(None, None)?
+            .closure_task_attributes::<F>()?;
+        self.ensure_fiber_admission(task)?;
+        self.fiber_runtime_borrow(
+            None,
+            task.execution
+                .is_fiber()
+                .then(|| task.stack_class.size_bytes().get()),
+        )?
+        .spawn_with_attrs(task, job)
     }
 
     pub fn spawn_fiber_with_stack<const STACK_BYTES: usize, F, T>(
@@ -310,17 +849,19 @@ impl<const MAX_FIBERS: usize, const ASYNC_CAPACITY: usize>
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
     {
-        self.runtime()
-            .map_err(fiber_error_from_executor)?
-            .fibers()
-            .spawn_with_stack::<STACK_BYTES, _, _>(job)
+        let stack_bytes = NonZeroUsize::new(STACK_BYTES).ok_or_else(FiberError::invalid)?;
+        let task = super::FiberTaskAttributes::from_stack_bytes(
+            stack_bytes,
+            super::FiberTaskPriority::DEFAULT,
+        )?;
+        self.ensure_fiber_admission(task)?;
+        self.fiber_runtime_borrow(None, Some(stack_bytes.get()))?
+            .spawn_with_attrs(task, job)
     }
 
     pub fn drive_once(&'static self) -> Result<bool, FiberError> {
-        self.runtime()
-            .map_err(fiber_error_from_executor)?
-            .fibers()
-            .drive_once()
+        self.fiber_runtime_if_initialized()?
+            .map_or(Ok(false), |runtime| runtime.drive_once())
     }
 
     /// Spawns one async task through the lazily owned current-thread runtime.
@@ -334,7 +875,7 @@ impl<const MAX_FIBERS: usize, const ASYNC_CAPACITY: usize>
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.runtime()?.executor().spawn(future)
+        self.async_runtime_for_spawn()?.spawn(future)
     }
 
     /// Spawns one async task with one explicit poll-stack contract through the lazily owned
@@ -352,8 +893,7 @@ impl<const MAX_FIBERS: usize, const ASYNC_CAPACITY: usize>
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.runtime()?
-            .executor()
+        self.async_runtime_for_spawn()?
             .spawn_with_poll_stack_bytes(poll_stack_bytes, future)
     }
 
@@ -368,7 +908,16 @@ impl<const MAX_FIBERS: usize, const ASYNC_CAPACITY: usize>
         F: Future + 'static,
         F::Output: 'static,
     {
-        self.runtime()?.executor().block_on(future)
+        let handle = self.async_runtime_for_spawn()?.spawn_local(future)?;
+        while !handle.is_finished()? {
+            if !self.drive_async_once()?
+                && !self.drive_async_reactors_once(true)?
+                && system_thread().yield_now().is_err()
+            {
+                spin_loop();
+            }
+        }
+        handle.join()
     }
 
     /// Drives one future to completion with one explicit poll-stack contract through the lazily
@@ -386,16 +935,23 @@ impl<const MAX_FIBERS: usize, const ASYNC_CAPACITY: usize>
         F: Future + 'static,
         F::Output: 'static,
     {
-        self.runtime()?
-            .executor()
-            .block_on_with_poll_stack_bytes(poll_stack_bytes, future)
+        let handle = self
+            .async_runtime_for_spawn()?
+            .spawn_local_with_poll_stack_bytes(poll_stack_bytes, future)?;
+        while !handle.is_finished()? {
+            if !self.drive_async_once()?
+                && !self.drive_async_reactors_once(true)?
+                && system_thread().yield_now().is_err()
+            {
+                spin_loop();
+            }
+        }
+        handle.join()
     }
 
     pub fn shutdown_fibers(&'static self) -> Result<(), FiberError> {
-        self.runtime()
-            .map_err(fiber_error_from_executor)?
-            .fibers()
-            .shutdown()
+        self.fiber_runtime_if_initialized()?
+            .map_or(Ok(()), |runtime| runtime.shutdown())
     }
 }
 
@@ -1543,5 +2099,169 @@ mod tests {
             .fibers()
             .shutdown()
             .expect("combined current runtime should shut down fibers");
+    }
+
+    #[test]
+    fn current_runtime_singleton_grows_fiber_capacity_quiescently() {
+        static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new();
+
+        let initial_capacity = RUNTIME
+            .fiber_runtime_borrow(None, None)
+            .expect("singleton fiber runtime should initialize")
+            .configured_capacity();
+        assert_eq!(initial_capacity, 1);
+
+        let first = RUNTIME
+            .spawn_fiber_with_stack::<4096, _, _>(|| 11_u8)
+            .expect("first fiber should spawn");
+        while !first.is_finished().expect("fiber completion should read") {
+            assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        }
+
+        let second = RUNTIME
+            .spawn_fiber_with_stack::<4096, _, _>(|| 13_u8)
+            .expect("second fiber should trigger quiescent growth");
+        let grown_capacity = RUNTIME
+            .fiber_runtime_borrow(None, None)
+            .expect("singleton fiber runtime should remain borrowable")
+            .configured_capacity();
+        assert!(
+            grown_capacity > initial_capacity,
+            "fiber capacity should grow after quiescent slot exhaustion"
+        );
+
+        while !second.is_finished().expect("fiber completion should read") {
+            assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        }
+
+        assert_eq!(first.join().expect("first fiber should join"), 11);
+        assert_eq!(second.join().expect("second fiber should join"), 13);
+        RUNTIME
+            .shutdown_fibers()
+            .expect("singleton fibers should shut down cleanly");
+    }
+
+    #[test]
+    fn current_runtime_singleton_grows_async_capacity_quiescently() {
+        static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new();
+
+        let initial_capacity = RUNTIME
+            .async_total_capacity()
+            .expect("singleton async capacity should read");
+        assert_eq!(initial_capacity, 0);
+
+        let first = RUNTIME
+            .spawn_async_with_poll_stack_bytes(2048, async { 21_u8 })
+            .expect("first async task should spawn");
+        let after_first_capacity = RUNTIME
+            .async_total_capacity()
+            .expect("singleton async capacity should read");
+        assert_eq!(after_first_capacity, 1);
+        assert_eq!(
+            RUNTIME
+                .run_async_until_idle()
+                .expect("singleton async runtime should run to idle"),
+            1
+        );
+        assert!(first.is_finished().expect("first task state should read"));
+
+        let second = RUNTIME
+            .spawn_async_with_poll_stack_bytes(2048, async { 34_u8 })
+            .expect("second async task should trigger segmented growth");
+        let grown_capacity = RUNTIME
+            .async_total_capacity()
+            .expect("singleton async capacity should read");
+        assert!(
+            grown_capacity > after_first_capacity,
+            "async capacity should grow by appending another segment after slot exhaustion"
+        );
+
+        assert_eq!(
+            RUNTIME
+                .run_async_until_idle()
+                .expect("singleton async runtime should run to idle"),
+            1
+        );
+
+        assert_eq!(first.join().expect("first task should join"), 21);
+        assert_eq!(second.join().expect("second task should join"), 34);
+    }
+
+    #[test]
+    fn current_runtime_singleton_respects_fiber_capacity_cap() {
+        static RUNTIME: CurrentFiberAsyncSingleton =
+            CurrentFiberAsyncSingleton::new().with_fiber_capacity(1);
+
+        let first = RUNTIME
+            .spawn_fiber_with_stack::<4096, _, _>(|| 55_u8)
+            .expect("first fiber should spawn");
+        while !first.is_finished().expect("fiber completion should read") {
+            assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        }
+
+        let second = RUNTIME.spawn_fiber_with_stack::<4096, _, _>(|| 89_u8);
+        assert!(matches!(
+            second,
+            Err(error) if error.kind() == FiberErrorKind::ResourceExhausted
+        ));
+
+        assert_eq!(first.join().expect("first fiber should join"), 55);
+        RUNTIME
+            .shutdown_fibers()
+            .expect("singleton fibers should shut down cleanly");
+    }
+
+    #[test]
+    fn current_runtime_singleton_respects_async_capacity_cap() {
+        static RUNTIME: CurrentFiberAsyncSingleton =
+            CurrentFiberAsyncSingleton::new().with_async_capacity(1);
+
+        let first = RUNTIME
+            .spawn_async_with_poll_stack_bytes(2048, async { 144_u8 })
+            .expect("first async task should spawn");
+        assert_eq!(
+            RUNTIME
+                .run_async_until_idle()
+                .expect("singleton async runtime should run to idle"),
+            1
+        );
+        assert!(first.is_finished().expect("task completion should read"));
+
+        let second = RUNTIME.spawn_async_with_poll_stack_bytes(2048, async { 233_u8 });
+        assert!(matches!(
+            second,
+            Err(ExecutorError::Sync(SyncErrorKind::Busy))
+        ));
+        assert_eq!(
+            RUNTIME
+                .async_total_capacity()
+                .expect("singleton async capacity should read"),
+            1
+        );
+
+        assert_eq!(first.join().expect("first task should join"), 144);
+    }
+
+    #[test]
+    fn current_runtime_singleton_block_on_drives_cross_segment_task_handles() {
+        static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new();
+
+        let first = RUNTIME
+            .spawn_async_with_poll_stack_bytes(2048, async { 99_u8 })
+            .expect("first async task should spawn");
+
+        let result = RUNTIME
+            .block_on_with_poll_stack_bytes(2048, async move {
+                first.await.expect("first task should complete")
+            })
+            .expect("singleton block_on should drive tasks across every async segment");
+
+        assert_eq!(result, 99);
+        assert!(
+            RUNTIME
+                .async_total_capacity()
+                .expect("singleton async capacity should read")
+                > 1
+        );
     }
 }

@@ -6184,6 +6184,10 @@ impl GreenTaskRegistry {
             .with(|free| free.pop().ok_or_else(FiberError::resource_exhausted))?
     }
 
+    fn available_slots(&self) -> Result<usize, FiberError> {
+        self.free.with_ref(|free| free.len)
+    }
+
     fn initialize_owner(&self, inner: *const GreenPoolInner) {
         for slot in &*self.slots {
             slot.set_owner(inner);
@@ -8231,6 +8235,17 @@ pub struct CurrentFiberPool {
 }
 
 impl CurrentFiberPool {
+    pub(crate) fn default_task_class(&self) -> Result<FiberStackClass, FiberError> {
+        self.inner.stacks.default_task_class()
+    }
+
+    pub(crate) fn closure_task_attributes<F>(&self) -> Result<FiberTaskAttributes, FiberError>
+    where
+        F: 'static,
+    {
+        closure_spawn_task_attributes::<F>(self.default_task_class()?)
+    }
+
     /// Returns the explicit backing plan for one manually-driven current-thread fiber pool.
     ///
     /// This plan is currently honest for the legacy single-slab stack configuration. Class-backed
@@ -8560,6 +8575,17 @@ impl CurrentFiberPool {
     #[must_use]
     pub fn active_count(&self) -> usize {
         self.inner.active.load(Ordering::Acquire)
+    }
+
+    /// Returns the number of unreserved task slots currently available in this pool.
+    ///
+    /// This is admission truth, not a guess derived from active-count folklore.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task registry cannot be observed honestly.
+    pub fn available_slots(&self) -> Result<usize, FiberError> {
+        self.inner.tasks.available_slots()
     }
 
     /// Returns whether this pool can honestly admit the requested task class.

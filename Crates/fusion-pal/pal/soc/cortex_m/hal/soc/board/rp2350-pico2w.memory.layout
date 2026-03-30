@@ -11,4 +11,9 @@ flash_boot_metadata_kind = "rp2350-image-def"
 flash_boot_window = 4K
 ram_origin = 0x20000000
 ram_length = 520K
+# TODO: Tighten this MSP/exception-stack reserve with real evidence instead of conservative board
+# policy. Fibers/async now lease their own stacks, but the Cortex-M main stack still backs reset,
+# interrupts, faults, panic paths, and any remaining ambient runtime work. We still need a PAL-
+# owned reserve here; what we do not yet know exactly is how small this window can become without
+# lying.
 default_main_stack_reserve = 64K
