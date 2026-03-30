@@ -1,6 +1,9 @@
 #[path = "context/context.rs"]
 /// macOS fusion-pal user-space context backend implementation.
 pub mod context;
+#[path = "capability/capability.rs"]
+/// macOS runtime capability probing and cache surface.
+pub mod capability;
 /// macOS atomic surface remains unsupported for now.
 pub mod atomic {
     pub use crate::contract::pal::runtime::atomic::{

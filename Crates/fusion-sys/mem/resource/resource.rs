@@ -1413,7 +1413,10 @@ mod tests {
         assert!(support.backings.contains(MemBackingCaps::FILE_SHARED));
         assert!(support.placements.contains(MemPlacementCaps::HINT));
         assert!(support.instance.ops.contains(ResourceOpSet::ADVISE));
-        assert!(support.instance.ops.contains(ResourceOpSet::QUERY));
+        assert_eq!(
+            support.instance.ops.contains(ResourceOpSet::QUERY),
+            system_mem().support().caps.contains(MemCaps::QUERY)
+        );
     }
 
     #[test]
@@ -1465,12 +1468,16 @@ mod tests {
         let request = ResourceRequest::anonymous_private(16 * 1024);
         let resource = VirtualMemoryResource::create(&request).expect("resource");
         let base = resource.view().base_addr();
-        let info = resource.query(base).expect("query");
-
-        assert!(info.region.contains(base.get()));
-        assert!(info.region.len >= resource.len());
-        assert!(info.protect.contains(Protect::READ));
-        assert!(info.protect.contains(Protect::WRITE));
+        if resource.ops().contains(ResourceOpSet::QUERY) {
+            let info = resource.query(base).expect("query");
+            assert!(info.region.contains(base.get()));
+            assert!(info.region.len >= resource.len());
+            assert!(info.protect.contains(Protect::READ));
+            assert!(info.protect.contains(Protect::WRITE));
+        } else {
+            let err = resource.query(base).expect_err("query should be unsupported");
+            assert_eq!(err.kind, ResourceErrorKind::UnsupportedOperation);
+        }
     }
 
     #[test]
@@ -1484,7 +1491,11 @@ mod tests {
             .query(second_base)
             .expect_err("foreign address should be rejected");
 
-        assert_eq!(err.kind, ResourceErrorKind::InvalidRange);
+        if first.ops().contains(ResourceOpSet::QUERY) {
+            assert_eq!(err.kind, ResourceErrorKind::InvalidRange);
+        } else {
+            assert_eq!(err.kind, ResourceErrorKind::UnsupportedOperation);
+        }
     }
 
     #[test]
@@ -1557,7 +1568,11 @@ mod tests {
             .query(second_base)
             .expect_err("foreign address should be rejected");
 
-        assert_eq!(err.kind, ResourceErrorKind::InvalidRange);
+        if first.support().ops.contains(ReservationOpSet::QUERY) {
+            assert_eq!(err.kind, ResourceErrorKind::InvalidRange);
+        } else {
+            assert_eq!(err.kind, ResourceErrorKind::UnsupportedOperation);
+        }
     }
 
     #[test]
@@ -1741,9 +1756,9 @@ mod tests {
 
     #[test]
     fn state_tracks_runtime_protect_and_lock_transitions() {
-        let request = ResourceRequest::anonymous_private(16 * 1024);
+        let page = system_mem().page_info().base_page.get();
+        let request = ResourceRequest::anonymous_private(page * 2);
         let resource = VirtualMemoryResource::create(&request).expect("resource");
-        let page = resource.page_info().base_page.get();
 
         unsafe { resource.protect(ResourceRange::new(0, page), Protect::READ) }.expect("protect");
         assert_eq!(resource.state().current_protect, StateValue::Asymmetric);
@@ -1785,7 +1800,8 @@ mod tests {
 
     #[test]
     fn subregion_respects_bounds() {
-        let request = ResourceRequest::anonymous_private(16 * 1024);
+        let page = system_mem().page_info().base_page.get();
+        let request = ResourceRequest::anonymous_private(page * 4);
         let resource = VirtualMemoryResource::create(&request).expect("resource");
         let page = resource.page_info().base_page.get();
         let region = resource
@@ -1836,9 +1852,14 @@ mod tests {
         let request = ResourceRequest::anonymous_private(16 * 1024);
         let resource = VirtualMemoryResource::create(&request).expect("resource");
         let page = resource.page_info().base_page.get();
-
-        unsafe { resource.advise(ResourceRange::new(0, page), Advise::HugePage) }
-            .expect("huge page advice should succeed");
+        if resource.support().advice.contains(MemAdviceCaps::HUGE_PAGE) {
+            unsafe { resource.advise(ResourceRange::new(0, page), Advise::HugePage) }
+                .expect("huge page advice should succeed");
+        } else {
+            let err = unsafe { resource.advise(ResourceRange::new(0, page), Advise::HugePage) }
+                .expect_err("huge page advice should be unsupported");
+            assert_eq!(err.kind, ResourceErrorKind::UnsupportedOperation);
+        }
     }
 
     #[test]

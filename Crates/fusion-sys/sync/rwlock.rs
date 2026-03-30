@@ -178,12 +178,14 @@ mod tests {
     fn rwlock_writer_excludes_other_access() {
         let lock = RwLock::new(1_u32);
         let mut writer = lock.write().expect("write lock should succeed");
-        assert!(lock.try_read().expect("try_read should evaluate").is_none());
-        assert!(
-            lock.try_write()
-                .expect("try_write should evaluate")
-                .is_none()
-        );
+        match lock.try_read() {
+            Ok(guard) => assert!(guard.is_none()),
+            Err(error) => assert_eq!(error, SyncError::busy()),
+        }
+        match lock.try_write() {
+            Ok(guard) => assert!(guard.is_none()),
+            Err(error) => assert_eq!(error, SyncError::busy()),
+        }
         *writer = 9;
         drop(writer);
         assert_eq!(*lock.read().expect("read should succeed"), 9);
