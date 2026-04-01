@@ -1,4 +1,10 @@
 //! fusion-sys courier contracts plus claim-aware mediation helpers.
+//!
+//! TODO: When `fusion-kernel` grows its real root-courier authority surface, teach the kernel
+//! courier path to observe and use architecture privilege/state bits such as CS / mPRIV /
+//! `CurrentEL` directly. That work belongs here at the courier authority boundary, because the
+//! kernel courier will want to reason about current execution privilege honestly instead of
+//! treating it as vague ambient kernel magic.
 
 pub use fusion_pal::sys::courier::*;
 

@@ -159,6 +159,7 @@ struct ClaimTrieNode<'a> {
 struct ClaimScopeTrie<'a, const MAX_SCOPE_NODES: usize> {
     nodes: [Option<ClaimTrieNode<'a>>; MAX_SCOPE_NODES],
     next_free: usize,
+    free_head: Option<usize>,
 }
 
 impl<'a, const MAX_SCOPE_NODES: usize> ClaimScopeTrie<'a, MAX_SCOPE_NODES> {
@@ -175,7 +176,11 @@ impl<'a, const MAX_SCOPE_NODES: usize> ClaimScopeTrie<'a, MAX_SCOPE_NODES> {
         } else {
             0
         };
-        Self { nodes, next_free }
+        Self {
+            nodes,
+            next_free,
+            free_head: None,
+        }
     }
 
     fn clear(&mut self) {
@@ -188,8 +193,10 @@ impl<'a, const MAX_SCOPE_NODES: usize> ClaimScopeTrie<'a, MAX_SCOPE_NODES> {
                 terminal_claim: None,
             });
             self.next_free = 1;
+            self.free_head = None;
         } else {
             self.next_free = 0;
+            self.free_head = None;
         }
     }
 
@@ -223,6 +230,60 @@ impl<'a, const MAX_SCOPE_NODES: usize> ClaimScopeTrie<'a, MAX_SCOPE_NODES> {
             .get(current)
             .and_then(|slot| slot.as_ref())
             .and_then(|node| node.terminal_claim)
+    }
+
+    fn remove(&mut self, claim: ClaimName<'a>) -> Result<Option<usize>, ClaimsError> {
+        let mut path = [None; MAX_SCOPE_NODES];
+        let mut depth = 0usize;
+        let mut current = 0usize;
+        for segment in claim.as_str().split('.') {
+            let Some((child, previous_sibling)) = self.find_child_with_previous(current, segment)
+            else {
+                return Ok(None);
+            };
+            if depth >= MAX_SCOPE_NODES {
+                return Err(ClaimsError::state_conflict());
+            }
+            path[depth] = Some((current, child, previous_sibling));
+            depth += 1;
+            current = child;
+        }
+        let Some(node) = self.nodes.get_mut(current).and_then(Option::as_mut) else {
+            return Err(ClaimsError::state_conflict());
+        };
+        let removed_claim = node.terminal_claim.take();
+        if removed_claim.is_none() {
+            return Ok(None);
+        }
+
+        while depth != 0 {
+            depth -= 1;
+            let Some((parent, child, previous_sibling)) = path[depth] else {
+                break;
+            };
+            let Some(node) = self.nodes.get(child).and_then(|slot| slot.as_ref()) else {
+                return Err(ClaimsError::state_conflict());
+            };
+            if node.terminal_claim.is_some() || node.first_child.is_some() {
+                break;
+            }
+            let next_sibling = node.next_sibling;
+            if let Some(previous) = previous_sibling {
+                let Some(previous_node) = self.nodes.get_mut(previous).and_then(Option::as_mut)
+                else {
+                    return Err(ClaimsError::state_conflict());
+                };
+                previous_node.next_sibling = next_sibling;
+            } else {
+                let Some(parent_node) = self.nodes.get_mut(parent).and_then(Option::as_mut) else {
+                    return Err(ClaimsError::state_conflict());
+                };
+                parent_node.first_child = next_sibling;
+            }
+            self.release_node(child)?;
+        }
+
+        Ok(removed_claim)
     }
 
     fn collect_prefix_claim_indices<const MAX_MATCHES: usize>(
@@ -296,6 +357,28 @@ impl<'a, const MAX_SCOPE_NODES: usize> ClaimScopeTrie<'a, MAX_SCOPE_NODES> {
         None
     }
 
+    fn find_child_with_previous(
+        &self,
+        parent: usize,
+        segment: &str,
+    ) -> Option<(usize, Option<usize>)> {
+        let mut previous = None;
+        let mut current = self
+            .nodes
+            .get(parent)
+            .and_then(|slot| slot.as_ref())
+            .and_then(|node| node.first_child);
+        while let Some(index) = current {
+            let node = self.nodes.get(index).and_then(|slot| slot.as_ref())?;
+            if node.segment == segment {
+                return Some((index, previous));
+            }
+            previous = Some(index);
+            current = node.next_sibling;
+        }
+        None
+    }
+
     fn find_or_insert_child(
         &mut self,
         parent: usize,
@@ -304,11 +387,7 @@ impl<'a, const MAX_SCOPE_NODES: usize> ClaimScopeTrie<'a, MAX_SCOPE_NODES> {
         if let Some(index) = self.find_child(parent, segment) {
             return Ok(index);
         }
-        let index = self.next_free;
-        if index >= MAX_SCOPE_NODES {
-            return Err(ClaimsError::resource_exhausted());
-        }
-        self.next_free += 1;
+        let index = self.allocate_node()?;
         self.nodes[index] = Some(ClaimTrieNode {
             segment,
             first_child: None,
@@ -345,6 +424,38 @@ impl<'a, const MAX_SCOPE_NODES: usize> ClaimScopeTrie<'a, MAX_SCOPE_NODES> {
             None => parent_node.first_child = Some(index),
         }
         Ok(index)
+    }
+
+    fn allocate_node(&mut self) -> Result<usize, ClaimsError> {
+        if let Some(index) = self.free_head {
+            let next = self
+                .nodes
+                .get(index)
+                .and_then(|slot| slot.as_ref())
+                .and_then(|node| node.next_sibling);
+            self.free_head = next;
+            return Ok(index);
+        }
+        let index = self.next_free;
+        if index >= MAX_SCOPE_NODES {
+            return Err(ClaimsError::resource_exhausted());
+        }
+        self.next_free += 1;
+        Ok(index)
+    }
+
+    fn release_node(&mut self, index: usize) -> Result<(), ClaimsError> {
+        if index == 0 {
+            return Err(ClaimsError::state_conflict());
+        }
+        self.nodes[index] = Some(ClaimTrieNode {
+            segment: "",
+            first_child: None,
+            next_sibling: self.free_head,
+            terminal_claim: None,
+        });
+        self.free_head = Some(index);
+        Ok(())
     }
 }
 
@@ -528,7 +639,7 @@ impl<
         let record = self
             .find_context_mut(context)
             .ok_or_else(ClaimsError::not_found)?;
-        record.descriptor.image_seal = image_seal;
+        record.descriptor.image_seal = image_seal.with_granted_claim_count(0);
         record.claims = [None; MAX_CLAIMS];
         record.bonds = [None; MAX_BONDS];
         record.claim_trie.clear();
@@ -572,7 +683,9 @@ impl<
             }
             *existing = grant;
         } else {
-            let Some(slot_index) = record.claims.iter().position(|slot| slot.is_none()) else {
+            let Some(slot_index) = record.claims.iter().position(|slot| {
+                slot.is_none_or(|grant| Self::is_terminal_claim_state(grant.state))
+            }) else {
                 return Err(ClaimsError::resource_exhausted());
             };
             record
@@ -580,14 +693,7 @@ impl<
                 .insert(grant.qualified.claim(), slot_index)?;
             record.claims[slot_index] = Some(grant);
         }
-        let granted_claim_count = record.claims.iter().flatten().count() as u32;
-        record.descriptor.image_seal = record
-            .descriptor
-            .image_seal
-            .with_granted_claim_count(granted_claim_count);
-        for claim in record.claims.iter_mut().flatten() {
-            claim.seal = record.descriptor.image_seal;
-        }
+        Self::refresh_context_seal_metadata(record);
         Ok(())
     }
 
@@ -604,29 +710,33 @@ impl<
         let record = self
             .find_context_mut(context)
             .ok_or_else(ClaimsError::not_found)?;
-        let Some(entry) = record
-            .claims
-            .iter_mut()
-            .flatten()
-            .find(|grant| grant.qualified == qualified)
-        else {
+        let Some(index) = Self::find_claim_index(record, qualified) else {
             return Err(ClaimsError::not_found());
         };
-        entry.state = ClaimGrantState::Revoked;
+        Self::retire_claim(record, index, ClaimGrantState::Revoked)?;
         Ok(())
     }
 
     /// Expires stale lease-bound claims across every registered context.
     pub fn expire_stale_claims(&mut self, now_unix_seconds: u64) {
         for record in self.contexts.iter_mut().flatten() {
-            for grant in record.claims.iter_mut().flatten() {
+            let mut expired = [None; MAX_CLAIMS];
+            let mut expired_count = 0usize;
+            for (index, grant) in record.claims.iter().enumerate() {
+                let Some(grant) = grant else {
+                    continue;
+                };
                 if matches!(grant.state, ClaimGrantState::Granted)
                     && grant
                         .expires_at_unix_seconds
                         .is_some_and(|expires| expires <= now_unix_seconds)
                 {
-                    grant.state = ClaimGrantState::Expired;
+                    expired[expired_count] = Some(index);
+                    expired_count += 1;
                 }
+            }
+            for index in expired.into_iter().take(expired_count).flatten() {
+                let _ = Self::retire_claim(record, index, ClaimGrantState::Expired);
             }
         }
     }
@@ -850,15 +960,26 @@ impl<
             return Err(ClaimsError::permission_denied());
         }
         let Some(claim_index) = record.claim_trie.exact_claim_index(qualified.claim()) else {
-            return Err(ClaimsError::not_found());
+            return match Self::find_claim_index(record, qualified)
+                .and_then(|index| record.claims.get(index).and_then(|slot| *slot))
+            {
+                Some(grant) => match grant.state {
+                    ClaimGrantState::Revoked => Err(ClaimsError::revoked()),
+                    ClaimGrantState::Expired => Err(ClaimsError::expired()),
+                    ClaimGrantState::Pending | ClaimGrantState::Consumed => {
+                        Err(ClaimsError::permission_denied())
+                    }
+                    ClaimGrantState::Granted => Err(ClaimsError::state_conflict()),
+                },
+                None => Err(ClaimsError::not_found()),
+            };
         };
-        let Some(grant) = record.claims.get_mut(claim_index).and_then(Option::as_mut) else {
+        let Some(grant) = record.claims.get(claim_index).and_then(|slot| *slot) else {
             return Err(ClaimsError::not_found());
         };
         if grant.qualified != qualified {
             return Err(ClaimsError::not_found());
         }
-        let granted = *grant;
         match grant.state {
             ClaimGrantState::Revoked => Err(ClaimsError::revoked()),
             ClaimGrantState::Expired => Err(ClaimsError::expired()),
@@ -866,13 +987,13 @@ impl<
                 Err(ClaimsError::permission_denied())
             }
             ClaimGrantState::Granted => {
-                if granted.is_active(now_unix_seconds) {
+                if grant.is_active(now_unix_seconds) {
                     if matches!(grant.lifetime, ClaimGrantLifetime::OneShot) {
-                        grant.state = ClaimGrantState::Consumed;
+                        Self::retire_claim(record, claim_index, ClaimGrantState::Consumed)?;
                     }
-                    Ok(granted)
+                    Ok(grant)
                 } else {
-                    grant.state = ClaimGrantState::Expired;
+                    Self::retire_claim(record, claim_index, ClaimGrantState::Expired)?;
                     Err(ClaimsError::expired())
                 }
             }
@@ -897,6 +1018,62 @@ impl<
             return Ok(false);
         };
         Ok(grant.is_active(now_unix_seconds))
+    }
+
+    fn refresh_context_seal_metadata(
+        record: &mut ClaimContextRecord<'a, MAX_CLAIMS, MAX_BONDS, MAX_SCOPE_NODES>,
+    ) {
+        let granted_claim_count = record
+            .claims
+            .iter()
+            .flatten()
+            .filter(|grant| matches!(grant.state, ClaimGrantState::Granted))
+            .count() as u32;
+        record.descriptor.image_seal = record
+            .descriptor
+            .image_seal
+            .with_granted_claim_count(granted_claim_count);
+        // TODO: stop copying the updated seal into every stored grant once inspection can join
+        // against the descriptor seal directly; this O(MAX_CLAIMS) rewrite is still temporary tax.
+        for claim in record.claims.iter_mut().flatten() {
+            claim.seal = record.descriptor.image_seal;
+        }
+    }
+
+    fn retire_claim(
+        record: &mut ClaimContextRecord<'a, MAX_CLAIMS, MAX_BONDS, MAX_SCOPE_NODES>,
+        index: usize,
+        state: ClaimGrantState,
+    ) -> Result<(), ClaimsError> {
+        let Some(grant) = record.claims.get_mut(index).and_then(Option::as_mut) else {
+            return Err(ClaimsError::not_found());
+        };
+        grant.state = state;
+        let removed = record.claim_trie.remove(grant.qualified.claim())?;
+        if removed.is_some_and(|claim_index| claim_index != index) {
+            return Err(ClaimsError::state_conflict());
+        }
+        // TODO: move terminal claim history into one dedicated tombstone/journal lane once
+        // inspection needs more than "dead until this slot is reused" semantics.
+        Self::refresh_context_seal_metadata(record);
+        Ok(())
+    }
+
+    fn find_claim_index(
+        record: &ClaimContextRecord<'a, MAX_CLAIMS, MAX_BONDS, MAX_SCOPE_NODES>,
+        qualified: QualifiedClaimId<'a>,
+    ) -> Option<usize> {
+        record
+            .claims
+            .iter()
+            .position(|slot| slot.is_some_and(|grant| grant.qualified == qualified))
+    }
+
+    const fn is_terminal_claim_state(state: ClaimGrantState) -> bool {
+        matches!(
+            state,
+            ClaimGrantState::Consumed | ClaimGrantState::Revoked | ClaimGrantState::Expired
+        )
     }
 
     fn attach_bond(
@@ -1013,6 +1190,8 @@ struct CourierAuthorityRecord<'a> {
 }
 
 /// Courier-rooted authority registry for claims, seals, and attachment bonds.
+// TODO: collapse this const-generic hedgehog behind one config carrier/trait if a second storage
+// flavor lands; the current knobs are honest, but they are not exactly graceful company.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CourierAuthorityRegistry<
     'a,
@@ -1415,6 +1594,7 @@ mod tests {
 
     type DemoRegistry<'a> = ClaimContextRegistry<'a, 4, 4, 4, 16>;
     type DemoAuthority<'a> = CourierAuthorityRegistry<'a, 4, 4, 4, 4, 16>;
+    type TinyRegistry<'a> = ClaimContextRegistry<'a, 1, 1, 1, 4>;
 
     fn local_seal(id: u64) -> LocalAdmissionSeal {
         LocalAdmissionSeal::new(
@@ -1601,6 +1781,15 @@ mod tests {
             registry.snapshot(ClaimContextId::new(1)).unwrap().claims[0],
             Some(grant) if grant.state == ClaimGrantState::Consumed
         ));
+        assert_eq!(
+            registry
+                .snapshot(ClaimContextId::new(1))
+                .unwrap()
+                .descriptor
+                .image_seal
+                .granted_claim_count,
+            0
+        );
     }
 
     #[test]
@@ -1633,6 +1822,19 @@ mod tests {
         registry
             .revoke_claim(ClaimContextId::new(1), qualified)
             .expect("revocation should succeed");
+        assert!(matches!(
+            registry.request_claim_for_courier(black_courier(ClaimContextId::new(1)), qualified, 125),
+            Err(error) if error.kind() == ClaimsErrorKind::Revoked
+        ));
+        assert_eq!(
+            registry
+                .snapshot(ClaimContextId::new(1))
+                .unwrap()
+                .descriptor
+                .image_seal
+                .granted_claim_count,
+            0
+        );
         registry
             .grant_claim(
                 ClaimContextId::new(1),
@@ -1657,6 +1859,96 @@ mod tests {
                     && grant.issued_at_unix_seconds == 150
                     && grant.expires_at_unix_seconds == Some(250)
         ));
+    }
+
+    #[test]
+    fn terminal_claim_slots_and_trie_nodes_are_reused_for_new_scopes() {
+        let mut registry: TinyRegistry<'_> = ClaimContextRegistry::new();
+        registry
+            .register_context(ClaimContextDescriptor {
+                id: ClaimContextId::new(1),
+                principal: PrincipalId::parse("httpd@kernel-local[cache]").unwrap(),
+                image_seal: local_seal(10),
+                awareness: ClaimAwareness::Black,
+            })
+            .expect("context should register");
+        let first = QualifiedClaimId::parse("httpd@kernel-local[cache]=>net.tcp.443").unwrap();
+        let second = QualifiedClaimId::parse("httpd@kernel-local[cache]=>hw.nic.rx").unwrap();
+        registry
+            .grant_claim(
+                ClaimContextId::new(1),
+                ClaimGrant {
+                    qualified: first,
+                    group: None,
+                    source: ClaimGrantSource::LocalPolicy,
+                    lifetime: ClaimGrantLifetime::Retained,
+                    state: ClaimGrantState::Granted,
+                    issued_at_unix_seconds: 100,
+                    expires_at_unix_seconds: None,
+                    seal: local_seal(10),
+                },
+            )
+            .expect("first claim should grant");
+        registry
+            .revoke_claim(ClaimContextId::new(1), first)
+            .expect("first claim should revoke");
+        registry
+            .grant_claim(
+                ClaimContextId::new(1),
+                ClaimGrant {
+                    qualified: second,
+                    group: None,
+                    source: ClaimGrantSource::LocalPolicy,
+                    lifetime: ClaimGrantLifetime::Retained,
+                    state: ClaimGrantState::Granted,
+                    issued_at_unix_seconds: 110,
+                    expires_at_unix_seconds: None,
+                    seal: local_seal(10),
+                },
+            )
+            .expect("second claim should reuse terminal slot and trie nodes");
+        assert_eq!(
+            registry.snapshot(ClaimContextId::new(1)).unwrap().claims[0]
+                .unwrap()
+                .qualified,
+            second
+        );
+    }
+
+    #[test]
+    fn expired_claims_drop_out_of_active_count() {
+        let mut registry: DemoRegistry<'_> = ClaimContextRegistry::new();
+        registry
+            .register_context(ClaimContextDescriptor {
+                id: ClaimContextId::new(1),
+                principal: PrincipalId::parse("httpd@kernel-local[cache]").unwrap(),
+                image_seal: local_seal(10),
+                awareness: ClaimAwareness::Black,
+            })
+            .expect("context should register");
+        registry
+            .grant_claim(
+                ClaimContextId::new(1),
+                ClaimGrant {
+                    qualified: QualifiedClaimId::parse("httpd@kernel-local[cache]=>net.tcp.9094")
+                        .unwrap(),
+                    group: None,
+                    source: ClaimGrantSource::LocalPolicy,
+                    lifetime: ClaimGrantLifetime::ExpiresAt { unix_seconds: 125 },
+                    state: ClaimGrantState::Granted,
+                    issued_at_unix_seconds: 100,
+                    expires_at_unix_seconds: Some(125),
+                    seal: local_seal(10),
+                },
+            )
+            .expect("claim should grant");
+        registry.expire_stale_claims(125);
+        let snapshot = registry.snapshot(ClaimContextId::new(1)).unwrap();
+        assert!(matches!(
+            snapshot.claims[0],
+            Some(grant) if grant.state == ClaimGrantState::Expired
+        ));
+        assert_eq!(snapshot.descriptor.image_seal.granted_claim_count, 0);
     }
 
     #[test]
