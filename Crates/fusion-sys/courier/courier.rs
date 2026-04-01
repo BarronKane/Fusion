@@ -5,6 +5,11 @@
 //! `CurrentEL` directly. That work belongs here at the courier authority boundary, because the
 //! kernel courier will want to reason about current execution privilege honestly instead of
 //! treating it as vague ambient kernel magic.
+//! Intended ring model once that work lands:
+//! - Ring 0: kernel core
+//! - Ring 1: OS services plus courier/fiber metadata surfaces
+//! - Ring 2: device drivers
+//! - Ring 3: user/context/application space
 
 pub use fusion_pal::sys::courier::*;
 
