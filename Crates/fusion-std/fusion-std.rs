@@ -19,6 +19,9 @@ pub use fusion_sys::atomic;
 pub use fusion_sys::gpio;
 /// Public channel-native debug/inspection surface re-exported from `fusion-sys`.
 pub use fusion_sys::insight;
+#[path = "claims/claims.rs"]
+/// Public claims parsing, matching, and inspection rendering sugar.
+pub mod claims;
 /// Public coprocessor sugar layered over the truthful `fusion-sys::pcu` substrate.
 #[path = "pcu/pcu.rs"]
 pub mod pcu;

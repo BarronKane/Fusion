@@ -134,8 +134,8 @@ fn probe_unnamed_posix_semaphore() -> bool {
 mod tests {
     extern crate std;
 
-    use super::*;
     use self::std::thread;
+    use super::*;
 
     #[test]
     fn runtime_capabilities_snapshot_is_stable_across_calls() {

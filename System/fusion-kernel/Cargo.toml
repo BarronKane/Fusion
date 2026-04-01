@@ -8,9 +8,21 @@ repository = ""
 
 [workspace]
 
+[lib]
+crate-type = ["rlib"]
+path = "lib.rs"
+
 [[bin]]
 name = "fusion-kernel"
 path = "fusion-kernel.rs"
 
 [features]
 default = []
+inspection = ["dep:fusion-std"]
+sys-cortex-m = ["fusion-pal/sys-cortex-m", "fusion-sys/sys-cortex-m"]
+soc-rp2350 = ["sys-cortex-m", "fusion-pal/soc-rp2350", "fusion-sys/soc-rp2350"]
+
+[dependencies]
+fusion-pal = { path = "../../Crates/fusion-pal", default-features = false }
+fusion-sys = { path = "../../Crates/fusion-sys", default-features = false }
+fusion-std = { path = "../../Crates/fusion-std", default-features = false, optional = true }

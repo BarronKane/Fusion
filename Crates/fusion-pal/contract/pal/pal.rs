@@ -1,6 +1,8 @@
 //! Platform abstraction contracts for every substrate Fusion can honestly target.
 
 pub mod caps;
+#[path = "claims/claims.rs"]
+pub mod claims;
 pub mod cpu;
 #[path = "domain/domain.rs"]
 pub mod domain;
@@ -18,6 +20,7 @@ pub mod unsupported;
 pub mod vector;
 
 pub use caps::*;
+pub use claims::*;
 pub use cpu::*;
 pub use error::*;
 pub use mem::*;

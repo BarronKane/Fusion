@@ -18,6 +18,9 @@ pub mod atomic;
 #[path = "channel/channel.rs"]
 /// fusion-sys channel transports and local channel demonstration surface.
 pub mod channel;
+#[path = "claims/claims.rs"]
+/// fusion-sys claims vocabulary and composition-facing claim identity surface.
+pub mod claims;
 #[path = "context/context.rs"]
 /// fusion-sys native visible-context contracts and wrappers.
 pub mod context;

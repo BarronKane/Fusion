@@ -34,6 +34,7 @@ pub use fusion_pal::sys::execution_context::{
 };
 
 use crate::channel::{ChannelError, ChannelSend, LocalChannel};
+use crate::claims::{ClaimAwareness, ClaimContextId};
 use crate::protocol::{
     Protocol,
     ProtocolBootstrapKind,
@@ -235,6 +236,12 @@ pub enum FiberMetadataMessage {
         fiber: FiberId,
         reason: FiberErrorKind,
     },
+    /// One managed fiber switched between claim-blind and black claim-aware execution.
+    ClaimAwarenessChanged {
+        fiber: FiberId,
+        awareness: ClaimAwareness,
+        claim_context: Option<ClaimContextId>,
+    },
     /// One managed fiber was dropped before terminal completion.
     Abandoned {
         fiber: FiberId,
@@ -283,9 +290,38 @@ pub struct ManagedFiber<
 > {
     id: FiberId,
     started: bool,
+    claim_awareness: ClaimAwareness,
+    claim_context: Option<ClaimContextId>,
     fiber: Option<PinnedFiber<'state, T>>,
     metadata: FiberMetadataChannel<META_CAPACITY, MAX_CONSUMERS>,
     metadata_producer: usize,
+}
+
+/// Snapshot of one managed fiber's live identity, lifecycle, and claim-coupling state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ManagedFiberSnapshot {
+    pub id: FiberId,
+    pub state: FiberState,
+    pub started: bool,
+    pub claim_awareness: ClaimAwareness,
+    pub claim_context: Option<ClaimContextId>,
+}
+
+impl ManagedFiberSnapshot {
+    #[must_use]
+    pub const fn is_running(self) -> bool {
+        matches!(self.state, FiberState::Running)
+    }
+
+    #[must_use]
+    pub const fn is_completed(self) -> bool {
+        matches!(self.state, FiberState::Completed)
+    }
+
+    #[must_use]
+    pub const fn is_claim_enabled(self) -> bool {
+        self.claim_awareness.is_black() && self.claim_context.is_some()
+    }
 }
 
 /// Yield outcome observed when resuming a fiber.
@@ -580,6 +616,8 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
         let managed = Self {
             id: next_fiber_id(),
             started: false,
+            claim_awareness: ClaimAwareness::Blind,
+            claim_context: None,
             fiber: Some(fiber),
             metadata,
             metadata_producer,
@@ -592,6 +630,53 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
     #[must_use]
     pub const fn id(&self) -> FiberId {
         self.id
+    }
+
+    /// Returns whether the managed fiber has ever been resumed.
+    #[must_use]
+    pub const fn started(&self) -> bool {
+        self.started
+    }
+
+    /// Returns whether this fiber is currently claim-blind or black/claim-enabled.
+    #[must_use]
+    pub const fn claim_awareness(&self) -> ClaimAwareness {
+        self.claim_awareness
+    }
+
+    /// Returns the active claim-context identifier carried by this fiber, if any.
+    #[must_use]
+    pub const fn claim_context(&self) -> Option<ClaimContextId> {
+        self.claim_context
+    }
+
+    /// Returns whether this managed fiber is currently claim-enabled.
+    #[must_use]
+    pub const fn is_claim_enabled(&self) -> bool {
+        self.claim_awareness.is_black() && self.claim_context.is_some()
+    }
+
+    /// Switches this fiber into one explicit claim mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns `invalid` when black claim-aware mode is requested without one claim-context ID.
+    pub fn set_claim_mode(
+        &mut self,
+        awareness: ClaimAwareness,
+        claim_context: Option<ClaimContextId>,
+    ) -> Result<(), FiberError> {
+        if awareness.is_black() && claim_context.is_none() {
+            return Err(FiberError::invalid());
+        }
+        self.claim_awareness = awareness;
+        self.claim_context = claim_context;
+        self.publish_metadata(FiberMetadataMessage::ClaimAwarenessChanged {
+            fiber: self.id,
+            awareness,
+            claim_context,
+        });
+        Ok(())
     }
 
     /// Returns the automatic metadata channel owned by this fiber.
@@ -625,6 +710,30 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
             .as_ref()
             .expect("managed fiber state should remain present until stack extraction")
             .fiber_state()
+    }
+
+    /// Returns a stable snapshot of the managed fiber's current execution and claim state.
+    #[must_use]
+    pub fn snapshot(&self) -> ManagedFiberSnapshot {
+        ManagedFiberSnapshot {
+            id: self.id,
+            state: self.fiber_state(),
+            started: self.started,
+            claim_awareness: self.claim_awareness,
+            claim_context: self.claim_context,
+        }
+    }
+
+    /// Returns whether the managed fiber is actively running right now.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        matches!(self.fiber_state(), FiberState::Running)
+    }
+
+    /// Returns whether the managed fiber has completed permanently.
+    #[must_use]
+    pub fn is_completed(&self) -> bool {
+        matches!(self.fiber_state(), FiberState::Completed)
     }
 
     /// Resumes the managed fiber once and emits coarse lifecycle metadata.
@@ -1136,5 +1245,40 @@ mod tests {
         ));
 
         clear_active_fiber().expect("active slot should clear");
+    }
+
+    struct YieldOnce;
+
+    impl FiberRunnable for YieldOnce {
+        fn run(self: Pin<&mut Self>) -> FiberReturn {
+            let _ = yield_now();
+            FiberReturn::new(0)
+        }
+    }
+
+    #[test]
+    fn managed_fiber_claim_mode_requires_context_for_black() {
+        let mut stack = [0u8; 4096];
+        let stack = FiberStack::from_slice(&mut stack).expect("stack should build");
+        let mut state = YieldOnce;
+        let mut managed = ManagedFiber::<_, 8>::new(Pin::new(&mut state), stack)
+            .expect("managed fiber should build");
+        let initial = managed.snapshot();
+        assert_eq!(initial.state, FiberState::Created);
+        assert!(!initial.started);
+        assert!(!initial.is_claim_enabled());
+
+        assert!(matches!(
+            managed.set_claim_mode(ClaimAwareness::Black, None),
+            Err(error) if error.kind() == FiberErrorKind::Invalid
+        ));
+        managed
+            .set_claim_mode(ClaimAwareness::Black, Some(ClaimContextId::new(9)))
+            .expect("black claim mode should accept one context");
+        assert_eq!(managed.claim_awareness(), ClaimAwareness::Black);
+        assert_eq!(managed.claim_context(), Some(ClaimContextId::new(9)));
+        let after_claims = managed.snapshot();
+        assert_eq!(after_claims.claim_context, Some(ClaimContextId::new(9)));
+        assert!(after_claims.is_claim_enabled());
     }
 }

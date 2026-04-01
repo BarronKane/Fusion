@@ -10,6 +10,7 @@ use crate::sync::{Mutex, SyncError, SyncErrorKind};
 use crate::transport::{
     TransportAccessRequirement,
     TransportAttachmentControl,
+    TransportAttachmentLaw,
     TransportAttachmentModel,
     TransportAttachmentRequest,
     TransportAttachmentScope,
@@ -47,6 +48,7 @@ struct LocalChannelState<T, const CAPACITY: usize, const MAX_CONSUMERS: usize> {
     head: usize,
     tail: usize,
     len: usize,
+    attachment_law: TransportAttachmentLaw,
     next_attachment: usize,
     producer: Option<usize>,
     consumers: [Option<usize>; MAX_CONSUMERS],
@@ -55,12 +57,13 @@ struct LocalChannelState<T, const CAPACITY: usize, const MAX_CONSUMERS: usize> {
 impl<T, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     LocalChannelState<T, CAPACITY, MAX_CONSUMERS>
 {
-    fn new() -> Self {
+    fn new(attachment_law: TransportAttachmentLaw) -> Self {
         Self {
             buffer: array::from_fn(|_| None),
             head: 0,
             tail: 0,
             len: 0,
+            attachment_law,
             next_attachment: 1,
             producer: None,
             consumers: array::from_fn(|_| None),
@@ -75,7 +78,11 @@ impl<T, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     }
 
     fn mode(&self) -> ChannelMode {
-        if self.consumer_count() > 1 {
+        if matches!(
+            self.attachment_law,
+            TransportAttachmentLaw::PromotableSpmc | TransportAttachmentLaw::SharedSpmc
+        ) && self.consumer_count() > 1
+        {
             ChannelMode::SingleProducerMultiConsumer
         } else {
             ChannelMode::SingleProducerSingleConsumer
@@ -94,25 +101,46 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     /// Returns an honest error when the protocol requires a transport shape this local channel
     /// cannot satisfy.
     pub fn new() -> Result<Self, ChannelError> {
+        Self::new_with_attachment_law(TransportAttachmentLaw::PromotableSpmc)
+    }
+
+    /// Creates a new local channel with one explicit attachment law.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the protocol requires a transport shape this local channel
+    /// cannot satisfy.
+    pub fn new_with_attachment_law(
+        attachment_law: TransportAttachmentLaw,
+    ) -> Result<Self, ChannelError> {
         P::validate_transport(Self::transport_support(
             ChannelMode::SingleProducerSingleConsumer,
+            attachment_law,
         ))
         .map_err(ChannelError::from)?;
         Ok(Self {
-            state: Mutex::new(LocalChannelState::new()),
+            state: Mutex::new(LocalChannelState::new(attachment_law)),
             _protocol: PhantomData,
         })
     }
 
-    fn transport_support(mode: ChannelMode) -> TransportSupport {
+    fn transport_support(
+        mode: ChannelMode,
+        attachment_law: TransportAttachmentLaw,
+    ) -> TransportSupport {
         TransportSupport {
-            caps: TransportCaps::ATTACH_PRODUCER
-                | TransportCaps::ATTACH_CONSUMER
-                | TransportCaps::DETACH_PRODUCER
-                | TransportCaps::DETACH_CONSUMER
-                | TransportCaps::TOPOLOGY_PROMOTION
-                | TransportCaps::CROSS_COURIER_ATTACH
-                | TransportCaps::BUFFERED,
+            caps: {
+                let mut caps = TransportCaps::ATTACH_PRODUCER
+                    | TransportCaps::ATTACH_CONSUMER
+                    | TransportCaps::DETACH_PRODUCER
+                    | TransportCaps::DETACH_CONSUMER
+                    | TransportCaps::CROSS_COURIER_ATTACH
+                    | TransportCaps::BUFFERED;
+                if matches!(attachment_law, TransportAttachmentLaw::PromotableSpmc) {
+                    caps |= TransportCaps::TOPOLOGY_PROMOTION;
+                }
+                caps
+            },
             implementation: TransportImplementationKind::Native,
             direction: TransportDirection::Unidirectional,
             topology: match mode {
@@ -128,6 +156,7 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
             reliability: TransportReliability::Reliable,
             backpressure: TransportBackpressure::RejectWhenFull,
             attachment: TransportAttachmentModel::ScopedHandles,
+            attachment_law,
             wake: TransportWakeModel::ExplicitPoll,
             same_courier_attach: TransportAccessRequirement::Available,
             cross_courier_attach: TransportAccessRequirement::Available,
@@ -173,7 +202,7 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportBa
             .state
             .lock()
             .expect("local channel state lock should acquire for support");
-        Self::transport_support(state.mode())
+        Self::transport_support(state.mode(), state.attachment_law)
     }
 
     fn active_topology(&self) -> TransportTopology {
@@ -214,6 +243,11 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAt
             .try_lock()
             .map_err(transport_error_from_sync)?
             .ok_or_else(TransportError::busy)?;
+        if let Some(requested_law) = request.requested_law {
+            if requested_law != state.attachment_law {
+                return Err(TransportError::permission_denied());
+            }
+        }
         if state.producer.is_some() {
             return Err(TransportError::busy());
         }
@@ -233,6 +267,16 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAt
             .try_lock()
             .map_err(transport_error_from_sync)?
             .ok_or_else(TransportError::busy)?;
+        if let Some(requested_law) = request.requested_law {
+            if requested_law != state.attachment_law {
+                return Err(TransportError::permission_denied());
+            }
+        }
+        if matches!(state.attachment_law, TransportAttachmentLaw::ExclusiveSpsc)
+            && state.consumer_count() >= 1
+        {
+            return Err(TransportError::state_conflict());
+        }
         let Some(slot_index) = state.consumers.iter().position(|slot| slot.is_none()) else {
             return Err(TransportError::resource_exhausted());
         };
@@ -287,16 +331,21 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelBase
             .expect("local channel state lock should acquire for support");
         let mode = state.mode();
         ChannelSupport {
-            caps: ChannelCaps::WRITE
-                | ChannelCaps::READ
-                | ChannelCaps::BUFFERED
-                | ChannelCaps::MODE_PROMOTION
-                | ChannelCaps::CLAIM_GATED_CROSS_COURIER,
+            caps: {
+                let mut caps = ChannelCaps::WRITE
+                    | ChannelCaps::READ
+                    | ChannelCaps::BUFFERED
+                    | ChannelCaps::CLAIM_GATED_CROSS_COURIER;
+                if matches!(state.attachment_law, TransportAttachmentLaw::PromotableSpmc) {
+                    caps |= ChannelCaps::MODE_PROMOTION;
+                }
+                caps
+            },
             implementation: ChannelImplementationKind::Native,
             mode,
             producer_count: usize::from(state.producer.is_some()),
             consumer_count: state.consumer_count(),
-            transport: Self::transport_support(mode),
+            transport: Self::transport_support(mode, state.attachment_law),
             protocol: P::DESCRIPTOR,
         }
     }
@@ -554,5 +603,34 @@ mod tests {
                 .expect("cross-thread receive should succeed"),
             Some(0xABCD_1234)
         );
+    }
+
+    #[test]
+    fn exclusive_spsc_channel_rejects_second_consumer() {
+        let channel = LocalChannel::<LocalWordProtocol, 4>::new_with_attachment_law(
+            TransportAttachmentLaw::ExclusiveSpsc,
+        )
+        .expect("channel should build");
+        channel
+            .attach_producer(
+                TransportAttachmentRequest::same_courier()
+                    .with_requested_law(TransportAttachmentLaw::ExclusiveSpsc),
+            )
+            .expect("producer should attach");
+        channel
+            .attach_consumer(
+                TransportAttachmentRequest::same_courier()
+                    .with_requested_law(TransportAttachmentLaw::ExclusiveSpsc),
+            )
+            .expect("first consumer should attach");
+
+        let denied = channel.attach_consumer(
+            TransportAttachmentRequest::same_courier()
+                .with_requested_law(TransportAttachmentLaw::ExclusiveSpsc),
+        );
+        assert!(matches!(
+            denied,
+            Err(error) if error.kind() == TransportErrorKind::StateConflict
+        ));
     }
 }

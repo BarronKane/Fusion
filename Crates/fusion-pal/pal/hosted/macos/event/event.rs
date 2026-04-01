@@ -192,12 +192,24 @@ fn apply_interest_change(
     let wants_read = interest.contains(EventInterest::READABLE);
     let wants_write = interest.contains(EventInterest::WRITABLE);
 
-    changes[len] = make_change(fd, libc::EVFILT_READ, if wants_read { libc::EV_ADD } else { libc::EV_DELETE });
+    changes[len] = make_change(
+        fd,
+        libc::EVFILT_READ,
+        if wants_read {
+            libc::EV_ADD
+        } else {
+            libc::EV_DELETE
+        },
+    );
     len += 1;
     changes[len] = make_change(
         fd,
         libc::EVFILT_WRITE,
-        if wants_write { libc::EV_ADD } else { libc::EV_DELETE },
+        if wants_write {
+            libc::EV_ADD
+        } else {
+            libc::EV_DELETE
+        },
     );
     len += 1;
 
@@ -224,7 +236,12 @@ fn remove_filter_if_present(
     let change = [make_change(fd, filter, libc::EV_DELETE)];
     match apply_changes_allow_delete_absent(kqueue_fd, &change) {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == crate::contract::pal::runtime::event::EventErrorKind::StateConflict => Ok(()),
+        Err(error)
+            if error.kind()
+                == crate::contract::pal::runtime::event::EventErrorKind::StateConflict =>
+        {
+            Ok(())
+        }
         Err(error) => Err(error),
     }
 }
@@ -278,7 +295,11 @@ fn apply_changes_allow_delete_absent(
     Ok(())
 }
 
-const fn make_change(fd: libc::c_int, filter: libc::c_short, flags: libc::c_ushort) -> libc::kevent {
+const fn make_change(
+    fd: libc::c_int,
+    filter: libc::c_short,
+    flags: libc::c_ushort,
+) -> libc::kevent {
     libc::kevent {
         ident: fd as libc::uintptr_t,
         filter,
@@ -425,8 +446,13 @@ mod tests {
             .expect("pipe read-end should register");
 
         let payload = [0x7Fu8; 1];
-        let write_rc =
-            unsafe { libc::write(write_fd, payload.as_ptr().cast::<libc::c_void>(), payload.len()) };
+        let write_rc = unsafe {
+            libc::write(
+                write_fd,
+                payload.as_ptr().cast::<libc::c_void>(),
+                payload.len(),
+            )
+        };
         assert_eq!(write_rc, 1, "write should signal readability");
 
         let mut events = [EventRecord {
@@ -436,7 +462,10 @@ mod tests {
         let count = provider
             .poll(&mut poller, &mut events, Some(Duration::from_millis(100)))
             .expect("poll should evaluate");
-        assert!(count >= 1, "at least one readiness event should be returned");
+        assert!(
+            count >= 1,
+            "at least one readiness event should be returned"
+        );
         assert!(
             events[..count].iter().any(|record| {
                 record.key == key

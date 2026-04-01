@@ -90,10 +90,7 @@ pub struct MacOsSavedContext {
 }
 
 unsafe extern "C" {
-    fn fusion_macos_aarch64_context_swap(
-        from: *mut Aarch64Registers,
-        to: *const Aarch64Registers,
-    );
+    fn fusion_macos_aarch64_context_swap(from: *mut Aarch64Registers, to: *const Aarch64Registers);
 }
 
 impl MacOsContext {

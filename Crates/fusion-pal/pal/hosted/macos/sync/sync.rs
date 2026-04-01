@@ -7,10 +7,10 @@ use core::cell::UnsafeCell;
 #[cfg(not(feature = "critical-safe"))]
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::pal::hosted::macos::capability::{
-    DarwinRuntimeCapabilities,
-    runtime_capabilities as darwin_runtime_capabilities,
-};
+#[cfg(feature = "critical-safe")]
+use crate::contract::pal::runtime::sync::UnsupportedRawOnce;
+#[cfg(feature = "critical-safe")]
+use crate::contract::pal::runtime::sync::UnsupportedSemaphore;
 use crate::contract::pal::runtime::sync::{
     MutexCaps,
     MutexSupport,
@@ -33,8 +33,6 @@ use crate::contract::pal::runtime::sync::{
     SyncSupport,
     TimeoutCaps,
 };
-#[cfg(feature = "critical-safe")]
-use crate::contract::pal::runtime::sync::UnsupportedSemaphore;
 #[cfg(not(feature = "critical-safe"))]
 use crate::contract::pal::runtime::sync::{
     OnceBeginResult,
@@ -44,8 +42,10 @@ use crate::contract::pal::runtime::sync::{
     RawSemaphore,
     SemaphoreCaps,
 };
-#[cfg(feature = "critical-safe")]
-use crate::contract::pal::runtime::sync::UnsupportedRawOnce;
+use crate::pal::hosted::macos::capability::{
+    DarwinRuntimeCapabilities,
+    runtime_capabilities as darwin_runtime_capabilities,
+};
 
 const MACOS_MUTEX_SUPPORT: MutexSupport = MutexSupport {
     caps: MutexCaps::TRY_LOCK
@@ -223,11 +223,7 @@ unsafe impl RawMutex for MacOsRawMutex {
 
     fn lock(&self) -> Result<(), SyncError> {
         let rc = unsafe { libc::pthread_mutex_lock(self.as_mut_ptr()) };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(map_errno(rc))
-        }
+        if rc == 0 { Ok(()) } else { Err(map_errno(rc)) }
     }
 
     fn try_lock(&self) -> Result<bool, SyncError> {
@@ -268,11 +264,7 @@ impl MacOsCondVar {
 
     fn wait(&self, mutex: &MacOsRawMutex) -> Result<(), SyncError> {
         let rc = unsafe { libc::pthread_cond_wait(self.as_mut_ptr(), mutex.as_mut_ptr()) };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(map_errno(rc))
-        }
+        if rc == 0 { Ok(()) } else { Err(map_errno(rc)) }
     }
 
     fn notify_one(&self) {
@@ -474,7 +466,9 @@ impl RawSemaphore for MacOsSemaphore {
 
         self.gate.lock()?;
         let current = self.permits.load(Ordering::Acquire);
-        let next = current.checked_add(permits).ok_or_else(SyncError::overflow)?;
+        let next = current
+            .checked_add(permits)
+            .ok_or_else(SyncError::overflow)?;
         if next > self.max {
             // SAFETY: this thread acquired `gate` above and still holds it.
             unsafe { self.gate.unlock_unchecked() };
@@ -538,11 +532,7 @@ unsafe impl RawRwLock for MacOsRawRwLock {
 
     fn read_lock(&self) -> Result<(), SyncError> {
         let rc = unsafe { libc::pthread_rwlock_rdlock(self.as_mut_ptr()) };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(map_errno(rc))
-        }
+        if rc == 0 { Ok(()) } else { Err(map_errno(rc)) }
     }
 
     fn try_read_lock(&self) -> Result<bool, SyncError> {
@@ -558,11 +548,7 @@ unsafe impl RawRwLock for MacOsRawRwLock {
 
     fn write_lock(&self) -> Result<(), SyncError> {
         let rc = unsafe { libc::pthread_rwlock_wrlock(self.as_mut_ptr()) };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(map_errno(rc))
-        }
+        if rc == 0 { Ok(()) } else { Err(map_errno(rc)) }
     }
 
     fn try_write_lock(&self) -> Result<bool, SyncError> {
@@ -633,7 +619,10 @@ mod tests {
     fn macos_sync_support_reports_native_mutex_and_rwlock() {
         let support = system_sync().support();
         assert_eq!(support.mutex.implementation, SyncImplementationKind::Native);
-        assert_eq!(support.rwlock.implementation, SyncImplementationKind::Native);
+        assert_eq!(
+            support.rwlock.implementation,
+            SyncImplementationKind::Native
+        );
     }
 
     #[test]
@@ -642,7 +631,10 @@ mod tests {
 
         #[cfg(feature = "critical-safe")]
         {
-            assert_eq!(support.once.implementation, SyncImplementationKind::Unsupported);
+            assert_eq!(
+                support.once.implementation,
+                SyncImplementationKind::Unsupported
+            );
             assert_eq!(
                 support.semaphore.implementation,
                 SyncImplementationKind::Unsupported
@@ -651,7 +643,10 @@ mod tests {
 
         #[cfg(not(feature = "critical-safe"))]
         {
-            assert_eq!(support.once.implementation, SyncImplementationKind::Emulated);
+            assert_eq!(
+                support.once.implementation,
+                SyncImplementationKind::Emulated
+            );
             assert_eq!(
                 support.semaphore.implementation,
                 SyncImplementationKind::Emulated
@@ -663,13 +658,19 @@ mod tests {
     #[test]
     fn macos_emulated_semaphore_tracks_permits() {
         let semaphore = MacOsSemaphore::new(1, 2).expect("valid semaphore");
-        assert!(semaphore.try_acquire().expect("first acquire should succeed"));
+        assert!(
+            semaphore
+                .try_acquire()
+                .expect("first acquire should succeed")
+        );
         assert!(
             !semaphore
                 .try_acquire()
                 .expect("second acquire should observe empty permits")
         );
-        semaphore.release(1).expect("release should restore one permit");
+        semaphore
+            .release(1)
+            .expect("release should restore one permit");
         assert!(
             semaphore
                 .try_acquire()

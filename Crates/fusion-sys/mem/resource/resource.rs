@@ -1475,7 +1475,9 @@ mod tests {
             assert!(info.protect.contains(Protect::READ));
             assert!(info.protect.contains(Protect::WRITE));
         } else {
-            let err = resource.query(base).expect_err("query should be unsupported");
+            let err = resource
+                .query(base)
+                .expect_err("query should be unsupported");
             assert_eq!(err.kind, ResourceErrorKind::UnsupportedOperation);
         }
     }

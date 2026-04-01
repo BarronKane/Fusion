@@ -98,7 +98,10 @@ impl HardwareTopologyQuery for MacOsHardware {
         write_logical_cpus(output)
     }
 
-    fn write_cores(&self, output: &mut [ThreadCoreId]) -> Result<HardwareWriteSummary, HardwareError> {
+    fn write_cores(
+        &self,
+        output: &mut [ThreadCoreId],
+    ) -> Result<HardwareWriteSummary, HardwareError> {
         write_cores(output)
     }
 
@@ -207,7 +210,8 @@ fn write_logical_cpus(
     let mut written = 0usize;
 
     for index in 0..total {
-        let index_u16 = u16::try_from(index).map_err(|_| HardwareError::platform(libc::EOVERFLOW))?;
+        let index_u16 =
+            u16::try_from(index).map_err(|_| HardwareError::platform(libc::EOVERFLOW))?;
         if written < output.len() {
             output[written] = ThreadLogicalCpuId {
                 group: ThreadProcessorGroupId(0),
@@ -225,7 +229,8 @@ fn write_cores(output: &mut [ThreadCoreId]) -> Result<HardwareWriteSummary, Hard
     let mut written = 0usize;
 
     for index in 0..total {
-        let index_u32 = u32::try_from(index).map_err(|_| HardwareError::platform(libc::EOVERFLOW))?;
+        let index_u32 =
+            u32::try_from(index).map_err(|_| HardwareError::platform(libc::EOVERFLOW))?;
         if written < output.len() {
             output[written] = ThreadCoreId(index_u32);
             written += 1;
@@ -485,7 +490,10 @@ mod tests {
     #[test]
     fn macos_hardware_support_reports_native_cpu_surface() {
         let support = system_hardware().support();
-        assert_eq!(support.cpu.implementation, HardwareImplementationKind::Native);
+        assert_eq!(
+            support.cpu.implementation,
+            HardwareImplementationKind::Native
+        );
         assert_eq!(support.cpu.descriptor, HardwareGuarantee::Verified);
         assert_eq!(support.cpu.memory_ordering, HardwareGuarantee::Verified);
         assert_eq!(support.cpu.atomic_widths, HardwareGuarantee::Verified);

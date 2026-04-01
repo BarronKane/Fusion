@@ -19,5 +19,7 @@ pub extern "C" fn _start() -> ! {
 
 #[cfg(not(target_os = "none"))]
 fn main() {
-    eprintln!("fusion-kernel is a bare-metal binary scaffold; build it for a target_os=none target.");
+    eprintln!(
+        "fusion-kernel is a bare-metal binary scaffold; build it for a target_os=none target."
+    );
 }

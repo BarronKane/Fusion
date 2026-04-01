@@ -174,7 +174,9 @@ unsafe impl ThreadLifecycle for MacOsThread {
         }
 
         unsafe {
-            start_ptr.cast::<ThreadStart>().write(ThreadStart { entry, context });
+            start_ptr
+                .cast::<ThreadStart>()
+                .write(ThreadStart { entry, context });
         }
 
         let mut pthread = MaybeUninit::<pthread_t>::uninit();

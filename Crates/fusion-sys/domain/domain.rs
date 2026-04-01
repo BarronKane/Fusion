@@ -2,6 +2,7 @@
 
 pub use fusion_pal::sys::domain::*;
 
+use crate::claims::{ClaimAwareness, ClaimContextId};
 use crate::context::{
     ContextBase,
     ContextCaps,
@@ -36,6 +37,8 @@ pub struct CourierDescriptor<'a> {
     pub name: &'a str,
     pub caps: CourierCaps,
     pub visibility: CourierVisibility,
+    pub claim_awareness: ClaimAwareness,
+    pub claim_context: Option<ClaimContextId>,
 }
 
 /// Static descriptor used to construct one visible context.
@@ -45,6 +48,7 @@ pub struct ContextDescriptor<'a> {
     pub name: &'a str,
     pub kind: ContextKind,
     pub caps: ContextCaps,
+    pub claim_context: Option<ClaimContextId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +125,8 @@ impl<'a, const MAX_COURIERS: usize, const MAX_CONTEXTS: usize, const MAX_VISIBLE
                 implementation: CourierImplementationKind::Native,
                 domain: self.domain.descriptor.id,
                 visibility: descriptor.visibility,
+                claim_awareness: descriptor.claim_awareness,
+                claim_context: descriptor.claim_context,
             },
             visible: [None; MAX_VISIBLE],
         })
@@ -155,6 +161,7 @@ impl<'a, const MAX_COURIERS: usize, const MAX_CONTEXTS: usize, const MAX_VISIBLE
                 owner,
                 kind: descriptor.kind,
                 projection: ContextProjectionKind::Owned,
+                claim_context: descriptor.claim_context,
             },
         });
         Ok(())
@@ -504,6 +511,8 @@ mod tests {
                     | CourierCaps::SPAWN_SUB_FIBERS
                     | CourierCaps::DEBUG_CHANNEL,
                 visibility: CourierVisibility::Full,
+                claim_awareness: ClaimAwareness::Black,
+                claim_context: Some(ClaimContextId::new(0xAAA0)),
             })
             .expect("primary courier should register");
         registry
@@ -514,6 +523,7 @@ mod tests {
                     name: "primary.main",
                     kind: ContextKind::FiberMetadata,
                     caps: ContextCaps::PROJECTABLE | ContextCaps::CONTROL_ENDPOINT,
+                    claim_context: Some(ClaimContextId::new(0xAAA0)),
                 },
             )
             .expect("fiber metadata context should register");
@@ -525,6 +535,7 @@ mod tests {
                     name: "nvme0n1p1",
                     kind: ContextKind::StorageEndpoint,
                     caps: ContextCaps::PROJECTABLE | ContextCaps::CHANNEL_BACKED,
+                    claim_context: None,
                 },
             )
             .expect("block context should register");
@@ -534,6 +545,8 @@ mod tests {
                 name: "scoped",
                 caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
                 visibility: CourierVisibility::Scoped,
+                claim_awareness: ClaimAwareness::Blind,
+                claim_context: None,
             })
             .expect("scoped courier should register");
         registry
@@ -547,6 +560,14 @@ mod tests {
             primary.courier_support().visibility,
             CourierVisibility::Full
         );
+        assert_eq!(
+            primary.courier_support().claim_awareness,
+            ClaimAwareness::Black
+        );
+        assert_eq!(
+            primary.courier_support().claim_context,
+            Some(ClaimContextId::new(0xAAA0))
+        );
         assert_eq!(primary.visible_context_count(), 2);
 
         let scoped = registry
@@ -555,6 +576,10 @@ mod tests {
         assert_eq!(
             scoped.courier_support().visibility,
             CourierVisibility::Scoped
+        );
+        assert_eq!(
+            scoped.courier_support().claim_awareness,
+            ClaimAwareness::Blind
         );
         assert_eq!(scoped.visible_context_count(), 1);
         assert!(!scoped.can_observe_context(FIBER_CONTEXT));
@@ -588,6 +613,8 @@ mod tests {
                 name: "primary",
                 caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
                 visibility: CourierVisibility::Full,
+                claim_awareness: ClaimAwareness::Blind,
+                claim_context: None,
             })
             .expect("primary courier should register");
 
@@ -596,6 +623,8 @@ mod tests {
             name: "duplicate",
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
             visibility: CourierVisibility::Scoped,
+            claim_awareness: ClaimAwareness::Black,
+            claim_context: Some(ClaimContextId::new(1)),
         });
         assert!(matches!(
             result,

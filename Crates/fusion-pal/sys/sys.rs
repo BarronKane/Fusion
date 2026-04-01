@@ -104,6 +104,10 @@ pub mod atomic {
     };
     pub use crate::contract::pal::runtime::atomic::*;
 }
+/// Public claims contract surface.
+pub mod claims {
+    pub use crate::contract::pal::claims::*;
+}
 /// Public native visible-context contract surface.
 pub mod context {
     pub use crate::contract::pal::domain::{

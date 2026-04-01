@@ -8,6 +8,8 @@ pub use caps::*;
 pub use error::*;
 pub use unsupported::*;
 
+use crate::contract::pal::claims::{ClaimAwareness, ClaimContextId};
+
 /// Stable identifier for one native Fusion domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DomainId(u64);
@@ -127,6 +129,8 @@ pub struct CourierSupport {
     pub implementation: CourierImplementationKind,
     pub domain: DomainId,
     pub visibility: CourierVisibility,
+    pub claim_awareness: ClaimAwareness,
+    pub claim_context: Option<ClaimContextId>,
 }
 
 impl CourierSupport {
@@ -137,7 +141,44 @@ impl CourierSupport {
             implementation: CourierImplementationKind::Unsupported,
             domain: DomainId::new(0),
             visibility: CourierVisibility::Scoped,
+            claim_awareness: ClaimAwareness::Blind,
+            claim_context: None,
         }
+    }
+
+    #[must_use]
+    pub const fn domain_id(self) -> DomainId {
+        self.domain
+    }
+
+    #[must_use]
+    pub const fn visibility(self) -> CourierVisibility {
+        self.visibility
+    }
+
+    #[must_use]
+    pub const fn claim_awareness(self) -> ClaimAwareness {
+        self.claim_awareness
+    }
+
+    #[must_use]
+    pub const fn claim_context(self) -> Option<ClaimContextId> {
+        self.claim_context
+    }
+
+    #[must_use]
+    pub const fn is_claim_enabled(self) -> bool {
+        self.claim_awareness.is_black() && self.claim_context.is_some()
+    }
+
+    #[must_use]
+    pub const fn is_full_visibility(self) -> bool {
+        matches!(self.visibility, CourierVisibility::Full)
+    }
+
+    #[must_use]
+    pub const fn is_scoped_visibility(self) -> bool {
+        matches!(self.visibility, CourierVisibility::Scoped)
     }
 }
 
@@ -150,6 +191,7 @@ pub struct ContextSupport {
     pub owner: CourierId,
     pub kind: ContextKind,
     pub projection: ContextProjectionKind,
+    pub claim_context: Option<ClaimContextId>,
 }
 
 impl ContextSupport {
@@ -162,6 +204,7 @@ impl ContextSupport {
             owner: CourierId::new(0),
             kind: ContextKind::Custom,
             projection: ContextProjectionKind::Alias,
+            claim_context: None,
         }
     }
 }

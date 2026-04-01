@@ -84,6 +84,17 @@ pub enum TransportWakeModel {
     Completion,
 }
 
+/// Attachment law declared by one transport implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransportAttachmentLaw {
+    /// Exactly one producer and one consumer may attach for the lifetime of the relationship.
+    ExclusiveSpsc,
+    /// The transport starts as SPSC and may promote to SPMC if the implementation allows it.
+    PromotableSpmc,
+    /// The transport is intentionally shared and may accept multiple consumers immediately.
+    SharedSpmc,
+}
+
 /// Scope in which one attachment is being requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportAttachmentScope {
@@ -109,6 +120,8 @@ pub enum TransportAccessRequirement {
 pub struct TransportAttachmentRequest {
     /// Scope in which the attachment is requested.
     pub scope: TransportAttachmentScope,
+    /// Preferred attachment law requested by the caller, when the endpoint cares to state one.
+    pub requested_law: Option<TransportAttachmentLaw>,
 }
 
 impl TransportAttachmentRequest {
@@ -117,6 +130,7 @@ impl TransportAttachmentRequest {
     pub const fn same_courier() -> Self {
         Self {
             scope: TransportAttachmentScope::SameCourier,
+            requested_law: None,
         }
     }
 
@@ -125,6 +139,7 @@ impl TransportAttachmentRequest {
     pub const fn cross_courier() -> Self {
         Self {
             scope: TransportAttachmentScope::CrossCourier,
+            requested_law: None,
         }
     }
 
@@ -133,7 +148,15 @@ impl TransportAttachmentRequest {
     pub const fn cross_domain() -> Self {
         Self {
             scope: TransportAttachmentScope::CrossDomain,
+            requested_law: None,
         }
+    }
+
+    /// Returns one attachment request explicitly naming one desired law.
+    #[must_use]
+    pub const fn with_requested_law(mut self, requested_law: TransportAttachmentLaw) -> Self {
+        self.requested_law = Some(requested_law);
+        self
     }
 }
 
@@ -158,6 +181,8 @@ pub struct TransportSupport {
     pub backpressure: TransportBackpressure,
     /// Attachment lifecycle model.
     pub attachment: TransportAttachmentModel,
+    /// Declared attachment law.
+    pub attachment_law: TransportAttachmentLaw,
     /// Wake/progress model.
     pub wake: TransportWakeModel,
     /// Same-courier attachment rule.
@@ -182,6 +207,7 @@ impl TransportSupport {
             reliability: TransportReliability::BestEffort,
             backpressure: TransportBackpressure::RejectWhenFull,
             attachment: TransportAttachmentModel::ScopedHandles,
+            attachment_law: TransportAttachmentLaw::ExclusiveSpsc,
             wake: TransportWakeModel::ExplicitPoll,
             same_courier_attach: TransportAccessRequirement::Unsupported,
             cross_courier_attach: TransportAccessRequirement::Unsupported,

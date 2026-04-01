@@ -7,7 +7,6 @@
 use core::ffi::c_void;
 use core::num::NonZeroUsize;
 
-use crate::pal::hosted::macos::capability::runtime_capabilities;
 use crate::contract::pal::mem::{
     Address,
     Advise,
@@ -39,6 +38,7 @@ use crate::contract::pal::mem::{
     RegionInfo,
     ReplacePlacement,
 };
+use crate::pal::hosted::macos::capability::runtime_capabilities;
 
 /// macOS implementation of the fusion-pal memory provider contract.
 #[derive(Debug, Clone, Copy, Default)]
@@ -278,10 +278,10 @@ impl MemBase for MacOsMem {
             placements: MemPlacementCaps::ANYWHERE | MemPlacementCaps::HINT,
             advice: {
                 let mut advice = MemAdviceCaps::NORMAL
-                | MemAdviceCaps::SEQUENTIAL
-                | MemAdviceCaps::RANDOM
-                | MemAdviceCaps::WILL_NEED
-                | MemAdviceCaps::DONT_NEED;
+                    | MemAdviceCaps::SEQUENTIAL
+                    | MemAdviceCaps::RANDOM
+                    | MemAdviceCaps::WILL_NEED
+                    | MemAdviceCaps::DONT_NEED;
                 if runtime.madv_free && !cfg!(feature = "critical-safe") {
                     advice |= MemAdviceCaps::FREE;
                 }
@@ -394,7 +394,9 @@ impl MemAdvise for MacOsMem {
             Advise::Random => libc::MADV_RANDOM,
             Advise::WillNeed => libc::MADV_WILLNEED,
             Advise::DontNeed => libc::MADV_DONTNEED,
-            Advise::Free if runtime.madv_free && !cfg!(feature = "critical-safe") => libc::MADV_FREE,
+            Advise::Free if runtime.madv_free && !cfg!(feature = "critical-safe") => {
+                libc::MADV_FREE
+            }
             Advise::Free | Advise::NoHugePage | Advise::HugePage => {
                 return Err(MemError::unsupported());
             }
