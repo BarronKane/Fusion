@@ -40,6 +40,17 @@ use fusion_sys::alloc::{
     ExtentLease,
     MemoryPoolExtentRequest,
 };
+use fusion_sys::context::ContextId;
+use fusion_sys::courier::{
+    CourierId,
+    CourierLaneSummary,
+    CourierPlan,
+    CourierResponsiveness,
+    CourierRunState,
+    CourierRuntimeSink,
+    CourierRuntimeSummary,
+    CourierSchedulingPolicy,
+};
 use fusion_sys::fiber::{FiberError, FiberErrorKind, FiberSystem};
 pub use fusion_sys::mem::resource::AllocatorLayoutPolicy;
 use fusion_sys::mem::resource::{
@@ -221,6 +232,10 @@ const fn executor_busy() -> ExecutorError {
     ExecutorError::Sync(SyncErrorKind::Busy)
 }
 
+const fn executor_resource_exhausted() -> ExecutorError {
+    ExecutorError::Sync(SyncErrorKind::Overflow)
+}
+
 const fn executor_overflow() -> ExecutorError {
     ExecutorError::Sync(SyncErrorKind::Overflow)
 }
@@ -378,6 +393,10 @@ unsafe impl Sync for CurrentAsyncRuntimeSlot {}
 /// generated metadata pipeline still depends on build-time sidecars rather than compiler-native
 /// artifacts.
 pub struct CurrentFiberAsyncSingleton {
+    courier_id: Option<CourierId>,
+    context_id: Option<ContextId>,
+    runtime_sink: Option<CourierRuntimeSink>,
+    courier_plan: Option<CourierPlan>,
     fiber_capacity_limit: Option<usize>,
     async_capacity_limit: Option<usize>,
     stack_floor_bytes: Option<usize>,
@@ -390,6 +409,10 @@ impl CurrentFiberAsyncSingleton {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
+            courier_plan: None,
             fiber_capacity_limit: None,
             async_capacity_limit: None,
             stack_floor_bytes: None,
@@ -397,6 +420,37 @@ impl CurrentFiberAsyncSingleton {
             fibers: CurrentFiberRuntimeSlot::new(),
             executor: CurrentAsyncRuntimeSlot::new(),
         }
+    }
+
+    /// Installs one explicit courier-shaped runtime plan for this singleton front door.
+    ///
+    /// Explicit per-lane overrides still win where they exist; the courier plan supplies the
+    /// default capacity and outer scheduling policy truth.
+    #[must_use]
+    pub const fn with_courier_plan(mut self, courier_plan: CourierPlan) -> Self {
+        self.courier_plan = Some(courier_plan);
+        self
+    }
+
+    /// Installs one explicit owning courier identity for the lazily realized runtime.
+    #[must_use]
+    pub const fn with_courier_id(mut self, courier_id: CourierId) -> Self {
+        self.courier_id = Some(courier_id);
+        self
+    }
+
+    /// Installs one explicit owning context identity for the lazily realized runtime.
+    #[must_use]
+    pub const fn with_context_id(mut self, context_id: ContextId) -> Self {
+        self.context_id = Some(context_id);
+        self
+    }
+
+    /// Installs one explicit runtime-to-courier sink for the lazily realized runtime.
+    #[must_use]
+    pub const fn with_runtime_sink(mut self, runtime_sink: CourierRuntimeSink) -> Self {
+        self.runtime_sink = Some(runtime_sink);
+        self
     }
 
     /// Installs one explicit current-thread fiber capacity cap.
@@ -441,6 +495,55 @@ impl CurrentFiberAsyncSingleton {
         self
     }
 
+    /// Returns the configured owning courier identity for this singleton, when present.
+    #[must_use]
+    pub const fn courier_id(&self) -> Option<CourierId> {
+        self.courier_id
+    }
+
+    /// Returns the configured owning context identity for this singleton, when present.
+    #[must_use]
+    pub const fn context_id(&self) -> Option<ContextId> {
+        self.context_id
+    }
+
+    fn effective_fiber_capacity_limit(&self) -> Option<usize> {
+        match self.fiber_capacity_limit {
+            Some(limit) => Some(limit),
+            None => self.courier_plan.map(|plan| {
+                if plan.max_live_fibers == 0 {
+                    1
+                } else {
+                    plan.max_live_fibers
+                }
+            }),
+        }
+    }
+
+    fn effective_async_capacity_limit(&self) -> Option<usize> {
+        match self.async_capacity_limit {
+            Some(limit) => Some(limit),
+            None => self.courier_plan.map(|plan| {
+                if plan.max_async_tasks == 0 {
+                    1
+                } else {
+                    plan.max_async_tasks
+                }
+            }),
+        }
+    }
+
+    fn runnable_capacity_limit(&self) -> Option<usize> {
+        self.courier_plan.map(|plan| plan.max_runnable_units)
+    }
+
+    fn scheduling_policy(&self, fallback: CourierSchedulingPolicy) -> CourierSchedulingPolicy {
+        match self.courier_plan.and_then(|plan| plan.time_slice_ticks) {
+            Some(quantum_ticks) => CourierSchedulingPolicy::TimeSliced { quantum_ticks },
+            None => fallback,
+        }
+    }
+
     fn fiber_bootstrap_with_policy(
         &self,
         fiber_capacity: usize,
@@ -467,15 +570,33 @@ impl CurrentFiberAsyncSingleton {
         fiber_capacity: usize,
         stack_floor_bytes: usize,
     ) -> Result<CurrentFiberPool, FiberError> {
-        self.fiber_bootstrap_with_policy(fiber_capacity, stack_floor_bytes)?
-            .build_current()
+        let mut bootstrap = self.fiber_bootstrap_with_policy(fiber_capacity, stack_floor_bytes)?;
+        if let Some(courier_id) = self.courier_id {
+            bootstrap = bootstrap.with_courier_id(courier_id);
+        }
+        if let Some(context_id) = self.context_id {
+            bootstrap = bootstrap.with_context_id(context_id);
+        }
+        if let Some(runtime_sink) = self.runtime_sink {
+            bootstrap = bootstrap.with_runtime_sink(runtime_sink);
+        }
+        bootstrap.build_current()
     }
 
     fn build_async_runtime_with_policy(
         &self,
         async_capacity: usize,
     ) -> Result<CurrentAsyncRuntime, ExecutorError> {
-        let config = ExecutorConfig::new().with_capacity(async_capacity.max(1));
+        let mut config = ExecutorConfig::new().with_capacity(async_capacity.max(1));
+        if let Some(courier_id) = self.courier_id {
+            config = config.with_courier_id(courier_id);
+        }
+        if let Some(context_id) = self.context_id {
+            config = config.with_context_id(context_id);
+        }
+        if let Some(runtime_sink) = self.runtime_sink {
+            config = config.with_runtime_sink(runtime_sink);
+        }
         if uses_explicit_bound_runtime_backing() {
             let layout = CurrentAsyncRuntime::backing_plan(config)?;
             let combined = layout.combined_eager()?;
@@ -521,7 +642,7 @@ impl CurrentFiberAsyncSingleton {
         let state = unsafe { &mut *self.fibers.state.get() };
         if state.runtime.is_none() {
             state.configured_capacity =
-                initial_runtime_capacity(self.fiber_capacity_limit, requested_capacity)
+                initial_runtime_capacity(self.effective_fiber_capacity_limit(), requested_capacity)
                     .ok_or_else(FiberError::resource_exhausted)?;
             state.effective_stack_floor_bytes = self
                 .stack_floor_bytes
@@ -598,15 +719,16 @@ impl CurrentFiberAsyncSingleton {
                 next_bounded_runtime_capacity(
                     state.configured_capacity,
                     required,
-                    self.fiber_capacity_limit,
+                    self.effective_fiber_capacity_limit(),
                 )
                 .map_err(fiber_error_from_executor)?
                 .ok_or_else(FiberError::resource_exhausted)?
             }
-            _ if state.runtime.is_none() => {
-                initial_runtime_capacity(self.fiber_capacity_limit, requested_fiber_capacity)
-                    .ok_or_else(FiberError::resource_exhausted)?
-            }
+            _ if state.runtime.is_none() => initial_runtime_capacity(
+                self.effective_fiber_capacity_limit(),
+                requested_fiber_capacity,
+            )
+            .ok_or_else(FiberError::resource_exhausted)?,
             _ => state.configured_capacity,
         };
         let next_stack_floor_bytes = state
@@ -670,13 +792,66 @@ impl CurrentFiberAsyncSingleton {
         }
     }
 
+    fn active_fiber_units(&'static self) -> Result<usize, FiberError> {
+        Ok(self
+            .fiber_runtime_if_initialized()?
+            .map_or(0, |runtime| runtime.active_count()))
+    }
+
+    fn active_async_units(&'static self) -> Result<usize, ExecutorError> {
+        let mut segment = self.async_segment_head_snapshot()?;
+        let mut active = 0usize;
+        while let Some(node) = segment {
+            // SAFETY: append-only segment nodes remain live and stable while linked from the slot.
+            let node_ref = unsafe { node.as_ref() };
+            active = active.saturating_add(node_ref.runtime.unfinished_task_count()?);
+            segment = node_ref.next;
+        }
+        Ok(active)
+    }
+
+    fn active_runnable_units(&'static self) -> Result<usize, ExecutorError> {
+        Ok(self
+            .active_fiber_units()
+            .map_err(executor_error_from_fiber)?
+            .saturating_add(self.active_async_units()?))
+    }
+
+    fn ensure_runnable_budget_for_fiber(&'static self) -> Result<(), FiberError> {
+        let Some(limit) = self.runnable_capacity_limit() else {
+            return Ok(());
+        };
+        // TODO: Planned-versus-dynamic runnable accounting still needs one courier-owned runtime
+        // ledger. This front door can only enforce the total runnable envelope honestly today.
+        if self
+            .active_runnable_units()
+            .map_err(fiber_error_from_executor)?
+            >= limit
+        {
+            return Err(FiberError::resource_exhausted());
+        }
+        Ok(())
+    }
+
+    fn ensure_runnable_budget_for_async(&'static self) -> Result<(), ExecutorError> {
+        let Some(limit) = self.runnable_capacity_limit() else {
+            return Ok(());
+        };
+        // TODO: Split planned versus dynamic runnable budget once the courier-owned runtime ledger
+        // tracks that distinction directly instead of forcing this singleton to infer it.
+        if self.active_runnable_units()? >= limit {
+            return Err(executor_resource_exhausted());
+        }
+        Ok(())
+    }
+
     fn next_async_segment_capacity(&self, total_capacity: usize) -> Option<usize> {
         let requested = if total_capacity == 0 {
             1
         } else {
             total_capacity
         };
-        match self.async_capacity_limit {
+        match self.effective_async_capacity_limit() {
             Some(limit) if total_capacity >= limit => None,
             Some(limit) => Some(requested.min(limit - total_capacity)),
             None => Some(requested),
@@ -823,11 +998,168 @@ impl CurrentFiberAsyncSingleton {
         Ok(state.total_capacity)
     }
 
+    /// Returns one courier-facing run summary for the currently realized fiber lane, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest fiber observation failure.
+    pub fn fiber_runtime_summary(
+        &'static self,
+    ) -> Result<Option<CourierRuntimeSummary>, FiberError> {
+        self.fiber_runtime_summary_with_responsiveness(CourierResponsiveness::Responsive)
+    }
+
+    /// Returns one courier-facing run summary for the currently realized fiber lane, if any, using
+    /// one caller-supplied responsiveness classification.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest fiber observation failure.
+    pub fn fiber_runtime_summary_with_responsiveness(
+        &'static self,
+        responsiveness: CourierResponsiveness,
+    ) -> Result<Option<CourierRuntimeSummary>, FiberError> {
+        Ok(self
+            .fiber_runtime_if_initialized()?
+            .map(|runtime| {
+                runtime
+                    .runtime_summary_with_responsiveness(responsiveness)
+                    .map(|mut summary| {
+                        summary.policy = self.scheduling_policy(summary.policy);
+                        summary
+                    })
+            })
+            .transpose()?)
+    }
+
+    /// Returns one courier-facing run summary for the currently realized async lane, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor observation failure.
+    pub fn async_runtime_summary(
+        &'static self,
+    ) -> Result<Option<CourierRuntimeSummary>, ExecutorError> {
+        self.async_runtime_summary_with_responsiveness(CourierResponsiveness::Responsive)
+    }
+
+    /// Returns one courier-facing run summary for the currently realized async lane, if any, using
+    /// one caller-supplied responsiveness classification.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest executor observation failure.
+    pub fn async_runtime_summary_with_responsiveness(
+        &'static self,
+        responsiveness: CourierResponsiveness,
+    ) -> Result<Option<CourierRuntimeSummary>, ExecutorError> {
+        let mut segment = self.async_segment_head_snapshot()?;
+        let mut fiber_lane = None;
+        let mut async_lane =
+            CourierLaneSummary::new(fusion_sys::courier::RunnableUnitKind::AsyncTask);
+        let mut saw_segment = false;
+        while let Some(node) = segment {
+            saw_segment = true;
+            // SAFETY: append-only segment nodes remain live and stable while linked from the slot.
+            let node_ref = unsafe { node.as_ref() };
+            let summary = node_ref
+                .runtime
+                .runtime_summary_with_responsiveness(responsiveness)?;
+            fiber_lane = fiber_lane.or(summary.fiber_lane);
+            if let Some(lane) = summary.async_lane {
+                async_lane.active_units = async_lane.active_units.saturating_add(lane.active_units);
+                async_lane.runnable_units = async_lane
+                    .runnable_units
+                    .saturating_add(lane.runnable_units);
+                async_lane.running_units =
+                    async_lane.running_units.saturating_add(lane.running_units);
+                async_lane.blocked_units =
+                    async_lane.blocked_units.saturating_add(lane.blocked_units);
+                async_lane.available_slots = async_lane
+                    .available_slots
+                    .saturating_add(lane.available_slots);
+            }
+            segment = node_ref.next;
+        }
+        if !saw_segment {
+            return Ok(None);
+        }
+        Ok(Some(
+            CourierRuntimeSummary {
+                policy: self.scheduling_policy(CourierSchedulingPolicy::CooperativePriority),
+                run_state: if async_lane.running_units != 0 {
+                    CourierRunState::Running
+                } else if async_lane.runnable_units != 0 {
+                    CourierRunState::Runnable
+                } else {
+                    CourierRunState::Idle
+                },
+                responsiveness,
+                fiber_lane,
+                async_lane: Some(async_lane),
+                control_lane: None,
+            }
+            .with_responsiveness(responsiveness),
+        ))
+    }
+
+    /// Returns one aggregate courier-facing runtime summary for the lazily realized singleton.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest fiber or async observation failure.
+    pub fn runtime_summary(&'static self) -> Result<CourierRuntimeSummary, ExecutorError> {
+        self.runtime_summary_with_responsiveness(CourierResponsiveness::Responsive)
+    }
+
+    /// Returns one aggregate courier-facing runtime summary for the lazily realized singleton using
+    /// one caller-supplied responsiveness classification.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest fiber or async observation failure.
+    pub fn runtime_summary_with_responsiveness(
+        &'static self,
+        responsiveness: CourierResponsiveness,
+    ) -> Result<CourierRuntimeSummary, ExecutorError> {
+        let fiber_summary = self
+            .fiber_runtime_summary_with_responsiveness(responsiveness)
+            .map_err(executor_error_from_fiber)?;
+        let async_summary = self.async_runtime_summary_with_responsiveness(responsiveness)?;
+        let fiber_lane = fiber_summary.and_then(|summary| summary.fiber_lane);
+        let async_lane = async_summary.and_then(|summary| summary.async_lane);
+        Ok(CourierRuntimeSummary {
+            policy: self.scheduling_policy(
+                fiber_summary
+                    .map(|summary| summary.policy)
+                    .or(async_summary.map(|summary| summary.policy))
+                    .unwrap_or(CourierSchedulingPolicy::CooperativePriority),
+            ),
+            run_state: if fiber_lane.is_some_and(|lane| lane.running_units != 0)
+                || async_lane.is_some_and(|lane| lane.running_units != 0)
+            {
+                CourierRunState::Running
+            } else if fiber_lane.is_some_and(|lane| lane.runnable_units != 0)
+                || async_lane.is_some_and(|lane| lane.runnable_units != 0)
+            {
+                CourierRunState::Runnable
+            } else {
+                CourierRunState::Idle
+            },
+            responsiveness,
+            fiber_lane,
+            async_lane,
+            control_lane: None,
+        }
+        .with_responsiveness(responsiveness))
+    }
+
     pub fn spawn_fiber<F, T>(&'static self, job: F) -> Result<CurrentFiberHandle<T>, FiberError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
     {
+        self.ensure_runnable_budget_for_fiber()?;
         let task = self
             .fiber_runtime_borrow(None, None)?
             .closure_task_attributes::<F>()?;
@@ -849,6 +1181,7 @@ impl CurrentFiberAsyncSingleton {
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
     {
+        self.ensure_runnable_budget_for_fiber()?;
         let stack_bytes = NonZeroUsize::new(STACK_BYTES).ok_or_else(FiberError::invalid)?;
         let task = super::FiberTaskAttributes::from_stack_bytes(
             stack_bytes,
@@ -857,6 +1190,26 @@ impl CurrentFiberAsyncSingleton {
         self.ensure_fiber_admission(task)?;
         self.fiber_runtime_borrow(None, Some(stack_bytes.get()))?
             .spawn_with_attrs(task, job)
+    }
+
+    pub fn spawn_planned_fiber<T>(
+        &'static self,
+        task: T,
+    ) -> Result<CurrentFiberHandle<T::Output>, FiberError>
+    where
+        T: super::ExplicitFiberTask,
+    {
+        self.ensure_runnable_budget_for_fiber()?;
+        let attributes = T::task_attributes()?;
+        self.ensure_fiber_admission(attributes)?;
+        self.fiber_runtime_borrow(
+            None,
+            attributes
+                .execution
+                .is_fiber()
+                .then(|| attributes.stack_class.size_bytes().get()),
+        )?
+        .spawn_with_attrs(attributes, move || task.run())
     }
 
     pub fn drive_once(&'static self) -> Result<bool, FiberError> {
@@ -875,6 +1228,7 @@ impl CurrentFiberAsyncSingleton {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        self.ensure_runnable_budget_for_async()?;
         self.async_runtime_for_spawn()?.spawn(future)
     }
 
@@ -893,6 +1247,7 @@ impl CurrentFiberAsyncSingleton {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        self.ensure_runnable_budget_for_async()?;
         self.async_runtime_for_spawn()?
             .spawn_with_poll_stack_bytes(poll_stack_bytes, future)
     }
@@ -1020,6 +1375,34 @@ impl CurrentFiberAsyncRuntime {
         Ok(CurrentFiberAsyncRuntimeMemoryFootprint {
             fibers: self.fibers.memory_footprint(),
             executor: self.executor.configured_memory_footprint()?,
+        })
+    }
+
+    /// Returns a courier-facing run summary for this combined current-thread runtime bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest fiber or async observation failure.
+    pub fn runtime_summary(&self) -> Result<CourierRuntimeSummary, CurrentFiberAsyncRuntimeError> {
+        let fiber_summary = self.fibers.runtime_summary()?;
+        let async_summary = self.executor.runtime_summary()?;
+        Ok(CourierRuntimeSummary {
+            policy: fiber_summary.policy,
+            run_state: if fiber_summary.run_state == CourierRunState::Running
+                || async_summary.run_state == CourierRunState::Running
+            {
+                CourierRunState::Running
+            } else if fiber_summary.run_state == CourierRunState::Runnable
+                || async_summary.run_state == CourierRunState::Runnable
+            {
+                CourierRunState::Runnable
+            } else {
+                CourierRunState::Idle
+            },
+            responsiveness: CourierResponsiveness::Responsive,
+            fiber_lane: fiber_summary.fiber_lane,
+            async_lane: async_summary.async_lane,
+            control_lane: None,
         })
     }
 }
@@ -1250,6 +1633,33 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
     pub const fn with_guard_pages(mut self, guard_pages: usize) -> Self {
         self.fibers =
             FiberPoolBootstrap::from_config(self.fibers.config().with_guard_pages(guard_pages));
+        self
+    }
+
+    /// Applies one explicit owning courier identity to both fiber and async halves.
+    #[must_use]
+    pub const fn with_courier_id(mut self, courier_id: CourierId) -> Self {
+        self.fibers =
+            FiberPoolBootstrap::from_config(self.fibers.config().with_courier_id(courier_id));
+        self.executor = self.executor.with_courier_id(courier_id);
+        self
+    }
+
+    /// Applies one explicit owning context identity to both fiber and async halves.
+    #[must_use]
+    pub const fn with_context_id(mut self, context_id: ContextId) -> Self {
+        self.fibers =
+            FiberPoolBootstrap::from_config(self.fibers.config().with_context_id(context_id));
+        self.executor = self.executor.with_context_id(context_id);
+        self
+    }
+
+    /// Applies one explicit runtime-to-courier sink to both fiber and async halves.
+    #[must_use]
+    pub const fn with_runtime_sink(mut self, runtime_sink: CourierRuntimeSink) -> Self {
+        self.fibers =
+            FiberPoolBootstrap::from_config(self.fibers.config().with_runtime_sink(runtime_sink));
+        self.executor = self.executor.with_runtime_sink(runtime_sink);
         self
     }
 
@@ -1840,6 +2250,7 @@ fn validate_runtime_config(config: &RuntimeConfig<'_>) -> Result<(), RuntimeErro
 mod tests {
     use super::*;
     use crate::thread::async_yield_now;
+    use crate::thread::yield_now;
     use fusion_pal::sys::mem::{Address, CachePolicy, MemAdviceCaps, Protect, Region};
     use fusion_sys::mem::resource::{
         BoundResourceSpec,
@@ -2188,6 +2599,108 @@ mod tests {
     }
 
     #[test]
+    fn current_runtime_singleton_runtime_summary_combines_fiber_and_async_lanes() {
+        static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new();
+
+        let idle = RUNTIME
+            .runtime_summary()
+            .expect("summary should observe empty singleton");
+        assert_eq!(idle.total_active_units(), 0);
+        assert_eq!(idle.run_state, CourierRunState::Idle);
+
+        let fiber = RUNTIME
+            .spawn_fiber_with_stack::<4096, _, _>(|| {
+                yield_now().expect("fiber should yield cleanly");
+                5_u8
+            })
+            .expect("fiber should spawn");
+        let task = RUNTIME
+            .spawn_async_with_poll_stack_bytes(2048, async {
+                async_yield_now().await;
+                8_u8
+            })
+            .expect("async task should spawn");
+
+        let active = RUNTIME
+            .runtime_summary()
+            .expect("summary should observe both runtime lanes");
+        assert!(active.fiber_lane.is_some());
+        assert!(active.async_lane.is_some());
+        assert!(active.total_active_units() >= 2);
+        assert!(
+            matches!(
+                active.run_state,
+                CourierRunState::Runnable | CourierRunState::Running
+            ),
+            "spawned fiber and async task should make the singleton runnable"
+        );
+
+        while !fiber.is_finished().expect("fiber completion should read") {
+            assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        }
+        assert_eq!(fiber.join().expect("fiber should join"), 5);
+        assert_eq!(
+            RUNTIME
+                .block_on_with_poll_stack_bytes(2048, task)
+                .expect("singleton should drive async task")
+                .expect("task should complete"),
+            8
+        );
+        let drained = RUNTIME
+            .runtime_summary()
+            .expect("summary should observe drained singleton");
+        assert_eq!(drained.total_active_units(), 0);
+        assert_eq!(drained.run_state, CourierRunState::Idle);
+    }
+
+    #[test]
+    fn current_runtime_singleton_courier_plan_surfaces_time_slice_policy() {
+        static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new()
+            .with_courier_plan(CourierPlan::new(0, 1).with_time_slice_ticks(47));
+
+        let summary = RUNTIME
+            .runtime_summary()
+            .expect("summary should observe courier policy");
+        assert_eq!(
+            summary.policy,
+            CourierSchedulingPolicy::TimeSliced { quantum_ticks: 47 }
+        );
+    }
+
+    #[test]
+    fn current_runtime_singleton_binds_courier_identity() {
+        static RUNTIME: CurrentFiberAsyncSingleton =
+            CurrentFiberAsyncSingleton::new().with_courier_id(CourierId::new(144));
+
+        let fiber = RUNTIME
+            .spawn_fiber_with_stack::<4096, _, _>(|| {
+                crate::thread::fiber::current_courier_id()
+                    .expect("current fiber courier id should be visible")
+                    .get()
+            })
+            .expect("fiber should spawn");
+        while !fiber.is_finished().expect("fiber completion should read") {
+            assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        }
+        assert_eq!(fiber.join().expect("fiber should join"), 144);
+
+        let task = RUNTIME
+            .spawn_async_with_poll_stack_bytes(2048, async {
+                crate::thread::executor::current_async_courier_id()
+                    .expect("current async courier id should be visible")
+                    .get()
+            })
+            .expect("async task should spawn");
+        assert_eq!(
+            RUNTIME
+                .run_async_until_idle()
+                .expect("singleton async runtime should run to idle"),
+            1
+        );
+        assert_eq!(task.join().expect("async task should complete"), 144);
+    }
+
+    #[test]
     fn current_runtime_singleton_respects_fiber_capacity_cap() {
         static RUNTIME: CurrentFiberAsyncSingleton =
             CurrentFiberAsyncSingleton::new().with_fiber_capacity(1);
@@ -2240,6 +2753,62 @@ mod tests {
         );
 
         assert_eq!(first.join().expect("first task should join"), 144);
+    }
+
+    #[test]
+    fn current_runtime_singleton_courier_plan_respects_async_capacity_cap() {
+        static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new()
+            .with_courier_plan(CourierPlan::new(0, 1).with_async_capacity(1));
+
+        let first = RUNTIME
+            .spawn_async_with_poll_stack_bytes(2048, async { 34_u8 })
+            .expect("first async task should spawn");
+        assert_eq!(
+            RUNTIME
+                .run_async_until_idle()
+                .expect("singleton async runtime should run to idle"),
+            1
+        );
+        assert!(first.is_finished().expect("task completion should read"));
+
+        let second = RUNTIME.spawn_async_with_poll_stack_bytes(2048, async { 55_u8 });
+        assert!(matches!(
+            second,
+            Err(ExecutorError::Sync(SyncErrorKind::Busy))
+        ));
+
+        assert_eq!(first.join().expect("first task should join"), 34);
+    }
+
+    #[test]
+    fn current_runtime_singleton_courier_plan_limits_total_runnable_units() {
+        static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new()
+            .with_courier_plan(
+                CourierPlan::new(0, 2)
+                    .with_async_capacity(2)
+                    .with_runnable_capacity(1),
+            );
+
+        let fiber = RUNTIME
+            .spawn_fiber_with_stack::<4096, _, _>(|| {
+                yield_now().expect("fiber should yield cleanly");
+                21_u8
+            })
+            .expect("first fiber should spawn");
+
+        let task = RUNTIME.spawn_async_with_poll_stack_bytes(2048, async { 89_u8 });
+        assert!(matches!(
+            task,
+            Err(ExecutorError::Sync(SyncErrorKind::Overflow))
+        ));
+
+        while !fiber.is_finished().expect("fiber completion should read") {
+            assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        }
+        assert_eq!(fiber.join().expect("fiber should join"), 21);
+        RUNTIME
+            .shutdown_fibers()
+            .expect("singleton fibers should shut down cleanly");
     }
 
     #[test]

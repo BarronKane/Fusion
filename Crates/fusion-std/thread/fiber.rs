@@ -47,6 +47,19 @@ use fusion_pal::sys::mem::{
     RegionAttrs,
     system_mem,
 };
+use fusion_sys::context::ContextId;
+use fusion_sys::courier::{
+    CourierId,
+    CourierLaneSummary,
+    CourierResponsiveness,
+    CourierRunState,
+    CourierRuntimeSink,
+    CourierRuntimeSummary,
+    CourierSchedulingPolicy,
+    RunnableUnitKind,
+    current_context_id as system_current_context_id,
+    current_courier_id as system_current_courier_id,
+};
 use fusion_sys::event::{
     EventCaps,
     EventInterest,
@@ -64,11 +77,13 @@ use fusion_sys::fiber::{
     ContextStackDirection,
     Fiber,
     FiberError,
+    FiberId,
     FiberReturn,
     FiberStack,
     FiberSupport,
     FiberSystem,
     FiberYield,
+    ManagedFiberSnapshot,
     current_context as system_fiber_context,
     yield_now as system_yield_now,
 };
@@ -1390,6 +1405,12 @@ pub struct FiberPoolConfig<'a> {
     pub reactor_policy: GreenReactorPolicy,
     /// Huge-page preference for large reservations.
     pub huge_pages: HugePagePolicy,
+    /// Optional owning courier identity carried by the live runtime for self-query surfaces.
+    pub courier_id: Option<CourierId>,
+    /// Optional owning context identity carried by the live runtime for self-query surfaces.
+    pub context_id: Option<ContextId>,
+    /// Optional courier-runtime sink used to publish authoritative lifecycle/runtime truth.
+    pub runtime_sink: Option<CourierRuntimeSink>,
 }
 
 /// Whether one green-fiber pool provisions hosted readiness/reactor machinery.
@@ -1423,6 +1444,9 @@ impl FiberPoolConfig<'static> {
             yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             reactor_policy: GreenReactorPolicy::Automatic,
             huge_pages: HugePagePolicy::Disabled,
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         }
     }
 
@@ -1444,6 +1468,9 @@ impl FiberPoolConfig<'static> {
             yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             reactor_policy: GreenReactorPolicy::Automatic,
             huge_pages: HugePagePolicy::Disabled,
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         }
     }
 
@@ -1480,6 +1507,9 @@ impl FiberPoolConfig<'static> {
             yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             reactor_policy: GreenReactorPolicy::Automatic,
             huge_pages: HugePagePolicy::Disabled,
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         })
     }
 }
@@ -1560,6 +1590,9 @@ impl<'a> FiberPoolConfig<'a> {
             yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             reactor_policy: GreenReactorPolicy::Automatic,
             huge_pages: HugePagePolicy::Disabled,
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         })
     }
 
@@ -1644,6 +1677,27 @@ impl<'a> FiberPoolConfig<'a> {
     #[must_use]
     pub const fn with_huge_pages(mut self, huge_pages: HugePagePolicy) -> Self {
         self.huge_pages = huge_pages;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit owning courier identity.
+    #[must_use]
+    pub const fn with_courier_id(mut self, courier_id: CourierId) -> Self {
+        self.courier_id = Some(courier_id);
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit owning context identity.
+    #[must_use]
+    pub const fn with_context_id(mut self, context_id: ContextId) -> Self {
+        self.context_id = Some(context_id);
+        self
+    }
+
+    /// Returns one copy of this configuration with one explicit runtime-to-courier sink.
+    #[must_use]
+    pub const fn with_runtime_sink(mut self, runtime_sink: CourierRuntimeSink) -> Self {
+        self.runtime_sink = Some(runtime_sink);
         self
     }
 
@@ -2013,6 +2067,27 @@ impl<'a> FiberPoolBootstrap<'a> {
     #[must_use]
     pub const fn with_scheduling(mut self, scheduling: GreenScheduling) -> Self {
         self.config = self.config.with_scheduling(scheduling);
+        self
+    }
+
+    /// Returns one copy of this bootstrap with an explicit owning courier identity.
+    #[must_use]
+    pub const fn with_courier_id(mut self, courier_id: CourierId) -> Self {
+        self.config = self.config.with_courier_id(courier_id);
+        self
+    }
+
+    /// Returns one copy of this bootstrap with an explicit owning context identity.
+    #[must_use]
+    pub const fn with_context_id(mut self, context_id: ContextId) -> Self {
+        self.config = self.config.with_context_id(context_id);
+        self
+    }
+
+    /// Returns one copy of this bootstrap with one explicit runtime-to-courier sink.
+    #[must_use]
+    pub const fn with_runtime_sink(mut self, runtime_sink: CourierRuntimeSink) -> Self {
+        self.config = self.config.with_runtime_sink(runtime_sink);
         self
     }
 
@@ -4436,6 +4511,9 @@ impl FiberStackClassPools {
                     yield_budget_policy: FiberYieldBudgetPolicy::Abort,
                     reactor_policy: config.reactor_policy,
                     huge_pages: config.huge_pages,
+                    courier_id: config.courier_id,
+                    context_id: config.context_id,
+                    runtime_sink: config.runtime_sink,
                 };
                 let slab = FiberStackSlab::new(&class_config, alignment, stack_direction)?;
                 unsafe {
@@ -5415,10 +5493,17 @@ impl CarrierQueue {
     }
 }
 
+fn next_green_fiber_id() -> FiberId {
+    static NEXT_GREEN_FIBER_ID: AtomicUsize = AtomicUsize::new(1);
+    FiberId::new(NEXT_GREEN_FIBER_ID.fetch_add(1, Ordering::Relaxed))
+}
+
 #[derive(Debug)]
 struct GreenTaskRecord {
     allocated: bool,
     id: u64,
+    fiber_id: FiberId,
+    class: fusion_sys::courier::CourierFiberClass,
     carrier: usize,
     stack_pool_index: usize,
     stack_slot: usize,
@@ -5437,6 +5522,8 @@ impl GreenTaskRecord {
         Self {
             allocated: false,
             id: 0,
+            fiber_id: FiberId::new(0),
+            class: fusion_sys::courier::CourierFiberClass::Dynamic,
             carrier: 0,
             stack_pool_index: 0,
             stack_slot: 0,
@@ -5511,6 +5598,9 @@ impl GreenTaskSlot {
             inner,
             slot_index: self.slot_index,
             id: self.current_id()?,
+            fiber_id: self.current_fiber_id()?,
+            courier_id: unsafe { (*inner).courier_id },
+            context_id: unsafe { (*inner).context_id },
         })
     }
 
@@ -5706,6 +5796,8 @@ impl GreenTaskSlot {
     fn assign<F>(
         &self,
         id: u64,
+        fiber_id: FiberId,
+        class: fusion_sys::courier::CourierFiberClass,
         carrier: usize,
         lease: Option<FiberStackLease>,
         task: FiberTaskAttributes,
@@ -5731,6 +5823,8 @@ impl GreenTaskSlot {
             record.job.store(job)?;
             record.allocated = true;
             record.id = id;
+            record.fiber_id = fiber_id;
+            record.class = class;
             record.carrier = carrier;
             record.stack_pool_index = lease.map_or(0, |reserved| reserved.pool_index);
             record.stack_slot = lease.map_or(0, |reserved| reserved.slot_index);
@@ -5759,6 +5853,15 @@ impl GreenTaskSlot {
                 return Err(FiberError::state_conflict());
             }
             Ok(record.id)
+        })?
+    }
+
+    fn current_fiber_id(&self) -> Result<FiberId, FiberError> {
+        self.record.with_ref(|record| {
+            if !record.allocated {
+                return Err(FiberError::state_conflict());
+            }
+            Ok(record.fiber_id)
         })?
     }
 
@@ -6188,6 +6291,35 @@ impl GreenTaskRegistry {
         self.free.with_ref(|free| free.len)
     }
 
+    fn lane_counts(&self) -> Result<(usize, usize, usize, usize), FiberError> {
+        let mut active = 0usize;
+        let mut runnable = 0usize;
+        let mut running = 0usize;
+        let mut blocked = 0usize;
+        for slot in &*self.slots {
+            slot.record.with_ref(|record| {
+                if !record.allocated {
+                    return Ok::<(), FiberError>(());
+                }
+                active = active.saturating_add(1);
+                match record.state {
+                    GreenTaskState::Queued | GreenTaskState::Yielded => {
+                        runnable = runnable.saturating_add(1);
+                    }
+                    GreenTaskState::Running | GreenTaskState::Finishing => {
+                        running = running.saturating_add(1);
+                    }
+                    GreenTaskState::Waiting => {
+                        blocked = blocked.saturating_add(1);
+                    }
+                    GreenTaskState::Completed | GreenTaskState::Failed(_) => {}
+                }
+                Ok(())
+            })??;
+        }
+        Ok((active, runnable, running, blocked))
+    }
+
     fn initialize_owner(&self, inner: *const GreenPoolInner) {
         for slot in &*self.slots {
             slot.set_owner(inner);
@@ -6198,6 +6330,8 @@ impl GreenTaskRegistry {
         &self,
         slot_index: usize,
         id: u64,
+        fiber_id: FiberId,
+        class: fusion_sys::courier::CourierFiberClass,
         carrier: usize,
         lease: Option<FiberStackLease>,
         task: FiberTaskAttributes,
@@ -6207,7 +6341,7 @@ impl GreenTaskRegistry {
         F: FnOnce() + Send + 'static,
     {
         let slot = &self.slots[slot_index];
-        slot.assign(id, carrier, lease, task, job)
+        slot.assign(id, fiber_id, class, carrier, lease, task, job)
     }
 
     fn recycle_slot(&self, slot_index: usize) -> Result<(), FiberError> {
@@ -6229,6 +6363,10 @@ impl GreenTaskRegistry {
 
     fn current_id(&self, slot_index: usize) -> Result<u64, FiberError> {
         self.slot(slot_index)?.current_id()
+    }
+
+    fn current_fiber_id(&self, slot_index: usize) -> Result<FiberId, FiberError> {
+        self.slot(slot_index)?.current_fiber_id()
     }
 
     fn priority(&self, slot_index: usize) -> Result<FiberTaskPriority, FiberError> {
@@ -6349,6 +6487,9 @@ struct CurrentGreenContext {
     inner: *const GreenPoolInner,
     slot_index: usize,
     id: u64,
+    fiber_id: FiberId,
+    courier_id: Option<CourierId>,
+    context_id: Option<ContextId>,
 }
 
 fn current_green_slot() -> Option<&'static GreenTaskSlot> {
@@ -6362,6 +6503,57 @@ fn current_green_slot() -> Option<&'static GreenTaskSlot> {
 
 fn current_green_context() -> Option<CurrentGreenContext> {
     current_green_slot()?.current_context().ok()
+}
+
+/// Returns the owning courier identity for the current running fiber/task when available.
+///
+/// This prefers the live green-task context and falls back to the lower `fusion-sys` managed-fiber
+/// slot when the caller is running on one raw managed fiber outside the green scheduler.
+///
+/// # Errors
+///
+/// Returns an error when no current fiber/courier identity is available honestly.
+#[allow(dead_code)]
+pub fn current_courier_id() -> Result<CourierId, FiberError> {
+    if let Some(context) = current_green_context()
+        && let Some(courier_id) = context.courier_id
+    {
+        return Ok(courier_id);
+    }
+    system_current_courier_id()
+}
+
+/// Returns the owning context identity for the current running fiber/task when available.
+///
+/// This prefers the live green-task context and falls back to the lower `fusion-sys` managed-fiber
+/// slot when the caller is running on one raw managed fiber outside the green scheduler.
+///
+/// # Errors
+///
+/// Returns an error when no current fiber/context identity is available honestly.
+#[allow(dead_code)]
+pub fn current_context_id() -> Result<ContextId, FiberError> {
+    if let Some(context) = current_green_context()
+        && let Some(context_id) = context.context_id
+    {
+        return Ok(context_id);
+    }
+    system_current_context_id()
+}
+
+/// Returns the stable fiber identifier for the current running task when available.
+///
+/// This prefers the live green-task context and falls back to the lower `fusion-sys` managed-fiber
+/// slot when the caller is running on one raw managed fiber outside the green scheduler.
+///
+/// # Errors
+///
+/// Returns an error when no current fiber identity is available honestly.
+pub fn current_fiber_id() -> Result<FiberId, FiberError> {
+    if let Some(context) = current_green_context() {
+        return Ok(context.fiber_id);
+    }
+    fusion_sys::fiber::current_fiber_id()
 }
 
 #[doc(hidden)]
@@ -7090,6 +7282,9 @@ fn green_pool_runtime_regions(
 #[derive(Debug)]
 struct GreenPoolInner {
     support: FiberSupport,
+    courier_id: Option<CourierId>,
+    context_id: Option<ContextId>,
+    runtime_sink: Option<CourierRuntimeSink>,
     scheduling: GreenScheduling,
     capacity_policy: CapacityPolicy,
     yield_budget_supported: bool,
@@ -7151,6 +7346,117 @@ fn ensure_yield_budget_watchdog_started(
 }
 
 impl GreenPoolInner {
+    fn runtime_tick(&self) -> u64 {
+        current_monotonic_nanos().unwrap_or(0)
+    }
+
+    fn publish_runtime_context(&self) -> Result<(), FiberError> {
+        let (Some(runtime_sink), Some(courier_id), Some(context_id)) =
+            (self.runtime_sink, self.courier_id, self.context_id)
+        else {
+            return Ok(());
+        };
+        runtime_sink
+            .record_context(courier_id, context_id, self.runtime_tick())
+            .map_err(fiber_error_from_runtime_sink)
+    }
+
+    fn publish_runtime_summary(&self) -> Result<(), FiberError> {
+        let (Some(runtime_sink), Some(courier_id)) = (self.runtime_sink, self.courier_id) else {
+            return Ok(());
+        };
+        let (active_units, runnable_units, running_units, blocked_units) =
+            self.tasks.lane_counts()?;
+        let available_slots = self.tasks.available_slots()?;
+        let summary = CourierRuntimeSummary::new(
+            match self.scheduling {
+                GreenScheduling::Fifo => CourierSchedulingPolicy::CooperativeRoundRobin,
+                GreenScheduling::Priority => CourierSchedulingPolicy::CooperativePriority,
+                GreenScheduling::WorkStealing => CourierSchedulingPolicy::CooperativeWorkStealing,
+            },
+            CourierResponsiveness::Responsive,
+        )
+        .with_fiber_lane(CourierLaneSummary {
+            kind: RunnableUnitKind::Fiber,
+            active_units,
+            runnable_units,
+            running_units,
+            blocked_units,
+            available_slots,
+        });
+        runtime_sink
+            .record_runtime_summary(courier_id, summary, self.runtime_tick())
+            .map_err(fiber_error_from_runtime_sink)
+    }
+
+    fn register_runtime_fiber(
+        &self,
+        fiber: FiberId,
+        class: fusion_sys::courier::CourierFiberClass,
+    ) -> Result<(), FiberError> {
+        let (Some(runtime_sink), Some(courier_id)) = (self.runtime_sink, self.courier_id) else {
+            return Ok(());
+        };
+        runtime_sink
+            .register_fiber(
+                courier_id,
+                ManagedFiberSnapshot {
+                    id: fiber,
+                    state: fusion_sys::fiber::FiberState::Created,
+                    started: false,
+                    claim_awareness: fusion_sys::claims::ClaimAwareness::Blind,
+                    claim_context: None,
+                },
+                fiber.get() as u64,
+                class,
+                false,
+                None,
+                self.runtime_tick(),
+            )
+            .map_err(fiber_error_from_runtime_sink)?;
+        self.publish_runtime_context()?;
+        self.publish_runtime_summary()
+    }
+
+    fn update_runtime_fiber(
+        &self,
+        fiber: FiberId,
+        state: fusion_sys::fiber::FiberState,
+        started: bool,
+    ) -> Result<(), FiberError> {
+        let (Some(runtime_sink), Some(courier_id)) = (self.runtime_sink, self.courier_id) else {
+            return Ok(());
+        };
+        runtime_sink
+            .update_fiber(
+                courier_id,
+                ManagedFiberSnapshot {
+                    id: fiber,
+                    state,
+                    started,
+                    claim_awareness: fusion_sys::claims::ClaimAwareness::Blind,
+                    claim_context: None,
+                },
+                self.runtime_tick(),
+            )
+            .map_err(fiber_error_from_runtime_sink)?;
+        self.publish_runtime_summary()
+    }
+
+    fn mark_runtime_fiber_terminal(
+        &self,
+        fiber: FiberId,
+        terminal: fusion_sys::courier::FiberTerminalStatus,
+    ) -> Result<(), FiberError> {
+        let (Some(runtime_sink), Some(courier_id)) = (self.runtime_sink, self.courier_id) else {
+            return Ok(());
+        };
+        runtime_sink
+            .mark_fiber_terminal(courier_id, fiber, terminal, self.runtime_tick())
+            .map_err(fiber_error_from_runtime_sink)?;
+        self.publish_runtime_summary()
+    }
+
     fn enqueue_with_signal(
         &self,
         carrier: usize,
@@ -7437,6 +7743,7 @@ impl GreenPoolInner {
         terminal_state: GreenTaskState,
     ) -> Result<(), FiberError> {
         let mut first_error = None;
+        let runtime_fiber_id = self.tasks.current_fiber_id(slot_index)?;
         let terminal_state = match self
             .tasks
             .slot(slot_index)?
@@ -7498,6 +7805,32 @@ impl GreenPoolInner {
             && first_error.is_none()
         {
             trace_carrier_failure("finish_task.try_reclaim", usize::MAX, &error);
+            first_error = Some(error);
+        }
+
+        let runtime_terminal = match terminal_state {
+            GreenTaskState::Completed => {
+                fusion_sys::courier::FiberTerminalStatus::Completed(FiberReturn::new(0))
+            }
+            GreenTaskState::Failed(error) => {
+                fusion_sys::courier::FiberTerminalStatus::Faulted(error.kind())
+            }
+            GreenTaskState::Queued
+            | GreenTaskState::Running
+            | GreenTaskState::Yielded
+            | GreenTaskState::Waiting
+            | GreenTaskState::Finishing => fusion_sys::courier::FiberTerminalStatus::Abandoned(
+                fusion_sys::fiber::FiberState::Suspended,
+            ),
+        };
+        if let Err(error) = self.mark_runtime_fiber_terminal(runtime_fiber_id, runtime_terminal)
+            && first_error.is_none()
+        {
+            trace_carrier_failure(
+                "finish_task.mark_runtime_fiber_terminal",
+                usize::MAX,
+                &error,
+            );
             first_error = Some(error);
         }
 
@@ -7940,6 +8273,7 @@ fn spawn_on_lease<F, T>(
     inner: &GreenPoolLease,
     task: FiberTaskAttributes,
     job: F,
+    class: fusion_sys::courier::CourierFiberClass,
     signal: bool,
     drive_mode: GreenHandleDriveMode,
 ) -> Result<GreenHandle<T>, FiberError>
@@ -7952,6 +8286,7 @@ where
     }
 
     let reservation = reserve_spawn_slot_for(inner, task)?;
+    let fiber_id = next_green_fiber_id();
     let slot_addr = reservation.context as usize;
     let wrapped = move || {
         let output = generated_closure_task_root(job);
@@ -7969,6 +8304,8 @@ where
     if let Err(error) = inner.tasks.assign_job(
         reservation.slot_index,
         reservation.id,
+        fiber_id,
+        class,
         reservation.carrier,
         reservation.lease,
         task,
@@ -8019,6 +8356,16 @@ where
         inner.enqueue_with_signal(reservation.carrier, reservation.slot_index, signal)
     {
         trace_spawn_failure("enqueue_with_signal", Some(reservation.slot_index), &error);
+        cleanup_failed_spawn_for(inner, &reservation);
+        return Err(error);
+    }
+
+    if let Err(error) = inner.register_runtime_fiber(fiber_id, class) {
+        trace_spawn_failure(
+            "runtime.register_runtime_fiber",
+            Some(reservation.slot_index),
+            &error,
+        );
         cleanup_failed_spawn_for(inner, &reservation);
         return Err(error);
     }
@@ -8400,6 +8747,9 @@ impl CurrentFiberPool {
             runtime_region,
             GreenPoolInner {
                 support,
+                courier_id: config.courier_id,
+                context_id: config.context_id,
+                runtime_sink: config.runtime_sink,
                 scheduling: config.scheduling,
                 capacity_policy: config.capacity_policy,
                 yield_budget_supported: yield_budget_enforcement_supported(),
@@ -8480,6 +8830,9 @@ impl CurrentFiberPool {
             backing.slab_owner,
             GreenPoolInner {
                 support,
+                courier_id: config.courier_id,
+                context_id: config.context_id,
+                runtime_sink: config.runtime_sink,
                 scheduling: config.scheduling,
                 capacity_policy: config.capacity_policy,
                 yield_budget_supported: yield_budget_enforcement_supported(),
@@ -8575,6 +8928,72 @@ impl CurrentFiberPool {
     #[must_use]
     pub fn active_count(&self) -> usize {
         self.inner.active.load(Ordering::Acquire)
+    }
+
+    /// Returns the owning courier identity for this current-thread fiber lane, when configured.
+    #[must_use]
+    pub fn courier_id(&self) -> Option<CourierId> {
+        self.inner.courier_id
+    }
+
+    /// Returns the owning context identity for this current-thread fiber lane, when configured.
+    #[must_use]
+    pub fn context_id(&self) -> Option<ContextId> {
+        self.inner.context_id
+    }
+
+    /// Returns a courier-facing run summary for this current-thread fiber lane.
+    ///
+    /// This is the current bridge between the existing fiber scheduler and the courier-local
+    /// supervision model. The pool still owns scheduling internally, but it can now report
+    /// runnable/running/blocked truth in courier vocabulary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task registry cannot be observed honestly.
+    pub fn runtime_summary(&self) -> Result<CourierRuntimeSummary, FiberError> {
+        self.runtime_summary_with_responsiveness(CourierResponsiveness::Responsive)
+    }
+
+    /// Returns a courier-facing run summary for this current-thread fiber lane using one
+    /// caller-supplied responsiveness classification.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task registry cannot be observed honestly.
+    pub fn runtime_summary_with_responsiveness(
+        &self,
+        responsiveness: CourierResponsiveness,
+    ) -> Result<CourierRuntimeSummary, FiberError> {
+        let (active_units, runnable_units, running_units, blocked_units) =
+            self.inner.tasks.lane_counts()?;
+        let available_slots = self.inner.tasks.available_slots()?;
+        Ok(CourierRuntimeSummary {
+            policy: match self.inner.scheduling {
+                GreenScheduling::Fifo => CourierSchedulingPolicy::CooperativeRoundRobin,
+                GreenScheduling::Priority => CourierSchedulingPolicy::CooperativePriority,
+                GreenScheduling::WorkStealing => CourierSchedulingPolicy::CooperativeWorkStealing,
+            },
+            run_state: if running_units != 0 {
+                CourierRunState::Running
+            } else if runnable_units != 0 {
+                CourierRunState::Runnable
+            } else {
+                CourierRunState::Idle
+            },
+            responsiveness,
+            fiber_lane: Some(CourierLaneSummary {
+                kind: RunnableUnitKind::Fiber,
+                active_units,
+                runnable_units,
+                running_units,
+                blocked_units,
+                available_slots,
+            }),
+            async_lane: None,
+            control_lane: None,
+        }
+        .with_responsiveness(responsiveness))
     }
 
     /// Returns the number of unreserved task slots currently available in this pool.
@@ -8710,10 +9129,24 @@ impl CurrentFiberPool {
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
     {
+        self.spawn_with_attrs_class(task, job, fusion_sys::courier::CourierFiberClass::Dynamic)
+    }
+
+    fn spawn_with_attrs_class<F, T>(
+        &self,
+        task: FiberTaskAttributes,
+        job: F,
+        class: fusion_sys::courier::CourierFiberClass,
+    ) -> Result<CurrentFiberHandle<T>, FiberError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: 'static,
+    {
         let handle = spawn_on_lease(
             &self.inner,
             task,
             job,
+            class,
             false,
             GreenHandleDriveMode::CurrentThread,
         )?;
@@ -8728,13 +9161,29 @@ impl CurrentFiberPool {
     /// # Errors
     ///
     /// Returns an error when the task contract cannot be mapped or admitted honestly.
+    pub fn spawn_planned<T>(&self, task: T) -> Result<CurrentFiberHandle<T::Output>, FiberError>
+    where
+        T: ExplicitFiberTask,
+    {
+        self.spawn_explicit(task)
+    }
+
+    /// Spawns one explicit fiber task carrying compile-time stack metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task contract cannot be mapped or admitted honestly.
     pub fn spawn_explicit<T>(&self, task: T) -> Result<CurrentFiberHandle<T::Output>, FiberError>
     where
         T: ExplicitFiberTask,
     {
         let attributes = T::task_attributes()?;
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs(attributes, move || task.run())
+        self.spawn_with_attrs_class(
+            attributes,
+            move || task.run(),
+            fusion_sys::courier::CourierFiberClass::Planned,
+        )
     }
 
     /// Spawns one explicit fiber task using build-generated stack metadata.
@@ -8749,7 +9198,11 @@ impl CurrentFiberPool {
     {
         let attributes = T::task_attributes()?;
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs(attributes, move || task.run())
+        self.spawn_with_attrs_class(
+            attributes,
+            move || task.run(),
+            fusion_sys::courier::CourierFiberClass::Planned,
+        )
     }
 
     /// Spawns one explicit fiber task using a compile-time generated contract.
@@ -8765,7 +9218,11 @@ impl CurrentFiberPool {
         let attributes = generated_explicit_task_contract_attributes::<T>()
             .with_optional_yield_budget(T::YIELD_BUDGET);
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs(attributes, move || task.run())
+        self.spawn_with_attrs_class(
+            attributes,
+            move || task.run(),
+            fusion_sys::courier::CourierFiberClass::Planned,
+        )
     }
 
     /// Spawns one explicit fiber task using a compile-time generated contract directly.
@@ -8783,7 +9240,11 @@ impl CurrentFiberPool {
         let attributes = generated_explicit_task_contract_attributes::<T>()
             .with_optional_yield_budget(T::YIELD_BUDGET);
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs(attributes, move || task.run())
+        self.spawn_with_attrs_class(
+            attributes,
+            move || task.run(),
+            fusion_sys::courier::CourierFiberClass::Planned,
+        )
     }
 
     /// Drives at most one ready task segment on the current thread.
@@ -8858,6 +9319,21 @@ fn fiber_error_from_current_runtime_backing(error: RuntimeBackingError) -> Fiber
         RuntimeBackingErrorKind::Invalid => FiberError::invalid(),
         RuntimeBackingErrorKind::ResourceExhausted => FiberError::resource_exhausted(),
         RuntimeBackingErrorKind::StateConflict => FiberError::state_conflict(),
+    }
+}
+
+fn fiber_error_from_runtime_sink(
+    error: fusion_sys::courier::CourierRuntimeSinkError,
+) -> FiberError {
+    match error {
+        fusion_sys::courier::CourierRuntimeSinkError::Unsupported => FiberError::unsupported(),
+        fusion_sys::courier::CourierRuntimeSinkError::Invalid => FiberError::invalid(),
+        fusion_sys::courier::CourierRuntimeSinkError::NotFound
+        | fusion_sys::courier::CourierRuntimeSinkError::StateConflict
+        | fusion_sys::courier::CourierRuntimeSinkError::Busy => FiberError::state_conflict(),
+        fusion_sys::courier::CourierRuntimeSinkError::ResourceExhausted => {
+            FiberError::resource_exhausted()
+        }
     }
 }
 
@@ -9631,6 +10107,9 @@ fn build_hosted_green_inner(
         runtime_region,
         GreenPoolInner {
             support,
+            courier_id: config.courier_id,
+            context_id: config.context_id,
+            runtime_sink: config.runtime_sink,
             scheduling: config.scheduling,
             capacity_policy: config.capacity_policy,
             yield_budget_supported: yield_budget_enforcement_supported(),
@@ -9754,6 +10233,62 @@ impl GreenPool {
     #[must_use]
     pub fn active_count(&self) -> usize {
         self.inner.active.load(Ordering::Acquire)
+    }
+
+    /// Returns the owning courier identity for this carrier-backed fiber lane, when configured.
+    #[must_use]
+    pub fn courier_id(&self) -> Option<CourierId> {
+        self.inner.courier_id
+    }
+
+    /// Returns a courier-facing run summary for this carrier-backed fiber lane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task registry cannot be observed honestly.
+    pub fn runtime_summary(&self) -> Result<CourierRuntimeSummary, FiberError> {
+        self.runtime_summary_with_responsiveness(CourierResponsiveness::Responsive)
+    }
+
+    /// Returns a courier-facing run summary for this carrier-backed fiber lane using one
+    /// caller-supplied responsiveness classification.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task registry cannot be observed honestly.
+    pub fn runtime_summary_with_responsiveness(
+        &self,
+        responsiveness: CourierResponsiveness,
+    ) -> Result<CourierRuntimeSummary, FiberError> {
+        let (active_units, runnable_units, running_units, blocked_units) =
+            self.inner.tasks.lane_counts()?;
+        let available_slots = self.inner.tasks.available_slots()?;
+        Ok(CourierRuntimeSummary {
+            policy: match self.inner.scheduling {
+                GreenScheduling::Fifo => CourierSchedulingPolicy::CooperativeRoundRobin,
+                GreenScheduling::Priority => CourierSchedulingPolicy::CooperativePriority,
+                GreenScheduling::WorkStealing => CourierSchedulingPolicy::CooperativeWorkStealing,
+            },
+            run_state: if running_units != 0 {
+                CourierRunState::Running
+            } else if runnable_units != 0 {
+                CourierRunState::Runnable
+            } else {
+                CourierRunState::Idle
+            },
+            responsiveness,
+            fiber_lane: Some(CourierLaneSummary {
+                kind: RunnableUnitKind::Fiber,
+                active_units,
+                runnable_units,
+                running_units,
+                blocked_units,
+                available_slots,
+            }),
+            async_lane: None,
+            control_lane: None,
+        }
+        .with_responsiveness(responsiveness))
     }
 
     /// Returns whether this live pool can honestly admit the requested task class.
@@ -9895,13 +10430,33 @@ impl GreenPool {
     ///
     /// Returns an error when the task's declared stack contract cannot be mapped to a supported
     /// class, or when ordinary green-task admission fails.
+    pub fn spawn_planned<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
+    where
+        T: ExplicitFiberTask,
+    {
+        self.spawn_explicit(task)
+    }
+
+    /// Spawns one explicit fiber task carrying compile-time stack metadata.
+    ///
+    /// This is the initial bridge between the public runtime and the planned build-time
+    /// stack-budget tooling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task's declared stack contract cannot be mapped to a supported
+    /// class, or when ordinary green-task admission fails.
     pub fn spawn_explicit<T>(&self, task: T) -> Result<GreenHandle<T::Output>, FiberError>
     where
         T: ExplicitFiberTask,
     {
         let attributes = T::task_attributes()?;
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs(attributes, move || task.run())
+        self.spawn_with_attrs_class(
+            attributes,
+            move || task.run(),
+            fusion_sys::courier::CourierFiberClass::Planned,
+        )
     }
 
     /// Spawns one explicit fiber task using build-generated stack metadata.
@@ -9917,7 +10472,11 @@ impl GreenPool {
     {
         let attributes = T::task_attributes()?;
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs(attributes, move || task.run())
+        self.spawn_with_attrs_class(
+            attributes,
+            move || task.run(),
+            fusion_sys::courier::CourierFiberClass::Planned,
+        )
     }
 
     /// Spawns one explicit fiber task using a compile-time generated contract.
@@ -9937,7 +10496,11 @@ impl GreenPool {
         let attributes = generated_explicit_task_contract_attributes::<T>()
             .with_optional_yield_budget(T::YIELD_BUDGET);
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs(attributes, move || task.run())
+        self.spawn_with_attrs_class(
+            attributes,
+            move || task.run(),
+            fusion_sys::courier::CourierFiberClass::Planned,
+        )
     }
 
     /// Spawns one explicit fiber task using a compile-time generated contract directly.
@@ -9956,7 +10519,11 @@ impl GreenPool {
         let attributes = generated_explicit_task_contract_attributes::<T>()
             .with_optional_yield_budget(T::YIELD_BUDGET);
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs(attributes, move || task.run())
+        self.spawn_with_attrs_class(
+            attributes,
+            move || task.run(),
+            fusion_sys::courier::CourierFiberClass::Planned,
+        )
     }
 
     /// Spawns one green-thread job with explicit stack-class and priority metadata.
@@ -9979,10 +10546,24 @@ impl GreenPool {
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
     {
+        self.spawn_with_attrs_class(task, job, fusion_sys::courier::CourierFiberClass::Dynamic)
+    }
+
+    fn spawn_with_attrs_class<F, T>(
+        &self,
+        task: FiberTaskAttributes,
+        job: F,
+        class: fusion_sys::courier::CourierFiberClass,
+    ) -> Result<GreenHandle<T>, FiberError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: 'static,
+    {
         spawn_on_lease(
             &self.inner,
             task,
             job,
+            class,
             true,
             GreenHandleDriveMode::CarrierPool,
         )
@@ -10361,6 +10942,12 @@ fn run_ready_task(
             return Err(error);
         }
     };
+    let runtime_fiber_id = inner.tasks.current_fiber_id(slot_index)?;
+    inner.update_runtime_fiber(
+        runtime_fiber_id,
+        fusion_sys::fiber::FiberState::Running,
+        true,
+    )?;
     if !execution.requires_fiber() {
         let runner = match slot.take_job_runner(task_id) {
             Ok(runner) => runner,
@@ -10450,10 +11037,20 @@ fn run_ready_task(
                 inner
                     .tasks
                     .set_state(slot_index, task_id, GreenTaskState::Yielded)?;
+                inner.update_runtime_fiber(
+                    runtime_fiber_id,
+                    fusion_sys::fiber::FiberState::Suspended,
+                    true,
+                )?;
                 inner.dispatch_capacity_for_task(slot_index, task_id)?;
                 inner.enqueue_with_signal(carrier_index, slot_index, false)?;
             }
             CurrentGreenYieldAction::WaitReadiness { source, interest } => {
+                inner.update_runtime_fiber(
+                    runtime_fiber_id,
+                    fusion_sys::fiber::FiberState::Suspended,
+                    true,
+                )?;
                 inner.dispatch_capacity_for_task(slot_index, task_id)?;
                 if let Err(error) =
                     inner.park_on_readiness(carrier_index, slot_index, task_id, source, interest)
@@ -11120,6 +11717,9 @@ mod tests {
             yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             reactor_policy: GreenReactorPolicy::Automatic,
             huge_pages: HugePagePolicy::Disabled,
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -11203,6 +11803,9 @@ mod tests {
             yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             reactor_policy: GreenReactorPolicy::Automatic,
             huge_pages: HugePagePolicy::Disabled,
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -11251,6 +11854,9 @@ mod tests {
             yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             reactor_policy: GreenReactorPolicy::Automatic,
             huge_pages: HugePagePolicy::Disabled,
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -11314,6 +11920,9 @@ mod tests {
             yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             reactor_policy: GreenReactorPolicy::Automatic,
             huge_pages: HugePagePolicy::Disabled,
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -11371,6 +11980,9 @@ mod tests {
             yield_budget_policy: FiberYieldBudgetPolicy::Abort,
             reactor_policy: GreenReactorPolicy::Automatic,
             huge_pages: HugePagePolicy::Disabled,
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -11434,6 +12046,9 @@ mod tests {
             huge_pages: HugePagePolicy::Enabled {
                 size: HugePageSize::TwoMiB,
             },
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -12648,6 +13263,71 @@ mod tests {
         second
             .join()
             .expect("second task should already be complete after run_until_idle");
+
+        fibers
+            .shutdown()
+            .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn current_fiber_pool_runtime_summary_reports_active_fiber_lane_state() {
+        let fibers = CurrentFiberPool::new(&FiberPoolConfig::new())
+            .expect("current fiber pool should build");
+        let idle = fibers
+            .runtime_summary()
+            .expect("summary should observe empty pool");
+        assert_eq!(idle.total_active_units(), 0);
+        assert_eq!(idle.run_state, CourierRunState::Idle);
+
+        let task = fibers
+            .spawn_with_stack::<4096, _, _>(|| {
+                yield_now().expect("task should yield cleanly");
+                7_u8
+            })
+            .expect("task should spawn");
+        let active = fibers
+            .runtime_summary()
+            .expect("summary should observe spawned fiber");
+        assert!(active.fiber_lane.is_some());
+        assert!(active.total_active_units() >= 1);
+        assert!(
+            matches!(
+                active.run_state,
+                CourierRunState::Runnable | CourierRunState::Running
+            ),
+            "spawned fiber should make the lane runnable"
+        );
+
+        let _ = fibers.run_until_idle().expect("pool should drain");
+        assert_eq!(task.join().expect("task should complete"), 7);
+        let drained = fibers
+            .runtime_summary()
+            .expect("summary should observe drained pool");
+        assert_eq!(drained.total_active_units(), 0);
+        assert_eq!(drained.run_state, CourierRunState::Idle);
+
+        fibers
+            .shutdown()
+            .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn current_fiber_pool_binds_current_courier_identity() {
+        let fibers =
+            CurrentFiberPool::new(&FiberPoolConfig::new().with_courier_id(CourierId::new(77)))
+                .expect("current fiber pool should build");
+        assert_eq!(fibers.courier_id(), Some(CourierId::new(77)));
+
+        let task = fibers
+            .spawn_with_stack::<4096, _, _>(|| {
+                current_courier_id()
+                    .expect("current courier id should be visible")
+                    .get()
+            })
+            .expect("task should spawn");
+
+        assert_eq!(fibers.run_until_idle().expect("pool should drain"), 1);
+        assert_eq!(task.join().expect("task should complete"), 77);
 
         fibers
             .shutdown()

@@ -541,6 +541,16 @@ fn print_fiber_metadata_message(message: FiberMetadataMessage) {
         FiberMetadataMessage::Faulted { fiber, reason } => {
             println!("fiber.metadata: faulted({}, reason={reason})", fiber.get());
         }
+        FiberMetadataMessage::ClaimAwarenessChanged {
+            fiber,
+            awareness,
+            claim_context,
+        } => {
+            println!(
+                "fiber.metadata: claim-awareness({}, mode={awareness:?}, context={claim_context:?})",
+                fiber.get()
+            );
+        }
         FiberMetadataMessage::Abandoned { fiber, lifecycle } => {
             println!(
                 "fiber.metadata: abandoned({}, state={})",
@@ -714,10 +724,11 @@ fn main() {
 
     let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
     let stack = FiberStack::from_slice(&mut stack_words).expect("fiber stack should build");
-    let mut fiber = ManagedFiber::<_, 16>::new(state.as_mut(), stack)
+    let mut fiber = ManagedFiber::<_, 16>::new_with_publication(state.as_mut(), stack)
         .expect("allocator demo fiber should build");
     let fiber_metadata_consumer = fiber
         .metadata_channel()
+        .expect("allocator demo fiber should expose explicit publication")
         .attach_consumer(TransportAttachmentRequest::same_courier())
         .expect("fiber metadata consumer should attach");
 
@@ -758,12 +769,22 @@ fn main() {
             },
         )
         .expect("initial pool-extents request should send");
-    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
+    drain_fiber_metadata(
+        fiber
+            .metadata_channel()
+            .expect("allocator demo fiber should expose explicit publication"),
+        fiber_metadata_consumer,
+    );
 
     let first = fiber.resume().expect("metadata fiber pump should resume");
     print_rule("Fiber Step 1");
     print_fiber_yield("fiber", first);
-    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
+    drain_fiber_metadata(
+        fiber
+            .metadata_channel()
+            .expect("allocator demo fiber should expose explicit publication"),
+        fiber_metadata_consumer,
+    );
     drain_metadata(fiber.state().service.metadata_channel(), metadata_consumer);
     drain_status(
         fiber.state().service.status_channel(),
@@ -787,7 +808,12 @@ fn main() {
     let second = fiber.resume().expect("audit fiber pump should resume");
     print_rule("Fiber Step 2");
     print_fiber_yield("fiber", second);
-    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
+    drain_fiber_metadata(
+        fiber
+            .metadata_channel()
+            .expect("allocator demo fiber should expose explicit publication"),
+        fiber_metadata_consumer,
+    );
     drain_status(
         fiber.state().service.status_channel(),
         status_consumer,
@@ -810,7 +836,12 @@ fn main() {
     let third = fiber.resume().expect("pool-stats fiber pump should resume");
     print_rule("Fiber Step 3");
     print_fiber_yield("fiber", third);
-    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
+    drain_fiber_metadata(
+        fiber
+            .metadata_channel()
+            .expect("allocator demo fiber should expose explicit publication"),
+        fiber_metadata_consumer,
+    );
     drain_status(
         fiber.state().service.status_channel(),
         status_consumer,
@@ -824,7 +855,12 @@ fn main() {
         .expect("pool-members fiber pump should resume");
     print_rule("Fiber Step 4");
     print_fiber_yield("fiber", fourth);
-    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
+    drain_fiber_metadata(
+        fiber
+            .metadata_channel()
+            .expect("allocator demo fiber should expose explicit publication"),
+        fiber_metadata_consumer,
+    );
     drain_status(
         fiber.state().service.status_channel(),
         status_consumer,
@@ -838,7 +874,12 @@ fn main() {
         .expect("pool-extents fiber pump should resume");
     print_rule("Fiber Step 5");
     print_fiber_yield("fiber", fifth);
-    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
+    drain_fiber_metadata(
+        fiber
+            .metadata_channel()
+            .expect("allocator demo fiber should expose explicit publication"),
+        fiber_metadata_consumer,
+    );
     drain_status(
         fiber.state().service.status_channel(),
         status_consumer,
@@ -856,7 +897,12 @@ fn main() {
     let sixth = fiber.resume().expect("republish fiber pump should resume");
     print_rule("Fiber Step 6");
     print_fiber_yield("fiber", sixth);
-    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
+    drain_fiber_metadata(
+        fiber
+            .metadata_channel()
+            .expect("allocator demo fiber should expose explicit publication"),
+        fiber_metadata_consumer,
+    );
     drain_metadata(fiber.state().service.metadata_channel(), metadata_consumer);
     drain_status(
         fiber.state().service.status_channel(),
@@ -869,7 +915,12 @@ fn main() {
     let final_outcome = fiber.resume().expect("final fiber pump should complete");
     print_rule("Fiber Final");
     print_fiber_yield("fiber", final_outcome);
-    drain_fiber_metadata(fiber.metadata_channel(), fiber_metadata_consumer);
+    drain_fiber_metadata(
+        fiber
+            .metadata_channel()
+            .expect("allocator demo fiber should expose explicit publication"),
+        fiber_metadata_consumer,
+    );
     drain_status(
         fiber.state().service.status_channel(),
         status_consumer,

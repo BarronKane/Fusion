@@ -182,12 +182,15 @@ fn allocator_channel_service_can_run_on_managed_fiber() {
     let mut service = pin!(service);
     let mut stack_words = vec![0_u128; 2048].into_boxed_slice();
     let stack = FiberStack::from_slice(stack_words.as_mut()).expect("stack should be valid");
-    let mut fiber =
-        fusion_sys::alloc::AllocatorChannelService::spawn_managed::<8, 8>(service.as_mut(), stack)
-            .expect("managed allocator service fiber should build");
+    let mut fiber = fusion_sys::alloc::AllocatorChannelService::spawn_managed_with_publication::<
+        8,
+        8,
+    >(service.as_mut(), stack)
+    .expect("managed allocator service fiber should build");
 
     let fiber_consumer = fiber
         .metadata_channel()
+        .expect("allocator service fiber should expose explicit publication")
         .attach_consumer(TransportAttachmentRequest::same_courier())
         .expect("fiber metadata consumer should attach");
     let metadata_consumer = fiber
@@ -209,6 +212,7 @@ fn allocator_channel_service_can_run_on_managed_fiber() {
     assert_eq!(
         fiber
             .metadata_channel()
+            .expect("allocator service fiber should expose explicit publication")
             .try_receive(fiber_consumer)
             .expect("fiber metadata receive should succeed"),
         Some(FiberMetadataMessage::Created { fiber: fiber.id() })
@@ -222,6 +226,7 @@ fn allocator_channel_service_can_run_on_managed_fiber() {
     assert_eq!(
         fiber
             .metadata_channel()
+            .expect("allocator service fiber should expose explicit publication")
             .try_receive(fiber_consumer)
             .expect("fiber metadata receive should succeed"),
         Some(FiberMetadataMessage::Started { fiber: fiber.id() })

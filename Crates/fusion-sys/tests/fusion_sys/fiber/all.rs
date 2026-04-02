@@ -269,10 +269,11 @@ fn managed_fiber_emits_automatic_metadata() {
     let mut stack_words = vec![0_u128; 4096].into_boxed_slice();
     let stack = FiberStack::from_slice(&mut stack_words).expect("stack should be valid");
 
-    let mut fiber =
-        ManagedFiber::<_, 8>::new(state.as_mut(), stack).expect("managed fiber should build");
+    let mut fiber = ManagedFiber::<_, 8>::new_with_publication(state.as_mut(), stack)
+        .expect("managed fiber should build");
     let consumer = fiber
         .metadata_channel()
+        .expect("managed fiber should expose explicit publication")
         .attach_consumer(TransportAttachmentRequest::same_courier())
         .expect("metadata consumer should attach");
     let fiber_id = fiber.id();
@@ -280,6 +281,7 @@ fn managed_fiber_emits_automatic_metadata() {
     assert_eq!(
         fiber
             .metadata_channel()
+            .expect("managed fiber should expose explicit publication")
             .try_receive(consumer)
             .expect("created metadata should read"),
         Some(FiberMetadataMessage::Created { fiber: fiber_id })
@@ -292,6 +294,7 @@ fn managed_fiber_emits_automatic_metadata() {
     assert_eq!(
         fiber
             .metadata_channel()
+            .expect("managed fiber should expose explicit publication")
             .try_receive(consumer)
             .expect("started metadata should read"),
         Some(FiberMetadataMessage::Started { fiber: fiber_id })
@@ -305,6 +308,7 @@ fn managed_fiber_emits_automatic_metadata() {
     assert_eq!(
         fiber
             .metadata_channel()
+            .expect("managed fiber should expose explicit publication")
             .try_receive(consumer)
             .expect("completed metadata should read"),
         Some(FiberMetadataMessage::Completed {

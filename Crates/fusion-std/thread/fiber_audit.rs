@@ -269,7 +269,8 @@ impl<
         &self.status_channel
     }
 
-    /// Spawns this audit service on one managed fiber with an automatic metadata channel.
+    /// Spawns this audit service on one managed fiber without any automatic fiber publication
+    /// lane.
     ///
     /// # Errors
     ///
@@ -279,6 +280,22 @@ impl<
         stack: FiberStack,
     ) -> Result<ManagedFiber<'state, Self, META_FIBER_CAPACITY, MAX_CONSUMERS>, FiberError> {
         Fiber::spawn_managed(stack, state)
+    }
+
+    /// Spawns this audit service on one managed fiber with one explicit opt-in publication lane.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest low-level fiber construction failure.
+    pub fn spawn_managed_with_publication<
+        'state,
+        const META_FIBER_CAPACITY: usize,
+        const MAX_CONSUMERS: usize,
+    >(
+        state: Pin<&'state mut Self>,
+        stack: FiberStack,
+    ) -> Result<ManagedFiber<'state, Self, META_FIBER_CAPACITY, MAX_CONSUMERS>, FiberError> {
+        Fiber::spawn_managed_with_publication(stack, state)
     }
 
     /// Pumps pending metadata and control requests once.
@@ -503,12 +520,15 @@ mod tests {
         let mut service = pin!(service);
         let mut stack_words = vec![0_u128; 2048].into_boxed_slice();
         let stack = FiberStack::from_slice(stack_words.as_mut()).expect("stack should build");
-        let mut fiber =
-            CurrentFiberPoolChannelService::spawn_managed::<8, 8>(service.as_mut(), stack)
-                .expect("managed current fiber pool service should build");
+        let mut fiber = CurrentFiberPoolChannelService::spawn_managed_with_publication::<8, 8>(
+            service.as_mut(),
+            stack,
+        )
+        .expect("managed current fiber pool service should build");
 
         let fiber_consumer = fiber
             .metadata_channel()
+            .expect("managed audit fiber should expose explicit publication")
             .attach_consumer(TransportAttachmentRequest::same_courier())
             .expect("fiber metadata consumer should attach");
         let metadata_consumer = fiber
@@ -530,6 +550,7 @@ mod tests {
         assert_eq!(
             fiber
                 .metadata_channel()
+                .expect("managed audit fiber should expose explicit publication")
                 .try_receive(fiber_consumer)
                 .expect("fiber metadata receive should succeed"),
             Some(FiberMetadataMessage::Created { fiber: fiber.id() })
@@ -543,6 +564,7 @@ mod tests {
         assert_eq!(
             fiber
                 .metadata_channel()
+                .expect("managed audit fiber should expose explicit publication")
                 .try_receive(fiber_consumer)
                 .expect("fiber metadata receive should succeed"),
             Some(FiberMetadataMessage::Started { fiber: fiber.id() })

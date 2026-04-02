@@ -35,6 +35,8 @@ pub use fusion_pal::sys::execution_context::{
 
 use crate::channel::{ChannelError, ChannelSend, LocalChannel};
 use crate::claims::{ClaimAwareness, ClaimContextId};
+use crate::context::ContextId;
+use crate::courier::CourierId;
 use crate::protocol::{
     Protocol,
     ProtocolBootstrapKind,
@@ -50,6 +52,7 @@ use crate::sync::{OnceLock, SyncError, SyncErrorKind, ThinMutex};
 use crate::thread::{ThreadErrorKind, ThreadId, ThreadSystem};
 use crate::transport::{
     TransportAttachmentControl,
+    TransportAttachmentLaw,
     TransportAttachmentRequest,
     TransportError,
     TransportErrorKind,
@@ -223,9 +226,12 @@ impl FiberId {
 }
 
 /// Coarse lifecycle metadata surfaced automatically by one managed fiber.
+// TODO: narrow this lane toward "current situation" reporting once courier-owned ledgers become
+// the authoritative substrate truth. The current event-shaped protocol is transitional only and
+// should disappear or become fully opt-in once courier-owned metadata is the sole truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FiberMetadataMessage {
-    /// One managed fiber was created and now owns one metadata channel.
+    /// One managed fiber was created and published one metadata event.
     Created { fiber: FiberId },
     /// One managed fiber started executing for the first time.
     Started { fiber: FiberId },
@@ -249,7 +255,7 @@ pub enum FiberMetadataMessage {
     },
 }
 
-/// Managed-fiber metadata protocol carried over the automatic fiber metadata channel.
+/// Managed-fiber metadata protocol carried over one transitional per-fiber publication channel.
 pub struct FiberMetadataProtocol;
 
 impl Protocol for FiberMetadataProtocol {
@@ -266,8 +272,8 @@ impl Protocol for FiberMetadataProtocol {
     };
 }
 
-/// Automatic metadata channel carried by one managed fiber.
-pub type FiberMetadataChannel<const CAPACITY: usize, const MAX_CONSUMERS: usize = 8> =
+/// Transitional publication channel carried by one managed fiber.
+pub type FiberMetadataChannel<const CAPACITY: usize, const MAX_CONSUMERS: usize = 1> =
     LocalChannel<FiberMetadataProtocol, CAPACITY, MAX_CONSUMERS>;
 
 /// One typed stackful fiber over caller-owned pinned state.
@@ -281,20 +287,22 @@ pub struct PinnedFiber<'state, T: FiberRunnable> {
     _marker: PhantomData<Pin<&'state mut T>>,
 }
 
-/// One subsystem-facing managed fiber with an automatic metadata channel.
+/// One subsystem-facing managed fiber with one transitional publication channel.
 pub struct ManagedFiber<
     'state,
     T: FiberRunnable,
     const META_CAPACITY: usize = 16,
-    const MAX_CONSUMERS: usize = 8,
+    const MAX_CONSUMERS: usize = 1,
 > {
     id: FiberId,
+    courier_id: Option<CourierId>,
+    context_id: Option<ContextId>,
     started: bool,
     claim_awareness: ClaimAwareness,
     claim_context: Option<ClaimContextId>,
     fiber: Option<PinnedFiber<'state, T>>,
-    metadata: FiberMetadataChannel<META_CAPACITY, MAX_CONSUMERS>,
-    metadata_producer: usize,
+    metadata: Option<FiberMetadataChannel<META_CAPACITY, MAX_CONSUMERS>>,
+    metadata_producer: Option<usize>,
 }
 
 /// Snapshot of one managed fiber's live identity, lifecycle, and claim-coupling state.
@@ -464,6 +472,9 @@ unsafe impl Sync for FiberBootstrapRegistry {}
 struct ActiveFiberSlot {
     active: bool,
     thread_id: ThreadId,
+    fiber_id: Option<FiberId>,
+    courier_id: Option<CourierId>,
+    context_id: Option<ContextId>,
     arg: *mut (),
     caller_context: *mut PlatformSavedContext,
     fiber_context: *mut PlatformSavedContext,
@@ -475,6 +486,9 @@ impl ActiveFiberSlot {
         Self {
             active: false,
             thread_id: ThreadId(0),
+            fiber_id: None,
+            courier_id: None,
+            context_id: None,
             arg: core::ptr::null_mut(),
             caller_context: core::ptr::null_mut(),
             fiber_context: core::ptr::null_mut(),
@@ -588,6 +602,16 @@ impl<'state, T: FiberRunnable> PinnedFiber<'state, T> {
         self.fiber.resume()
     }
 
+    fn resume_with_active_id(
+        &mut self,
+        fiber_id: Option<FiberId>,
+        courier_id: Option<CourierId>,
+        context_id: Option<ContextId>,
+    ) -> Result<FiberYield, FiberError> {
+        self.fiber
+            .resume_with_active_id(fiber_id, courier_id, context_id)
+    }
+
     /// Returns the owned stack reservation once the fiber has completed.
     ///
     /// # Errors
@@ -601,26 +625,54 @@ impl<'state, T: FiberRunnable> PinnedFiber<'state, T> {
 impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: usize>
     ManagedFiber<'state, T, META_CAPACITY, MAX_CONSUMERS>
 {
-    /// Creates one managed fiber with an automatic metadata channel.
+    /// Creates one managed fiber without any automatic publication channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest fiber construction failure.
+    pub fn new(state: Pin<&'state mut T>, stack: FiberStack) -> Result<Self, FiberError> {
+        let fiber = PinnedFiber::new(state, stack)?;
+        Ok(Self {
+            id: next_fiber_id(),
+            courier_id: None,
+            context_id: None,
+            started: false,
+            claim_awareness: ClaimAwareness::Blind,
+            claim_context: None,
+            fiber: Some(fiber),
+            metadata: None,
+            metadata_producer: None,
+        })
+    }
+
+    /// Creates one managed fiber with one explicit opt-in publication channel.
     ///
     /// # Errors
     ///
     /// Returns any honest fiber or metadata-channel construction failure.
-    pub fn new(state: Pin<&'state mut T>, stack: FiberStack) -> Result<Self, FiberError> {
+    pub fn new_with_publication(
+        state: Pin<&'state mut T>,
+        stack: FiberStack,
+    ) -> Result<Self, FiberError> {
         let fiber = PinnedFiber::new(state, stack)?;
-        let metadata = FiberMetadataChannel::<META_CAPACITY, MAX_CONSUMERS>::new()
+        let metadata =
+            FiberMetadataChannel::<META_CAPACITY, MAX_CONSUMERS>::new_with_attachment_law(
+                TransportAttachmentLaw::ExclusiveSpsc,
+            )
             .map_err(fiber_error_from_channel)?;
         let metadata_producer = metadata
             .attach_producer(TransportAttachmentRequest::same_courier())
             .map_err(fiber_error_from_transport)?;
         let managed = Self {
             id: next_fiber_id(),
+            courier_id: None,
+            context_id: None,
             started: false,
             claim_awareness: ClaimAwareness::Blind,
             claim_context: None,
             fiber: Some(fiber),
-            metadata,
-            metadata_producer,
+            metadata: Some(metadata),
+            metadata_producer: Some(metadata_producer),
         };
         managed.publish_metadata(FiberMetadataMessage::Created { fiber: managed.id });
         Ok(managed)
@@ -630,6 +682,34 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
     #[must_use]
     pub const fn id(&self) -> FiberId {
         self.id
+    }
+
+    /// Returns the courier this fiber is currently admitted under, when known.
+    ///
+    /// Lower layers do not invent courier identity on their own. Until a real courier admission
+    /// path binds this fiber, the answer stays `None` instead of hallucinating one.
+    #[must_use]
+    pub const fn courier_id(&self) -> Option<CourierId> {
+        self.courier_id
+    }
+
+    /// Returns the context this fiber is currently admitted under, when known.
+    #[must_use]
+    pub const fn context_id(&self) -> Option<ContextId> {
+        self.context_id
+    }
+
+    /// Binds this managed fiber to one courier identity for runtime self-query surfaces.
+    ///
+    /// This is a transitional low-level hook. The real courier runtime should set this
+    /// automatically at admission time once the scheduler/courier boundary owns that truth.
+    pub fn bind_to_courier(&mut self, courier_id: CourierId) {
+        self.courier_id = Some(courier_id);
+    }
+
+    /// Binds this managed fiber to one context identity for runtime self-query surfaces.
+    pub fn bind_to_context(&mut self, context_id: ContextId) {
+        self.context_id = Some(context_id);
     }
 
     /// Returns whether the managed fiber has ever been resumed.
@@ -679,10 +759,12 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
         Ok(())
     }
 
-    /// Returns the automatic metadata channel owned by this fiber.
+    /// Returns the optional explicit publication channel owned by this fiber.
     #[must_use]
-    pub const fn metadata_channel(&self) -> &FiberMetadataChannel<META_CAPACITY, MAX_CONSUMERS> {
-        &self.metadata
+    pub const fn metadata_channel(
+        &self,
+    ) -> Option<&FiberMetadataChannel<META_CAPACITY, MAX_CONSUMERS>> {
+        self.metadata.as_ref()
     }
 
     /// Returns one shared view of the pinned fiber state.
@@ -724,6 +806,12 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
         }
     }
 
+    /// Returns the managed fiber's current situation for courier-facing supervision.
+    #[must_use]
+    pub fn current_situation(&self) -> ManagedFiberSnapshot {
+        self.snapshot()
+    }
+
     /// Returns whether the managed fiber is actively running right now.
     #[must_use]
     pub fn is_running(&self) -> bool {
@@ -751,7 +839,7 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
             .fiber
             .as_mut()
             .expect("managed fiber state should remain present until stack extraction")
-            .resume()
+            .resume_with_active_id(Some(self.id), self.courier_id, self.context_id)
         {
             Ok(FiberYield::Yielded) => Ok(FiberYield::Yielded),
             Ok(FiberYield::Completed(result)) => {
@@ -784,7 +872,13 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
     }
 
     fn publish_metadata(&self, message: FiberMetadataMessage) {
-        let _ = self.metadata.try_send(self.metadata_producer, message);
+        let Some(metadata) = self.metadata.as_ref() else {
+            return;
+        };
+        let Some(producer) = self.metadata_producer else {
+            return;
+        };
+        let _ = metadata.try_send(producer, message);
     }
 }
 
@@ -860,11 +954,11 @@ impl Fiber {
         PinnedFiber::new(state, stack)
     }
 
-    /// Creates one managed typed stackful fiber with an automatic metadata channel.
+    /// Creates one managed typed stackful fiber without any automatic publication channel.
     ///
     /// # Errors
     ///
-    /// Returns any honest low-level fiber or metadata-channel construction failure.
+    /// Returns any honest low-level fiber construction failure.
     pub fn spawn_managed<
         'state,
         T: FiberRunnable,
@@ -877,6 +971,23 @@ impl Fiber {
         ManagedFiber::new(state, stack)
     }
 
+    /// Creates one managed typed stackful fiber with one explicit opt-in publication channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest low-level fiber or metadata-channel construction failure.
+    pub fn spawn_managed_with_publication<
+        'state,
+        T: FiberRunnable,
+        const META_CAPACITY: usize,
+        const MAX_CONSUMERS: usize,
+    >(
+        stack: FiberStack,
+        state: Pin<&'state mut T>,
+    ) -> Result<ManagedFiber<'state, T, META_CAPACITY, MAX_CONSUMERS>, FiberError> {
+        ManagedFiber::new_with_publication(state, stack)
+    }
+
     /// Resumes the fiber on the current carrier thread.
     ///
     /// # Errors
@@ -884,6 +995,15 @@ impl Fiber {
     /// Returns an error if the fiber is already running or has completed, or the selected
     /// backend cannot resume the saved context honestly.
     pub fn resume(&mut self) -> Result<FiberYield, FiberError> {
+        self.resume_with_active_id(None, None, None)
+    }
+
+    fn resume_with_active_id(
+        &mut self,
+        fiber_id: Option<FiberId>,
+        courier_id: Option<CourierId>,
+        context_id: Option<ContextId>,
+    ) -> Result<FiberYield, FiberError> {
         if matches!(self.state, FiberState::Running | FiberState::Completed) {
             return Err(FiberError::state_conflict());
         }
@@ -906,6 +1026,9 @@ impl Fiber {
         install_active_fiber(ActiveFiberSlot {
             active: true,
             thread_id: current_thread_id()?,
+            fiber_id,
+            courier_id,
+            context_id,
             arg: active_arg,
             caller_context,
             fiber_context,
@@ -1000,6 +1123,38 @@ pub fn current_context() -> Result<*mut (), FiberError> {
         return Err(FiberError::state_conflict());
     }
     Ok(active.arg)
+}
+
+/// Returns the current running managed fiber identifier when available.
+///
+/// # Errors
+///
+/// Returns an error if no active managed fiber is registered on the current carrier.
+pub fn current_fiber_id() -> Result<FiberId, FiberError> {
+    let active = current_active_fiber()?;
+    active.fiber_id.ok_or_else(FiberError::state_conflict)
+}
+
+/// Returns the current running managed fiber's bound courier identifier when available.
+///
+/// # Errors
+///
+/// Returns an error if no active managed fiber is registered on the current carrier or the active
+/// fiber has not been admitted under one courier identity yet.
+pub fn current_courier_id() -> Result<CourierId, FiberError> {
+    let active = current_active_fiber()?;
+    active.courier_id.ok_or_else(FiberError::state_conflict)
+}
+
+/// Returns the current running managed fiber's bound context identifier when available.
+///
+/// # Errors
+///
+/// Returns an error when no active managed fiber is registered on the current carrier or the
+/// active fiber has not been admitted under one context identity yet.
+pub fn current_context_id() -> Result<ContextId, FiberError> {
+    let active = current_active_fiber()?;
+    active.context_id.ok_or_else(FiberError::state_conflict)
 }
 
 unsafe fn pinned_fiber_entry<T: FiberRunnable>(arg: *mut ()) -> FiberReturn {
@@ -1215,6 +1370,7 @@ const fn fiber_error_from_channel(error: ChannelError) -> FiberError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     fn reset_active_slots() {
         with_active_slots(|slots| {
@@ -1232,6 +1388,9 @@ mod tests {
         let slot = ActiveFiberSlot {
             active: true,
             thread_id,
+            fiber_id: None,
+            courier_id: None,
+            context_id: None,
             arg: core::ptr::null_mut(),
             caller_context: core::ptr::null_mut(),
             fiber_context: core::ptr::null_mut(),
@@ -1256,13 +1415,43 @@ mod tests {
         }
     }
 
+    struct CaptureCurrentFiberId<'a> {
+        observed: &'a AtomicUsize,
+    }
+
+    impl FiberRunnable for CaptureCurrentFiberId<'_> {
+        fn run(self: Pin<&mut Self>) -> FiberReturn {
+            let state = self.get_mut();
+            let id = current_fiber_id().expect("managed fiber id should be visible while running");
+            state.observed.store(id.get(), Ordering::Release);
+            let _ = yield_now();
+            FiberReturn::new(0)
+        }
+    }
+
+    struct CaptureCurrentCourierId<'a> {
+        observed: &'a AtomicUsize,
+    }
+
+    impl FiberRunnable for CaptureCurrentCourierId<'_> {
+        fn run(self: Pin<&mut Self>) -> FiberReturn {
+            let state = self.get_mut();
+            let id =
+                current_courier_id().expect("managed courier id should be visible while running");
+            state.observed.store(id.get() as usize, Ordering::Release);
+            let _ = yield_now();
+            FiberReturn::new(0)
+        }
+    }
+
     #[test]
     fn managed_fiber_claim_mode_requires_context_for_black() {
-        let mut stack = [0u8; 4096];
+        let mut stack = [0u128; 512];
         let stack = FiberStack::from_slice(&mut stack).expect("stack should build");
         let mut state = YieldOnce;
         let mut managed = ManagedFiber::<_, 8>::new(Pin::new(&mut state), stack)
             .expect("managed fiber should build");
+        assert!(managed.metadata_channel().is_none());
         let initial = managed.snapshot();
         assert_eq!(initial.state, FiberState::Created);
         assert!(!initial.started);
@@ -1280,5 +1469,42 @@ mod tests {
         let after_claims = managed.snapshot();
         assert_eq!(after_claims.claim_context, Some(ClaimContextId::new(9)));
         assert!(after_claims.is_claim_enabled());
+    }
+
+    #[test]
+    fn managed_fiber_resume_exposes_current_fiber_id() {
+        let mut stack = [0u128; 512];
+        let stack = FiberStack::from_slice(&mut stack).expect("stack should build");
+        let observed = AtomicUsize::new(0);
+        let mut state = CaptureCurrentFiberId {
+            observed: &observed,
+        };
+        let mut managed = ManagedFiber::<_, 8>::new(Pin::new(&mut state), stack)
+            .expect("managed fiber should build");
+
+        assert_eq!(
+            managed.resume().expect("managed fiber should yield"),
+            FiberYield::Yielded
+        );
+        assert_eq!(observed.load(Ordering::Acquire), managed.id().get());
+    }
+
+    #[test]
+    fn managed_fiber_resume_exposes_current_courier_id_when_bound() {
+        let mut stack = [0u128; 512];
+        let stack = FiberStack::from_slice(&mut stack).expect("stack should build");
+        let observed = AtomicUsize::new(0);
+        let mut state = CaptureCurrentCourierId {
+            observed: &observed,
+        };
+        let mut managed = ManagedFiber::<_, 8>::new(Pin::new(&mut state), stack)
+            .expect("managed fiber should build");
+        managed.bind_to_courier(CourierId::new(33));
+
+        assert_eq!(
+            managed.resume().expect("managed fiber should yield"),
+            FiberYield::Yielded
+        );
+        assert_eq!(observed.load(Ordering::Acquire), 33);
     }
 }

@@ -59,6 +59,19 @@ use fusion_sys::alloc::{
 use fusion_sys::channel::ChannelError;
 #[cfg(feature = "debug-insights")]
 use fusion_sys::channel::ChannelReceive;
+use fusion_sys::context::ContextId;
+use fusion_sys::courier::{
+    CourierId,
+    CourierLaneSummary,
+    CourierResponsiveness,
+    CourierRunState,
+    CourierRuntimeSink,
+    CourierRuntimeSummary,
+    CourierSchedulingPolicy,
+    RunnableUnitKind,
+    current_context_id as system_current_context_id,
+    current_courier_id as system_current_courier_id,
+};
 use fusion_sys::event::EventSystem;
 pub use fusion_sys::event::{
     EventCompletion,
@@ -512,6 +525,8 @@ struct CurrentAsyncTaskContext {
     core: usize,
     slot_index: usize,
     generation: u64,
+    courier_id: Option<CourierId>,
+    context_id: Option<ContextId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -769,6 +784,12 @@ static mut CURRENT_ASYNC_TASK_REQUEUE_STD: bool = false;
 #[cfg(feature = "std")]
 #[thread_local]
 static mut CURRENT_ASYNC_TASK_SCHEDULER_STD: usize = 0;
+#[cfg(feature = "std")]
+#[thread_local]
+static mut CURRENT_ASYNC_TASK_COURIER_STD: u64 = 0;
+#[cfg(feature = "std")]
+#[thread_local]
+static mut CURRENT_ASYNC_TASK_CONTEXT_STD: u64 = 0;
 #[cfg(not(feature = "std"))]
 static CURRENT_ASYNC_TASK_REQUEUE: AtomicBool = AtomicBool::new(false);
 
@@ -780,6 +801,10 @@ static CURRENT_ASYNC_TASK_SLOT: AtomicUsize = AtomicUsize::new(usize::MAX);
 static CURRENT_ASYNC_TASK_GENERATION: AtomicUsize = AtomicUsize::new(0);
 #[cfg(not(feature = "std"))]
 static CURRENT_ASYNC_TASK_SCHEDULER: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(feature = "std"))]
+static CURRENT_ASYNC_TASK_COURIER: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(feature = "std"))]
+static CURRENT_ASYNC_TASK_CONTEXT: AtomicUsize = AtomicUsize::new(0);
 fn current_async_task_context() -> Option<CurrentAsyncTaskContext> {
     #[cfg(feature = "std")]
     {
@@ -791,6 +816,14 @@ fn current_async_task_context() -> Option<CurrentAsyncTaskContext> {
             core,
             slot_index: unsafe { CURRENT_ASYNC_TASK_SLOT_STD },
             generation: unsafe { CURRENT_ASYNC_TASK_GENERATION_STD } as u64,
+            courier_id: match unsafe { CURRENT_ASYNC_TASK_COURIER_STD } {
+                0 => None,
+                raw => Some(CourierId::new(raw)),
+            },
+            context_id: match unsafe { CURRENT_ASYNC_TASK_CONTEXT_STD } {
+                0 => None,
+                raw => Some(ContextId::new(raw)),
+            },
         })
     }
 
@@ -804,6 +837,14 @@ fn current_async_task_context() -> Option<CurrentAsyncTaskContext> {
             core,
             slot_index: CURRENT_ASYNC_TASK_SLOT.load(Ordering::Acquire),
             generation: CURRENT_ASYNC_TASK_GENERATION.load(Ordering::Acquire) as u64,
+            courier_id: match CURRENT_ASYNC_TASK_COURIER.load(Ordering::Acquire) as u64 {
+                0 => None,
+                raw => Some(CourierId::new(raw)),
+            },
+            context_id: match CURRENT_ASYNC_TASK_CONTEXT.load(Ordering::Acquire) as u64 {
+                0 => None,
+                raw => Some(ContextId::new(raw)),
+            },
         })
     }
 }
@@ -817,10 +858,16 @@ fn set_current_async_task_context(context: Option<CurrentAsyncTaskContext>) {
                 CURRENT_ASYNC_TASK_SLOT_STD = context.slot_index;
                 CURRENT_ASYNC_TASK_GENERATION_STD =
                     usize::try_from(context.generation).unwrap_or(usize::MAX);
+                CURRENT_ASYNC_TASK_COURIER_STD = context
+                    .courier_id
+                    .map_or(0, fusion_sys::courier::CourierId::get);
+                CURRENT_ASYNC_TASK_CONTEXT_STD = context.context_id.map_or(0, ContextId::get);
             } else {
                 CURRENT_ASYNC_TASK_CORE_STD = 0;
                 CURRENT_ASYNC_TASK_SLOT_STD = usize::MAX;
                 CURRENT_ASYNC_TASK_GENERATION_STD = 0;
+                CURRENT_ASYNC_TASK_COURIER_STD = 0;
+                CURRENT_ASYNC_TASK_CONTEXT_STD = 0;
             }
             CURRENT_ASYNC_TASK_REQUEUE_STD = false;
         }
@@ -832,10 +879,20 @@ fn set_current_async_task_context(context: Option<CurrentAsyncTaskContext>) {
             CURRENT_ASYNC_TASK_GENERATION.store(context.generation as usize, Ordering::Release);
             CURRENT_ASYNC_TASK_SLOT.store(context.slot_index, Ordering::Release);
             CURRENT_ASYNC_TASK_CORE.store(context.core as usize, Ordering::Release);
+            CURRENT_ASYNC_TASK_COURIER.store(
+                context.courier_id.map_or(0, |id| id.get() as usize),
+                Ordering::Release,
+            );
+            CURRENT_ASYNC_TASK_CONTEXT.store(
+                context.context_id.map_or(0, |id| id.get() as usize),
+                Ordering::Release,
+            );
         } else {
             CURRENT_ASYNC_TASK_CORE.store(0, Ordering::Release);
             CURRENT_ASYNC_TASK_SLOT.store(usize::MAX, Ordering::Release);
             CURRENT_ASYNC_TASK_GENERATION.store(0, Ordering::Release);
+            CURRENT_ASYNC_TASK_COURIER.store(0, Ordering::Release);
+            CURRENT_ASYNC_TASK_CONTEXT.store(0, Ordering::Release);
         }
         CURRENT_ASYNC_TASK_REQUEUE.store(false, Ordering::Release);
     }
@@ -853,6 +910,40 @@ fn current_async_task_scheduler() -> Option<AsyncTaskSchedulerTag> {
     }
 }
 
+/// Returns the owning courier identity for the current async task when available.
+///
+/// This prefers the active async-task context and falls back to the lower `fusion-sys`
+/// managed-fiber slot when the caller is running on one raw managed fiber outside the executor.
+///
+/// # Errors
+///
+/// Returns an error when no current courier identity is available honestly.
+pub fn current_async_courier_id() -> Result<CourierId, ExecutorError> {
+    if let Some(context) = current_async_task_context()
+        && let Some(courier_id) = context.courier_id
+    {
+        return Ok(courier_id);
+    }
+    system_current_courier_id().map_err(|_| ExecutorError::Unsupported)
+}
+
+/// Returns the owning context identity for the current async task when available.
+///
+/// This prefers the active async-task context and falls back to the lower `fusion-sys`
+/// managed-fiber slot when the caller is running on one raw managed fiber outside the executor.
+///
+/// # Errors
+///
+/// Returns an error when no current context identity is available honestly.
+pub fn current_async_context_id() -> Result<ContextId, ExecutorError> {
+    if let Some(context) = current_async_task_context()
+        && let Some(context_id) = context.context_id
+    {
+        return Ok(context_id);
+    }
+    system_current_context_id().map_err(|_| ExecutorError::Unsupported)
+}
+
 #[derive(Debug)]
 struct AsyncTaskContextGuard;
 
@@ -862,6 +953,8 @@ impl AsyncTaskContextGuard {
             core: core::ptr::from_ref(core) as usize,
             slot_index,
             generation,
+            courier_id: core.courier_id,
+            context_id: core.context_id,
         }));
         #[cfg(feature = "std")]
         unsafe {
@@ -1220,6 +1313,12 @@ pub struct ExecutorConfig {
     pub capacity: usize,
     /// Sizing strategy applied to executor-owned backing plans.
     pub sizing: RuntimeSizingStrategy,
+    /// Optional owning courier identity carried by this runtime for self-query surfaces.
+    pub courier_id: Option<CourierId>,
+    /// Optional owning context identity carried by this runtime for self-query surfaces.
+    pub context_id: Option<ContextId>,
+    /// Optional courier-runtime sink used to publish authoritative runtime truth.
+    pub runtime_sink: Option<CourierRuntimeSink>,
 }
 
 impl ExecutorConfig {
@@ -1231,6 +1330,9 @@ impl ExecutorConfig {
             reactor: ReactorConfig::new(),
             capacity: TASK_REGISTRY_CAPACITY,
             sizing: default_runtime_sizing_strategy(),
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         }
     }
 
@@ -1242,6 +1344,9 @@ impl ExecutorConfig {
             reactor: ReactorConfig::new(),
             capacity: TASK_REGISTRY_CAPACITY,
             sizing: default_runtime_sizing_strategy(),
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         }
     }
 
@@ -1253,6 +1358,9 @@ impl ExecutorConfig {
             reactor: ReactorConfig::new(),
             capacity: TASK_REGISTRY_CAPACITY,
             sizing: default_runtime_sizing_strategy(),
+            courier_id: None,
+            context_id: None,
+            runtime_sink: None,
         }
     }
 
@@ -1274,6 +1382,27 @@ impl ExecutorConfig {
     #[must_use]
     pub const fn with_sizing_strategy(mut self, sizing: RuntimeSizingStrategy) -> Self {
         self.sizing = sizing;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit owning courier identity.
+    #[must_use]
+    pub const fn with_courier_id(mut self, courier_id: CourierId) -> Self {
+        self.courier_id = Some(courier_id);
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit owning context identity.
+    #[must_use]
+    pub const fn with_context_id(mut self, context_id: ContextId) -> Self {
+        self.context_id = Some(context_id);
+        self
+    }
+
+    /// Returns one copy of this configuration with one explicit runtime-to-courier sink.
+    #[must_use]
+    pub const fn with_runtime_sink(mut self, runtime_sink: CourierRuntimeSink) -> Self {
+        self.runtime_sink = Some(runtime_sink);
         self
     }
 }
@@ -3898,7 +4027,8 @@ impl AsyncTaskRegistry {
         let mut count = 0usize;
         for slot in &self.slots {
             let generation = slot.generation();
-            if generation == 0 {
+            let state = slot.state();
+            if generation == 0 || state == SLOT_EMPTY {
                 continue;
             }
             if !slot.is_finished(generation)? {
@@ -3906,6 +4036,32 @@ impl AsyncTaskRegistry {
             }
         }
         Ok(count)
+    }
+
+    fn scheduled_task_count(&self) -> usize {
+        let mut count = 0usize;
+        for slot in &self.slots {
+            if slot.generation() == 0 || slot.state() != SLOT_PENDING {
+                continue;
+            }
+            if slot.run_state.load(Ordering::Acquire) & SLOT_RUN_SCHEDULED != 0 {
+                count = count.saturating_add(1);
+            }
+        }
+        count
+    }
+
+    fn running_task_count(&self) -> usize {
+        let mut count = 0usize;
+        for slot in &self.slots {
+            if slot.generation() == 0 || slot.state() != SLOT_PENDING {
+                continue;
+            }
+            if slot.is_running() {
+                count = count.saturating_add(1);
+            }
+        }
+        count
     }
 }
 
@@ -4191,6 +4347,9 @@ impl ExecutorRegistry {
 }
 
 struct ExecutorCore {
+    courier_id: Option<CourierId>,
+    context_id: Option<ContextId>,
+    runtime_sink: Option<CourierRuntimeSink>,
     reactor: Reactor,
     reactor_max_events: Option<usize>,
     current_queue: CurrentQueue,
@@ -4217,6 +4376,60 @@ impl fmt::Debug for ExecutorCore {
 }
 
 impl ExecutorCore {
+    fn runtime_tick(&self) -> u64 {
+        0
+    }
+
+    fn publish_runtime_context(&self) -> Result<(), ExecutorError> {
+        let (Some(runtime_sink), Some(courier_id), Some(context_id)) =
+            (self.runtime_sink, self.courier_id, self.context_id)
+        else {
+            return Ok(());
+        };
+        runtime_sink
+            .record_context(courier_id, context_id, self.runtime_tick())
+            .map_err(executor_error_from_runtime_sink)
+    }
+
+    fn publish_runtime_summary(&self) -> Result<(), ExecutorError> {
+        let (Some(runtime_sink), Some(courier_id)) = (self.runtime_sink, self.courier_id) else {
+            return Ok(());
+        };
+        let registry = self.registry()?;
+        let active_units = registry.unfinished_task_count()?;
+        let runnable_units = registry.scheduled_task_count();
+        let running_units = registry.running_task_count();
+        let blocked_units =
+            active_units.saturating_sub(runnable_units.saturating_add(running_units));
+        let available_slots = registry.available_slots()?;
+        let summary = CourierRuntimeSummary::new(
+            match self.scheduler {
+                SchedulerBinding::Current | SchedulerBinding::GreenPool(_) => {
+                    CourierSchedulingPolicy::CooperativePriority
+                }
+                #[cfg(feature = "std")]
+                SchedulerBinding::ThreadWorkers(_) => {
+                    CourierSchedulingPolicy::CooperativeRoundRobin
+                }
+                #[cfg(not(feature = "std"))]
+                SchedulerBinding::ThreadPool(_) => CourierSchedulingPolicy::CooperativeRoundRobin,
+                SchedulerBinding::Unsupported => CourierSchedulingPolicy::CooperativePriority,
+            },
+            CourierResponsiveness::Responsive,
+        )
+        .with_async_lane(CourierLaneSummary {
+            kind: RunnableUnitKind::AsyncTask,
+            active_units,
+            runnable_units,
+            running_units,
+            blocked_units,
+            available_slots,
+        });
+        runtime_sink
+            .record_runtime_summary(courier_id, summary, self.runtime_tick())
+            .map_err(executor_error_from_runtime_sink)
+    }
+
     #[cfg(feature = "std")]
     fn ensure_reactor_driver(&self) -> Result<(), ExecutorError> {
         if !matches!(self.scheduler, SchedulerBinding::ThreadWorkers(_)) {
@@ -4549,6 +4762,7 @@ impl ExecutorCore {
                     });
                 }
                 let _ = self.recycle_slot_if_possible(slot_index, generation);
+                let _ = self.publish_runtime_summary();
                 AsyncSlotRunDisposition::Terminal
             }
             Ok(Poll::Pending) => {
@@ -4582,6 +4796,7 @@ impl ExecutorCore {
                         }
                     });
                 }
+                let _ = self.publish_runtime_summary();
                 AsyncSlotRunDisposition::Pending
             }
             Err(error) => {
@@ -4598,6 +4813,7 @@ impl ExecutorCore {
                     });
                 }
                 let _ = self.recycle_slot_if_possible(slot_index, generation);
+                let _ = self.publish_runtime_summary();
                 AsyncSlotRunDisposition::Terminal
             }
         }
@@ -4627,7 +4843,9 @@ impl ExecutorCore {
         }
         self.clear_wait(slot_index, generation)?;
         slot.reset_empty(&registry.spill_store, generation)?;
-        registry.release_slot(slot_index, generation)
+        let released = registry.release_slot(slot_index, generation);
+        let _ = self.publish_runtime_summary();
+        released
     }
 
     fn detach_handle(&self, slot_index: usize, generation: u64) -> Result<(), ExecutorError> {
@@ -5430,6 +5648,18 @@ impl CurrentAsyncRuntime {
         self.executor.config
     }
 
+    /// Returns the owning courier identity for this runtime, when configured.
+    #[must_use]
+    pub const fn courier_id(&self) -> Option<CourierId> {
+        self.executor.config.courier_id
+    }
+
+    /// Returns the owning context identity for this runtime, when configured.
+    #[must_use]
+    pub const fn context_id(&self) -> Option<ContextId> {
+        self.executor.config.context_id
+    }
+
     /// Returns the number of immediately available task slots in this runtime.
     ///
     /// # Errors
@@ -5449,6 +5679,29 @@ impl CurrentAsyncRuntime {
     /// Returns an error if the executor registry cannot be observed honestly.
     pub fn unfinished_task_count(&self) -> Result<usize, ExecutorError> {
         self.executor.unfinished_task_count()
+    }
+
+    /// Returns a courier-facing run summary for this current-thread async lane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the executor registry cannot be observed honestly.
+    pub fn runtime_summary(&self) -> Result<CourierRuntimeSummary, ExecutorError> {
+        self.runtime_summary_with_responsiveness(CourierResponsiveness::Responsive)
+    }
+
+    /// Returns a courier-facing run summary for this current-thread async lane using one
+    /// caller-supplied responsiveness classification.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the executor registry cannot be observed honestly.
+    pub fn runtime_summary_with_responsiveness(
+        &self,
+        responsiveness: CourierResponsiveness,
+    ) -> Result<CourierRuntimeSummary, ExecutorError> {
+        self.executor
+            .runtime_summary_with_responsiveness(responsiveness)
     }
 
     /// Returns the exact configured backing plan for this runtime.
@@ -6041,6 +6294,9 @@ impl Executor {
                 let registry =
                     ExecutorRegistry::new(config.capacity, fast_current, &mut allocators);
                 let core = allocators.control.control(ExecutorCore {
+                    courier_id: config.courier_id,
+                    context_id: config.context_id,
+                    runtime_sink: config.runtime_sink,
                     reactor,
                     reactor_max_events: config.reactor.max_events,
                     current_queue,
@@ -6119,6 +6375,9 @@ impl Executor {
                     .control(
                         default_domain,
                         ExecutorCore {
+                            courier_id: config.courier_id,
+                            context_id: config.context_id,
+                            runtime_sink: config.runtime_sink,
                             reactor,
                             reactor_max_events: config.reactor.max_events,
                             current_queue,
@@ -6195,6 +6454,62 @@ impl Executor {
 
     fn unfinished_task_count(&self) -> Result<usize, ExecutorError> {
         self.core()?.registry()?.unfinished_task_count()
+    }
+
+    /// Returns a courier-facing run summary for this executor-owned async lane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the executor registry cannot be observed honestly.
+    pub fn runtime_summary(&self) -> Result<CourierRuntimeSummary, ExecutorError> {
+        self.runtime_summary_with_responsiveness(CourierResponsiveness::Responsive)
+    }
+
+    /// Returns a courier-facing run summary for this executor-owned async lane using one
+    /// caller-supplied responsiveness classification.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the executor registry cannot be observed honestly.
+    pub fn runtime_summary_with_responsiveness(
+        &self,
+        responsiveness: CourierResponsiveness,
+    ) -> Result<CourierRuntimeSummary, ExecutorError> {
+        let registry = self.core()?.registry()?;
+        let active_units = registry.unfinished_task_count()?;
+        let runnable_units = registry.scheduled_task_count();
+        let running_units = registry.running_task_count();
+        let blocked_units =
+            active_units.saturating_sub(runnable_units.saturating_add(running_units));
+        let available_slots = registry.available_slots()?;
+        let policy = match self.config.mode {
+            ExecutorMode::CurrentThread | ExecutorMode::GreenPool | ExecutorMode::Hybrid => {
+                CourierSchedulingPolicy::CooperativePriority
+            }
+            ExecutorMode::ThreadPool => CourierSchedulingPolicy::CooperativeRoundRobin,
+        };
+        Ok(CourierRuntimeSummary {
+            policy,
+            run_state: if running_units != 0 {
+                CourierRunState::Running
+            } else if runnable_units != 0 {
+                CourierRunState::Runnable
+            } else {
+                CourierRunState::Idle
+            },
+            responsiveness,
+            fiber_lane: None,
+            async_lane: Some(CourierLaneSummary {
+                kind: RunnableUnitKind::AsyncTask,
+                active_units,
+                runnable_units,
+                running_units,
+                blocked_units,
+                available_slots,
+            }),
+            control_lane: None,
+        }
+        .with_responsiveness(responsiveness))
     }
 
     /// Returns the public reactor wrapper.
@@ -6308,6 +6623,8 @@ impl Executor {
             scheduler: core.scheduler_tag(),
             admission,
         });
+        core.publish_runtime_context()?;
+        core.publish_runtime_summary()?;
 
         Ok(TaskHandle {
             inner: TaskHandleInner {
@@ -6756,6 +7073,25 @@ const fn executor_error_from_alloc(error: AllocError) -> ExecutorError {
         | AllocErrorKind::InvalidDomain
         | AllocErrorKind::ResourceFailure(_)
         | AllocErrorKind::PoolFailure(_) => ExecutorError::Sync(SyncErrorKind::Invalid),
+    }
+}
+
+const fn executor_error_from_runtime_sink(
+    error: fusion_sys::courier::CourierRuntimeSinkError,
+) -> ExecutorError {
+    match error {
+        fusion_sys::courier::CourierRuntimeSinkError::Unsupported => ExecutorError::Unsupported,
+        fusion_sys::courier::CourierRuntimeSinkError::Invalid => {
+            ExecutorError::Sync(SyncErrorKind::Invalid)
+        }
+        fusion_sys::courier::CourierRuntimeSinkError::NotFound
+        | fusion_sys::courier::CourierRuntimeSinkError::StateConflict
+        | fusion_sys::courier::CourierRuntimeSinkError::Busy => {
+            ExecutorError::Sync(SyncErrorKind::Busy)
+        }
+        fusion_sys::courier::CourierRuntimeSinkError::ResourceExhausted => {
+            ExecutorError::Sync(SyncErrorKind::Overflow)
+        }
     }
 }
 
@@ -7491,6 +7827,43 @@ mod tests {
     }
 
     #[test]
+    fn executor_runtime_summary_reports_active_async_lane_state() {
+        let executor = Executor::new(ExecutorConfig::new());
+        let idle = executor
+            .runtime_summary()
+            .expect("summary should observe empty executor");
+        assert_eq!(idle.total_active_units(), 0);
+        assert_eq!(idle.run_state, CourierRunState::Idle);
+
+        let handle = executor
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
+                async_yield_now().await;
+                13_u8
+            })
+            .expect("task should spawn");
+        let active = executor
+            .runtime_summary()
+            .expect("summary should observe spawned task");
+        assert!(active.async_lane.is_some());
+        assert!(active.total_active_units() >= 1);
+        assert!(
+            matches!(
+                active.run_state,
+                CourierRunState::Runnable | CourierRunState::Running
+            ),
+            "spawned task should make the async lane runnable"
+        );
+
+        let _ = executor.run_until_idle().expect("executor should drain");
+        assert_eq!(handle.join().expect("task should complete"), 13);
+        let drained = executor
+            .runtime_summary()
+            .expect("summary should observe drained executor");
+        assert_eq!(drained.total_active_units(), 0);
+        assert_eq!(drained.run_state, CourierRunState::Idle);
+    }
+
+    #[test]
     fn exact_future_spill_accepts_medium_future_frames() {
         let executor = Executor::new(ExecutorConfig::new());
         let sample_payload = [0_u8; 384];
@@ -7742,6 +8115,23 @@ mod tests {
             .expect("task should spawn");
         assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 2);
         assert_eq!(handle.join().expect("task should complete"), 34);
+    }
+
+    #[test]
+    fn current_async_runtime_binds_current_courier_identity() {
+        let runtime = CurrentAsyncRuntime::with_executor_config(
+            ExecutorConfig::new().with_courier_id(CourierId::new(91)),
+        );
+        assert_eq!(runtime.courier_id(), Some(CourierId::new(91)));
+        let handle = runtime
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
+                current_async_courier_id()
+                    .expect("current courier id should be visible")
+                    .get()
+            })
+            .expect("task should spawn");
+        assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 1);
+        assert_eq!(handle.join().expect("task should complete"), 91);
     }
 
     #[test]
