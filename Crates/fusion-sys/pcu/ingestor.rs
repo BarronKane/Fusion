@@ -25,7 +25,6 @@ use crate::fiber::{
     Fiber,
     FiberError,
     FiberErrorKind,
-    FiberMetadataChannel,
     FiberReturn,
     FiberRunnable,
     FiberStack,
@@ -770,33 +769,6 @@ impl<
         })
     }
 
-    /// Creates one low-level fiber-backed ingestor over caller-owned pinned state with one
-    /// explicit opt-in fiber publication lane.
-    ///
-    /// # Errors
-    ///
-    /// Returns any honest fiber construction failure.
-    pub fn new_with_publication(
-        state: Pin<
-            &'state mut PcuExecutorIngestorState<
-                'kernel,
-                'data,
-                MAX_KERNELS,
-                MAX_PARAMETERS,
-                SUBMISSION_CAPACITY,
-                STATUS_CAPACITY,
-                METADATA_CAPACITY,
-            >,
-        >,
-        stack: FiberStack,
-    ) -> Result<Self, PcuIngestorError> {
-        let fiber = Fiber::spawn_managed_with_publication(stack, state)?;
-        Ok(Self {
-            fiber,
-            _marker: PhantomData,
-        })
-    }
-
     /// Returns one shared view of the pinned ingestor state.
     #[must_use]
     pub fn state(
@@ -811,12 +783,6 @@ impl<
         METADATA_CAPACITY,
     > {
         self.fiber.state()
-    }
-
-    /// Returns the optional explicit fiber publication channel owned by this ingestor fiber.
-    #[must_use]
-    pub const fn fiber_metadata_channel(&self) -> Option<&FiberMetadataChannel<16>> {
-        self.fiber.metadata_channel()
     }
 
     /// Resumes the ingestor fiber once.
@@ -885,8 +851,7 @@ mod tests {
     use core::pin::pin;
 
     use super::*;
-    use crate::channel::ChannelReceive;
-    use crate::fiber::{FiberMetadataMessage, FiberState};
+    use crate::fiber::FiberState;
     use crate::pcu::{
         PcuParameterSlot,
         PcuParameterValue,
@@ -896,10 +861,10 @@ mod tests {
         PcuStreamPattern,
         PcuStreamValueType,
     };
-    use crate::transport::{TransportAttachmentControl, TransportAttachmentRequest};
+    use crate::transport::TransportAttachmentControl;
 
     #[test]
-    fn fiber_ingestor_publishes_metadata_and_executes_one_stream_submission() {
+    fn fiber_ingestor_executes_one_stream_submission() {
         let system = PcuSystem::new();
         let executor = system.executors()[0];
         let mut state = PcuExecutorIngestorState::<4, 4, 4, 8, 4>::new(system, executor.id)
@@ -932,40 +897,14 @@ mod tests {
         let stack = FiberStack::from_slice(stack_words.as_mut()).expect("stack should be valid");
 
         let mut state = pin!(state);
-        let mut ingestor = PcuExecutorIngestor::new_with_publication(state.as_mut(), stack)
-            .expect("ingestor fiber should build");
-        let fiber_consumer = ingestor
-            .fiber_metadata_channel()
-            .expect("ingestor should expose explicit publication")
-            .attach_consumer(TransportAttachmentRequest::same_courier())
-            .expect("fiber metadata consumer should attach");
-
-        assert_eq!(
-            ingestor
-                .fiber_metadata_channel()
-                .expect("ingestor should expose explicit publication")
-                .try_receive(fiber_consumer)
-                .expect("fiber metadata read should succeed"),
-            Some(FiberMetadataMessage::Created {
-                fiber: ingestor.fiber.id()
-            })
-        );
+        let mut ingestor =
+            PcuExecutorIngestor::new(state.as_mut(), stack).expect("ingestor fiber should build");
         assert_eq!(ingestor.fiber.fiber_state(), FiberState::Created);
 
         assert!(matches!(
             ingestor.pump().expect("metadata pump should yield"),
             FiberYield::Yielded
         ));
-        assert_eq!(
-            ingestor
-                .fiber_metadata_channel()
-                .expect("ingestor should expose explicit publication")
-                .try_receive(fiber_consumer)
-                .expect("fiber metadata read should succeed"),
-            Some(FiberMetadataMessage::Started {
-                fiber: ingestor.fiber.id()
-            })
-        );
         assert_eq!(
             ingestor
                 .state()

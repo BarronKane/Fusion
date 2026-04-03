@@ -63,8 +63,12 @@ use fusion_sys::context::ContextId;
 use fusion_sys::courier::{
     CourierId,
     CourierLaneSummary,
+    CourierMetadataSubject,
+    CourierObligationId,
+    CourierObligationSpec,
     CourierResponsiveness,
     CourierRunState,
+    CourierRuntimeLedger,
     CourierRuntimeSink,
     CourierRuntimeSummary,
     CourierSchedulingPolicy,
@@ -786,10 +790,10 @@ static mut CURRENT_ASYNC_TASK_REQUEUE_STD: bool = false;
 static mut CURRENT_ASYNC_TASK_SCHEDULER_STD: usize = 0;
 #[cfg(feature = "std")]
 #[thread_local]
-static mut CURRENT_ASYNC_TASK_COURIER_STD: u64 = 0;
+static mut CURRENT_ASYNC_TASK_COURIER_STD: u64 = u64::MAX;
 #[cfg(feature = "std")]
 #[thread_local]
-static mut CURRENT_ASYNC_TASK_CONTEXT_STD: u64 = 0;
+static mut CURRENT_ASYNC_TASK_CONTEXT_STD: u64 = u64::MAX;
 #[cfg(not(feature = "std"))]
 static CURRENT_ASYNC_TASK_REQUEUE: AtomicBool = AtomicBool::new(false);
 
@@ -802,9 +806,101 @@ static CURRENT_ASYNC_TASK_GENERATION: AtomicUsize = AtomicUsize::new(0);
 #[cfg(not(feature = "std"))]
 static CURRENT_ASYNC_TASK_SCHEDULER: AtomicUsize = AtomicUsize::new(0);
 #[cfg(not(feature = "std"))]
-static CURRENT_ASYNC_TASK_COURIER: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_ASYNC_TASK_COURIER: AtomicUsize = AtomicUsize::new(usize::MAX);
 #[cfg(not(feature = "std"))]
-static CURRENT_ASYNC_TASK_CONTEXT: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_ASYNC_TASK_CONTEXT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+#[cfg(feature = "std")]
+const ASYNC_TASK_ID_SENTINEL_STD: u64 = u64::MAX;
+#[cfg(not(feature = "std"))]
+const ASYNC_TASK_ID_SENTINEL: usize = usize::MAX;
+
+#[cfg(feature = "std")]
+const fn encode_async_task_courier_id(id: Option<CourierId>) -> u64 {
+    match id {
+        Some(id) => id.get(),
+        None => ASYNC_TASK_ID_SENTINEL_STD,
+    }
+}
+
+#[cfg(feature = "std")]
+const fn decode_async_task_courier_id(raw: u64) -> Option<CourierId> {
+    if raw == ASYNC_TASK_ID_SENTINEL_STD {
+        None
+    } else {
+        Some(CourierId::new(raw))
+    }
+}
+
+#[cfg(feature = "std")]
+const fn encode_async_task_context_id(id: Option<ContextId>) -> u64 {
+    match id {
+        Some(id) => id.get(),
+        None => ASYNC_TASK_ID_SENTINEL_STD,
+    }
+}
+
+#[cfg(feature = "std")]
+const fn decode_async_task_context_id(raw: u64) -> Option<ContextId> {
+    if raw == ASYNC_TASK_ID_SENTINEL_STD {
+        None
+    } else {
+        Some(ContextId::new(raw))
+    }
+}
+
+#[cfg(not(feature = "std"))]
+fn encode_async_task_courier_id(id: Option<CourierId>) -> usize {
+    match id {
+        Some(id) => match usize::try_from(id.get()) {
+            Ok(raw) => {
+                debug_assert!(raw != ASYNC_TASK_ID_SENTINEL);
+                raw
+            }
+            Err(_) => {
+                debug_assert!(false, "courier id does not fit in async TLS usize slot");
+                ASYNC_TASK_ID_SENTINEL - 1
+            }
+        },
+        None => ASYNC_TASK_ID_SENTINEL,
+    }
+}
+
+#[cfg(not(feature = "std"))]
+fn decode_async_task_courier_id(raw: usize) -> Option<CourierId> {
+    if raw == ASYNC_TASK_ID_SENTINEL {
+        None
+    } else {
+        Some(CourierId::new(raw as u64))
+    }
+}
+
+#[cfg(not(feature = "std"))]
+fn encode_async_task_context_id(id: Option<ContextId>) -> usize {
+    match id {
+        Some(id) => match usize::try_from(id.get()) {
+            Ok(raw) => {
+                debug_assert!(raw != ASYNC_TASK_ID_SENTINEL);
+                raw
+            }
+            Err(_) => {
+                debug_assert!(false, "context id does not fit in async TLS usize slot");
+                ASYNC_TASK_ID_SENTINEL - 1
+            }
+        },
+        None => ASYNC_TASK_ID_SENTINEL,
+    }
+}
+
+#[cfg(not(feature = "std"))]
+fn decode_async_task_context_id(raw: usize) -> Option<ContextId> {
+    if raw == ASYNC_TASK_ID_SENTINEL {
+        None
+    } else {
+        Some(ContextId::new(raw as u64))
+    }
+}
+
 fn current_async_task_context() -> Option<CurrentAsyncTaskContext> {
     #[cfg(feature = "std")]
     {
@@ -816,14 +912,8 @@ fn current_async_task_context() -> Option<CurrentAsyncTaskContext> {
             core,
             slot_index: unsafe { CURRENT_ASYNC_TASK_SLOT_STD },
             generation: unsafe { CURRENT_ASYNC_TASK_GENERATION_STD } as u64,
-            courier_id: match unsafe { CURRENT_ASYNC_TASK_COURIER_STD } {
-                0 => None,
-                raw => Some(CourierId::new(raw)),
-            },
-            context_id: match unsafe { CURRENT_ASYNC_TASK_CONTEXT_STD } {
-                0 => None,
-                raw => Some(ContextId::new(raw)),
-            },
+            courier_id: decode_async_task_courier_id(unsafe { CURRENT_ASYNC_TASK_COURIER_STD }),
+            context_id: decode_async_task_context_id(unsafe { CURRENT_ASYNC_TASK_CONTEXT_STD }),
         })
     }
 
@@ -837,14 +927,12 @@ fn current_async_task_context() -> Option<CurrentAsyncTaskContext> {
             core,
             slot_index: CURRENT_ASYNC_TASK_SLOT.load(Ordering::Acquire),
             generation: CURRENT_ASYNC_TASK_GENERATION.load(Ordering::Acquire) as u64,
-            courier_id: match CURRENT_ASYNC_TASK_COURIER.load(Ordering::Acquire) as u64 {
-                0 => None,
-                raw => Some(CourierId::new(raw)),
-            },
-            context_id: match CURRENT_ASYNC_TASK_CONTEXT.load(Ordering::Acquire) as u64 {
-                0 => None,
-                raw => Some(ContextId::new(raw)),
-            },
+            courier_id: decode_async_task_courier_id(
+                CURRENT_ASYNC_TASK_COURIER.load(Ordering::Acquire),
+            ),
+            context_id: decode_async_task_context_id(
+                CURRENT_ASYNC_TASK_CONTEXT.load(Ordering::Acquire),
+            ),
         })
     }
 }
@@ -858,16 +946,14 @@ fn set_current_async_task_context(context: Option<CurrentAsyncTaskContext>) {
                 CURRENT_ASYNC_TASK_SLOT_STD = context.slot_index;
                 CURRENT_ASYNC_TASK_GENERATION_STD =
                     usize::try_from(context.generation).unwrap_or(usize::MAX);
-                CURRENT_ASYNC_TASK_COURIER_STD = context
-                    .courier_id
-                    .map_or(0, fusion_sys::courier::CourierId::get);
-                CURRENT_ASYNC_TASK_CONTEXT_STD = context.context_id.map_or(0, ContextId::get);
+                CURRENT_ASYNC_TASK_COURIER_STD = encode_async_task_courier_id(context.courier_id);
+                CURRENT_ASYNC_TASK_CONTEXT_STD = encode_async_task_context_id(context.context_id);
             } else {
                 CURRENT_ASYNC_TASK_CORE_STD = 0;
                 CURRENT_ASYNC_TASK_SLOT_STD = usize::MAX;
                 CURRENT_ASYNC_TASK_GENERATION_STD = 0;
-                CURRENT_ASYNC_TASK_COURIER_STD = 0;
-                CURRENT_ASYNC_TASK_CONTEXT_STD = 0;
+                CURRENT_ASYNC_TASK_COURIER_STD = ASYNC_TASK_ID_SENTINEL_STD;
+                CURRENT_ASYNC_TASK_CONTEXT_STD = ASYNC_TASK_ID_SENTINEL_STD;
             }
             CURRENT_ASYNC_TASK_REQUEUE_STD = false;
         }
@@ -880,19 +966,19 @@ fn set_current_async_task_context(context: Option<CurrentAsyncTaskContext>) {
             CURRENT_ASYNC_TASK_SLOT.store(context.slot_index, Ordering::Release);
             CURRENT_ASYNC_TASK_CORE.store(context.core as usize, Ordering::Release);
             CURRENT_ASYNC_TASK_COURIER.store(
-                context.courier_id.map_or(0, |id| id.get() as usize),
+                encode_async_task_courier_id(context.courier_id),
                 Ordering::Release,
             );
             CURRENT_ASYNC_TASK_CONTEXT.store(
-                context.context_id.map_or(0, |id| id.get() as usize),
+                encode_async_task_context_id(context.context_id),
                 Ordering::Release,
             );
         } else {
             CURRENT_ASYNC_TASK_CORE.store(0, Ordering::Release);
             CURRENT_ASYNC_TASK_SLOT.store(usize::MAX, Ordering::Release);
             CURRENT_ASYNC_TASK_GENERATION.store(0, Ordering::Release);
-            CURRENT_ASYNC_TASK_COURIER.store(0, Ordering::Release);
-            CURRENT_ASYNC_TASK_CONTEXT.store(0, Ordering::Release);
+            CURRENT_ASYNC_TASK_COURIER.store(ASYNC_TASK_ID_SENTINEL, Ordering::Release);
+            CURRENT_ASYNC_TASK_CONTEXT.store(ASYNC_TASK_ID_SENTINEL, Ordering::Release);
         }
         CURRENT_ASYNC_TASK_REQUEUE.store(false, Ordering::Release);
     }
@@ -942,6 +1028,153 @@ pub fn current_async_context_id() -> Result<ContextId, ExecutorError> {
         return Ok(context_id);
     }
     system_current_context_id().map_err(|_| ExecutorError::Unsupported)
+}
+
+/// Returns the courier-owned runtime ledger for the current async task when available.
+///
+/// # Errors
+///
+/// Returns an error when the current async runtime cannot honestly resolve one courier-owned
+/// ledger.
+pub fn current_async_courier_runtime_ledger() -> Result<CourierRuntimeLedger, ExecutorError> {
+    let context = current_async_task_context().ok_or(ExecutorError::Unsupported)?;
+    let courier_id = context.courier_id.ok_or(ExecutorError::Unsupported)?;
+    let core = executor_core_from_context(context)?;
+    let runtime_sink = core.runtime_sink.ok_or(ExecutorError::Unsupported)?;
+    runtime_sink
+        .runtime_ledger(courier_id)
+        .map_err(executor_error_from_runtime_sink)
+}
+
+/// Returns the courier-owned responsiveness classification for the current async task when
+/// available.
+///
+/// # Errors
+///
+/// Returns an error when the current async runtime cannot honestly resolve one courier-owned
+/// responsiveness state.
+pub fn current_async_courier_responsiveness() -> Result<CourierResponsiveness, ExecutorError> {
+    let context = current_async_task_context().ok_or(ExecutorError::Unsupported)?;
+    let courier_id = context.courier_id.ok_or(ExecutorError::Unsupported)?;
+    let core = executor_core_from_context(context)?;
+    let runtime_sink = core.runtime_sink.ok_or(ExecutorError::Unsupported)?;
+    runtime_sink
+        .evaluate_responsiveness(courier_id, core.runtime_tick())
+        .map_err(executor_error_from_runtime_sink)
+}
+
+fn current_async_runtime_subjects()
+-> Result<(CourierRuntimeSink, CourierId, ContextId, u64), ExecutorError> {
+    let context = current_async_task_context().ok_or(ExecutorError::Unsupported)?;
+    let courier_id = context.courier_id.ok_or(ExecutorError::Unsupported)?;
+    let core = executor_core_from_context(context)?;
+    let runtime_sink = core.runtime_sink.ok_or(ExecutorError::Unsupported)?;
+    Ok((
+        runtime_sink,
+        courier_id,
+        current_async_context_id()?,
+        core.runtime_tick(),
+    ))
+}
+
+/// Updates one courier-owned metadata entry for the current async task's owning courier.
+///
+/// # Errors
+///
+/// Returns an error when the current async runtime cannot honestly resolve or update the courier.
+pub fn update_current_async_courier_metadata(
+    key: &'static str,
+    value: &'static str,
+) -> Result<(), ExecutorError> {
+    let (runtime_sink, courier_id, _, tick) = current_async_runtime_subjects()?;
+    runtime_sink
+        .upsert_metadata(
+            courier_id,
+            CourierMetadataSubject::AsyncLane,
+            key,
+            value,
+            tick,
+        )
+        .map_err(executor_error_from_runtime_sink)
+}
+
+/// Updates one courier-owned metadata entry for the current async task's context.
+///
+/// # Errors
+///
+/// Returns an error when the current async runtime cannot honestly resolve or update the current
+/// context.
+pub fn update_current_async_context_metadata(
+    key: &'static str,
+    value: &'static str,
+) -> Result<(), ExecutorError> {
+    let (runtime_sink, courier_id, context_id, tick) = current_async_runtime_subjects()?;
+    runtime_sink
+        .upsert_metadata(
+            courier_id,
+            CourierMetadataSubject::Context(context_id),
+            key,
+            value,
+            tick,
+        )
+        .map_err(executor_error_from_runtime_sink)
+}
+
+/// Registers one courier-level externally visible obligation under the current async task.
+///
+/// # Errors
+///
+/// Returns an error when the current async runtime cannot honestly resolve or register the
+/// obligation.
+pub fn register_current_async_courier_obligation(
+    spec: CourierObligationSpec<'static>,
+) -> Result<CourierObligationId, ExecutorError> {
+    let (runtime_sink, courier_id, _, tick) = current_async_runtime_subjects()?;
+    runtime_sink
+        .register_obligation(courier_id, spec, tick)
+        .map_err(executor_error_from_runtime_sink)
+}
+
+/// Records progress on one previously registered courier obligation from the current async task.
+///
+/// # Errors
+///
+/// Returns an error when the current async runtime cannot honestly resolve or update the
+/// obligation.
+pub fn record_current_async_courier_obligation_progress(
+    obligation: CourierObligationId,
+) -> Result<(), ExecutorError> {
+    let (runtime_sink, courier_id, _, tick) = current_async_runtime_subjects()?;
+    runtime_sink
+        .record_obligation_progress(courier_id, obligation, tick)
+        .map_err(executor_error_from_runtime_sink)
+}
+
+/// Removes one previously registered courier obligation from the current async task's courier.
+///
+/// # Errors
+///
+/// Returns an error when the current async runtime cannot honestly resolve or remove the
+/// obligation.
+pub fn remove_current_async_courier_obligation(
+    obligation: CourierObligationId,
+) -> Result<(), ExecutorError> {
+    let (runtime_sink, courier_id, _, _) = current_async_runtime_subjects()?;
+    runtime_sink
+        .remove_obligation(courier_id, obligation)
+        .map_err(executor_error_from_runtime_sink)
+}
+
+fn executor_core_from_context(
+    context: CurrentAsyncTaskContext,
+) -> Result<&'static ExecutorCore, ExecutorError> {
+    let core = context.core as *const ExecutorCore;
+    if core.is_null() {
+        return Err(ExecutorError::Unsupported);
+    }
+    // SAFETY: the async task TLS context only carries this pointer while the task is actively
+    // executing on the owning executor core.
+    Ok(unsafe { &*core })
 }
 
 #[derive(Debug)]
@@ -4377,7 +4610,11 @@ impl fmt::Debug for ExecutorCore {
 
 impl ExecutorCore {
     fn runtime_tick(&self) -> u64 {
-        0
+        match runtime_monotonic_raw_now() {
+            Ok(fusion_sys::thread::MonotonicRawInstant::Bits32(raw)) => u64::from(raw),
+            Ok(fusion_sys::thread::MonotonicRawInstant::Bits64(raw)) => raw,
+            Err(_) => 0,
+        }
     }
 
     fn publish_runtime_context(&self) -> Result<(), ExecutorError> {
@@ -4402,6 +4639,9 @@ impl ExecutorCore {
         let blocked_units =
             active_units.saturating_sub(runnable_units.saturating_add(running_units));
         let available_slots = registry.available_slots()?;
+        let responsiveness = runtime_sink
+            .evaluate_responsiveness(courier_id, self.runtime_tick())
+            .map_err(executor_error_from_runtime_sink)?;
         let summary = CourierRuntimeSummary::new(
             match self.scheduler {
                 SchedulerBinding::Current | SchedulerBinding::GreenPool(_) => {
@@ -4415,7 +4655,7 @@ impl ExecutorCore {
                 SchedulerBinding::ThreadPool(_) => CourierSchedulingPolicy::CooperativeRoundRobin,
                 SchedulerBinding::Unsupported => CourierSchedulingPolicy::CooperativePriority,
             },
-            CourierResponsiveness::Responsive,
+            responsiveness,
         )
         .with_async_lane(CourierLaneSummary {
             kind: RunnableUnitKind::AsyncTask,
@@ -7253,6 +7493,18 @@ mod tests {
     use core::num::NonZeroUsize;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use fusion_pal::sys::mem::{Address, CachePolicy, MemAdviceCaps, Protect, Region};
+    use fusion_sys::claims::{ClaimAwareness, ClaimContextId};
+    use fusion_sys::context::{ContextCaps, ContextKind};
+    use fusion_sys::courier::{CourierCaps, CourierPlan, CourierVisibility};
+    use fusion_sys::domain::{
+        ContextDescriptor,
+        CourierDescriptor,
+        DomainCaps,
+        DomainDescriptor,
+        DomainId,
+        DomainKind,
+        DomainRegistry,
+    };
     use fusion_sys::mem::resource::{
         BoundMemoryResource,
         BoundResourceSpec,
@@ -8132,6 +8384,171 @@ mod tests {
             .expect("task should spawn");
         assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 1);
         assert_eq!(handle.join().expect("task should complete"), 91);
+    }
+
+    #[test]
+    fn current_async_runtime_queries_courier_truth() {
+        const COURIER: CourierId = CourierId::new(91);
+        const CONTEXT: ContextId = ContextId::new(0x440);
+
+        let mut registry: DomainRegistry<'static, 4, 4, 4, 2, 4> =
+            DomainRegistry::new(DomainDescriptor {
+                id: DomainId::new(0x5056_4153),
+                name: "pvas",
+                kind: DomainKind::NativeSubstrate,
+                caps: DomainCaps::COURIER_REGISTRY | DomainCaps::COURIER_VISIBILITY,
+            });
+        registry
+            .register_courier(CourierDescriptor {
+                id: COURIER,
+                name: "httpd",
+                caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
+                visibility: CourierVisibility::Scoped,
+                claim_awareness: ClaimAwareness::Black,
+                claim_context: Some(ClaimContextId::new(0xBBB0)),
+                plan: CourierPlan::new(0, 2).with_async_capacity(2),
+            })
+            .expect("courier should register");
+
+        let runtime = CurrentAsyncRuntime::with_executor_config(
+            ExecutorConfig::new()
+                .with_courier_id(COURIER)
+                .with_context_id(CONTEXT)
+                .with_runtime_sink(registry.runtime_sink()),
+        );
+        let handle = runtime
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
+                let ledger = current_async_courier_runtime_ledger()
+                    .expect("courier runtime ledger should be visible");
+                let responsiveness = current_async_courier_responsiveness()
+                    .expect("courier responsiveness should be visible");
+                (ledger.current_context.unwrap().context, responsiveness)
+            })
+            .expect("task should spawn");
+
+        assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 1);
+        assert_eq!(
+            handle.join().expect("task should complete"),
+            (CONTEXT, CourierResponsiveness::Responsive)
+        );
+    }
+
+    #[test]
+    fn current_async_runtime_updates_courier_owned_metadata_and_obligations() {
+        const COURIER: CourierId = CourierId::new(92);
+        const CONTEXT: ContextId = ContextId::new(0x441);
+
+        let mut registry: DomainRegistry<'static, 4, 4, 4, 2, 8> =
+            DomainRegistry::new(DomainDescriptor {
+                id: DomainId::new(0x5056_4153),
+                name: "pvas",
+                kind: DomainKind::NativeSubstrate,
+                caps: DomainCaps::COURIER_REGISTRY
+                    | DomainCaps::COURIER_VISIBILITY
+                    | DomainCaps::CONTEXT_REGISTRY,
+            });
+        registry
+            .register_courier(CourierDescriptor {
+                id: COURIER,
+                name: "httpd",
+                caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
+                visibility: CourierVisibility::Scoped,
+                claim_awareness: ClaimAwareness::Black,
+                claim_context: Some(ClaimContextId::new(0xBBB1)),
+                plan: CourierPlan::new(0, 2)
+                    .with_async_capacity(2)
+                    .with_app_metadata_capacity(4)
+                    .with_obligation_capacity(4),
+            })
+            .expect("courier should register");
+        registry
+            .register_context(
+                COURIER,
+                ContextDescriptor {
+                    id: CONTEXT,
+                    name: "httpd.main",
+                    kind: ContextKind::FiberMetadata,
+                    caps: ContextCaps::PROJECTABLE | ContextCaps::CONTROL_ENDPOINT,
+                    claim_context: Some(ClaimContextId::new(0xBBB1)),
+                },
+            )
+            .expect("context should register");
+
+        let runtime = CurrentAsyncRuntime::with_executor_config(
+            ExecutorConfig::new()
+                .with_courier_id(COURIER)
+                .with_context_id(CONTEXT)
+                .with_runtime_sink(registry.runtime_sink()),
+        );
+        let handle = runtime
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
+                update_current_async_courier_metadata("executor", "hot")
+                    .expect("async-lane metadata update should succeed");
+                update_current_async_context_metadata("phase", "warm")
+                    .expect("context metadata update should succeed");
+                let obligation = register_current_async_courier_obligation(
+                    fusion_sys::courier::CourierObligationSpec::new(
+                        fusion_sys::courier::CourierMetadataSubject::AsyncLane,
+                        fusion_sys::courier::CourierObligationBinding::Input(
+                            "hw.keyboard@kernel-local[pvas.me]",
+                        ),
+                        10_000_000_000,
+                        20_000_000_000,
+                    ),
+                )
+                .expect("obligation registration should succeed");
+                record_current_async_courier_obligation_progress(obligation)
+                    .expect("obligation progress should succeed");
+                obligation.get()
+            })
+            .expect("task should spawn");
+
+        assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 1);
+        assert_eq!(handle.join().expect("task should complete"), 1);
+
+        let courier = registry.courier(COURIER).expect("courier should exist");
+        let async_metadata = courier
+            .async_metadata_entry("executor")
+            .expect("async metadata should exist");
+        assert_eq!(async_metadata.value, "hot");
+        let context_metadata = courier
+            .context_metadata_entry(CONTEXT, "phase")
+            .expect("context metadata should exist");
+        assert_eq!(context_metadata.value, "warm");
+        let obligation = courier
+            .obligations()
+            .next()
+            .expect("courier obligation should exist");
+        assert_eq!(
+            obligation.binding,
+            fusion_sys::courier::CourierObligationBinding::Input(
+                "hw.keyboard@kernel-local[pvas.me]"
+            )
+        );
+        assert_eq!(obligation.responsiveness, CourierResponsiveness::Responsive);
+    }
+
+    #[test]
+    fn current_async_runtime_preserves_zero_identity_in_tls_context() {
+        let runtime = CurrentAsyncRuntime::with_executor_config(
+            ExecutorConfig::new()
+                .with_courier_id(CourierId::new(0))
+                .with_context_id(ContextId::new(0)),
+        );
+        let handle = runtime
+            .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
+                (
+                    current_async_courier_id()
+                        .expect("current courier id should be visible")
+                        .get(),
+                    current_async_context_id()
+                        .expect("current context id should be visible")
+                        .get(),
+                )
+            })
+            .expect("task should spawn");
+        assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 1);
+        assert_eq!(handle.join().expect("task should complete"), (0, 0));
     }
 
     #[test]

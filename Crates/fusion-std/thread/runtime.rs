@@ -42,8 +42,10 @@ use fusion_sys::alloc::{
 };
 use fusion_sys::context::ContextId;
 use fusion_sys::courier::{
+    CourierChildLaunchRequest,
     CourierId,
     CourierLaneSummary,
+    CourierLaunchControl,
     CourierPlan,
     CourierResponsiveness,
     CourierRunState,
@@ -62,9 +64,11 @@ use fusion_sys::mem::resource::{
     ResourceRange,
 };
 use fusion_sys::thread::{
+    MonotonicRawInstant,
     RuntimeBackingError,
     RuntimeBackingErrorKind,
     allocate_owned_runtime_slab,
+    system_monotonic_time,
     system_thread,
     uses_explicit_bound_runtime_backing,
 };
@@ -396,6 +400,8 @@ pub struct CurrentFiberAsyncSingleton {
     courier_id: Option<CourierId>,
     context_id: Option<ContextId>,
     runtime_sink: Option<CourierRuntimeSink>,
+    launch_control: Option<CourierLaunchControl<'static>>,
+    launch_request: Option<CourierChildLaunchRequest<'static>>,
     courier_plan: Option<CourierPlan>,
     fiber_capacity_limit: Option<usize>,
     async_capacity_limit: Option<usize>,
@@ -412,6 +418,8 @@ impl CurrentFiberAsyncSingleton {
             courier_id: None,
             context_id: None,
             runtime_sink: None,
+            launch_control: None,
+            launch_request: None,
             courier_plan: None,
             fiber_capacity_limit: None,
             async_capacity_limit: None,
@@ -450,6 +458,27 @@ impl CurrentFiberAsyncSingleton {
     #[must_use]
     pub const fn with_runtime_sink(mut self, runtime_sink: CourierRuntimeSink) -> Self {
         self.runtime_sink = Some(runtime_sink);
+        self
+    }
+
+    /// Installs one explicit child-courier launch-control surface for the lazily realized
+    /// runtime.
+    #[must_use]
+    pub const fn with_launch_control(
+        mut self,
+        launch_control: CourierLaunchControl<'static>,
+    ) -> Self {
+        self.launch_control = Some(launch_control);
+        self
+    }
+
+    /// Installs one explicit child-courier launch request for the lazily realized runtime.
+    #[must_use]
+    pub const fn with_child_launch(
+        mut self,
+        launch_request: CourierChildLaunchRequest<'static>,
+    ) -> Self {
+        self.launch_request = Some(launch_request);
         self
     }
 
@@ -544,6 +573,18 @@ impl CurrentFiberAsyncSingleton {
         }
     }
 
+    fn courier_responsiveness(
+        &'static self,
+        fallback: CourierResponsiveness,
+    ) -> CourierResponsiveness {
+        let (Some(runtime_sink), Some(courier_id)) = (self.runtime_sink, self.courier_id) else {
+            return fallback;
+        };
+        runtime_sink
+            .evaluate_responsiveness(courier_id, runtime_tick())
+            .unwrap_or(fallback)
+    }
+
     fn fiber_bootstrap_with_policy(
         &self,
         fiber_capacity: usize,
@@ -579,6 +620,12 @@ impl CurrentFiberAsyncSingleton {
         }
         if let Some(runtime_sink) = self.runtime_sink {
             bootstrap = bootstrap.with_runtime_sink(runtime_sink);
+        }
+        if let Some(launch_control) = self.launch_control {
+            bootstrap = bootstrap.with_launch_control(launch_control);
+        }
+        if let Some(launch_request) = self.launch_request {
+            bootstrap = bootstrap.with_child_launch(launch_request);
         }
         bootstrap.build_current()
     }
@@ -1122,6 +1169,7 @@ impl CurrentFiberAsyncSingleton {
         &'static self,
         responsiveness: CourierResponsiveness,
     ) -> Result<CourierRuntimeSummary, ExecutorError> {
+        let responsiveness = self.courier_responsiveness(responsiveness);
         let fiber_summary = self
             .fiber_runtime_summary_with_responsiveness(responsiveness)
             .map_err(executor_error_from_fiber)?;
@@ -1386,6 +1434,16 @@ impl CurrentFiberAsyncRuntime {
     pub fn runtime_summary(&self) -> Result<CourierRuntimeSummary, CurrentFiberAsyncRuntimeError> {
         let fiber_summary = self.fibers.runtime_summary()?;
         let async_summary = self.executor.runtime_summary()?;
+        let responsiveness = match (fiber_summary.responsiveness, async_summary.responsiveness) {
+            (CourierResponsiveness::NonResponsive, _)
+            | (_, CourierResponsiveness::NonResponsive) => CourierResponsiveness::NonResponsive,
+            (CourierResponsiveness::Stale, _) | (_, CourierResponsiveness::Stale) => {
+                CourierResponsiveness::Stale
+            }
+            (CourierResponsiveness::Responsive, CourierResponsiveness::Responsive) => {
+                CourierResponsiveness::Responsive
+            }
+        };
         Ok(CourierRuntimeSummary {
             policy: fiber_summary.policy,
             run_state: if fiber_summary.run_state == CourierRunState::Running
@@ -1399,11 +1457,12 @@ impl CurrentFiberAsyncRuntime {
             } else {
                 CourierRunState::Idle
             },
-            responsiveness: CourierResponsiveness::Responsive,
+            responsiveness,
             fiber_lane: fiber_summary.fiber_lane,
             async_lane: async_summary.async_lane,
             control_lane: None,
-        })
+        }
+        .with_responsiveness(responsiveness))
     }
 }
 
@@ -1477,6 +1536,14 @@ impl From<fusion_sys::fiber::FiberError> for CurrentFiberAsyncRuntimeError {
 impl From<super::ExecutorError> for CurrentFiberAsyncRuntimeError {
     fn from(value: super::ExecutorError) -> Self {
         Self::Executor(value)
+    }
+}
+
+fn runtime_tick() -> u64 {
+    match system_monotonic_time().raw_now() {
+        Ok(MonotonicRawInstant::Bits32(raw)) => u64::from(raw),
+        Ok(MonotonicRawInstant::Bits64(raw)) => raw,
+        Err(_) => 0,
     }
 }
 
@@ -1660,6 +1727,29 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
         self.fibers =
             FiberPoolBootstrap::from_config(self.fibers.config().with_runtime_sink(runtime_sink));
         self.executor = self.executor.with_runtime_sink(runtime_sink);
+        self
+    }
+
+    /// Applies one explicit child-courier launch-control surface to the fiber half.
+    #[must_use]
+    pub const fn with_launch_control(
+        mut self,
+        launch_control: CourierLaunchControl<'static>,
+    ) -> Self {
+        self.fibers = FiberPoolBootstrap::from_config(
+            self.fibers.config().with_launch_control(launch_control),
+        );
+        self
+    }
+
+    /// Applies one explicit child-courier launch request to the fiber half.
+    #[must_use]
+    pub const fn with_child_launch(
+        mut self,
+        launch_request: CourierChildLaunchRequest<'static>,
+    ) -> Self {
+        self.fibers =
+            FiberPoolBootstrap::from_config(self.fibers.config().with_child_launch(launch_request));
         self
     }
 
@@ -2250,8 +2340,35 @@ fn validate_runtime_config(config: &RuntimeConfig<'_>) -> Result<(), RuntimeErro
 mod tests {
     use super::*;
     use crate::thread::async_yield_now;
+    use crate::thread::fiber::{
+        current_courier_responsiveness,
+        current_courier_runtime_ledger,
+        current_fiber_record,
+    };
     use crate::thread::yield_now;
     use fusion_pal::sys::mem::{Address, CachePolicy, MemAdviceCaps, Protect, Region};
+    use fusion_sys::claims::{
+        ClaimAwareness,
+        ClaimContextId,
+        ClaimsDigest,
+        ImageSealId,
+        PrincipalId,
+    };
+    use fusion_sys::courier::{
+        CourierCaps,
+        CourierChildLaunchRequest,
+        CourierLaunchDescriptor,
+        CourierPlan,
+        CourierVisibility,
+    };
+    use fusion_sys::domain::{
+        CourierDescriptor,
+        DomainCaps,
+        DomainDescriptor,
+        DomainId,
+        DomainKind,
+        DomainRegistry,
+    };
     use fusion_sys::mem::resource::{
         BoundResourceSpec,
         MemoryDomain,
@@ -2651,6 +2768,127 @@ mod tests {
             .expect("summary should observe drained singleton");
         assert_eq!(drained.total_active_units(), 0);
         assert_eq!(drained.run_state, CourierRunState::Idle);
+    }
+
+    #[test]
+    fn combined_current_runtime_realizes_child_launch_against_domain_registry() {
+        const ROOT_COURIER: CourierId = CourierId::new(1);
+        const CHILD_COURIER: CourierId = CourierId::new(177);
+        const CHILD_CONTEXT: ContextId = ContextId::new(0x620);
+
+        let mut registry: DomainRegistry<'static, 4, 4, 4, 2, 4> =
+            DomainRegistry::new(DomainDescriptor {
+                id: DomainId::new(0x5056_4153),
+                name: "pvas",
+                kind: DomainKind::NativeSubstrate,
+                caps: DomainCaps::COURIER_REGISTRY
+                    | DomainCaps::COURIER_VISIBILITY
+                    | DomainCaps::CONTEXT_REGISTRY,
+            });
+        registry
+            .register_courier(CourierDescriptor {
+                id: ROOT_COURIER,
+                name: "kernel",
+                caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
+                visibility: CourierVisibility::Full,
+                claim_awareness: ClaimAwareness::Black,
+                claim_context: Some(ClaimContextId::new(0xAAA1)),
+                plan: CourierPlan::new(2, 4),
+            })
+            .expect("root courier should register");
+
+        let runtime = CurrentFiberAsyncBootstrap::uniform(
+            2,
+            NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
+            1,
+        )
+        .with_guard_pages(0)
+        .with_courier_id(CHILD_COURIER)
+        .with_context_id(CHILD_CONTEXT)
+        .with_runtime_sink(registry.runtime_sink())
+        .with_launch_control(registry.launch_control())
+        .with_child_launch(CourierChildLaunchRequest {
+            parent: ROOT_COURIER,
+            descriptor: CourierLaunchDescriptor {
+                id: CHILD_COURIER,
+                name: "httpd",
+                caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
+                visibility: CourierVisibility::Scoped,
+                claim_awareness: ClaimAwareness::Black,
+                claim_context: Some(ClaimContextId::new(0xBBB3)),
+                plan: CourierPlan::new(0, 2),
+            },
+            principal: PrincipalId::parse("httpd#01@web[cache.pvas-local]:443")
+                .expect("principal should parse"),
+            image_seal: fusion_sys::claims::LocalAdmissionSeal::new(
+                ImageSealId::new(8),
+                ClaimsDigest::zero(),
+                ClaimsDigest::zero(),
+                ClaimsDigest::zero(),
+                48,
+            ),
+            launch_epoch: 48,
+        })
+        .build_current()
+        .expect("combined current runtime should build");
+
+        let handle = runtime
+            .fibers()
+            .spawn_with_stack::<4096, _, _>(|| {
+                let ledger = current_courier_runtime_ledger()
+                    .expect("courier runtime ledger should be visible");
+                let record =
+                    current_fiber_record().expect("current fiber record should be visible");
+                let responsiveness = current_courier_responsiveness()
+                    .expect("courier responsiveness should be visible");
+                (
+                    ledger.current_context.unwrap().context,
+                    record.is_root,
+                    responsiveness,
+                )
+            })
+            .expect("runtime fiber should spawn");
+
+        assert_eq!(
+            runtime
+                .fibers()
+                .run_until_idle()
+                .expect("pool should drain"),
+            1
+        );
+        assert_eq!(
+            handle.join().expect("runtime fiber should complete"),
+            (CHILD_CONTEXT, true, CourierResponsiveness::Responsive)
+        );
+
+        let parent = registry
+            .courier(ROOT_COURIER)
+            .expect("root courier should exist");
+        let child = parent
+            .child_couriers()
+            .next()
+            .expect("parent should supervise one child courier");
+        assert_eq!(child.child, CHILD_COURIER);
+
+        let launched = registry
+            .courier(CHILD_COURIER)
+            .expect("launched child courier should exist");
+        assert_eq!(
+            launched.runtime_ledger().current_context.unwrap().context,
+            CHILD_CONTEXT
+        );
+        assert!(
+            launched
+                .fibers()
+                .next()
+                .expect("root fiber should exist")
+                .is_root
+        );
+
+        runtime
+            .fibers()
+            .shutdown()
+            .expect("combined current runtime should shut down fibers");
     }
 
     #[test]

@@ -421,6 +421,83 @@ impl CourierRuntimeSink {
         // SAFETY: the sink provider guarantees the pointed backing outlives the runtime using it.
         unsafe { (self.vtable.record_runtime_summary)(self.context, courier, summary, tick) }
     }
+
+    pub fn runtime_ledger(
+        self,
+        courier: CourierId,
+    ) -> Result<CourierRuntimeLedger, CourierRuntimeSinkError> {
+        // SAFETY: the sink provider guarantees the pointed backing outlives the runtime using it.
+        unsafe { (self.vtable.runtime_ledger)(self.context, courier) }
+    }
+
+    pub fn fiber_record(
+        self,
+        courier: CourierId,
+        fiber: FiberId,
+    ) -> Result<Option<CourierFiberRecord>, CourierRuntimeSinkError> {
+        // SAFETY: the sink provider guarantees the pointed backing outlives the runtime using it.
+        unsafe { (self.vtable.fiber_record)(self.context, courier, fiber) }
+    }
+
+    pub fn evaluate_responsiveness(
+        self,
+        courier: CourierId,
+        tick: u64,
+    ) -> Result<CourierResponsiveness, CourierRuntimeSinkError> {
+        // SAFETY: the sink provider guarantees the pointed backing outlives the runtime using it.
+        unsafe { (self.vtable.evaluate_responsiveness)(self.context, courier, tick) }
+    }
+
+    pub fn upsert_metadata(
+        self,
+        courier: CourierId,
+        subject: CourierMetadataSubject,
+        key: &'static str,
+        value: &'static str,
+        tick: u64,
+    ) -> Result<(), CourierRuntimeSinkError> {
+        // SAFETY: the sink provider guarantees the pointed backing outlives the runtime using it.
+        unsafe { (self.vtable.upsert_metadata)(self.context, courier, subject, key, value, tick) }
+    }
+
+    pub fn remove_metadata(
+        self,
+        courier: CourierId,
+        subject: CourierMetadataSubject,
+        key: &str,
+    ) -> Result<(), CourierRuntimeSinkError> {
+        // SAFETY: the sink provider guarantees the pointed backing outlives the runtime using it.
+        unsafe { (self.vtable.remove_metadata)(self.context, courier, subject, key) }
+    }
+
+    pub fn register_obligation(
+        self,
+        courier: CourierId,
+        spec: CourierObligationSpec<'static>,
+        tick: u64,
+    ) -> Result<CourierObligationId, CourierRuntimeSinkError> {
+        // SAFETY: the sink provider guarantees the pointed backing outlives the runtime using it.
+        unsafe { (self.vtable.register_obligation)(self.context, courier, spec, tick) }
+    }
+
+    pub fn record_obligation_progress(
+        self,
+        courier: CourierId,
+        obligation: CourierObligationId,
+        tick: u64,
+    ) -> Result<(), CourierRuntimeSinkError> {
+        // SAFETY: the sink provider guarantees the pointed backing outlives the runtime using it.
+        unsafe { (self.vtable.record_obligation_progress)(self.context, courier, obligation, tick) }
+    }
+
+    pub fn remove_obligation(
+        self,
+        courier: CourierId,
+        obligation: CourierObligationId,
+    ) -> Result<(), CourierRuntimeSinkError> {
+        // SAFETY: the sink provider guarantees the pointed backing outlives the runtime using it.
+        unsafe { (self.vtable.remove_obligation)(self.context, courier, obligation) }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -456,6 +533,47 @@ pub struct CourierRuntimeSinkVTable {
         CourierRuntimeSummary,
         u64,
     ) -> Result<(), CourierRuntimeSinkError>,
+    pub runtime_ledger:
+        unsafe fn(*mut (), CourierId) -> Result<CourierRuntimeLedger, CourierRuntimeSinkError>,
+    pub fiber_record: unsafe fn(
+        *mut (),
+        CourierId,
+        FiberId,
+    ) -> Result<Option<CourierFiberRecord>, CourierRuntimeSinkError>,
+    pub evaluate_responsiveness:
+        unsafe fn(
+            *mut (),
+            CourierId,
+            u64,
+        ) -> Result<CourierResponsiveness, CourierRuntimeSinkError>,
+    pub upsert_metadata: unsafe fn(
+        *mut (),
+        CourierId,
+        CourierMetadataSubject,
+        &'static str,
+        &'static str,
+        u64,
+    ) -> Result<(), CourierRuntimeSinkError>,
+    pub remove_metadata: unsafe fn(
+        *mut (),
+        CourierId,
+        CourierMetadataSubject,
+        &str,
+    ) -> Result<(), CourierRuntimeSinkError>,
+    pub register_obligation: unsafe fn(
+        *mut (),
+        CourierId,
+        CourierObligationSpec<'static>,
+        u64,
+    ) -> Result<CourierObligationId, CourierRuntimeSinkError>,
+    pub record_obligation_progress: unsafe fn(
+        *mut (),
+        CourierId,
+        CourierObligationId,
+        u64,
+    ) -> Result<(), CourierRuntimeSinkError>,
+    pub remove_obligation:
+        unsafe fn(*mut (), CourierId, CourierObligationId) -> Result<(), CourierRuntimeSinkError>,
 }
 
 impl CourierRuntimeSummary {
@@ -1389,6 +1507,120 @@ impl<const MAX_FIBERS: usize> Default for CourierFiberLedger<MAX_FIBERS> {
     }
 }
 
+/// Static courier descriptor carried by one runtime launch request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CourierLaunchDescriptor<'a> {
+    pub id: CourierId,
+    pub name: &'a str,
+    pub caps: CourierCaps,
+    pub visibility: CourierVisibility,
+    pub claim_awareness: ClaimAwareness,
+    pub claim_context: Option<ClaimContextId>,
+    pub plan: CourierPlan,
+}
+
+/// Parent/child launch request carried by one runtime before the root fiber is admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CourierChildLaunchRequest<'a> {
+    pub parent: CourierId,
+    pub descriptor: CourierLaunchDescriptor<'a>,
+    pub principal: PrincipalId<'a>,
+    pub image_seal: LocalAdmissionSeal,
+    pub launch_epoch: u64,
+}
+
+/// Coarse launch-control error surfaced when one runtime asks the courier substrate to realize one
+/// child launch tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CourierLaunchControlError {
+    Unsupported,
+    Invalid,
+    NotFound,
+    ResourceExhausted,
+    StateConflict,
+    Busy,
+}
+
+impl From<crate::domain::DomainError> for CourierLaunchControlError {
+    fn from(value: crate::domain::DomainError) -> Self {
+        use crate::domain::DomainErrorKind;
+        match value.kind() {
+            DomainErrorKind::Unsupported => Self::Unsupported,
+            DomainErrorKind::Invalid => Self::Invalid,
+            DomainErrorKind::NotFound => Self::NotFound,
+            DomainErrorKind::ResourceExhausted => Self::ResourceExhausted,
+            DomainErrorKind::StateConflict => Self::StateConflict,
+            DomainErrorKind::NotVisible
+            | DomainErrorKind::Busy
+            | DomainErrorKind::PermissionDenied
+            | DomainErrorKind::Platform(_) => Self::Busy,
+        }
+    }
+}
+
+/// Generic launch-control surface used by runtimes to realize parent/child courier truth once the
+/// root fiber identity is actually known.
+#[derive(Debug, Clone, Copy)]
+pub struct CourierLaunchControl<'a> {
+    context: *mut (),
+    vtable: CourierLaunchControlVTable<'a>,
+}
+
+unsafe impl Send for CourierLaunchControl<'_> {}
+unsafe impl Sync for CourierLaunchControl<'_> {}
+
+impl PartialEq for CourierLaunchControl<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.context == other.context
+            && self.vtable.register_child_courier as usize
+                == other.vtable.register_child_courier as usize
+    }
+}
+
+impl Eq for CourierLaunchControl<'_> {}
+
+impl Hash for CourierLaunchControl<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.context.hash(state);
+        (self.vtable.register_child_courier as usize).hash(state);
+    }
+}
+
+impl<'a> CourierLaunchControl<'a> {
+    #[must_use]
+    pub const fn new(context: *mut (), vtable: CourierLaunchControlVTable<'a>) -> Self {
+        Self { context, vtable }
+    }
+
+    pub fn register_child_courier(
+        self,
+        request: CourierChildLaunchRequest<'a>,
+        launched_at_tick: u64,
+        root_fiber: FiberId,
+    ) -> Result<(), CourierLaunchControlError> {
+        // SAFETY: the launch-control provider guarantees the pointed backing outlives the runtime
+        // using it.
+        unsafe {
+            (self.vtable.register_child_courier)(
+                self.context,
+                request,
+                launched_at_tick,
+                root_fiber,
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CourierLaunchControlVTable<'a> {
+    pub register_child_courier: unsafe fn(
+        *mut (),
+        CourierChildLaunchRequest<'a>,
+        u64,
+        FiberId,
+    ) -> Result<(), CourierLaunchControlError>,
+}
+
 /// Static courier metadata plan for exact-static builds and reviewable footprints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CourierPlan {
@@ -1481,11 +1713,16 @@ impl CourierPlan {
 
     #[must_use]
     pub const fn is_valid(self) -> bool {
+        let total_lane_capacity = self.max_live_fibers.saturating_add(self.max_async_tasks);
         self.max_live_fibers > 0
             && self.max_runnable_units > 0
             && self.planned_fiber_capacity <= self.max_live_fibers
             && self.dynamic_fiber_capacity <= self.max_live_fibers
             && self.max_async_tasks <= self.max_runnable_units
+            // `max_runnable_units` is one aggregate active-work cap. It may be lower than the
+            // sum of fiber+async lane capacities, but it should not exceed the total work those
+            // lanes could ever admit.
+            && self.max_runnable_units <= total_lane_capacity
     }
 
     #[must_use]
@@ -1946,6 +2183,22 @@ mod tests {
                 .unwrap()
                 .last_progress_tick,
             111
+        );
+    }
+
+    #[test]
+    fn courier_plan_validation_treats_runnable_capacity_as_aggregate_cap() {
+        assert!(
+            CourierPlan::new(1, 4)
+                .with_async_capacity(4)
+                .with_runnable_capacity(4)
+                .is_valid()
+        );
+        assert!(
+            !CourierPlan::new(1, 2)
+                .with_async_capacity(1)
+                .with_runnable_capacity(8)
+                .is_valid()
         );
     }
 }

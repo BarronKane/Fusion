@@ -2,7 +2,7 @@ use core::pin::pin;
 
 use fusion_sys::alloc::{AllocErrorKind, Allocator, AllocatorControlRequest};
 use fusion_sys::channel::{ChannelReceive, ChannelSend};
-use fusion_sys::fiber::{FiberMetadataMessage, FiberStack, FiberYield};
+use fusion_sys::fiber::{FiberMetadataMessage, FiberStack, FiberYield, ManagedFiber};
 use fusion_sys::transport::{TransportAttachmentControl, TransportAttachmentRequest};
 
 #[test]
@@ -182,11 +182,8 @@ fn allocator_channel_service_can_run_on_managed_fiber() {
     let mut service = pin!(service);
     let mut stack_words = vec![0_u128; 2048].into_boxed_slice();
     let stack = FiberStack::from_slice(stack_words.as_mut()).expect("stack should be valid");
-    let mut fiber = fusion_sys::alloc::AllocatorChannelService::spawn_managed_with_publication::<
-        8,
-        8,
-    >(service.as_mut(), stack)
-    .expect("managed allocator service fiber should build");
+    let mut fiber = ManagedFiber::<_, 8, 8>::new_with_publication(service.as_mut(), stack)
+        .expect("managed allocator service fiber should build");
 
     let fiber_consumer = fiber
         .metadata_channel()

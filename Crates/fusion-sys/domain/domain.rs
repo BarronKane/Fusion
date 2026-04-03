@@ -18,10 +18,14 @@ use crate::courier::{
     CourierAppMetadataStore,
     CourierBase,
     CourierCaps,
+    CourierChildLaunchRequest,
     CourierFiberClass,
     CourierFiberLedger,
     CourierFiberRecord,
     CourierImplementationKind,
+    CourierLaunchControl,
+    CourierLaunchControlError,
+    CourierLaunchControlVTable,
     CourierMetadata,
     CourierMetadataEntry,
     CourierMetadataSubject,
@@ -546,6 +550,32 @@ impl<
         }
     }
 
+    /// Returns one copy of the courier-owned runtime ledger.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the courier does not exist.
+    pub fn runtime_ledger(&self, courier: CourierId) -> Result<CourierRuntimeLedger, DomainError> {
+        self.find_courier(courier)
+            .map(|record| record.runtime)
+            .ok_or_else(DomainError::not_found)
+    }
+
+    /// Returns one copy of one supervised fiber record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the courier does not exist.
+    pub fn fiber_record(
+        &self,
+        courier: CourierId,
+        fiber: FiberId,
+    ) -> Result<Option<CourierFiberRecord>, DomainError> {
+        self.find_courier(courier)
+            .map(|record| record.fibers.fiber(fiber).copied())
+            .ok_or_else(DomainError::not_found)
+    }
+
     /// Marks one fiber stale under the owning courier ledger.
     ///
     /// # Errors
@@ -1016,6 +1046,19 @@ impl<
         Ok(responsiveness)
     }
 
+    /// Returns one honest responsiveness classification for the supplied courier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the courier does not exist.
+    pub fn courier_responsiveness(
+        &mut self,
+        courier: CourierId,
+        now_tick: u64,
+    ) -> Result<CourierResponsiveness, DomainError> {
+        self.evaluate_courier_responsiveness(courier, now_tick)
+    }
+
     /// Registers one owned context under the supplied owning courier.
     ///
     /// # Errors
@@ -1157,6 +1200,23 @@ impl<
         CourierRuntimeSink::new(
             self as *mut Self as *mut (),
             runtime_sink_vtable::<
+                MAX_COURIERS,
+                MAX_CONTEXTS,
+                MAX_VISIBLE,
+                MAX_CHILDREN,
+                MAX_FIBERS,
+                MAX_METADATA,
+            >(),
+        )
+    }
+
+    /// Returns one generic launch-control view over this registry.
+    #[must_use]
+    pub fn launch_control(&mut self) -> CourierLaunchControl<'a> {
+        CourierLaunchControl::new(
+            self as *mut Self as *mut (),
+            launch_control_vtable::<
+                'a,
                 MAX_COURIERS,
                 MAX_CONTEXTS,
                 MAX_VISIBLE,
@@ -1950,6 +2010,91 @@ fn runtime_sink_vtable<
             MAX_FIBERS,
             MAX_METADATA,
         >,
+        runtime_ledger: runtime_sink_runtime_ledger::<
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >,
+        fiber_record: runtime_sink_fiber_record::<
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >,
+        evaluate_responsiveness: runtime_sink_evaluate_responsiveness::<
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >,
+        upsert_metadata: runtime_sink_upsert_metadata::<
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >,
+        remove_metadata: runtime_sink_remove_metadata::<
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >,
+        register_obligation: runtime_sink_register_obligation::<
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >,
+        record_obligation_progress: runtime_sink_record_obligation_progress::<
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >,
+        remove_obligation: runtime_sink_remove_obligation::<
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >,
+    }
+}
+
+fn launch_control_vtable<
+    'a,
+    const MAX_COURIERS: usize,
+    const MAX_CONTEXTS: usize,
+    const MAX_VISIBLE: usize,
+    const MAX_CHILDREN: usize,
+    const MAX_FIBERS: usize,
+    const MAX_METADATA: usize,
+>() -> CourierLaunchControlVTable<'a> {
+    CourierLaunchControlVTable {
+        register_child_courier: launch_control_register_child_courier::<
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >,
     }
 }
 
@@ -1980,6 +2125,52 @@ unsafe fn runtime_sink_record_context<
     };
     registry
         .record_runtime_context(courier, runtime_context, tick)
+        .map_err(Into::into)
+}
+
+unsafe fn launch_control_register_child_courier<
+    'a,
+    const MAX_COURIERS: usize,
+    const MAX_CONTEXTS: usize,
+    const MAX_VISIBLE: usize,
+    const MAX_CHILDREN: usize,
+    const MAX_FIBERS: usize,
+    const MAX_METADATA: usize,
+>(
+    context: *mut (),
+    request: CourierChildLaunchRequest<'a>,
+    launched_at_tick: u64,
+    root_fiber: FiberId,
+) -> Result<(), CourierLaunchControlError> {
+    let registry = unsafe {
+        &mut *context.cast::<DomainRegistry<
+            'a,
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >>()
+    };
+    registry
+        .register_child_courier(
+            request.parent,
+            CourierDescriptor {
+                id: request.descriptor.id,
+                name: request.descriptor.name,
+                caps: request.descriptor.caps,
+                visibility: request.descriptor.visibility,
+                claim_awareness: request.descriptor.claim_awareness,
+                claim_context: request.descriptor.claim_context,
+                plan: request.descriptor.plan,
+            },
+            request.principal,
+            request.image_seal,
+            request.launch_epoch,
+            launched_at_tick,
+            root_fiber,
+        )
         .map_err(Into::into)
 }
 
@@ -2116,10 +2307,259 @@ unsafe fn runtime_sink_record_runtime_summary<
         .map_err(Into::into)
 }
 
+unsafe fn runtime_sink_runtime_ledger<
+    'a,
+    const MAX_COURIERS: usize,
+    const MAX_CONTEXTS: usize,
+    const MAX_VISIBLE: usize,
+    const MAX_CHILDREN: usize,
+    const MAX_FIBERS: usize,
+    const MAX_METADATA: usize,
+>(
+    context: *mut (),
+    courier: CourierId,
+) -> Result<CourierRuntimeLedger, CourierRuntimeSinkError> {
+    let registry = unsafe {
+        &mut *context.cast::<DomainRegistry<
+            'a,
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >>()
+    };
+    registry.runtime_ledger(courier).map_err(Into::into)
+}
+
+unsafe fn runtime_sink_fiber_record<
+    'a,
+    const MAX_COURIERS: usize,
+    const MAX_CONTEXTS: usize,
+    const MAX_VISIBLE: usize,
+    const MAX_CHILDREN: usize,
+    const MAX_FIBERS: usize,
+    const MAX_METADATA: usize,
+>(
+    context: *mut (),
+    courier: CourierId,
+    fiber: FiberId,
+) -> Result<Option<CourierFiberRecord>, CourierRuntimeSinkError> {
+    let registry = unsafe {
+        &mut *context.cast::<DomainRegistry<
+            'a,
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >>()
+    };
+    registry.fiber_record(courier, fiber).map_err(Into::into)
+}
+
+unsafe fn runtime_sink_evaluate_responsiveness<
+    'a,
+    const MAX_COURIERS: usize,
+    const MAX_CONTEXTS: usize,
+    const MAX_VISIBLE: usize,
+    const MAX_CHILDREN: usize,
+    const MAX_FIBERS: usize,
+    const MAX_METADATA: usize,
+>(
+    context: *mut (),
+    courier: CourierId,
+    tick: u64,
+) -> Result<CourierResponsiveness, CourierRuntimeSinkError> {
+    let registry = unsafe {
+        &mut *context.cast::<DomainRegistry<
+            'a,
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >>()
+    };
+    registry
+        .courier_responsiveness(courier, tick)
+        .map_err(Into::into)
+}
+
+unsafe fn runtime_sink_upsert_metadata<
+    'a,
+    const MAX_COURIERS: usize,
+    const MAX_CONTEXTS: usize,
+    const MAX_VISIBLE: usize,
+    const MAX_CHILDREN: usize,
+    const MAX_FIBERS: usize,
+    const MAX_METADATA: usize,
+>(
+    context: *mut (),
+    courier: CourierId,
+    subject: CourierMetadataSubject,
+    key: &'static str,
+    value: &'static str,
+    tick: u64,
+) -> Result<(), CourierRuntimeSinkError> {
+    let registry = unsafe {
+        &mut *context.cast::<DomainRegistry<
+            'a,
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >>()
+    };
+    match subject {
+        CourierMetadataSubject::Courier => {
+            registry.upsert_courier_metadata(courier, key, value, tick)
+        }
+        CourierMetadataSubject::ChildCourier(child) => {
+            registry.upsert_child_courier_metadata(courier, child, key, value, tick)
+        }
+        CourierMetadataSubject::Fiber(fiber) => {
+            registry.upsert_fiber_metadata(courier, fiber, key, value, tick)
+        }
+        CourierMetadataSubject::Context(runtime_context) => {
+            registry.upsert_context_metadata(runtime_context, key, value, tick)
+        }
+        CourierMetadataSubject::AsyncLane => {
+            registry.upsert_async_metadata(courier, key, value, tick)
+        }
+    }
+    .map_err(Into::into)
+}
+
+unsafe fn runtime_sink_remove_metadata<
+    'a,
+    const MAX_COURIERS: usize,
+    const MAX_CONTEXTS: usize,
+    const MAX_VISIBLE: usize,
+    const MAX_CHILDREN: usize,
+    const MAX_FIBERS: usize,
+    const MAX_METADATA: usize,
+>(
+    context: *mut (),
+    courier: CourierId,
+    subject: CourierMetadataSubject,
+    key: &str,
+) -> Result<(), CourierRuntimeSinkError> {
+    let registry = unsafe {
+        &mut *context.cast::<DomainRegistry<
+            'a,
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >>()
+    };
+    registry
+        .remove_metadata(courier, subject, key)
+        .map_err(Into::into)
+}
+
+unsafe fn runtime_sink_register_obligation<
+    'a,
+    const MAX_COURIERS: usize,
+    const MAX_CONTEXTS: usize,
+    const MAX_VISIBLE: usize,
+    const MAX_CHILDREN: usize,
+    const MAX_FIBERS: usize,
+    const MAX_METADATA: usize,
+>(
+    context: *mut (),
+    courier: CourierId,
+    spec: CourierObligationSpec<'static>,
+    tick: u64,
+) -> Result<CourierObligationId, CourierRuntimeSinkError> {
+    let registry = unsafe {
+        &mut *context.cast::<DomainRegistry<
+            'a,
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >>()
+    };
+    registry
+        .register_obligation_spec(courier, spec, tick)
+        .map_err(Into::into)
+}
+
+unsafe fn runtime_sink_record_obligation_progress<
+    'a,
+    const MAX_COURIERS: usize,
+    const MAX_CONTEXTS: usize,
+    const MAX_VISIBLE: usize,
+    const MAX_CHILDREN: usize,
+    const MAX_FIBERS: usize,
+    const MAX_METADATA: usize,
+>(
+    context: *mut (),
+    courier: CourierId,
+    obligation: CourierObligationId,
+    tick: u64,
+) -> Result<(), CourierRuntimeSinkError> {
+    let registry = unsafe {
+        &mut *context.cast::<DomainRegistry<
+            'a,
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >>()
+    };
+    registry
+        .record_obligation_progress(courier, obligation, tick)
+        .map_err(Into::into)
+}
+
+unsafe fn runtime_sink_remove_obligation<
+    'a,
+    const MAX_COURIERS: usize,
+    const MAX_CONTEXTS: usize,
+    const MAX_VISIBLE: usize,
+    const MAX_CHILDREN: usize,
+    const MAX_FIBERS: usize,
+    const MAX_METADATA: usize,
+>(
+    context: *mut (),
+    courier: CourierId,
+    obligation: CourierObligationId,
+) -> Result<(), CourierRuntimeSinkError> {
+    let registry = unsafe {
+        &mut *context.cast::<DomainRegistry<
+            'a,
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >>()
+    };
+    registry
+        .remove_obligation(courier, obligation)
+        .map_err(Into::into)
+}
+
 #[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     use super::*;
     use crate::claims::{ClaimsDigest, ImageSealId};
+    use crate::courier::CourierLaunchDescriptor;
 
     fn demo_plan(max_child_couriers: usize, max_live_fibers: usize) -> CourierPlan {
         CourierPlan::new(max_child_couriers, max_live_fibers)
@@ -2358,6 +2798,61 @@ mod tests {
             root.metadata_attachment,
             Some(FiberMetadataAttachment::new(11))
         );
+    }
+
+    #[test]
+    fn launch_control_registers_child_courier_launch_truth() {
+        let mut registry: DomainRegistry<'_, 4, 4, 4, 2, 4> =
+            DomainRegistry::new(DomainDescriptor {
+                id: DOMAIN_ID,
+                name: "pvas",
+                kind: DomainKind::NativeSubstrate,
+                caps: DomainCaps::COURIER_REGISTRY | DomainCaps::COURIER_VISIBILITY,
+            });
+        registry
+            .register_courier(CourierDescriptor {
+                id: PRIMARY_COURIER,
+                name: "root",
+                caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
+                visibility: CourierVisibility::Full,
+                claim_awareness: ClaimAwareness::Black,
+                claim_context: Some(ClaimContextId::new(0xAAA0)),
+                plan: demo_plan(2, 4),
+            })
+            .expect("root courier should register");
+
+        let request = CourierChildLaunchRequest {
+            parent: PRIMARY_COURIER,
+            descriptor: CourierLaunchDescriptor {
+                id: SCOPED_COURIER,
+                name: "httpd",
+                caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
+                visibility: CourierVisibility::Scoped,
+                claim_awareness: ClaimAwareness::Black,
+                claim_context: Some(ClaimContextId::new(0xBBB0)),
+                plan: demo_plan(0, 2),
+            },
+            principal: PrincipalId::parse("httpd#01@web[cache.pvas-local]:443").unwrap(),
+            image_seal: LocalAdmissionSeal::new(
+                ImageSealId::new(7),
+                ClaimsDigest::zero(),
+                ClaimsDigest::zero(),
+                ClaimsDigest::zero(),
+                47,
+            ),
+            launch_epoch: 47,
+        };
+
+        registry
+            .launch_control()
+            .register_child_courier(request, 99, FiberId::new(42))
+            .expect("launch control should register child courier");
+
+        let parent = registry.courier(PRIMARY_COURIER).unwrap();
+        let child = parent.child_couriers().next().unwrap();
+        assert_eq!(child.child, SCOPED_COURIER);
+        assert_eq!(child.root_fiber, FiberId::new(42));
+        assert_eq!(child.launched_at_tick, 99);
     }
 
     #[test]

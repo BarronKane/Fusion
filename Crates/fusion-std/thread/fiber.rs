@@ -49,10 +49,17 @@ use fusion_pal::sys::mem::{
 };
 use fusion_sys::context::ContextId;
 use fusion_sys::courier::{
+    CourierChildLaunchRequest,
+    CourierFiberRecord,
     CourierId,
     CourierLaneSummary,
+    CourierLaunchControl,
+    CourierMetadataSubject,
+    CourierObligationId,
+    CourierObligationSpec,
     CourierResponsiveness,
     CourierRunState,
+    CourierRuntimeLedger,
     CourierRuntimeSink,
     CourierRuntimeSummary,
     CourierSchedulingPolicy,
@@ -1411,6 +1418,11 @@ pub struct FiberPoolConfig<'a> {
     pub context_id: Option<ContextId>,
     /// Optional courier-runtime sink used to publish authoritative lifecycle/runtime truth.
     pub runtime_sink: Option<CourierRuntimeSink>,
+    /// Optional launch-control surface used to realize parent/child courier truth at root-fiber
+    /// admission time.
+    pub launch_control: Option<CourierLaunchControl<'static>>,
+    /// Optional child-courier launch request realized on first root-fiber admission.
+    pub launch_request: Option<CourierChildLaunchRequest<'static>>,
 }
 
 /// Whether one green-fiber pool provisions hosted readiness/reactor machinery.
@@ -1447,6 +1459,8 @@ impl FiberPoolConfig<'static> {
             courier_id: None,
             context_id: None,
             runtime_sink: None,
+            launch_control: None,
+            launch_request: None,
         }
     }
 
@@ -1471,6 +1485,8 @@ impl FiberPoolConfig<'static> {
             courier_id: None,
             context_id: None,
             runtime_sink: None,
+            launch_control: None,
+            launch_request: None,
         }
     }
 
@@ -1510,6 +1526,8 @@ impl FiberPoolConfig<'static> {
             courier_id: None,
             context_id: None,
             runtime_sink: None,
+            launch_control: None,
+            launch_request: None,
         })
     }
 }
@@ -1593,6 +1611,8 @@ impl<'a> FiberPoolConfig<'a> {
             courier_id: None,
             context_id: None,
             runtime_sink: None,
+            launch_control: None,
+            launch_request: None,
         })
     }
 
@@ -1698,6 +1718,27 @@ impl<'a> FiberPoolConfig<'a> {
     #[must_use]
     pub const fn with_runtime_sink(mut self, runtime_sink: CourierRuntimeSink) -> Self {
         self.runtime_sink = Some(runtime_sink);
+        self
+    }
+
+    /// Returns one copy of this configuration with one explicit child-courier launch-control
+    /// surface.
+    #[must_use]
+    pub const fn with_launch_control(
+        mut self,
+        launch_control: CourierLaunchControl<'static>,
+    ) -> Self {
+        self.launch_control = Some(launch_control);
+        self
+    }
+
+    /// Returns one copy of this configuration with one explicit child-courier launch request.
+    #[must_use]
+    pub const fn with_child_launch(
+        mut self,
+        launch_request: CourierChildLaunchRequest<'static>,
+    ) -> Self {
+        self.launch_request = Some(launch_request);
         self
     }
 
@@ -2088,6 +2129,27 @@ impl<'a> FiberPoolBootstrap<'a> {
     #[must_use]
     pub const fn with_runtime_sink(mut self, runtime_sink: CourierRuntimeSink) -> Self {
         self.config = self.config.with_runtime_sink(runtime_sink);
+        self
+    }
+
+    /// Returns one copy of this bootstrap with one explicit child-courier launch-control
+    /// surface.
+    #[must_use]
+    pub const fn with_launch_control(
+        mut self,
+        launch_control: CourierLaunchControl<'static>,
+    ) -> Self {
+        self.config = self.config.with_launch_control(launch_control);
+        self
+    }
+
+    /// Returns one copy of this bootstrap with one explicit child-courier launch request.
+    #[must_use]
+    pub const fn with_child_launch(
+        mut self,
+        launch_request: CourierChildLaunchRequest<'static>,
+    ) -> Self {
+        self.config = self.config.with_child_launch(launch_request);
         self
     }
 
@@ -4514,6 +4576,8 @@ impl FiberStackClassPools {
                     courier_id: config.courier_id,
                     context_id: config.context_id,
                     runtime_sink: config.runtime_sink,
+                    launch_control: config.launch_control,
+                    launch_request: config.launch_request,
                 };
                 let slab = FiberStackSlab::new(&class_config, alignment, stack_direction)?;
                 unsafe {
@@ -6505,6 +6569,17 @@ fn current_green_context() -> Option<CurrentGreenContext> {
     current_green_slot()?.current_context().ok()
 }
 
+fn current_green_runtime_sink() -> Option<CourierRuntimeSink> {
+    let context = current_green_context()?;
+    // SAFETY: the current green context only points at a live owning pool while the task is
+    // actively running on that pool.
+    unsafe { (*context.inner).runtime_sink }
+}
+
+fn current_runtime_tick() -> u64 {
+    current_monotonic_nanos().unwrap_or(0)
+}
+
 /// Returns the owning courier identity for the current running fiber/task when available.
 ///
 /// This prefers the live green-task context and falls back to the lower `fusion-sys` managed-fiber
@@ -6521,6 +6596,170 @@ pub fn current_courier_id() -> Result<CourierId, FiberError> {
         return Ok(courier_id);
     }
     system_current_courier_id()
+}
+
+/// Returns the courier-owned runtime ledger for the current running fiber/task when available.
+///
+/// # Errors
+///
+/// Returns an error when the current runtime cannot honestly resolve one courier-owned ledger.
+pub fn current_courier_runtime_ledger() -> Result<CourierRuntimeLedger, FiberError> {
+    let courier_id = current_courier_id()?;
+    let runtime_sink = current_green_runtime_sink().ok_or_else(FiberError::unsupported)?;
+    runtime_sink
+        .runtime_ledger(courier_id)
+        .map_err(fiber_error_from_runtime_sink)
+}
+
+/// Returns the courier-owned fiber ledger record for the current running fiber/task.
+///
+/// # Errors
+///
+/// Returns an error when the current runtime cannot honestly resolve one courier-owned fiber
+/// record.
+pub fn current_fiber_record() -> Result<CourierFiberRecord, FiberError> {
+    let courier_id = current_courier_id()?;
+    let fiber_id = current_fiber_id()?;
+    let runtime_sink = current_green_runtime_sink().ok_or_else(FiberError::unsupported)?;
+    runtime_sink
+        .fiber_record(courier_id, fiber_id)
+        .map_err(fiber_error_from_runtime_sink)?
+        .ok_or_else(FiberError::state_conflict)
+}
+
+/// Returns the courier-owned responsiveness classification for the current running fiber/task.
+///
+/// # Errors
+///
+/// Returns an error when the current runtime cannot honestly resolve one courier-owned
+/// responsiveness state.
+pub fn current_courier_responsiveness() -> Result<CourierResponsiveness, FiberError> {
+    let courier_id = current_courier_id()?;
+    let runtime_sink = current_green_runtime_sink().ok_or_else(FiberError::unsupported)?;
+    runtime_sink
+        .evaluate_responsiveness(courier_id, current_runtime_tick())
+        .map_err(fiber_error_from_runtime_sink)
+}
+
+fn current_runtime_metadata_subjects()
+-> Result<(CourierRuntimeSink, CourierId, FiberId, ContextId, u64), FiberError> {
+    let runtime_sink = current_green_runtime_sink().ok_or_else(FiberError::unsupported)?;
+    Ok((
+        runtime_sink,
+        current_courier_id()?,
+        current_fiber_id()?,
+        current_context_id()?,
+        current_runtime_tick(),
+    ))
+}
+
+/// Updates one courier-owned metadata entry for the current courier.
+///
+/// This is the runtime-facing `/proc` lane: the courier owns the truth in memory, and running
+/// fibers may submit app-defined metadata into that store without inventing mandatory channels.
+///
+/// # Errors
+///
+/// Returns an error when the current runtime cannot honestly resolve or update the owning courier.
+pub fn update_current_courier_metadata(
+    key: &'static str,
+    value: &'static str,
+) -> Result<(), FiberError> {
+    let (runtime_sink, courier_id, _, _, tick) = current_runtime_metadata_subjects()?;
+    runtime_sink
+        .upsert_metadata(
+            courier_id,
+            CourierMetadataSubject::Courier,
+            key,
+            value,
+            tick,
+        )
+        .map_err(fiber_error_from_runtime_sink)
+}
+
+/// Updates one courier-owned metadata entry for the current fiber.
+///
+/// # Errors
+///
+/// Returns an error when the current runtime cannot honestly resolve or update the current fiber.
+pub fn update_current_fiber_metadata(
+    key: &'static str,
+    value: &'static str,
+) -> Result<(), FiberError> {
+    let (runtime_sink, courier_id, fiber_id, _, tick) = current_runtime_metadata_subjects()?;
+    runtime_sink
+        .upsert_metadata(
+            courier_id,
+            CourierMetadataSubject::Fiber(fiber_id),
+            key,
+            value,
+            tick,
+        )
+        .map_err(fiber_error_from_runtime_sink)
+}
+
+/// Updates one courier-owned metadata entry for the current context.
+///
+/// # Errors
+///
+/// Returns an error when the current runtime cannot honestly resolve or update the current
+/// context.
+pub fn update_current_context_metadata(
+    key: &'static str,
+    value: &'static str,
+) -> Result<(), FiberError> {
+    let (runtime_sink, courier_id, _, context_id, tick) = current_runtime_metadata_subjects()?;
+    runtime_sink
+        .upsert_metadata(
+            courier_id,
+            CourierMetadataSubject::Context(context_id),
+            key,
+            value,
+            tick,
+        )
+        .map_err(fiber_error_from_runtime_sink)
+}
+
+/// Registers one courier-level externally visible obligation under the current running fiber.
+///
+/// # Errors
+///
+/// Returns an error when the current runtime cannot honestly resolve or register the obligation.
+pub fn register_current_courier_obligation(
+    spec: CourierObligationSpec<'static>,
+) -> Result<CourierObligationId, FiberError> {
+    let (runtime_sink, courier_id, _, _, tick) = current_runtime_metadata_subjects()?;
+    runtime_sink
+        .register_obligation(courier_id, spec, tick)
+        .map_err(fiber_error_from_runtime_sink)
+}
+
+/// Records progress on one previously registered courier obligation.
+///
+/// # Errors
+///
+/// Returns an error when the current runtime cannot honestly resolve or update the obligation.
+pub fn record_current_courier_obligation_progress(
+    obligation: CourierObligationId,
+) -> Result<(), FiberError> {
+    let (runtime_sink, courier_id, _, _, tick) = current_runtime_metadata_subjects()?;
+    runtime_sink
+        .record_obligation_progress(courier_id, obligation, tick)
+        .map_err(fiber_error_from_runtime_sink)
+}
+
+/// Removes one previously registered courier obligation from the current running fiber's courier.
+///
+/// # Errors
+///
+/// Returns an error when the current runtime cannot honestly resolve or remove the obligation.
+pub fn remove_current_courier_obligation(
+    obligation: CourierObligationId,
+) -> Result<(), FiberError> {
+    let (runtime_sink, courier_id, _, _, _) = current_runtime_metadata_subjects()?;
+    runtime_sink
+        .remove_obligation(courier_id, obligation)
+        .map_err(fiber_error_from_runtime_sink)
 }
 
 /// Returns the owning context identity for the current running fiber/task when available.
@@ -7285,6 +7524,8 @@ struct GreenPoolInner {
     courier_id: Option<CourierId>,
     context_id: Option<ContextId>,
     runtime_sink: Option<CourierRuntimeSink>,
+    launch_control: Option<CourierLaunchControl<'static>>,
+    launch_request: Option<CourierChildLaunchRequest<'static>>,
     scheduling: GreenScheduling,
     capacity_policy: CapacityPolicy,
     yield_budget_supported: bool,
@@ -7293,6 +7534,8 @@ struct GreenPoolInner {
     shutdown: AtomicBool,
     client_refs: AtomicUsize,
     active: AtomicUsize,
+    root_registered: AtomicBool,
+    launch_registered: AtomicBool,
     next_id: AtomicUsize,
     next_carrier: AtomicUsize,
     carriers: MetadataSlice<CarrierQueue>,
@@ -7368,13 +7611,16 @@ impl GreenPoolInner {
         let (active_units, runnable_units, running_units, blocked_units) =
             self.tasks.lane_counts()?;
         let available_slots = self.tasks.available_slots()?;
+        let responsiveness = runtime_sink
+            .evaluate_responsiveness(courier_id, self.runtime_tick())
+            .map_err(fiber_error_from_runtime_sink)?;
         let summary = CourierRuntimeSummary::new(
             match self.scheduling {
                 GreenScheduling::Fifo => CourierSchedulingPolicy::CooperativeRoundRobin,
                 GreenScheduling::Priority => CourierSchedulingPolicy::CooperativePriority,
                 GreenScheduling::WorkStealing => CourierSchedulingPolicy::CooperativeWorkStealing,
             },
-            CourierResponsiveness::Responsive,
+            responsiveness,
         )
         .with_fiber_lane(CourierLaneSummary {
             kind: RunnableUnitKind::Fiber,
@@ -7392,11 +7638,28 @@ impl GreenPoolInner {
     fn register_runtime_fiber(
         &self,
         fiber: FiberId,
+        generation: u64,
         class: fusion_sys::courier::CourierFiberClass,
     ) -> Result<(), FiberError> {
         let (Some(runtime_sink), Some(courier_id)) = (self.runtime_sink, self.courier_id) else {
             return Ok(());
         };
+        let is_root = self
+            .root_registered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if is_root
+            && let (Some(launch_control), Some(launch_request)) =
+                (self.launch_control, self.launch_request)
+            && self
+                .launch_registered
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            launch_control
+                .register_child_courier(launch_request, self.runtime_tick(), fiber)
+                .map_err(fiber_error_from_launch_control)?;
+        }
         runtime_sink
             .register_fiber(
                 courier_id,
@@ -7407,9 +7670,9 @@ impl GreenPoolInner {
                     claim_awareness: fusion_sys::claims::ClaimAwareness::Blind,
                     claim_context: None,
                 },
-                fiber.get() as u64,
+                generation,
                 class,
-                false,
+                is_root,
                 None,
                 self.runtime_tick(),
             )
@@ -8360,7 +8623,7 @@ where
         return Err(error);
     }
 
-    if let Err(error) = inner.register_runtime_fiber(fiber_id, class) {
+    if let Err(error) = inner.register_runtime_fiber(fiber_id, reservation.id, class) {
         trace_spawn_failure(
             "runtime.register_runtime_fiber",
             Some(reservation.slot_index),
@@ -8750,6 +9013,8 @@ impl CurrentFiberPool {
                 courier_id: config.courier_id,
                 context_id: config.context_id,
                 runtime_sink: config.runtime_sink,
+                launch_control: config.launch_control,
+                launch_request: config.launch_request,
                 scheduling: config.scheduling,
                 capacity_policy: config.capacity_policy,
                 yield_budget_supported: yield_budget_enforcement_supported(),
@@ -8758,6 +9023,8 @@ impl CurrentFiberPool {
                 shutdown: AtomicBool::new(false),
                 client_refs: AtomicUsize::new(1),
                 active: AtomicUsize::new(0),
+                root_registered: AtomicBool::new(false),
+                launch_registered: AtomicBool::new(false),
                 next_id: AtomicUsize::new(1),
                 next_carrier: AtomicUsize::new(0),
                 carriers,
@@ -8833,6 +9100,8 @@ impl CurrentFiberPool {
                 courier_id: config.courier_id,
                 context_id: config.context_id,
                 runtime_sink: config.runtime_sink,
+                launch_control: config.launch_control,
+                launch_request: config.launch_request,
                 scheduling: config.scheduling,
                 capacity_policy: config.capacity_policy,
                 yield_budget_supported: yield_budget_enforcement_supported(),
@@ -8841,6 +9110,8 @@ impl CurrentFiberPool {
                 shutdown: AtomicBool::new(false),
                 client_refs: AtomicUsize::new(1),
                 active: AtomicUsize::new(0),
+                root_registered: AtomicBool::new(false),
+                launch_registered: AtomicBool::new(false),
                 next_id: AtomicUsize::new(1),
                 next_carrier: AtomicUsize::new(0),
                 carriers,
@@ -9332,6 +9603,21 @@ fn fiber_error_from_runtime_sink(
         | fusion_sys::courier::CourierRuntimeSinkError::StateConflict
         | fusion_sys::courier::CourierRuntimeSinkError::Busy => FiberError::state_conflict(),
         fusion_sys::courier::CourierRuntimeSinkError::ResourceExhausted => {
+            FiberError::resource_exhausted()
+        }
+    }
+}
+
+fn fiber_error_from_launch_control(
+    error: fusion_sys::courier::CourierLaunchControlError,
+) -> FiberError {
+    match error {
+        fusion_sys::courier::CourierLaunchControlError::Unsupported => FiberError::unsupported(),
+        fusion_sys::courier::CourierLaunchControlError::Invalid => FiberError::invalid(),
+        fusion_sys::courier::CourierLaunchControlError::NotFound
+        | fusion_sys::courier::CourierLaunchControlError::StateConflict
+        | fusion_sys::courier::CourierLaunchControlError::Busy => FiberError::state_conflict(),
+        fusion_sys::courier::CourierLaunchControlError::ResourceExhausted => {
             FiberError::resource_exhausted()
         }
     }
@@ -10110,6 +10396,8 @@ fn build_hosted_green_inner(
             courier_id: config.courier_id,
             context_id: config.context_id,
             runtime_sink: config.runtime_sink,
+            launch_control: config.launch_control,
+            launch_request: config.launch_request,
             scheduling: config.scheduling,
             capacity_policy: config.capacity_policy,
             yield_budget_supported: yield_budget_enforcement_supported(),
@@ -10118,6 +10406,8 @@ fn build_hosted_green_inner(
             shutdown: AtomicBool::new(false),
             client_refs: AtomicUsize::new(1),
             active: AtomicUsize::new(0),
+            root_registered: AtomicBool::new(false),
+            launch_registered: AtomicBool::new(false),
             next_id: AtomicUsize::new(1),
             next_carrier: AtomicUsize::new(0),
             carriers,
@@ -11235,6 +11525,28 @@ mod tests {
     use super::*;
     use crate::sync::Mutex as FusionMutex;
     use fusion_pal::sys::mem::{Address, CachePolicy, MemAdviceCaps, Protect, Region};
+    use fusion_sys::claims::{
+        ClaimAwareness,
+        ClaimContextId,
+        ClaimsDigest,
+        ImageSealId,
+        PrincipalId,
+    };
+    use fusion_sys::courier::{
+        CourierCaps,
+        CourierChildLaunchRequest,
+        CourierLaunchDescriptor,
+        CourierPlan,
+        CourierVisibility,
+    };
+    use fusion_sys::domain::{
+        CourierDescriptor,
+        DomainCaps,
+        DomainDescriptor,
+        DomainId,
+        DomainKind,
+        DomainRegistry,
+    };
     use fusion_sys::mem::resource::{
         BoundMemoryResource,
         BoundResourceSpec,
@@ -11305,6 +11617,242 @@ mod tests {
                 ),
             ))
             .expect("aligned bound resource should bind"),
+        )
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct TestRuntimeSinkState {
+        ledger: CourierRuntimeLedger,
+        fiber: Option<CourierFiberRecord>,
+        responsiveness: CourierResponsiveness,
+        metadata: Option<fusion_sys::courier::CourierMetadataEntry<'static>>,
+        obligation: Option<fusion_sys::courier::CourierObligationRecord<'static>>,
+    }
+
+    unsafe fn test_runtime_sink_record_context(
+        context: *mut (),
+        _courier: CourierId,
+        runtime_context: ContextId,
+        tick: u64,
+    ) -> Result<(), fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let mut state = state.lock().expect("test runtime sink mutex should lock");
+        state.ledger.record_context(runtime_context, tick);
+        Ok(())
+    }
+
+    unsafe fn test_runtime_sink_register_fiber(
+        context: *mut (),
+        _courier: CourierId,
+        snapshot: ManagedFiberSnapshot,
+        generation: u64,
+        class: fusion_sys::courier::CourierFiberClass,
+        is_root: bool,
+        metadata_attachment: Option<fusion_sys::courier::FiberMetadataAttachment>,
+        tick: u64,
+    ) -> Result<(), fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let mut state = state.lock().expect("test runtime sink mutex should lock");
+        state.fiber = Some(CourierFiberRecord::from_snapshot(
+            snapshot,
+            generation,
+            class,
+            is_root,
+            metadata_attachment,
+            tick,
+        ));
+        state.ledger.register_fiber(class);
+        Ok(())
+    }
+
+    unsafe fn test_runtime_sink_update_fiber(
+        context: *mut (),
+        _courier: CourierId,
+        snapshot: ManagedFiberSnapshot,
+        tick: u64,
+    ) -> Result<(), fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let mut state = state.lock().expect("test runtime sink mutex should lock");
+        let Some(record) = state.fiber.as_mut() else {
+            return Err(fusion_sys::courier::CourierRuntimeSinkError::NotFound);
+        };
+        record.update_from_snapshot(snapshot, tick);
+        Ok(())
+    }
+
+    unsafe fn test_runtime_sink_mark_fiber_terminal(
+        context: *mut (),
+        _courier: CourierId,
+        fiber: FiberId,
+        terminal: fusion_sys::courier::FiberTerminalStatus,
+        tick: u64,
+    ) -> Result<(), fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let mut state = state.lock().expect("test runtime sink mutex should lock");
+        let Some(mut record) = state.fiber else {
+            return Err(fusion_sys::courier::CourierRuntimeSinkError::NotFound);
+        };
+        if record.fiber != fiber {
+            return Err(fusion_sys::courier::CourierRuntimeSinkError::NotFound);
+        }
+        record.mark_terminal(terminal, tick);
+        state.ledger.release_fiber(record.class);
+        state.fiber = Some(record);
+        Ok(())
+    }
+
+    unsafe fn test_runtime_sink_record_runtime_summary(
+        context: *mut (),
+        _courier: CourierId,
+        summary: CourierRuntimeSummary,
+        tick: u64,
+    ) -> Result<(), fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let mut state = state.lock().expect("test runtime sink mutex should lock");
+        state.ledger.record_summary(summary, tick);
+        Ok(())
+    }
+
+    unsafe fn test_runtime_sink_runtime_ledger(
+        context: *mut (),
+        _courier: CourierId,
+    ) -> Result<CourierRuntimeLedger, fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let state = state.lock().expect("test runtime sink mutex should lock");
+        Ok(state.ledger)
+    }
+
+    unsafe fn test_runtime_sink_fiber_record(
+        context: *mut (),
+        _courier: CourierId,
+        fiber: FiberId,
+    ) -> Result<Option<CourierFiberRecord>, fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let state = state.lock().expect("test runtime sink mutex should lock");
+        Ok(state.fiber.filter(|record| record.fiber == fiber))
+    }
+
+    unsafe fn test_runtime_sink_evaluate_responsiveness(
+        context: *mut (),
+        _courier: CourierId,
+        _tick: u64,
+    ) -> Result<CourierResponsiveness, fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let state = state.lock().expect("test runtime sink mutex should lock");
+        Ok(state.responsiveness)
+    }
+
+    unsafe fn test_runtime_sink_upsert_metadata(
+        context: *mut (),
+        _courier: CourierId,
+        subject: fusion_sys::courier::CourierMetadataSubject,
+        key: &'static str,
+        value: &'static str,
+        tick: u64,
+    ) -> Result<(), fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let mut state = state.lock().expect("test runtime sink mutex should lock");
+        state.metadata = Some(fusion_sys::courier::CourierMetadataEntry::new(
+            subject, key, value, tick,
+        ));
+        Ok(())
+    }
+
+    unsafe fn test_runtime_sink_remove_metadata(
+        context: *mut (),
+        _courier: CourierId,
+        subject: fusion_sys::courier::CourierMetadataSubject,
+        key: &str,
+    ) -> Result<(), fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let mut state = state.lock().expect("test runtime sink mutex should lock");
+        if state
+            .metadata
+            .is_some_and(|entry| entry.subject == subject && entry.key == key)
+        {
+            state.metadata = None;
+            return Ok(());
+        }
+        Err(fusion_sys::courier::CourierRuntimeSinkError::NotFound)
+    }
+
+    unsafe fn test_runtime_sink_register_obligation(
+        context: *mut (),
+        _courier: CourierId,
+        spec: fusion_sys::courier::CourierObligationSpec<'static>,
+        tick: u64,
+    ) -> Result<
+        fusion_sys::courier::CourierObligationId,
+        fusion_sys::courier::CourierRuntimeSinkError,
+    > {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let mut state = state.lock().expect("test runtime sink mutex should lock");
+        let record = fusion_sys::courier::CourierObligationRecord::new(
+            fusion_sys::courier::CourierObligationId::new(1),
+            spec,
+            tick,
+        );
+        state.obligation = Some(record);
+        Ok(record.id)
+    }
+
+    unsafe fn test_runtime_sink_record_obligation_progress(
+        context: *mut (),
+        _courier: CourierId,
+        obligation: fusion_sys::courier::CourierObligationId,
+        tick: u64,
+    ) -> Result<(), fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let mut state = state.lock().expect("test runtime sink mutex should lock");
+        let Some(record) = state.obligation.as_mut() else {
+            return Err(fusion_sys::courier::CourierRuntimeSinkError::NotFound);
+        };
+        if record.id != obligation {
+            return Err(fusion_sys::courier::CourierRuntimeSinkError::NotFound);
+        }
+        record.last_progress_tick = tick;
+        record.responsiveness = CourierResponsiveness::Responsive;
+        Ok(())
+    }
+
+    unsafe fn test_runtime_sink_remove_obligation(
+        context: *mut (),
+        _courier: CourierId,
+        obligation: fusion_sys::courier::CourierObligationId,
+    ) -> Result<(), fusion_sys::courier::CourierRuntimeSinkError> {
+        let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
+        let mut state = state.lock().expect("test runtime sink mutex should lock");
+        if state
+            .obligation
+            .is_some_and(|record| record.id == obligation)
+        {
+            state.obligation = None;
+            return Ok(());
+        }
+        Err(fusion_sys::courier::CourierRuntimeSinkError::NotFound)
+    }
+
+    const TEST_RUNTIME_SINK_VTABLE: fusion_sys::courier::CourierRuntimeSinkVTable =
+        fusion_sys::courier::CourierRuntimeSinkVTable {
+            record_context: test_runtime_sink_record_context,
+            register_fiber: test_runtime_sink_register_fiber,
+            update_fiber: test_runtime_sink_update_fiber,
+            mark_fiber_terminal: test_runtime_sink_mark_fiber_terminal,
+            record_runtime_summary: test_runtime_sink_record_runtime_summary,
+            runtime_ledger: test_runtime_sink_runtime_ledger,
+            fiber_record: test_runtime_sink_fiber_record,
+            evaluate_responsiveness: test_runtime_sink_evaluate_responsiveness,
+            upsert_metadata: test_runtime_sink_upsert_metadata,
+            remove_metadata: test_runtime_sink_remove_metadata,
+            register_obligation: test_runtime_sink_register_obligation,
+            record_obligation_progress: test_runtime_sink_record_obligation_progress,
+            remove_obligation: test_runtime_sink_remove_obligation,
+        };
+
+    fn test_runtime_sink(state: &StdMutex<TestRuntimeSinkState>) -> CourierRuntimeSink {
+        CourierRuntimeSink::new(
+            (state as *const StdMutex<TestRuntimeSinkState>) as *mut (),
+            &TEST_RUNTIME_SINK_VTABLE,
         )
     }
 
@@ -11720,6 +12268,8 @@ mod tests {
             courier_id: None,
             context_id: None,
             runtime_sink: None,
+            launch_control: None,
+            launch_request: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -11806,6 +12356,8 @@ mod tests {
             courier_id: None,
             context_id: None,
             runtime_sink: None,
+            launch_control: None,
+            launch_request: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -11857,6 +12409,8 @@ mod tests {
             courier_id: None,
             context_id: None,
             runtime_sink: None,
+            launch_control: None,
+            launch_request: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -11923,6 +12477,8 @@ mod tests {
             courier_id: None,
             context_id: None,
             runtime_sink: None,
+            launch_control: None,
+            launch_request: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -11983,6 +12539,8 @@ mod tests {
             courier_id: None,
             context_id: None,
             runtime_sink: None,
+            launch_control: None,
+            launch_request: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -12049,6 +12607,8 @@ mod tests {
             courier_id: None,
             context_id: None,
             runtime_sink: None,
+            launch_control: None,
+            launch_request: None,
         };
         let slab = FiberStackSlab::new(
             &config,
@@ -13328,6 +13888,131 @@ mod tests {
 
         assert_eq!(fibers.run_until_idle().expect("pool should drain"), 1);
         assert_eq!(task.join().expect("task should complete"), 77);
+
+        fibers
+            .shutdown()
+            .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn current_fiber_pool_publishes_courier_truth_to_runtime_sink() {
+        const COURIER: CourierId = CourierId::new(77);
+        const CONTEXT: ContextId = ContextId::new(0x220);
+
+        let sink_state = StdMutex::new(TestRuntimeSinkState {
+            ledger: CourierRuntimeLedger::new(),
+            fiber: None,
+            responsiveness: CourierResponsiveness::Responsive,
+            metadata: None,
+            obligation: None,
+        });
+        let fibers = CurrentFiberPool::new(
+            &FiberPoolConfig::new()
+                .with_courier_id(COURIER)
+                .with_context_id(CONTEXT)
+                .with_runtime_sink(test_runtime_sink(&sink_state)),
+        )
+        .expect("current fiber pool should build");
+
+        let handle = fibers
+            .spawn_with_stack::<4096, _, _>(|| 7_u8)
+            .expect("task should spawn");
+
+        assert_eq!(fibers.run_until_idle().expect("pool should drain"), 1);
+        assert_eq!(handle.join().expect("task should complete"), 7);
+
+        let sink_state = sink_state
+            .lock()
+            .expect("test runtime sink mutex should lock");
+        assert_eq!(sink_state.ledger.current_context.unwrap().context, CONTEXT);
+        assert_eq!(sink_state.ledger.active_runnable_units, 0);
+        let record = sink_state
+            .fiber
+            .expect("runtime sink should retain the fiber record");
+        assert_eq!(record.state, fusion_sys::fiber::FiberState::Completed);
+        assert!(record.is_root);
+
+        fibers
+            .shutdown()
+            .expect("current fiber pool should shut down cleanly");
+    }
+
+    #[test]
+    fn current_fiber_pool_realizes_child_launch_against_domain_registry() {
+        const ROOT_COURIER: CourierId = CourierId::new(1);
+        const CHILD_COURIER: CourierId = CourierId::new(77);
+        const CHILD_CONTEXT: ContextId = ContextId::new(0x220);
+
+        let mut registry: DomainRegistry<'static, 4, 4, 4, 2, 4> =
+            DomainRegistry::new(DomainDescriptor {
+                id: DomainId::new(0x5056_4153),
+                name: "pvas",
+                kind: DomainKind::NativeSubstrate,
+                caps: DomainCaps::COURIER_REGISTRY
+                    | DomainCaps::COURIER_VISIBILITY
+                    | DomainCaps::CONTEXT_REGISTRY,
+            });
+        registry
+            .register_courier(CourierDescriptor {
+                id: ROOT_COURIER,
+                name: "kernel",
+                caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
+                visibility: CourierVisibility::Full,
+                claim_awareness: ClaimAwareness::Black,
+                claim_context: Some(ClaimContextId::new(0xAAA0)),
+                plan: CourierPlan::new(2, 4),
+            })
+            .expect("root courier should register");
+        let runtime_sink = registry.runtime_sink();
+        let launch_control = registry.launch_control();
+        let fibers = CurrentFiberPool::new(
+            &FiberPoolConfig::new()
+                .with_courier_id(CHILD_COURIER)
+                .with_context_id(CHILD_CONTEXT)
+                .with_runtime_sink(runtime_sink)
+                .with_launch_control(launch_control)
+                .with_child_launch(CourierChildLaunchRequest {
+                    parent: ROOT_COURIER,
+                    descriptor: CourierLaunchDescriptor {
+                        id: CHILD_COURIER,
+                        name: "httpd",
+                        caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS
+                            | CourierCaps::SPAWN_SUB_FIBERS,
+                        visibility: CourierVisibility::Scoped,
+                        claim_awareness: ClaimAwareness::Black,
+                        claim_context: Some(ClaimContextId::new(0xBBB0)),
+                        plan: CourierPlan::new(0, 2),
+                    },
+                    principal: PrincipalId::parse("httpd#01@web[cache.pvas-local]:443")
+                        .expect("principal should parse"),
+                    image_seal: fusion_sys::claims::LocalAdmissionSeal::new(
+                        ImageSealId::new(7),
+                        ClaimsDigest::zero(),
+                        ClaimsDigest::zero(),
+                        ClaimsDigest::zero(),
+                        47,
+                    ),
+                    launch_epoch: 47,
+                }),
+        )
+        .expect("current fiber pool should build");
+
+        let handle = fibers
+            .spawn_with_stack::<4096, _, _>(|| 7_u8)
+            .expect("task should spawn");
+
+        assert_eq!(fibers.run_until_idle().expect("pool should drain"), 1);
+        assert_eq!(handle.join().expect("task should complete"), 7);
+
+        let parent = registry.courier(ROOT_COURIER).unwrap();
+        let child = parent.child_couriers().next().unwrap();
+        assert_eq!(child.child, CHILD_COURIER);
+        let launched = registry.courier(CHILD_COURIER).unwrap();
+        assert_eq!(
+            launched.runtime_ledger().current_context.unwrap().context,
+            CHILD_CONTEXT
+        );
+        assert!(launched.fibers().next().unwrap().is_root);
 
         fibers
             .shutdown()

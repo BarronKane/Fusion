@@ -210,22 +210,6 @@ impl<
         Fiber::spawn_managed(stack, state)
     }
 
-    /// Spawns this service on one managed fiber with one explicit opt-in publication lane.
-    ///
-    /// # Errors
-    ///
-    /// Returns any honest low-level fiber construction failure.
-    pub fn spawn_managed_with_publication<
-        'state,
-        const META_CAPACITY: usize,
-        const MAX_CONSUMERS: usize,
-    >(
-        state: Pin<&'state mut Self>,
-        stack: FiberStack,
-    ) -> Result<ManagedFiber<'state, Self, META_CAPACITY, MAX_CONSUMERS>, FiberError> {
-        Fiber::spawn_managed_with_publication(stack, state)
-    }
-
     /// Pumps pending metadata and control requests once.
     ///
     /// # Errors
