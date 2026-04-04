@@ -51,11 +51,6 @@ compile_error!("fusion-pal Cortex-M SoC features require `sys-cortex-m`.");
 #[cfg(all(feature = "sys-fusion-kn", not(target_os = "linux")))]
 compile_error!("fusion-pal feature `sys-fusion-kn` currently supports only Linux targets.");
 
-/// Dynamic bare-metal hardware-discovery and firmware-enumeration family facade.
-pub mod hal {
-    pub use crate::pal::hal::*;
-}
-
 /// Hosted implementation-family facade.
 pub mod hosted {
     pub use crate::pal::hosted::*;

@@ -1,0 +1,41 @@
+[package]
+name = "fusion-firmware"
+description = ""
+documentation = ""
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+path = "fusion-firmware.rs"
+
+[features]
+default = ["std"]
+std = ["fusion-hal/std", "fusion-pal/std"]
+soc = ["fusion-hal/soc", "fusion-pal/soc"]
+hosted = ["std", "fusion-hal/hosted", "fusion-pal/hosted"]
+critical-safe = ["fusion-hal/critical-safe", "fusion-pal/critical-safe"]
+debug-profile = ["fusion-hal/debug-profile", "fusion-pal/debug-profile"]
+debug-insights = ["fusion-hal/debug-insights", "fusion-pal/debug-insights"]
+sys-cortex-m = ["soc", "fusion-hal/sys-cortex-m", "fusion-pal/sys-cortex-m"]
+soc-rp2350 = ["sys-cortex-m", "fusion-hal/soc-rp2350", "fusion-pal/soc-rp2350"]
+sys-fusion-kn = ["hosted", "fusion-hal/sys-fusion-kn", "fusion-pal/sys-fusion-kn"]
+cortex-m-vector-secure-world = [
+    "fusion-hal/cortex-m-vector-secure-world",
+    "fusion-pal/cortex-m-vector-secure-world",
+]
+cortex-m-vector-nonsecure-world = [
+    "fusion-hal/cortex-m-vector-nonsecure-world",
+    "fusion-pal/cortex-m-vector-nonsecure-world",
+]
+
+[dependencies]
+bitflags.workspace = true
+fusion-hal = { workspace = true, default-features = false }
+fusion-pal = { workspace = true, default-features = false }
+
+[lints]
+workspace = true

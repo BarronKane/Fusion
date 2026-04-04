@@ -4,9 +4,6 @@ pub mod hosted;
 #[path = "soc/soc.rs"]
 pub mod soc;
 
-#[path = "hal/hal.rs"]
-pub mod hal;
-
 pub mod selected {
     include!(concat!(env!("OUT_DIR"), "/selected_pal.rs"));
 }

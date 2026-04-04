@@ -46,23 +46,12 @@ fn feature_enabled(name: &str) -> bool {
 fn selected_lane() -> &'static str {
     let soc = feature_enabled("CARGO_FEATURE_SOC");
     let hosted = feature_enabled("CARGO_FEATURE_HOSTED");
-    let hal = feature_enabled("CARGO_FEATURE_HAL");
-
-    if soc && hal {
-        panic!(
-            "fusion-pal requires at most one explicit hardware PAL lane; `soc` and `hal` are mutually exclusive"
-        );
-    }
 
     // `hosted` is the soft default for ordinary root-workspace consumers. When a more specific
     // hardware lane is selected explicitly, let it win instead of turning default convenience into
     // a fake conflict.
     if soc {
         return "soc";
-    }
-
-    if hal {
-        return "hal";
     }
 
     if hosted {
@@ -80,9 +69,11 @@ fn selected_lane() -> &'static str {
 
     match env::var("CARGO_CFG_TARGET_OS").as_deref() {
         Ok("linux" | "macos" | "windows" | "ios") => "hosted",
-        Ok("none") => "hal",
+        Ok("none") => panic!(
+            "fusion-pal no longer exposes the generic `hal` lane; use `fusion-firmware` for dynamic firmware and hardware-discovery targets"
+        ),
         Ok(other) => panic!(
-            "fusion-pal could not infer PAL lane for target_os={other:?}; enable one of `soc`, `hosted`, or `hal`"
+            "fusion-pal could not infer PAL lane for target_os={other:?}; enable one of `soc` or `hosted`"
         ),
         Err(_) => panic!(
             "fusion-pal could not infer PAL lane because CARGO_CFG_TARGET_OS was unavailable"
@@ -138,10 +129,6 @@ fn selected_pal_glue(lane: &str) -> String {
                 ),
             }
         }
-        "hal" => "pub use super::hal::SelectedPalLane;\n\
-                  pub const PAL_LANE_NAME: &str = super::hal::PAL_LANE_NAME;\n\
-                  pub use crate::pal::hal as platform;\n"
-            .to_owned(),
         other => panic!("unsupported fusion-pal lane selection {other:?}"),
     }
 }
@@ -150,7 +137,6 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SOC");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_HOSTED");
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_HAL");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SYS_CORTEX_M");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SOC_RP2350");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SYS_FUSION_KN");
