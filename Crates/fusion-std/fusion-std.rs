@@ -14,11 +14,9 @@ extern crate std;
 compile_error!("fusion-std without feature `std` requires panic = \"abort\".");
 
 /// Public atomic substrate re-exported from `fusion-sys`.
-pub use fusion_sys::atomic;
-/// Public GPIO surface re-exported from `fusion-sys`.
-pub use fusion_sys::gpio;
+pub use fusion_sys::sync::atomic;
 /// Public channel-native debug/inspection surface re-exported from `fusion-sys`.
-pub use fusion_sys::insight;
+pub use fusion_sys::channel::insight;
 #[path = "claims/claims.rs"]
 /// Public claims parsing, matching, and inspection rendering sugar.
 pub mod claims;

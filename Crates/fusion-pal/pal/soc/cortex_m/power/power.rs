@@ -17,10 +17,10 @@ const CORTEX_M_POWER_SUPPORT: PowerSupport = PowerSupport {
 
 /// Cortex-M power provider type.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct CortexMPower;
+pub struct Power;
 
 /// Selected Cortex-M power provider type.
-pub type PlatformPower = CortexMPower;
+pub type PlatformPower = Power;
 
 /// Returns the selected Cortex-M power provider.
 #[must_use]
@@ -28,7 +28,7 @@ pub const fn system_power() -> PlatformPower {
     PlatformPower::new()
 }
 
-impl CortexMPower {
+impl Power {
     /// Creates a new Cortex-M power provider handle.
     #[must_use]
     pub const fn new() -> Self {
@@ -36,13 +36,13 @@ impl CortexMPower {
     }
 }
 
-impl PowerBase for CortexMPower {
+impl PowerBase for Power {
     fn support(&self) -> PowerSupport {
         CORTEX_M_POWER_SUPPORT
     }
 }
 
-impl PowerControl for CortexMPower {
+impl PowerControl for Power {
     fn modes(&self) -> &'static [PowerModeDescriptor] {
         crate::pal::soc::cortex_m::hal::soc::board::pal_power_modes()
     }

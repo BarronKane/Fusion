@@ -1,6 +1,9 @@
 #[path = "context/context.rs"]
 /// Windows fusion-pal user-space context backend implementation.
 pub mod context;
+#[path = "dma/dma.rs"]
+/// Windows fusion-pal DMA backend implementation.
+pub mod dma;
 /// Windows atomic surface remains unsupported for now.
 pub mod atomic {
     pub use crate::contract::pal::runtime::atomic::{
@@ -26,19 +29,6 @@ pub mod atomic {
 #[path = "event/event.rs"]
 /// Windows fusion-pal event backend implementation.
 pub mod event;
-/// Windows GPIO surface remains unsupported for now.
-pub mod gpio {
-    pub use crate::contract::drivers::gpio::{
-        UnsupportedGpio as PlatformGpio,
-        UnsupportedGpioPin as PlatformGpioPin,
-    };
-
-    /// Returns the unsupported GPIO provider for the selected backend.
-    #[must_use]
-    pub const fn system_gpio() -> PlatformGpio {
-        PlatformGpio::new()
-    }
-}
 /// Windows hosted-fiber helper surface remains unsupported for now.
 pub mod fiber {
     pub use crate::contract::pal::runtime::fiber::{

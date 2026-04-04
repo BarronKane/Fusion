@@ -1,0 +1,34 @@
+[package]
+name = "fusion-hal"
+description = ""
+documentation = ""
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+path = "fusion-hal.rs"
+
+[features]
+default = ["std"]
+std = []
+soc = []
+hosted = ["std"]
+hal = []
+critical-safe = []
+debug-profile = []
+debug-insights = []
+sys-cortex-m = ["soc"]
+soc-rp2350 = ["sys-cortex-m"]
+sys-fusion-kn = ["hosted"]
+cortex-m-vector-secure-world = []
+cortex-m-vector-nonsecure-world = []
+
+[dependencies]
+bitflags.workspace = true
+
+[lints]
+workspace = true

@@ -12,6 +12,7 @@ pub use fusion_kn::contract::*;
 pub use crate::pal::hosted::linux::{
     atomic,
     context,
+    dma,
     event,
     fiber,
     gpio,

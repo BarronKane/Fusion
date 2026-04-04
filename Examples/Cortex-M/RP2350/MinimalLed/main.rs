@@ -3,15 +3,26 @@
 
 use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::pin::Pin;
+use core::sync::atomic::{
+    AtomicBool,
+    Ordering,
+};
 use core::time::Duration;
 
 use cortex_m_rt::{entry, exception};
 
-use fusion_example_rp2350_on_device::runtime::block_on_with_poll_stack_bytes;
-use fusion_std::gpio::{Gpio, GpioDriveStrength, GpioPin};
-use fusion_std::thread::async_sleep_for;
-use fusion_sys::hardware::peripheral::LedPair;
+use fusion_example_rp2350_on_device::gpio::{
+    Rp2350FiberGpioOutputPin,
+    Rp2350FiberGpioService,
+};
+use fusion_example_rp2350_on_device::runtime::{
+    drive_once,
+    spawn_with_stack,
+};
+use fusion_hal::contract::drivers::bus::gpio::GpioDriveStrength;
+use fusion_hal::drivers::peripheral::LedPair;
+use fusion_std::thread::yield_now;
 use fusion_sys::thread::system_monotonic_time;
 
 const BLUE_LED_PIN: u8 = 28;
@@ -19,27 +30,46 @@ const RED_LED_PIN: u8 = 27;
 const FIZZBUZZ_PERIOD: Duration = Duration::from_millis(300);
 const STARTUP_PHASE_PERIOD: Duration = Duration::from_millis(500);
 const PANIC_PHASE_PERIOD: Duration = Duration::from_millis(500);
-const FIZZBUZZ_POLL_STACK_BYTES: usize = 2048;
+const GPIO_SERVICE_STACK_BYTES: usize = 2048;
+const FIZZBUZZ_STACK_BYTES: usize = 4096;
 
-type PicoLeds = LedPair<GpioPin, GpioPin>;
+type PicoGpioService = Rp2350FiberGpioService<2>;
+type PicoGpioPin = Rp2350FiberGpioOutputPin<16, 16>;
+type PicoLeds = LedPair<PicoGpioPin, PicoGpioPin>;
 
 static mut LED_STORAGE: MaybeUninit<PicoLeds> = MaybeUninit::uninit();
+static mut GPIO_SERVICE_STORAGE: MaybeUninit<PicoGpioService> = MaybeUninit::uninit();
 static LEDS_READY: AtomicBool = AtomicBool::new(false);
 
-fn claim_led_pin(pin: u8) -> GpioPin {
-    let mut gpio = Gpio::take(pin).expect("gpio pin should be claimable");
-    gpio.set_drive_strength(GpioDriveStrength::MilliAmps4)
-        .expect("drive strength should be configurable");
-    gpio
+fn init_gpio_service() -> *mut PicoGpioService {
+    unsafe {
+        let service = core::ptr::addr_of_mut!(GPIO_SERVICE_STORAGE).cast::<PicoGpioService>();
+        service.write(PicoGpioService::new().expect("gpio service should build"));
+        service
+    }
 }
 
 fn init_leds() -> &'static mut PicoLeds {
+    let gpio_service = init_gpio_service();
+    let blue = unsafe {
+        Pin::new_unchecked(&mut *gpio_service)
+            .claim_output_pin(BLUE_LED_PIN, GpioDriveStrength::MilliAmps4)
+            .expect("blue led pin should be claimable")
+    };
+    let red = unsafe {
+        Pin::new_unchecked(&mut *gpio_service)
+            .claim_output_pin(RED_LED_PIN, GpioDriveStrength::MilliAmps4)
+            .expect("red led pin should be claimable")
+    };
+    unsafe {
+        Pin::new_unchecked(&mut *gpio_service)
+            .spawn::<GPIO_SERVICE_STACK_BYTES>()
+            .expect("gpio service fiber should spawn");
+    }
+
     unsafe {
         let leds = core::ptr::addr_of_mut!(LED_STORAGE).cast::<PicoLeds>();
-        leds.write(
-            LedPair::new(claim_led_pin(BLUE_LED_PIN), claim_led_pin(RED_LED_PIN))
-                .expect("led pair should configure"),
-        );
+        leds.write(LedPair::new(blue, red).expect("led pair should configure"));
         LEDS_READY.store(true, Ordering::Release);
         &mut *leds
     }
@@ -88,14 +118,19 @@ fn fizzbuzz_command(step: u32) -> (bool, bool) {
     (step.is_multiple_of(3), step.is_multiple_of(5))
 }
 
-async fn fizzbuzz_loop(leds: &mut PicoLeds) -> ! {
+fn fizzbuzz_loop(leds: &mut PicoLeds) -> ! {
     let mut step = 3_u32;
     loop {
         let (blue_on, red_on) = fizzbuzz_command(step);
         leds.set(blue_on, red_on).expect("LED pair should update");
-        async_sleep_for(FIZZBUZZ_PERIOD)
-            .await
+        system_monotonic_time()
+            .sleep_for(FIZZBUZZ_PERIOD)
             .expect("monotonic timer wait should complete");
+        if yield_now().is_err() {
+            loop {
+                core::hint::spin_loop();
+            }
+        }
         step = step.wrapping_add(1);
     }
 }
@@ -106,8 +141,12 @@ fn main() -> ! {
     leds.off().expect("LEDs should start off");
     startup_dance(leds);
 
-    block_on_with_poll_stack_bytes(FIZZBUZZ_POLL_STACK_BYTES, fizzbuzz_loop(leds))
-        .expect("current-thread async runtime should drive fizzbuzz loop");
+    let _fizzbuzz = spawn_with_stack::<FIZZBUZZ_STACK_BYTES, _, _>(move || fizzbuzz_loop(leds))
+        .expect("fizzbuzz fiber should spawn");
+
+    loop {
+        drive_once().expect("current-thread fiber runtime should progress");
+    }
 }
 
 #[exception]

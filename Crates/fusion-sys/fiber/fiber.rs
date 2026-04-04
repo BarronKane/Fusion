@@ -45,9 +45,9 @@ use crate::claims::{
     ClaimAwareness,
     ClaimContextId,
 };
-use crate::context::ContextId;
+use crate::domain::context::ContextId;
 use crate::courier::CourierId;
-use crate::protocol::{
+use crate::transport::protocol::{
     Protocol,
     ProtocolBootstrapKind,
     ProtocolCaps,

@@ -71,18 +71,18 @@ pub enum AsyncTaskLifecycleRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AsyncTaskLifecycleProtocol;
 
-impl fusion_sys::protocol::Protocol for AsyncTaskLifecycleProtocol {
+impl fusion_sys::transport::protocol::Protocol for AsyncTaskLifecycleProtocol {
     type Message = AsyncTaskLifecycleRecord;
 
-    const DESCRIPTOR: fusion_sys::protocol::ProtocolDescriptor =
-        fusion_sys::protocol::ProtocolDescriptor {
-            id: fusion_sys::protocol::ProtocolId(0x4655_5349_4f4e_4153_594e_435f_544c_0001),
-            version: fusion_sys::protocol::ProtocolVersion::new(1, 0, 0),
-            caps: fusion_sys::protocol::ProtocolCaps::DEBUG_VIEW,
-            bootstrap: fusion_sys::protocol::ProtocolBootstrapKind::Immediate,
-            debug_view: fusion_sys::protocol::ProtocolDebugView::Structured,
-            transport: fusion_sys::protocol::ProtocolTransportRequirements::message_local(),
-            implementation: fusion_sys::protocol::ProtocolImplementationKind::Native,
+    const DESCRIPTOR: fusion_sys::transport::protocol::ProtocolDescriptor =
+        fusion_sys::transport::protocol::ProtocolDescriptor {
+            id: fusion_sys::transport::protocol::ProtocolId(0x4655_5349_4f4e_4153_594e_435f_544c_0001),
+            version: fusion_sys::transport::protocol::ProtocolVersion::new(1, 0, 0),
+            caps: fusion_sys::transport::protocol::ProtocolCaps::DEBUG_VIEW,
+            bootstrap: fusion_sys::transport::protocol::ProtocolBootstrapKind::Immediate,
+            debug_view: fusion_sys::transport::protocol::ProtocolDebugView::Structured,
+            transport: fusion_sys::transport::protocol::ProtocolTransportRequirements::message_local(),
+            implementation: fusion_sys::transport::protocol::ProtocolImplementationKind::Native,
         };
 }
 

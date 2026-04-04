@@ -1,3 +1,11 @@
+#[cfg(feature = "std")]
+use self::hosted::{
+    ExecutorReactorDriverState,
+    HostedThreadScheduler,
+};
+#[cfg(not(feature = "std"))]
+use self::engine::run_scheduled_slot_lease;
+
 include!("state.rs");
 
 struct AsyncTaskSlot {
@@ -635,160 +643,9 @@ enum AsyncSlotRunDisposition {
     PendingRequeue,
 }
 
-#[cfg(feature = "std")]
-#[derive(Debug)]
-struct HostedThreadScheduler {
-    ready: SyncMutex<HostedReadyQueueState>,
-    signal: Semaphore,
-    shutdown: AtomicBool,
-    worker_count: usize,
-}
-
-#[cfg(feature = "std")]
-#[derive(Debug)]
-struct HostedThreadWorkers {
-    scheduler: Arc<HostedThreadScheduler>,
-    handles: Vec<ThreadHandle>,
-    system: ThreadSystem,
-}
-
-#[cfg(feature = "std")]
-#[derive(Debug)]
-enum ThreadAsyncCarriers {
-    Direct(HostedThreadWorkers),
-    ThreadPool(ThreadPool),
-}
-
-/// Hosted thread-async runtime bootstrap realization.
-#[cfg(feature = "std")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ThreadAsyncRuntimeBootstrap {
-    /// Hosted async workers are born directly as long-lived OS-thread carriers.
-    DirectHostedWorkers,
-    /// Hosted async workers are composed on top of one generic thread pool.
-    ComposedThreadPool,
-}
-
-#[cfg(feature = "std")]
-impl HostedThreadScheduler {
-    fn new(pool: &ThreadPool) -> Result<Arc<Self>, ExecutorError> {
-        let worker_count = pool
-            .stats()
-            .map_err(executor_error_from_thread_pool)?
-            .max_threads
-            .max(1);
-        let scheduler = Arc::new(Self {
-            ready: SyncMutex::new(HostedReadyQueueState::new()),
-            signal: Semaphore::new(
-                0,
-                u32::try_from(CURRENT_QUEUE_CAPACITY.saturating_add(worker_count))
-                    .unwrap_or(u32::MAX),
-            )
-            .map_err(executor_error_from_sync)?,
-            shutdown: AtomicBool::new(false),
-            worker_count,
-        });
-        for _ in 0..worker_count {
-            let worker = Arc::clone(&scheduler);
-            pool.submit(move || run_hosted_thread_scheduler(&worker))
-                .map_err(executor_error_from_thread_pool)?;
-        }
-        Ok(scheduler)
-    }
-
-    fn new_direct(
-        config: &super::ThreadPoolConfig<'_>,
-    ) -> Result<HostedThreadWorkers, ExecutorError> {
-        let worker_count = config.max_threads.max(1);
-        let scheduler = Arc::new(Self {
-            ready: SyncMutex::new(HostedReadyQueueState::new()),
-            signal: Semaphore::new(
-                0,
-                u32::try_from(CURRENT_QUEUE_CAPACITY.saturating_add(worker_count))
-                    .unwrap_or(u32::MAX),
-            )
-            .map_err(executor_error_from_sync)?,
-            shutdown: AtomicBool::new(false),
-            worker_count,
-        });
-        let mut handles = Vec::with_capacity(worker_count);
-
-        let system = ThreadSystem::new();
-        let thread_config = ThreadConfig {
-            join_policy: ThreadJoinPolicy::Joinable,
-            name: config.name_prefix,
-            start_mode: ThreadStartMode::Immediate,
-            placement: ThreadPlacementRequest::new(),
-            scheduler: config.scheduler,
-            stack: config.stack,
-        };
-
-        for _ in 0..worker_count {
-            let scheduler_context = Arc::into_raw(Arc::clone(&scheduler));
-            let handle = unsafe {
-                system.spawn_raw(
-                    &thread_config,
-                    hosted_thread_scheduler_entry,
-                    scheduler_context.cast_mut().cast(),
-                )
-            };
-            match handle {
-                Ok(handle) => handles.push(handle),
-                Err(error) => {
-                    unsafe {
-                        drop(Arc::from_raw(scheduler_context));
-                    }
-                    let _ = scheduler.request_shutdown();
-                    for handle in handles.drain(..) {
-                        let _ = system.join(handle);
-                    }
-                    return Err(executor_error_from_thread(error));
-                }
-            }
-        }
-
-        Ok(HostedThreadWorkers {
-            scheduler,
-            handles,
-            system,
-        })
-    }
-
-    fn enqueue(&self, job: CurrentJob) -> Result<(), ExecutorError> {
-        if self.shutdown.load(Ordering::Acquire) {
-            return Err(ExecutorError::Stopped);
-        }
-        let mut ready = self.ready.lock().map_err(executor_error_from_sync)?;
-        ready.enqueue(job)?;
-        drop(ready);
-        self.signal.release(1).map_err(executor_error_from_sync)
-    }
-
-    fn request_shutdown(&self) -> Result<usize, ExecutorError> {
-        self.shutdown.store(true, Ordering::Release);
-        let dropped = self.ready.lock().map_err(executor_error_from_sync)?.clear();
-        self.signal
-            .release(u32::try_from(self.worker_count).unwrap_or(u32::MAX))
-            .map_err(executor_error_from_sync)?;
-        Ok(dropped)
-    }
-}
-
-#[cfg(feature = "std")]
-impl HostedThreadWorkers {
-    fn direct_supported(config: &super::ThreadPoolConfig<'_>) -> bool {
-        matches!(config.placement, super::PoolPlacement::Inherit)
-            && matches!(config.resize_policy, super::ResizePolicy::Fixed)
-            && matches!(config.shutdown_policy, super::ShutdownPolicy::Drain)
-            && config.min_threads == config.max_threads
-            && config.min_threads != 0
-    }
-    fn shutdown_and_join(&mut self) {
-        let _ = self.scheduler.request_shutdown();
-        for handle in self.handles.drain(..) {
-            let _ = self.system.join(handle);
-        }
-    }
+pub(super) unsafe fn run_current_slot(core: usize, slot_index: usize, generation: u64) {
+    let core = unsafe { &*(core as *const ExecutorCore) };
+    let _ = core.run_slot_by_ref(slot_index, generation);
 }
 
 #[derive(Clone, Copy)]
@@ -810,6 +667,12 @@ impl ScheduledExecutorCorePtr {
 // originating executor core. The explicit wrapper is safer than laundering the pointer through
 // `usize`, while lifetime validity remains the surrounding executor's invariant.
 unsafe impl Send for ScheduledExecutorCorePtr {}
+
+fn run_scheduled_slot_ptr(core: ScheduledExecutorCorePtr, slot_index: usize, generation: u64) {
+    core.run_slot(slot_index, generation);
+    // SAFETY: executor shutdown now waits until externally scheduled jobs have drained.
+    unsafe { core.0.as_ref().finish_external_schedule() };
+}
 
 impl SchedulerBinding {
     const fn uses_external_carrier(&self) -> bool {

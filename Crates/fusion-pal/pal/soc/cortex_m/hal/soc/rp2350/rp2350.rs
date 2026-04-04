@@ -102,6 +102,9 @@ use super::pio::{
 mod descriptors;
 pub use descriptors::*;
 
+#[path = "drivers/drivers.rs"]
+pub mod drivers;
+
 /// RP2350 SoC provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Rp2350Soc;

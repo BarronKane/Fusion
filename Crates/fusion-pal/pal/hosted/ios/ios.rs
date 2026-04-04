@@ -1,6 +1,9 @@
 #[path = "context/context.rs"]
 /// iOS fusion-pal user-space context backend implementation.
 pub mod context;
+#[path = "dma/dma.rs"]
+/// iOS fusion-pal DMA backend implementation.
+pub mod dma;
 /// iOS atomic surface remains unsupported for now.
 pub mod atomic {
     pub use crate::contract::pal::runtime::atomic::{
@@ -26,19 +29,6 @@ pub mod atomic {
 #[path = "event/event.rs"]
 /// iOS fusion-pal event backend implementation.
 pub mod event;
-/// iOS GPIO surface remains unsupported for now.
-pub mod gpio {
-    pub use crate::contract::drivers::gpio::{
-        UnsupportedGpio as PlatformGpio,
-        UnsupportedGpioPin as PlatformGpioPin,
-    };
-
-    /// Returns the unsupported GPIO provider for the selected backend.
-    #[must_use]
-    pub const fn system_gpio() -> PlatformGpio {
-        PlatformGpio::new()
-    }
-}
 /// iOS hosted-fiber helper surface remains unsupported for now.
 pub mod fiber {
     pub use crate::contract::pal::runtime::fiber::{

@@ -68,7 +68,7 @@ use fusion_pal::sys::mem::{
     RegionAttrs,
     system_mem,
 };
-use fusion_sys::context::ContextId;
+use fusion_sys::domain::context::ContextId;
 use fusion_sys::courier::{
     CourierChildLaunchRequest,
     CourierFiberRecord,

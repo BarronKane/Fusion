@@ -4,6 +4,9 @@
 //! local fallbacks, exposes internal-friendly locking utilities such as [`ThinMutex`], and
 //! keeps the no-alloc, no-poison contract surface explicit for higher layers.
 
+#[path = "atomic/atomic.rs"]
+/// Atomic substrate wrappers that belong with the rest of the synchronization surface.
+pub mod atomic;
 mod left_right;
 mod mutex;
 mod once;

@@ -491,6 +491,7 @@ fn record_yield_budget_event(event: FiberYieldBudgetEvent) {
 
 #[test]
 fn stack_class_rounding_matches_current_slab_envelope() {
+    let _guard = crate::thread::runtime_test_guard();
     let support = GreenPool::support();
     let config = FiberPoolConfig::fixed(
         NonZeroUsize::new(12 * 1024).expect("non-zero fixed stack"),
@@ -519,6 +520,7 @@ fn stack_class_rounding_matches_current_slab_envelope() {
 
 #[test]
 fn class_store_selects_smallest_matching_pool() {
+    let _guard = crate::thread::runtime_test_guard();
     let support = GreenPool::support();
     let classes = [
         FiberStackClassConfig::new(
@@ -577,6 +579,7 @@ fn class_store_selects_smallest_matching_pool() {
 
 #[test]
 fn classed_config_derives_capacity_and_largest_backing() {
+    let _guard = crate::thread::runtime_test_guard();
     let classes = [
         FiberStackClassConfig::new(FiberStackClass::MIN, 3).expect("valid class config"),
         FiberStackClassConfig::new(
@@ -603,6 +606,7 @@ fn classed_config_derives_capacity_and_largest_backing() {
 
 #[test]
 fn class_store_uses_per_class_growth_chunks() {
+    let _guard = crate::thread::runtime_test_guard();
     let support = GreenPool::support();
     let classes = [
         FiberStackClassConfig::new(FiberStackClass::MIN, 4)
@@ -639,6 +643,7 @@ fn class_store_uses_per_class_growth_chunks() {
 
 #[test]
 fn classed_config_validates_explicit_task_contracts() {
+    let _guard = crate::thread::runtime_test_guard();
     let classes = [
         FiberStackClassConfig::new(SUPPORTED_GENERATED_CONTRACT_CLASS, 2)
             .expect("valid class config"),
@@ -659,6 +664,7 @@ fn classed_config_validates_explicit_task_contracts() {
 
 #[test]
 fn explicit_task_contracts_work_in_const_context() {
+    let _guard = crate::thread::runtime_test_guard();
     const VALIDATION: Result<(), FiberError> =
         COMPILE_TIME_EXPLICIT_CONFIG.validate_explicit_task::<SupportedExplicitTask>();
 
@@ -674,6 +680,7 @@ fn explicit_task_contracts_work_in_const_context() {
 
 #[test]
 fn raw_task_attributes_work_in_const_context() {
+    let _guard = crate::thread::runtime_test_guard();
     const VALIDATION: Result<(), FiberError> =
         COMPILE_TIME_EXPLICIT_CONFIG.validate_task_attributes(COMPILE_TIME_EXPLICIT_ATTRIBUTES);
 
@@ -689,6 +696,7 @@ fn raw_task_attributes_work_in_const_context() {
 
 #[test]
 fn generated_task_contracts_work_in_const_context() {
+    let _guard = crate::thread::runtime_test_guard();
     const VALIDATION: Result<(), FiberError> = COMPILE_TIME_EXPLICIT_CONFIG
         .validate_generated_task_contract::<SupportedGeneratedContractTask>(
     );
@@ -705,7 +713,7 @@ fn generated_task_contracts_work_in_const_context() {
 
 #[test]
 fn live_pool_validates_generated_task_contracts_before_spawn() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let carrier = ThreadPool::new(&ThreadPoolConfig::new()).expect("carrier pool should build");
     let classes =
         [FiberStackClassConfig::new(FiberStackClass::MIN, 2).expect("valid class config")];
@@ -735,6 +743,7 @@ fn live_pool_validates_generated_task_contracts_before_spawn() {
 
 #[test]
 fn elastic_stack_slab_grows_and_shrinks_by_chunk() {
+    let _guard = crate::thread::runtime_test_guard();
     let _guard = lock_elastic_tests();
     let support = GreenPool::support();
     let config = FiberPoolConfig {
@@ -823,6 +832,7 @@ fn elastic_stack_slab_grows_and_shrinks_by_chunk() {
 
 #[test]
 fn elastic_stack_fault_promotion_makes_detector_page_writable() {
+    let _guard = crate::thread::runtime_test_guard();
     let _guard = lock_elastic_tests();
     let support = GreenPool::support();
     let config = FiberPoolConfig {
@@ -876,6 +886,7 @@ fn elastic_stack_fault_promotion_makes_detector_page_writable() {
 
 #[test]
 fn elastic_stack_stats_track_growth_and_capacity() {
+    let _guard = crate::thread::runtime_test_guard();
     let _guard = lock_elastic_tests();
     let support = GreenPool::support();
     let config = FiberPoolConfig {
@@ -938,6 +949,7 @@ fn elastic_stack_stats_track_growth_and_capacity() {
 
 #[test]
 fn elastic_capacity_events_dispatch_with_fiber_identity() {
+    let _guard = crate::thread::runtime_test_guard();
     let _guard = lock_elastic_tests();
     CAPACITY_EVENT_CALLS.store(0, Ordering::Release);
     LAST_CAPACITY_FIBER_ID.store(0, Ordering::Release);
@@ -1006,6 +1018,7 @@ fn elastic_capacity_events_dispatch_with_fiber_identity() {
 
 #[test]
 fn elastic_stack_registry_tracks_live_slots_and_clears_on_drop() {
+    let _guard = crate::thread::runtime_test_guard();
     let _guard = lock_elastic_tests();
     let support = GreenPool::support();
     let config = FiberPoolConfig {
@@ -1067,6 +1080,7 @@ fn elastic_stack_registry_tracks_live_slots_and_clears_on_drop() {
 
 #[test]
 fn elastic_huge_page_policy_leaves_a_small_page_growth_window() {
+    let _guard = crate::thread::runtime_test_guard();
     let _guard = lock_elastic_tests();
     if !system_mem()
         .support()
@@ -1123,6 +1137,7 @@ fn elastic_huge_page_policy_leaves_a_small_page_growth_window() {
 
 #[test]
 fn priority_queue_dequeues_higher_priorities_first() {
+    let _guard = crate::thread::runtime_test_guard();
     let mut buckets = [PriorityBucket::empty(); FIBER_PRIORITY_LEVELS];
     let mut next = [EMPTY_QUEUE_SLOT; 8];
     let mut priorities = [FiberTaskPriority::DEFAULT.get(); 8];
@@ -1171,6 +1186,7 @@ fn priority_queue_dequeues_higher_priorities_first() {
 
 #[test]
 fn priority_queue_aging_eventually_promotes_waiting_work() {
+    let _guard = crate::thread::runtime_test_guard();
     let mut buckets = [PriorityBucket::empty(); FIBER_PRIORITY_LEVELS];
     let mut next = [EMPTY_QUEUE_SLOT; 8];
     let mut priorities = [FiberTaskPriority::DEFAULT.get(); 8];
@@ -1226,6 +1242,7 @@ fn priority_queue_aging_eventually_promotes_waiting_work() {
 
 #[test]
 fn priority_queue_prefers_higher_base_priority_when_effective_priorities_tie() {
+    let _guard = crate::thread::runtime_test_guard();
     let mut buckets = [PriorityBucket::empty(); FIBER_PRIORITY_LEVELS];
     let mut next = [EMPTY_QUEUE_SLOT; 8];
     let mut priorities = [FiberTaskPriority::DEFAULT.get(); 8];
@@ -1278,6 +1295,7 @@ fn priority_queue_prefers_higher_base_priority_when_effective_priorities_tie() {
 
 #[test]
 fn priority_queue_preserves_fifo_order_within_one_priority_bucket() {
+    let _guard = crate::thread::runtime_test_guard();
     let mut buckets = [PriorityBucket::empty(); FIBER_PRIORITY_LEVELS];
     let mut next = [EMPTY_QUEUE_SLOT; 8];
     let mut priorities = [FiberTaskPriority::DEFAULT.get(); 8];
@@ -1325,6 +1343,7 @@ fn priority_queue_preserves_fifo_order_within_one_priority_bucket() {
 
 #[test]
 fn priority_queue_age_cap_limits_virtual_promotion() {
+    let _guard = crate::thread::runtime_test_guard();
     let mut buckets = [PriorityBucket::empty(); FIBER_PRIORITY_LEVELS];
     let mut next = [EMPTY_QUEUE_SLOT; 8];
     let mut priorities = [FiberTaskPriority::DEFAULT.get(); 8];
@@ -1376,6 +1395,7 @@ fn priority_queue_age_cap_limits_virtual_promotion() {
 
 #[test]
 fn green_exclusion_span_guard_tracks_active_spans_and_blocks_yield() {
+    let _guard = crate::thread::runtime_test_guard();
     const REQUIRED_LEAF: [u32; 2] = [1_u32 << 6, 0];
     const REQUIRED_ROOT: [u32; 1] = [1_u32 << 0];
     const REQUIRED_LEVELS: [&[u32]; 1] = [&REQUIRED_ROOT];
@@ -1425,6 +1445,7 @@ fn green_exclusion_span_guard_tracks_active_spans_and_blocks_yield() {
 
 #[test]
 fn cooperative_exclusion_summary_tree_matches_named_spans() {
+    let _guard = crate::thread::runtime_test_guard();
     const LEAF: [u32; 33] = {
         let mut words = [0_u32; 33];
         words[0] = 1_u32 << 2;
@@ -1461,7 +1482,7 @@ fn cooperative_exclusion_summary_tree_matches_named_spans() {
 
 #[test]
 fn green_exclusion_summary_tree_falls_back_honestly_for_spans_beyond_fast_cache() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     const LEAF: [u32; 33] = {
         let mut words = [0_u32; 33];
         words[32] = 1_u32 << 0;
@@ -1505,7 +1526,7 @@ fn green_exclusion_summary_tree_falls_back_honestly_for_spans_beyond_fast_cache(
 
 #[test]
 fn green_yield_rejects_when_cooperative_mutex_is_held() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let carrier = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1543,7 +1564,7 @@ fn green_yield_rejects_when_cooperative_mutex_is_held() {
 
 #[test]
 fn ranked_green_mutexes_reject_descending_acquisition_order() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let carrier = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1590,7 +1611,7 @@ fn ranked_green_mutexes_reject_descending_acquisition_order() {
 
 #[test]
 fn ranked_green_mutexes_allow_ascending_acquisition_order() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let carrier = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1635,7 +1656,7 @@ fn ranked_green_mutexes_allow_ascending_acquisition_order() {
 
 #[test]
 fn green_join_rejects_when_cooperative_mutex_is_held() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let carrier = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1704,7 +1725,7 @@ fn green_join_rejects_when_cooperative_mutex_is_held() {
 
 #[test]
 fn green_task_yield_budget_faults_after_overrun_and_yield() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     YIELD_BUDGET_EVENT_CALLS.store(0, Ordering::Release);
     LAST_YIELD_BUDGET_FIBER_ID.store(0, Ordering::Release);
     LAST_YIELD_BUDGET_CARRIER_ID.store(usize::MAX, Ordering::Release);
@@ -1762,7 +1783,7 @@ fn green_task_yield_budget_faults_after_overrun_and_yield() {
 
 #[test]
 fn watchdog_faults_non_yielding_green_budget_overrun() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     YIELD_BUDGET_EVENT_CALLS.store(0, Ordering::Release);
     LAST_YIELD_BUDGET_FIBER_ID.store(0, Ordering::Release);
     LAST_YIELD_BUDGET_CARRIER_ID.store(usize::MAX, Ordering::Release);
@@ -1823,7 +1844,7 @@ fn work_stealing_runs_ready_work_on_an_idle_carrier() {
         return;
     }
 
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let carrier = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 2,
         max_threads: 2,
@@ -1910,6 +1931,7 @@ fn work_stealing_runs_ready_work_on_an_idle_carrier() {
 
 #[test]
 fn automatic_huge_page_policy_tracks_backend_support_and_reservation_size() {
+    let _guard = crate::thread::runtime_test_guard();
     let small = automatic_huge_page_policy(FiberStackBacking::Elastic {
         initial_size: NonZeroUsize::new(4 * 1024).expect("non-zero initial stack"),
         max_size: NonZeroUsize::new(64 * 1024).expect("non-zero max stack"),

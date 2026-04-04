@@ -20,128 +20,131 @@ pub const LOCAL_CRITICAL_SECTION_SYNC_SAFE: bool = false;
 /// Runtime per-device identity support class for RP2350 boards.
 pub const DEVICE_ID_SUPPORT: CortexMSocDeviceIdSupport = CortexMSocDeviceIdSupport::OtpReadable;
 
-const APB_SLOT_BYTES: usize = 0x0000_8000;
-const AHB_SLOT_BYTES: usize = 0x0010_0000;
-const ROM_BYTES: usize = 32 * 1024;
-const XIP_WINDOW_BYTES: usize = 32 * 1024 * 1024;
-const SRAM_BYTES: usize = 0x0008_2000;
-const APB_SEGMENT_BYTES: usize = 0x0016_8000;
-const AHB_SEGMENT_BYTES: usize = 0x0080_0000;
-const SIO_SEGMENT_BYTES: usize = 0x0004_0000;
-const PPB_SEGMENT_BYTES: usize = 0x000A_0000;
+pub(crate) const APB_SLOT_BYTES: usize = 0x0000_8000;
+pub(crate) const AHB_SLOT_BYTES: usize = 0x0010_0000;
+pub(crate) const ROM_BYTES: usize = 32 * 1024;
+pub(crate) const XIP_WINDOW_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const SRAM_BYTES: usize = 0x0008_2000;
+pub(crate) const APB_SEGMENT_BYTES: usize = 0x0016_8000;
+pub(crate) const AHB_SEGMENT_BYTES: usize = 0x0080_0000;
+pub(crate) const SIO_SEGMENT_BYTES: usize = 0x0004_0000;
+pub(crate) const PPB_SEGMENT_BYTES: usize = 0x000A_0000;
 
-const RP2350_SYSINFO_CHIP_ID: *const u32 = 0x4000_0000 as *const u32;
-const RP2350_SYSINFO_PLATFORM: *const u32 = 0x4000_0008 as *const u32;
-const RP2350_SYSINFO_GITREF_RP2350: *const u32 = 0x4000_0014 as *const u32;
-const RP2350_SYSINFO_CHIP_INFO: *const u32 = 0x4000_0018 as *const u32;
-const RP2350_OTP_DATA: *const u32 = 0x4013_0000 as *const u32;
-const RP2350_SIO_CPUID: *const u32 = 0xd000_0000 as *const u32;
-const CORTEX_M_SCB_SCR: *mut u32 = 0xE000_ED10 as *mut u32;
-const CORTEX_M_SCB_SCR_SLEEPDEEP: u32 = 1 << 2;
-const CORTEX_M_NVIC_ISER: *mut u32 = 0xE000_E100 as *mut u32;
-const CORTEX_M_NVIC_ICER: *mut u32 = 0xE000_E180 as *mut u32;
-const CORTEX_M_NVIC_ISPR: *mut u32 = 0xE000_E200 as *mut u32;
-const CORTEX_M_NVIC_ICPR: *mut u32 = 0xE000_E280 as *mut u32;
-const CORTEX_M_NVIC_IPR: *mut u8 = 0xE000_E400 as *mut u8;
-const RP2350_TICKS_BASE: usize = 0x4010_8000;
-const RP2350_TIMER0_BASE: usize = 0x400b_0000;
-const RP2350_TIMER1_BASE: usize = 0x400b_8000;
-const RP2350_RESETS_BASE: usize = 0x4002_0000;
-const RP2350_IO_BANK0_BASE: usize = 0x4002_8000;
-const RP2350_IO_QSPI_BASE: usize = 0x4003_0000;
-const RP2350_DMA_BASE: usize = 0x5000_0000;
-const RP2350_SPI0_BASE: usize = 0x4008_0000;
-const RP2350_SPI1_BASE: usize = 0x4008_8000;
-const RP2350_UART0_BASE: usize = 0x4007_0000;
-const RP2350_UART1_BASE: usize = 0x4007_8000;
-const RP2350_I2C0_BASE: usize = 0x4009_0000;
-const RP2350_I2C1_BASE: usize = 0x4009_8000;
-const RP2350_PIO0_BASE: usize = 0x5020_0000;
-const RP2350_PIO1_BASE: usize = 0x5030_0000;
-const RP2350_PIO2_BASE: usize = 0x5040_0000;
-const RP2350_PIO_ENGINE_COUNT: usize = 3;
-const RP2350_PIO_LANES_PER_ENGINE: usize = 4;
-const RP2350_PIO_FIFO_DEPTH_WORDS: u8 = 4;
-const RP2350_PIO_INSTRUCTION_WORDS: u16 = 32;
-const RP2350_REG_ALIAS_SET_OFFSET: usize = 0x2000;
-const RP2350_REG_ALIAS_CLR_OFFSET: usize = 0x3000;
-const RP2350_PIO_CTRL_OFFSET: usize = 0x00;
-const RP2350_PIO_FSTAT_OFFSET: usize = 0x04;
-const RP2350_PIO_FDEBUG_OFFSET: usize = 0x08;
-const RP2350_PIO_TXF0_OFFSET: usize = 0x10;
-const RP2350_PIO_RXF0_OFFSET: usize = 0x20;
-const RP2350_PIO_INSTR_MEM0_OFFSET: usize = 0x48;
-const RP2350_PIO_SM_STRIDE: usize = 0x18;
-const RP2350_PIO_SM0_CLKDIV_OFFSET: usize = 0xc8;
-const RP2350_PIO_SM0_EXECCTRL_OFFSET: usize = 0xcc;
-const RP2350_PIO_SM0_SHIFTCTRL_OFFSET: usize = 0xd0;
-const RP2350_PIO_SM0_INSTR_OFFSET: usize = 0xd8;
-const RP2350_PIO_SM0_PINCTRL_OFFSET: usize = 0xdc;
-const RP2350_PIO_CTRL_SM_ENABLE_MASK: u32 = 0x0000_000f;
-const RP2350_PIO_CTRL_SM_RESTART_SHIFT: u32 = 4;
-const RP2350_PIO_CTRL_CLKDIV_RESTART_SHIFT: u32 = 8;
-const RP2350_PIO_FSTAT_TXFULL_SHIFT: u32 = 16;
-const RP2350_PIO_FSTAT_RXEMPTY_SHIFT: u32 = 8;
-const RP2350_PIO_FDEBUG_TXSTALL_SHIFT: u32 = 24;
-const RP2350_PIO_FDEBUG_TXOVER_SHIFT: u32 = 16;
-const RP2350_PIO_FDEBUG_RXUNDER_SHIFT: u32 = 8;
-const RP2350_PIO_FDEBUG_RXSTALL_SHIFT: u32 = 0;
-const RP2350_PIO_SM_SHIFTCTRL_FJOIN_RX_BIT: u32 = 1 << 31;
-const RP2350_PIO_VALID_LANE_MASK: u8 = 0x0f;
-const RP2350_RESETS_RESET_OFFSET: usize = 0x00;
-const RP2350_RESETS_RESET_DONE_OFFSET: usize = 0x08;
-const RP2350_RESETS_PIO0_BIT: u32 = 0x0000_0800;
-const RP2350_RESETS_PIO1_BIT: u32 = 0x0000_1000;
-const RP2350_RESETS_PIO2_BIT: u32 = 0x0000_2000;
-const RP2350_EVENT_TIMEOUT_TIMER_BASE: usize = RP2350_TIMER0_BASE;
-const RP2350_EVENT_TIMEOUT_ALARM_INDEX: u16 = 3;
-const RP2350_EVENT_TIMEOUT_IRQN: u16 = 3;
-const RP2350_EVENT_TIMEOUT_TICK_HZ: u64 = 1_000_000;
-const RP2350_EVENT_TIMEOUT_COUNTER_BITS: u32 = 32;
-const RP2350_EVENT_TIMEOUT_MAX_RELATIVE_TIMEOUT: Duration = Duration::from_micros(u32::MAX as u64);
-const RP2350_CLK_REF_HZ: u32 = 12_000_000;
-const RP2350_TIMER_TICK_CYCLES: u32 = RP2350_CLK_REF_HZ / RP2350_EVENT_TIMEOUT_TICK_HZ as u32;
-const RP2350_TICKS_TIMER0_CTRL_OFFSET: usize = 0x18;
-const RP2350_TICKS_TIMER0_CYCLES_OFFSET: usize = 0x1c;
-const RP2350_TICKS_CTRL_ENABLE: u32 = 1 << 0;
-const RP2350_TICKS_CTRL_RUNNING: u32 = 1 << 1;
+pub(crate) const RP2350_SYSINFO_CHIP_ID: *const u32 = 0x4000_0000 as *const u32;
+pub(crate) const RP2350_SYSINFO_PLATFORM: *const u32 = 0x4000_0008 as *const u32;
+pub(crate) const RP2350_SYSINFO_GITREF_RP2350: *const u32 = 0x4000_0014 as *const u32;
+pub(crate) const RP2350_SYSINFO_CHIP_INFO: *const u32 = 0x4000_0018 as *const u32;
+pub(crate) const RP2350_OTP_DATA: *const u32 = 0x4013_0000 as *const u32;
+pub(crate) const RP2350_SIO_CPUID: *const u32 = 0xd000_0000 as *const u32;
+pub(crate) const CORTEX_M_SCB_SCR: *mut u32 = 0xE000_ED10 as *mut u32;
+pub(crate) const CORTEX_M_SCB_SCR_SLEEPDEEP: u32 = 1 << 2;
+pub(crate) const CORTEX_M_NVIC_ISER: *mut u32 = 0xE000_E100 as *mut u32;
+pub(crate) const CORTEX_M_NVIC_ICER: *mut u32 = 0xE000_E180 as *mut u32;
+pub(crate) const CORTEX_M_NVIC_ISPR: *mut u32 = 0xE000_E200 as *mut u32;
+pub(crate) const CORTEX_M_NVIC_ICPR: *mut u32 = 0xE000_E280 as *mut u32;
+pub(crate) const CORTEX_M_NVIC_IPR: *mut u8 = 0xE000_E400 as *mut u8;
+pub(crate) const RP2350_TICKS_BASE: usize = 0x4010_8000;
+pub(crate) const RP2350_TIMER0_BASE: usize = 0x400b_0000;
+pub(crate) const RP2350_TIMER1_BASE: usize = 0x400b_8000;
+pub(crate) const RP2350_RESETS_BASE: usize = 0x4002_0000;
+pub(crate) const RP2350_IO_BANK0_BASE: usize = 0x4002_8000;
+pub(crate) const RP2350_IO_QSPI_BASE: usize = 0x4003_0000;
+pub(crate) const RP2350_DMA_BASE: usize = 0x5000_0000;
+pub(crate) const RP2350_SPI0_BASE: usize = 0x4008_0000;
+pub(crate) const RP2350_SPI1_BASE: usize = 0x4008_8000;
+pub(crate) const RP2350_UART0_BASE: usize = 0x4007_0000;
+pub(crate) const RP2350_UART1_BASE: usize = 0x4007_8000;
+pub(crate) const RP2350_I2C0_BASE: usize = 0x4009_0000;
+pub(crate) const RP2350_I2C1_BASE: usize = 0x4009_8000;
+pub(crate) const RP2350_PIO0_BASE: usize = 0x5020_0000;
+pub(crate) const RP2350_PIO1_BASE: usize = 0x5030_0000;
+pub(crate) const RP2350_PIO2_BASE: usize = 0x5040_0000;
+pub(crate) const RP2350_PIO_ENGINE_COUNT: usize = 3;
+pub(crate) const RP2350_PIO_LANES_PER_ENGINE: usize = 4;
+pub(crate) const RP2350_PIO_FIFO_DEPTH_WORDS: u8 = 4;
+pub(crate) const RP2350_PIO_INSTRUCTION_WORDS: u16 = 32;
+pub(crate) const RP2350_REG_ALIAS_SET_OFFSET: usize = 0x2000;
+pub(crate) const RP2350_REG_ALIAS_CLR_OFFSET: usize = 0x3000;
+pub(crate) const RP2350_PIO_CTRL_OFFSET: usize = 0x00;
+pub(crate) const RP2350_PIO_FSTAT_OFFSET: usize = 0x04;
+pub(crate) const RP2350_PIO_FDEBUG_OFFSET: usize = 0x08;
+pub(crate) const RP2350_PIO_TXF0_OFFSET: usize = 0x10;
+pub(crate) const RP2350_PIO_RXF0_OFFSET: usize = 0x20;
+pub(crate) const RP2350_PIO_INSTR_MEM0_OFFSET: usize = 0x48;
+pub(crate) const RP2350_PIO_SM_STRIDE: usize = 0x18;
+pub(crate) const RP2350_PIO_SM0_CLKDIV_OFFSET: usize = 0xc8;
+pub(crate) const RP2350_PIO_SM0_EXECCTRL_OFFSET: usize = 0xcc;
+pub(crate) const RP2350_PIO_SM0_SHIFTCTRL_OFFSET: usize = 0xd0;
+pub(crate) const RP2350_PIO_SM0_INSTR_OFFSET: usize = 0xd8;
+pub(crate) const RP2350_PIO_SM0_PINCTRL_OFFSET: usize = 0xdc;
+pub(crate) const RP2350_PIO_CTRL_SM_ENABLE_MASK: u32 = 0x0000_000f;
+pub(crate) const RP2350_PIO_CTRL_SM_RESTART_SHIFT: u32 = 4;
+pub(crate) const RP2350_PIO_CTRL_CLKDIV_RESTART_SHIFT: u32 = 8;
+pub(crate) const RP2350_PIO_FSTAT_TXFULL_SHIFT: u32 = 16;
+pub(crate) const RP2350_PIO_FSTAT_RXEMPTY_SHIFT: u32 = 8;
+pub(crate) const RP2350_PIO_FDEBUG_TXSTALL_SHIFT: u32 = 24;
+pub(crate) const RP2350_PIO_FDEBUG_TXOVER_SHIFT: u32 = 16;
+pub(crate) const RP2350_PIO_FDEBUG_RXUNDER_SHIFT: u32 = 8;
+pub(crate) const RP2350_PIO_FDEBUG_RXSTALL_SHIFT: u32 = 0;
+pub(crate) const RP2350_PIO_SM_SHIFTCTRL_FJOIN_RX_BIT: u32 = 1 << 31;
+pub(crate) const RP2350_PIO_VALID_LANE_MASK: u8 = 0x0f;
+pub(crate) const RP2350_RESETS_RESET_OFFSET: usize = 0x00;
+pub(crate) const RP2350_RESETS_RESET_DONE_OFFSET: usize = 0x08;
+pub(crate) const RP2350_RESETS_PIO0_BIT: u32 = 0x0000_0800;
+pub(crate) const RP2350_RESETS_PIO1_BIT: u32 = 0x0000_1000;
+pub(crate) const RP2350_RESETS_PIO2_BIT: u32 = 0x0000_2000;
+pub(crate) const RP2350_EVENT_TIMEOUT_TIMER_BASE: usize = RP2350_TIMER0_BASE;
+pub(crate) const RP2350_EVENT_TIMEOUT_ALARM_INDEX: u16 = 3;
+pub(crate) const RP2350_EVENT_TIMEOUT_IRQN: u16 = 3;
+pub(crate) const RP2350_EVENT_TIMEOUT_TICK_HZ: u64 = 1_000_000;
+pub(crate) const RP2350_EVENT_TIMEOUT_COUNTER_BITS: u32 = 32;
+pub(crate) const RP2350_EVENT_TIMEOUT_MAX_RELATIVE_TIMEOUT: Duration =
+    Duration::from_micros(u32::MAX as u64);
+pub(crate) const RP2350_CLK_REF_HZ: u32 = 12_000_000;
+pub(crate) const RP2350_TIMER_TICK_CYCLES: u32 =
+    RP2350_CLK_REF_HZ / RP2350_EVENT_TIMEOUT_TICK_HZ as u32;
+pub(crate) const RP2350_TICKS_TIMER0_CTRL_OFFSET: usize = 0x18;
+pub(crate) const RP2350_TICKS_TIMER0_CYCLES_OFFSET: usize = 0x1c;
+pub(crate) const RP2350_TICKS_CTRL_ENABLE: u32 = 1 << 0;
+pub(crate) const RP2350_TICKS_CTRL_RUNNING: u32 = 1 << 1;
 
-const RP2350_EVENT_TIMEOUT_SUPPORT: CortexMEventTimeoutSupport = CortexMEventTimeoutSupport {
-    implementation: CortexMEventTimeoutImplementation::ReservedOneShotAlarm,
-    irqn: Some(RP2350_EVENT_TIMEOUT_IRQN),
-    counter_bits: Some(RP2350_EVENT_TIMEOUT_COUNTER_BITS),
-    tick_hz: Some(RP2350_EVENT_TIMEOUT_TICK_HZ),
-    max_relative_timeout: Some(RP2350_EVENT_TIMEOUT_MAX_RELATIVE_TIMEOUT),
-};
-const RP2350_INLINE_EXCEPTION_STACK_RESERVE_BYTES: usize = 128;
-const RP2350_IO_BANK0_INTR0_OFFSET: usize = 0x230;
-const RP2350_IO_QSPI_INTR_OFFSET: usize = 0x218;
-const RP2350_IO_IRQ_WORD_STRIDE: usize = 0x4;
-const RP2350_GPIO_BANK0_SUMMARY_WORDS: usize = 6;
-const RP2350_GPIO_QSPI_SUMMARY_WORDS: usize = 1;
-const RP2350_GPIO_EDGE_EVENT_MASK: u32 = 0xCCCC_CCCC;
-const RP2350_TIMER_ALARM0_OFFSET: usize = 0x10;
-const RP2350_TIMER_ARMED_OFFSET: usize = 0x20;
-const RP2350_TIMER_TIMERAWH_OFFSET: usize = 0x24;
-const RP2350_TIMER_TIMERAWL_OFFSET: usize = 0x28;
-const RP2350_TIMER_INTR_OFFSET: usize = 0x3c;
-const RP2350_TIMER_INTE_OFFSET: usize = 0x40;
-const RP2350_TIMER_INTS_OFFSET: usize = 0x48;
-const RP2350_DMA_INTS0_OFFSET: usize = 0x40c;
-const RP2350_SPI_SSPMIS_OFFSET: usize = 0x1c;
-const RP2350_SPI_SSPICR_OFFSET: usize = 0x20;
-const RP2350_SPI_SSPICR_CLEARABLE_MASK: u32 = 0x3;
-const RP2350_UARTMIS_OFFSET: usize = 0x40;
-const RP2350_UARTICR_OFFSET: usize = 0x44;
-const RP2350_UARTICR_CLEARABLE_BITS: u32 = 0x0000_07ff;
-const RP2350_I2C_IC_INTR_STAT_OFFSET: usize = 0x2c;
-const RP2350_I2C_IC_CLR_INTR_OFFSET: usize = 0x40;
-const RP2350_PIO_IRQ_OFFSET: usize = 0x30;
-const RP2350_PIO_IRQ0_INTS_OFFSET: usize = 0x178;
-const RP2350_PIO_IRQ1_INTS_OFFSET: usize = 0x184;
-const RP2350_TIMER0_TICK_STATE_UNINITIALIZED: u8 = 0;
-const RP2350_TIMER0_TICK_STATE_INITIALIZING: u8 = 1;
-const RP2350_TIMER0_TICK_STATE_READY: u8 = 2;
+pub(crate) const RP2350_EVENT_TIMEOUT_SUPPORT: CortexMEventTimeoutSupport =
+    CortexMEventTimeoutSupport {
+        implementation: CortexMEventTimeoutImplementation::ReservedOneShotAlarm,
+        irqn: Some(RP2350_EVENT_TIMEOUT_IRQN),
+        counter_bits: Some(RP2350_EVENT_TIMEOUT_COUNTER_BITS),
+        tick_hz: Some(RP2350_EVENT_TIMEOUT_TICK_HZ),
+        max_relative_timeout: Some(RP2350_EVENT_TIMEOUT_MAX_RELATIVE_TIMEOUT),
+    };
+pub(crate) const RP2350_INLINE_EXCEPTION_STACK_RESERVE_BYTES: usize = 128;
+pub(crate) const RP2350_IO_BANK0_INTR0_OFFSET: usize = 0x230;
+pub(crate) const RP2350_IO_QSPI_INTR_OFFSET: usize = 0x218;
+pub(crate) const RP2350_IO_IRQ_WORD_STRIDE: usize = 0x4;
+pub(crate) const RP2350_GPIO_BANK0_SUMMARY_WORDS: usize = 6;
+pub(crate) const RP2350_GPIO_QSPI_SUMMARY_WORDS: usize = 1;
+pub(crate) const RP2350_GPIO_EDGE_EVENT_MASK: u32 = 0xCCCC_CCCC;
+pub(crate) const RP2350_TIMER_ALARM0_OFFSET: usize = 0x10;
+pub(crate) const RP2350_TIMER_ARMED_OFFSET: usize = 0x20;
+pub(crate) const RP2350_TIMER_TIMERAWH_OFFSET: usize = 0x24;
+pub(crate) const RP2350_TIMER_TIMERAWL_OFFSET: usize = 0x28;
+pub(crate) const RP2350_TIMER_INTR_OFFSET: usize = 0x3c;
+pub(crate) const RP2350_TIMER_INTE_OFFSET: usize = 0x40;
+pub(crate) const RP2350_TIMER_INTS_OFFSET: usize = 0x48;
+pub(crate) const RP2350_DMA_INTS0_OFFSET: usize = 0x40c;
+pub(crate) const RP2350_SPI_SSPMIS_OFFSET: usize = 0x1c;
+pub(crate) const RP2350_SPI_SSPICR_OFFSET: usize = 0x20;
+pub(crate) const RP2350_SPI_SSPICR_CLEARABLE_MASK: u32 = 0x3;
+pub(crate) const RP2350_UARTMIS_OFFSET: usize = 0x40;
+pub(crate) const RP2350_UARTICR_OFFSET: usize = 0x44;
+pub(crate) const RP2350_UARTICR_CLEARABLE_BITS: u32 = 0x0000_07ff;
+pub(crate) const RP2350_I2C_IC_INTR_STAT_OFFSET: usize = 0x2c;
+pub(crate) const RP2350_I2C_IC_CLR_INTR_OFFSET: usize = 0x40;
+pub(crate) const RP2350_PIO_IRQ_OFFSET: usize = 0x30;
+pub(crate) const RP2350_PIO_IRQ0_INTS_OFFSET: usize = 0x178;
+pub(crate) const RP2350_PIO_IRQ1_INTS_OFFSET: usize = 0x184;
+pub(crate) const RP2350_TIMER0_TICK_STATE_UNINITIALIZED: u8 = 0;
+pub(crate) const RP2350_TIMER0_TICK_STATE_INITIALIZING: u8 = 1;
+pub(crate) const RP2350_TIMER0_TICK_STATE_READY: u8 = 2;
 
 unsafe extern "C" {
     static __sheap: u8;
@@ -149,16 +152,17 @@ unsafe extern "C" {
     static _stack_start: u8;
 }
 
-const CLK_REF_MAIN_SOURCES: &[&str] = &[
+pub(crate) const CLK_REF_MAIN_SOURCES: &[&str] = &[
     "rosc_clkr_ref",
     "clksrc_clk_ref_aux",
     "xosc_clkr_ref",
     "lposc_clkr_ref",
 ];
-const CLK_REF_AUX_SOURCES: &[&str] = &["clksrc_gpin0", "clksrc_gpin1", "pll_usb_clkr_ref"];
-const CLK_REF_CONSUMERS: &[&str] = &["otp", "powman", "ticks"];
-const CLK_SYS_MAIN_SOURCES: &[&str] = &["clksrc_clk_sys_aux", "clk_ref"];
-const CLK_SYS_AUX_SOURCES: &[&str] = &[
+pub(crate) const CLK_REF_AUX_SOURCES: &[&str] =
+    &["clksrc_gpin0", "clksrc_gpin1", "pll_usb_clkr_ref"];
+pub(crate) const CLK_REF_CONSUMERS: &[&str] = &["otp", "powman", "ticks"];
+pub(crate) const CLK_SYS_MAIN_SOURCES: &[&str] = &["clksrc_clk_sys_aux", "clk_ref"];
+pub(crate) const CLK_SYS_AUX_SOURCES: &[&str] = &[
     "clksrc_pll_sys",
     "clksrc_gpin0",
     "clksrc_gpin1",
@@ -166,7 +170,7 @@ const CLK_SYS_AUX_SOURCES: &[&str] = &[
     "rosc_clkr_sys",
     "xosc_clkr_sys",
 ];
-const CLK_SYS_CONSUMERS: &[&str] = &[
+pub(crate) const CLK_SYS_CONSUMERS: &[&str] = &[
     "cores",
     "bootram",
     "busctrl",
@@ -184,8 +188,8 @@ const CLK_SYS_CONSUMERS: &[&str] = &[
     "timer1",
     "trng",
 ];
-const CLK_PERI_MAIN_SOURCES: &[&str] = &[];
-const CLK_PERI_AUX_SOURCES: &[&str] = &[
+pub(crate) const CLK_PERI_MAIN_SOURCES: &[&str] = &[];
+pub(crate) const CLK_PERI_AUX_SOURCES: &[&str] = &[
     "clksrc_pll_sys",
     "clksrc_gpin0",
     "clksrc_gpin1",
@@ -194,12 +198,12 @@ const CLK_PERI_AUX_SOURCES: &[&str] = &[
     "xosc_clksrc",
     "clk_sys",
 ];
-const CLK_PERI_CONSUMERS: &[&str] = &["uart0", "uart1", "spi0", "spi1", "i2c0", "i2c1"];
-const CLK_HSTX_MAIN_SOURCES: &[&str] = &[];
-const CLK_HSTX_AUX_SOURCES: &[&str] = &["clksrc_pll_sys", "clksrc_pll_usb", "clk_sys"];
-const CLK_HSTX_CONSUMERS: &[&str] = &["hstx"];
-const CLK_USB_MAIN_SOURCES: &[&str] = &[];
-const CLK_USB_AUX_SOURCES: &[&str] = &[
+pub(crate) const CLK_PERI_CONSUMERS: &[&str] = &["uart0", "uart1", "spi0", "spi1", "i2c0", "i2c1"];
+pub(crate) const CLK_HSTX_MAIN_SOURCES: &[&str] = &[];
+pub(crate) const CLK_HSTX_AUX_SOURCES: &[&str] = &["clksrc_pll_sys", "clksrc_pll_usb", "clk_sys"];
+pub(crate) const CLK_HSTX_CONSUMERS: &[&str] = &["hstx"];
+pub(crate) const CLK_USB_MAIN_SOURCES: &[&str] = &[];
+pub(crate) const CLK_USB_AUX_SOURCES: &[&str] = &[
     "clksrc_pll_sys",
     "clksrc_gpin0",
     "clksrc_gpin1",
@@ -207,9 +211,9 @@ const CLK_USB_AUX_SOURCES: &[&str] = &[
     "rosc_clksrc_ph",
     "xosc_clksrc",
 ];
-const CLK_USB_CONSUMERS: &[&str] = &["usbctrl"];
-const CLK_ADC_MAIN_SOURCES: &[&str] = &[];
-const CLK_ADC_AUX_SOURCES: &[&str] = &[
+pub(crate) const CLK_USB_CONSUMERS: &[&str] = &["usbctrl"];
+pub(crate) const CLK_ADC_MAIN_SOURCES: &[&str] = &[];
+pub(crate) const CLK_ADC_AUX_SOURCES: &[&str] = &[
     "clksrc_pll_sys",
     "clksrc_gpin0",
     "clksrc_gpin1",
@@ -218,7 +222,7 @@ const CLK_ADC_AUX_SOURCES: &[&str] = &[
     "xosc_clksrc",
 ];
 
-const RP2350_OVERCLOCK_PROFILES: &[CortexMSocOverclockProfile] = &[
+pub(crate) const RP2350_OVERCLOCK_PROFILES: &[CortexMSocOverclockProfile] = &[
     CortexMSocOverclockProfile {
         name: "stock-150mhz",
         sys_clock_hz: 150_000_000,
@@ -240,20 +244,21 @@ const RP2350_OVERCLOCK_PROFILES: &[CortexMSocOverclockProfile] = &[
         monotonic_time_impact: CortexMSocMonotonicTimeImpact::Unknown,
     },
 ];
-const CLK_ADC_CONSUMERS: &[&str] = &["adc"];
-const RP2350_SLEEP_WAKE_SOURCES: &[&str] = &["irq", "sev", "timer", "gpio"];
-const RP2350_SLEEP_GATED_DOMAINS: &[&str] = &["core pipeline"];
-const RP2350_DEEP_SLEEP_WAKE_SOURCES: &[&str] = &["irq", "gpio", "timer"];
-const RP2350_DEEP_SLEEP_GATED_DOMAINS: &[&str] = &["clk_sys", "clk_peri", "core pipeline"];
-const RP2350_FLASH_BYTES: usize = 4 * 1024 * 1024;
-const RP2350_FLASH_ERASE_BLOCK_BYTES: usize = 4 * 1024;
-const RP2350_FLASH_PROGRAM_GRANULE_BYTES: usize = 256;
-const RP2350_PIO_PIN_MAPPING: PcuPinMappingCaps = PcuPinMappingCaps::INPUT_BASE
+pub(crate) const CLK_ADC_CONSUMERS: &[&str] = &["adc"];
+pub(crate) const RP2350_SLEEP_WAKE_SOURCES: &[&str] = &["irq", "sev", "timer", "gpio"];
+pub(crate) const RP2350_SLEEP_GATED_DOMAINS: &[&str] = &["core pipeline"];
+pub(crate) const RP2350_DEEP_SLEEP_WAKE_SOURCES: &[&str] = &["irq", "gpio", "timer"];
+pub(crate) const RP2350_DEEP_SLEEP_GATED_DOMAINS: &[&str] =
+    &["clk_sys", "clk_peri", "core pipeline"];
+pub(crate) const RP2350_FLASH_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const RP2350_FLASH_ERASE_BLOCK_BYTES: usize = 4 * 1024;
+pub(crate) const RP2350_FLASH_PROGRAM_GRANULE_BYTES: usize = 256;
+pub(crate) const RP2350_PIO_PIN_MAPPING: PcuPinMappingCaps = PcuPinMappingCaps::INPUT_BASE
     .union(PcuPinMappingCaps::OUTPUT_BASE)
     .union(PcuPinMappingCaps::SET_BASE)
     .union(PcuPinMappingCaps::SIDESET_BASE)
     .union(PcuPinMappingCaps::JMP_PIN);
-const RP2350_PIO_ENGINE_CAPS: PcuCaps = PcuCaps::SHARED_INSTRUCTION_MEMORY
+pub(crate) const RP2350_PIO_ENGINE_CAPS: PcuCaps = PcuCaps::SHARED_INSTRUCTION_MEMORY
     .union(PcuCaps::PER_LANE_PROGRAM_COUNTER)
     .union(PcuCaps::LANE_SIDESET)
     .union(PcuCaps::WAIT_ON_PIN)
@@ -265,31 +270,35 @@ const RP2350_PIO_ENGINE_CAPS: PcuCaps = PcuCaps::SHARED_INSTRUCTION_MEMORY
     .union(PcuCaps::PROGRAM_SWAP_REQUIRES_STOP)
     .union(PcuCaps::MULTI_LANE_COOPERATIVE_START)
     .union(PcuCaps::PIN_MAPPING_FLEXIBLE);
-const RP2350_PIO_SYSTEM_CAPS: PcuCaps = PcuCaps::ENUMERATE
+pub(crate) const RP2350_PIO_SYSTEM_CAPS: PcuCaps = PcuCaps::ENUMERATE
     .union(PcuCaps::CLAIM_ENGINE)
     .union(PcuCaps::CLAIM_LANES)
     .union(PcuCaps::LOAD_PROGRAM)
     .union(PcuCaps::CONTROL)
     .union(PcuCaps::FIFO_IO)
     .union(RP2350_PIO_ENGINE_CAPS);
-const RP2350_PIO_SUPPORT: PcuSupport = PcuSupport {
+pub(crate) const RP2350_PIO_SUPPORT: PcuSupport = PcuSupport {
     caps: RP2350_PIO_SYSTEM_CAPS,
     implementation: PcuImplementationKind::Native,
     engine_count: RP2350_PIO_ENGINE_COUNT as u8,
 };
 
-static RP2350_PIO_ENGINE_CLAIMS: [AtomicBool; RP2350_PIO_ENGINE_COUNT] =
+pub(crate) static RP2350_PIO_ENGINE_CLAIMS: [AtomicBool; RP2350_PIO_ENGINE_COUNT] =
     [const { AtomicBool::new(false) }; RP2350_PIO_ENGINE_COUNT];
-static RP2350_PIO_LANE_CLAIMS: [AtomicU8; RP2350_PIO_ENGINE_COUNT] =
+pub(crate) static RP2350_PIO_LANE_CLAIMS: [AtomicU8; RP2350_PIO_ENGINE_COUNT] =
     [const { AtomicU8::new(0) }; RP2350_PIO_ENGINE_COUNT];
-static RP2350_TIMER0_TICK_STATE: AtomicU8 = AtomicU8::new(RP2350_TIMER0_TICK_STATE_UNINITIALIZED);
-static RP2350_EVENT_TIMEOUT_FIRED: AtomicBool = AtomicBool::new(false);
+pub(crate) static RP2350_TIMER0_TICK_STATE: AtomicU8 =
+    AtomicU8::new(RP2350_TIMER0_TICK_STATE_UNINITIALIZED);
+pub(crate) static RP2350_EVENT_TIMEOUT_FIRED: AtomicBool = AtomicBool::new(false);
 
-const RP2350_PIO0_IRQ_LINES: [u16; 2] = [15, 16];
-const RP2350_PIO1_IRQ_LINES: [u16; 2] = [17, 18];
-const RP2350_PIO2_IRQ_LINES: [u16; 2] = [19, 20];
+pub(crate) const RP2350_PIO0_IRQ_LINES: [u16; 2] = [15, 16];
+pub(crate) const RP2350_PIO1_IRQ_LINES: [u16; 2] = [17, 18];
+pub(crate) const RP2350_PIO2_IRQ_LINES: [u16; 2] = [19, 20];
 
-const fn rp2350_pio_fifo(lane: PcuLaneId, direction: PcuFifoDirection) -> PcuFifoDescriptor {
+pub(crate) const fn rp2350_pio_fifo(
+    lane: PcuLaneId,
+    direction: PcuFifoDirection,
+) -> PcuFifoDescriptor {
     PcuFifoDescriptor {
         id: PcuFifoId { lane, direction },
         depth_words: RP2350_PIO_FIFO_DEPTH_WORDS,
@@ -297,7 +306,11 @@ const fn rp2350_pio_fifo(lane: PcuLaneId, direction: PcuFifoDirection) -> PcuFif
     }
 }
 
-const fn rp2350_pio_lane(engine: u8, index: u8, name: &'static str) -> PcuLaneDescriptor {
+pub(crate) const fn rp2350_pio_lane(
+    engine: u8,
+    index: u8,
+    name: &'static str,
+) -> PcuLaneDescriptor {
     let lane = PcuLaneId {
         engine: PcuEngineId(engine),
         index,
@@ -311,7 +324,7 @@ const fn rp2350_pio_lane(engine: u8, index: u8, name: &'static str) -> PcuLaneDe
     }
 }
 
-const fn rp2350_pio_engine(
+pub(crate) const fn rp2350_pio_engine(
     engine: u8,
     name: &'static str,
     irq_lines: &'static [u16],
@@ -338,32 +351,32 @@ const fn rp2350_pio_engine(
     }
 }
 
-const PIO_ENGINES: [PcuEngineDescriptor; RP2350_PIO_ENGINE_COUNT] = [
+pub(crate) const PIO_ENGINES: [PcuEngineDescriptor; RP2350_PIO_ENGINE_COUNT] = [
     rp2350_pio_engine(0, "pio0", &RP2350_PIO0_IRQ_LINES, 0, 4),
     rp2350_pio_engine(1, "pio1", &RP2350_PIO1_IRQ_LINES, 8, 12),
     rp2350_pio_engine(2, "pio2", &RP2350_PIO2_IRQ_LINES, 16, 20),
 ];
 
-const PIO0_LANES: [PcuLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
+pub(crate) const PIO0_LANES: [PcuLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
     rp2350_pio_lane(0, 0, "pio0-sm0"),
     rp2350_pio_lane(0, 1, "pio0-sm1"),
     rp2350_pio_lane(0, 2, "pio0-sm2"),
     rp2350_pio_lane(0, 3, "pio0-sm3"),
 ];
-const PIO1_LANES: [PcuLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
+pub(crate) const PIO1_LANES: [PcuLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
     rp2350_pio_lane(1, 0, "pio1-sm0"),
     rp2350_pio_lane(1, 1, "pio1-sm1"),
     rp2350_pio_lane(1, 2, "pio1-sm2"),
     rp2350_pio_lane(1, 3, "pio1-sm3"),
 ];
-const PIO2_LANES: [PcuLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
+pub(crate) const PIO2_LANES: [PcuLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
     rp2350_pio_lane(2, 0, "pio2-sm0"),
     rp2350_pio_lane(2, 1, "pio2-sm1"),
     rp2350_pio_lane(2, 2, "pio2-sm2"),
     rp2350_pio_lane(2, 3, "pio2-sm3"),
 ];
 
-const MEMORY_MAP: [CortexMMemoryRegionDescriptor; 8] = [
+pub(crate) const MEMORY_MAP: [CortexMMemoryRegionDescriptor; 8] = [
     CortexMMemoryRegionDescriptor {
         name: "rom",
         kind: CortexMMemoryRegionKind::Rom,
@@ -460,7 +473,7 @@ const MEMORY_MAP: [CortexMMemoryRegionDescriptor; 8] = [
     },
 ];
 
-const PERIPHERALS: [CortexMPeripheralDescriptor; 45] = [
+pub(crate) const PERIPHERALS: [CortexMPeripheralDescriptor; 45] = [
     CortexMPeripheralDescriptor {
         name: "sysinfo",
         bus: CortexMPeripheralBus::Apb,
@@ -733,7 +746,7 @@ const PERIPHERALS: [CortexMPeripheralDescriptor; 45] = [
     },
 ];
 
-const fn irq(
+pub(crate) const fn irq(
     name: &'static str,
     irqn: u16,
     peripheral: Option<&'static str>,
@@ -751,7 +764,7 @@ const fn irq(
     }
 }
 
-const IRQS: [CortexMIrqDescriptor; 52] = [
+pub(crate) const IRQS: [CortexMIrqDescriptor; 52] = [
     irq(
         "timer0-irq0",
         0,
@@ -1086,23 +1099,26 @@ const IRQS: [CortexMIrqDescriptor; 52] = [
     irq("spare5", 51, None, CortexMIrqClass::Spare, Some("5"), false),
 ];
 
-const DMA_CONTROLLERS: [CortexMDmaControllerDescriptor; 1] = [CortexMDmaControllerDescriptor {
-    name: "dma",
-    base: 0x5000_0000,
-    channel_count: 16,
-    transfer_caps: CortexMDmaTransferCaps::MEMORY_TO_MEMORY
-        .union(CortexMDmaTransferCaps::MEMORY_TO_PERIPHERAL)
-        .union(CortexMDmaTransferCaps::PERIPHERAL_TO_MEMORY)
-        .union(CortexMDmaTransferCaps::CHANNEL_CHAINING),
-}];
+pub(crate) const DMA_CONTROLLERS: [CortexMDmaControllerDescriptor; 1] =
+    [CortexMDmaControllerDescriptor {
+        name: "dma",
+        base: 0x5000_0000,
+        channel_count: 16,
+        transfer_caps: CortexMDmaTransferCaps::MEMORY_TO_MEMORY
+            .union(CortexMDmaTransferCaps::MEMORY_TO_PERIPHERAL)
+            .union(CortexMDmaTransferCaps::PERIPHERAL_TO_MEMORY)
+            .union(CortexMDmaTransferCaps::CHANNEL_CHAINING),
+    }];
 
-const DMA_PERIPHERAL_TX_CAPS: CortexMDmaTransferCaps = CortexMDmaTransferCaps::MEMORY_TO_PERIPHERAL;
-const DMA_PERIPHERAL_RX_CAPS: CortexMDmaTransferCaps = CortexMDmaTransferCaps::PERIPHERAL_TO_MEMORY;
-const DMA_PACER_CAPS: CortexMDmaTransferCaps = CortexMDmaTransferCaps::MEMORY_TO_MEMORY
+pub(crate) const DMA_PERIPHERAL_TX_CAPS: CortexMDmaTransferCaps =
+    CortexMDmaTransferCaps::MEMORY_TO_PERIPHERAL;
+pub(crate) const DMA_PERIPHERAL_RX_CAPS: CortexMDmaTransferCaps =
+    CortexMDmaTransferCaps::PERIPHERAL_TO_MEMORY;
+pub(crate) const DMA_PACER_CAPS: CortexMDmaTransferCaps = CortexMDmaTransferCaps::MEMORY_TO_MEMORY
     .union(CortexMDmaTransferCaps::MEMORY_TO_PERIPHERAL)
     .union(CortexMDmaTransferCaps::PERIPHERAL_TO_MEMORY);
 
-const fn dma_request(
+pub(crate) const fn dma_request(
     name: &'static str,
     request_line: u16,
     peripheral: Option<&'static str>,
@@ -1120,7 +1136,7 @@ const fn dma_request(
     }
 }
 
-const DMA_REQUESTS: [CortexMDmaRequestDescriptor; 60] = [
+pub(crate) const DMA_REQUESTS: [CortexMDmaRequestDescriptor; 60] = [
     dma_request(
         "pio0-tx0",
         0,
@@ -1603,7 +1619,7 @@ const DMA_REQUESTS: [CortexMDmaRequestDescriptor; 60] = [
     ),
 ];
 
-const CLOCK_TREE: [CortexMClockDescriptor; 6] = [
+pub(crate) const CLOCK_TREE: [CortexMClockDescriptor; 6] = [
     CortexMClockDescriptor {
         name: "clk_ref",
         main_sources: CLK_REF_MAIN_SOURCES,
@@ -1642,7 +1658,7 @@ const CLOCK_TREE: [CortexMClockDescriptor; 6] = [
     },
 ];
 
-const POWER_MODES: [CortexMPowerModeDescriptor; 2] = [
+pub(crate) const POWER_MODES: [CortexMPowerModeDescriptor; 2] = [
     CortexMPowerModeDescriptor {
         name: "sleep-wfi",
         uses_wfi: true,
@@ -1661,7 +1677,7 @@ const POWER_MODES: [CortexMPowerModeDescriptor; 2] = [
     },
 ];
 
-const PAL_POWER_MODES: [PowerModeDescriptor; 2] = [
+pub(crate) const PAL_POWER_MODES: [PowerModeDescriptor; 2] = [
     PowerModeDescriptor {
         name: "sleep-wfi",
         depth: PowerModeDepth::Sleep,
@@ -1681,18 +1697,19 @@ const PAL_POWER_MODES: [PowerModeDescriptor; 2] = [
 // population. Raspberry Pi's Pico 2 W prose datasheet currently disagrees and mentions a
 // W25Q16JV instead, so this must split into a truly board-specific module if that ambiguity ever
 // becomes more than documentation slop.
-const FLASH_REGIONS: [CortexMFlashRegionDescriptor; 1] = [CortexMFlashRegionDescriptor {
-    name: "qspi-flash-xip",
-    base: 0x1000_0000,
-    len: RP2350_FLASH_BYTES,
-    erase_block_bytes: RP2350_FLASH_ERASE_BLOCK_BYTES,
-    program_granule_bytes: RP2350_FLASH_PROGRAM_GRANULE_BYTES,
-    xip: true,
-    writable: true,
-    requires_xip_quiesce: true,
-}];
+pub(crate) const FLASH_REGIONS: [CortexMFlashRegionDescriptor; 1] =
+    [CortexMFlashRegionDescriptor {
+        name: "qspi-flash-xip",
+        base: 0x1000_0000,
+        len: RP2350_FLASH_BYTES,
+        erase_block_bytes: RP2350_FLASH_ERASE_BLOCK_BYTES,
+        program_granule_bytes: RP2350_FLASH_PROGRAM_GRANULE_BYTES,
+        xip: true,
+        writable: true,
+        requires_xip_quiesce: true,
+    }];
 
-const fn rp2350_owned_sram_region_from_bounds(
+pub(crate) const fn rp2350_owned_sram_region_from_bounds(
     heap_start: usize,
     stack_end: usize,
 ) -> Option<CortexMMemoryRegionDescriptor> {
@@ -1716,13 +1733,13 @@ const fn rp2350_owned_sram_region_from_bounds(
     })
 }
 
-fn rp2350_owned_sram_region() -> Option<CortexMMemoryRegionDescriptor> {
+pub(crate) fn rp2350_owned_sram_region() -> Option<CortexMMemoryRegionDescriptor> {
     let heap_start = (&raw const __sheap) as usize;
     let stack_end = (&raw const _stack_end) as usize;
     rp2350_owned_sram_region_from_bounds(heap_start, stack_end)
 }
 
-fn rp2350_inline_current_exception_stack_allows(required_bytes: usize) -> bool {
+pub(crate) fn rp2350_inline_current_exception_stack_allows(required_bytes: usize) -> bool {
     if required_bytes == 0 {
         return true;
     }
@@ -1736,7 +1753,7 @@ fn rp2350_inline_current_exception_stack_allows(required_bytes: usize) -> bool {
     )
 }
 
-const fn rp2350_inline_current_exception_stack_allows_from_bounds(
+pub(crate) const fn rp2350_inline_current_exception_stack_allows_from_bounds(
     stack_floor: usize,
     current_msp: usize,
     required_bytes: usize,
@@ -1752,14 +1769,14 @@ const fn rp2350_inline_current_exception_stack_allows_from_bounds(
         >= required_bytes.saturating_add(RP2350_INLINE_EXCEPTION_STACK_RESERVE_BYTES)
 }
 
-fn rp2350_exception_stack_observation() -> CortexMExceptionStackObservation {
+pub(crate) fn rp2350_exception_stack_observation() -> CortexMExceptionStackObservation {
     let lower_bound = (&raw const _stack_end) as usize;
     let upper_bound = (&raw const _stack_start) as usize;
     let current_sp = rp2350_current_msp();
     rp2350_exception_stack_observation_from_bounds(lower_bound, upper_bound, current_sp)
 }
 
-const fn rp2350_exception_stack_observation_from_bounds(
+pub(crate) const fn rp2350_exception_stack_observation_from_bounds(
     lower_bound: usize,
     upper_bound: usize,
     current_sp: usize,
@@ -1776,7 +1793,7 @@ const fn rp2350_exception_stack_observation_from_bounds(
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-fn rp2350_current_msp() -> usize {
+pub(crate) fn rp2350_current_msp() -> usize {
     let msp: usize;
     unsafe {
         asm!(
@@ -1789,6 +1806,6 @@ fn rp2350_current_msp() -> usize {
 }
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-const fn rp2350_current_msp() -> usize {
+pub(crate) const fn rp2350_current_msp() -> usize {
     0
 }

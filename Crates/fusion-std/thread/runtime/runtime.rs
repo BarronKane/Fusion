@@ -18,7 +18,7 @@ use fusion_sys::alloc::{
     ExtentLease,
     MemoryPoolExtentRequest,
 };
-use fusion_sys::context::ContextId;
+use fusion_sys::domain::context::ContextId;
 use fusion_sys::courier::{
     CourierChildLaunchRequest,
     CourierId,

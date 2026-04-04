@@ -31,7 +31,7 @@ use fusion_sys::fiber::{
     ManagedFiber,
     yield_now,
 };
-use fusion_sys::insight::{
+use fusion_sys::channel::insight::{
     InsightCaptureMode,
     InsightChannelClass,
     LocalInsightChannel,
@@ -42,7 +42,7 @@ use fusion_sys::mem::resource::{
     ResourceRequest,
     VirtualMemoryResource,
 };
-use fusion_sys::protocol::{
+use fusion_sys::transport::protocol::{
     Protocol,
     ProtocolBootstrapKind,
     ProtocolCaps,
@@ -257,11 +257,13 @@ fn allocator_service_error_kind_name(kind: AllocatorChannelServiceErrorKind) -> 
 }
 
 fn insight_availability_name(
-    availability: fusion_sys::insight::InsightAvailabilityKind,
+    availability: fusion_sys::channel::insight::InsightAvailabilityKind,
 ) -> &'static str {
     match availability {
-        fusion_sys::insight::InsightAvailabilityKind::Available => "available",
-        fusion_sys::insight::InsightAvailabilityKind::DisabledByFeature => "disabled-by-feature",
+        fusion_sys::channel::insight::InsightAvailabilityKind::Available => "available",
+        fusion_sys::channel::insight::InsightAvailabilityKind::DisabledByFeature => {
+            "disabled-by-feature"
+        }
     }
 }
 

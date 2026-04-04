@@ -8,8 +8,7 @@ use core::sync::atomic::{
 use fusion_pal::contract::pal::HardwareTopologyQuery as _;
 use fusion_pal::sys::cpu::system_cpu;
 use fusion_sys::fiber::FiberError;
-use fusion_sys::thread::ThreadGuarantee;
-use fusion_sys::vector::{
+use fusion_sys::thread::vector::{
     IrqSlot,
     SealedVectorTable,
     VectorDispatchCookie,
@@ -18,6 +17,7 @@ use fusion_sys::vector::{
     VectorPriority,
     VectorTableBuilder,
 };
+use fusion_sys::thread::ThreadGuarantee;
 
 use crate::sync::{
     Mutex as SyncMutex,
@@ -908,7 +908,7 @@ mod tests {
 
     #[test]
     fn vector_lane_mapping_tracks_resolved_tier() {
-        let _guard = crate::thread::hosted_test_guard();
+        let _guard = crate::thread::runtime_test_guard();
         let pool = match TieredGreenPool::new(&TieredGreenPoolConfig::new()) {
             Ok(pool) => pool,
             Err(error) if tiered_pool_is_unsupported(error) => return,
@@ -938,7 +938,7 @@ mod tests {
 
     #[test]
     fn draining_vector_dispatch_routes_registered_targets() {
-        let _guard = crate::thread::hosted_test_guard();
+        let _guard = crate::thread::runtime_test_guard();
         PERFORMANCE_RUNS.store(0, Ordering::Release);
         EFFICIENCY_RUNS.store(0, Ordering::Release);
 
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn draining_vector_dispatch_handles_burst_callbacks() {
-        let _guard = crate::thread::hosted_test_guard();
+        let _guard = crate::thread::runtime_test_guard();
         PERFORMANCE_RUNS.store(0, Ordering::Release);
         EFFICIENCY_RUNS.store(0, Ordering::Release);
 
@@ -1057,6 +1057,7 @@ mod tests {
 
     #[test]
     fn clear_tiered_vector_target_removes_registered_target_and_pending_count() {
+        let _guard = crate::thread::runtime_test_guard();
         let performance = TieredTaskAttributes::new(
             FiberTaskAttributes::new(FiberStackClass::MIN)
                 .with_priority(FiberTaskPriority::DEFAULT),

@@ -38,7 +38,7 @@ use crate::fiber::{
     ManagedFiber,
     yield_now,
 };
-use crate::protocol::{
+use crate::transport::protocol::{
     Protocol,
     ProtocolBootstrapKind,
     ProtocolCaps,

@@ -8,8 +8,6 @@ mod event;
 mod fiber;
 #[path = "mem/mem.rs"]
 mod mem;
-#[path = "power/power.rs"]
-mod power;
 #[path = "sync/sync.rs"]
 mod sync;
 #[path = "thread/thread.rs"]

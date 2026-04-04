@@ -61,10 +61,9 @@ pub mod hosted {
     pub use crate::pal::hosted::*;
 }
 
+#[path = "soc/soc.rs"]
 /// Static SoC implementation-family facade.
-pub mod soc {
-    pub use crate::pal::soc::*;
-}
+pub mod soc;
 
 #[cfg(target_os = "ios")]
 use crate::pal::hosted::ios as platform;
@@ -138,6 +137,183 @@ pub mod cpu {
         system_hardware as system_cpu,
     };
 }
+/// Public DMA catalog module re-exported from the selected platform backend.
+pub mod dma {
+    pub use super::platform::dma::{
+        PlatformDma,
+        dma_controllers,
+        dma_requests,
+        system_dma,
+    };
+    pub use crate::contract::pal::dma::*;
+
+    /// Recommended transfer shape for one DMA request consumer.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum DmaTransferShape {
+        /// A memory-to-memory transfer path.
+        MemoryToMemory,
+        /// A memory-to-peripheral transfer path.
+        MemoryToPeripheral,
+        /// A peripheral-to-memory transfer path.
+        PeripheralToMemory,
+        /// One channel-to-channel chaining or trigger path.
+        ChannelChaining,
+    }
+
+    /// Consumer-facing role inferred from one DMA request descriptor.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum DmaConsumerRole {
+        /// Peripheral transmit or drain pacing.
+        PeripheralTx,
+        /// Peripheral receive or fill pacing.
+        PeripheralRx,
+        /// Peripheral-generated pacing that is not plain TX/RX FIFO traffic.
+        PeripheralPacer,
+        /// Timer-driven pacing.
+        TimerPacer,
+        /// Software-forced request with no peripheral endpoint.
+        Force,
+    }
+
+    /// Consumer-side routing and pacing policy for one DMA request.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct DmaRequestPolicy {
+        /// Coarse consumer role of this request.
+        pub role: DmaConsumerRole,
+        /// Preferred transfer shape when one is implied by the request.
+        pub preferred_shape: Option<DmaTransferShape>,
+    }
+
+    /// Typed helper over one selected DMA request descriptor.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct DmaRequest {
+        descriptor: &'static DmaRequestDescriptor,
+    }
+
+    impl DmaRequest {
+        /// Returns all surfaced DMA request descriptors for the selected backend.
+        #[must_use]
+        pub fn all() -> &'static [DmaRequestDescriptor] {
+            dma_requests()
+        }
+
+        /// Returns all surfaced DMA controller descriptors for the selected backend.
+        #[must_use]
+        pub fn controllers() -> &'static [DmaControllerDescriptor] {
+            dma_controllers()
+        }
+
+        /// Looks up one DMA request by its hardware request-line selector.
+        #[must_use]
+        pub fn from_request_line(request_line: u16) -> Option<Self> {
+            Self::all()
+                .iter()
+                .find(|descriptor| descriptor.request_line == request_line)
+                .map(|descriptor| Self { descriptor })
+        }
+
+        /// Returns the underlying descriptor.
+        #[must_use]
+        pub const fn descriptor(self) -> &'static DmaRequestDescriptor {
+            self.descriptor
+        }
+
+        /// Returns the hardware request-line selector.
+        #[must_use]
+        pub const fn request_line(self) -> u16 {
+            self.descriptor.request_line
+        }
+
+        /// Returns the associated peripheral block when one exists.
+        #[must_use]
+        pub const fn peripheral(self) -> Option<&'static str> {
+            self.descriptor.peripheral
+        }
+
+        /// Returns the peripheral-local endpoint name when one exists.
+        #[must_use]
+        pub const fn endpoint(self) -> Option<&'static str> {
+            self.descriptor.endpoint
+        }
+
+        /// Returns the coarse request classification.
+        #[must_use]
+        pub const fn class(self) -> DmaRequestClass {
+            self.descriptor.class
+        }
+
+        /// Returns the transfer capability envelope of this request.
+        #[must_use]
+        pub const fn transfer_caps(self) -> DmaTransferCaps {
+            self.descriptor.transfer_caps
+        }
+
+        /// Returns the consumer-facing routing and pacing policy for this request.
+        #[must_use]
+        pub const fn policy(self) -> DmaRequestPolicy {
+            policy_for_descriptor(self.descriptor)
+        }
+
+        /// Returns the consumer-facing role inferred for this request.
+        #[must_use]
+        pub const fn consumer_role(self) -> DmaConsumerRole {
+            self.policy().role
+        }
+
+        /// Returns the preferred transfer shape implied by this request, when one exists.
+        #[must_use]
+        pub const fn preferred_shape(self) -> Option<DmaTransferShape> {
+            self.policy().preferred_shape
+        }
+
+        /// Returns whether the descriptor honestly supports the requested transfer shape.
+        #[must_use]
+        pub const fn supports_shape(self, shape: DmaTransferShape) -> bool {
+            let caps = self.transfer_caps();
+            match shape {
+                DmaTransferShape::MemoryToMemory => {
+                    caps.contains(DmaTransferCaps::MEMORY_TO_MEMORY)
+                }
+                DmaTransferShape::MemoryToPeripheral => {
+                    caps.contains(DmaTransferCaps::MEMORY_TO_PERIPHERAL)
+                }
+                DmaTransferShape::PeripheralToMemory => {
+                    caps.contains(DmaTransferCaps::PERIPHERAL_TO_MEMORY)
+                }
+                DmaTransferShape::ChannelChaining => {
+                    caps.contains(DmaTransferCaps::CHANNEL_CHAINING)
+                }
+            }
+        }
+    }
+
+    /// Returns the consumer-facing policy for one raw DMA request descriptor.
+    #[must_use]
+    pub const fn policy_for_descriptor(descriptor: &DmaRequestDescriptor) -> DmaRequestPolicy {
+        match descriptor.class {
+            DmaRequestClass::PeripheralTx => DmaRequestPolicy {
+                role: DmaConsumerRole::PeripheralTx,
+                preferred_shape: Some(DmaTransferShape::MemoryToPeripheral),
+            },
+            DmaRequestClass::PeripheralRx => DmaRequestPolicy {
+                role: DmaConsumerRole::PeripheralRx,
+                preferred_shape: Some(DmaTransferShape::PeripheralToMemory),
+            },
+            DmaRequestClass::PeripheralPacer => DmaRequestPolicy {
+                role: DmaConsumerRole::PeripheralPacer,
+                preferred_shape: None,
+            },
+            DmaRequestClass::TimerPacer => DmaRequestPolicy {
+                role: DmaConsumerRole::TimerPacer,
+                preferred_shape: None,
+            },
+            DmaRequestClass::Force => DmaRequestPolicy {
+                role: DmaConsumerRole::Force,
+                preferred_shape: Some(DmaTransferShape::MemoryToMemory),
+            },
+        }
+    }
+}
 /// Public courier contract surface.
 pub mod courier {
     pub use crate::contract::pal::domain::{
@@ -171,15 +347,6 @@ pub mod event {
         system_event,
     };
     pub use crate::contract::pal::runtime::event::*;
-}
-/// Public GPIO driver module re-exported from the selected platform backend.
-pub mod gpio {
-    pub use super::platform::gpio::{
-        PlatformGpio,
-        PlatformGpioPin,
-        system_gpio,
-    };
-    pub use crate::contract::drivers::gpio::*;
 }
 /// Public hosted-fiber helper module re-exported from the selected platform backend.
 pub mod fiber {

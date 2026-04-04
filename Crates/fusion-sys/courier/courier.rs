@@ -25,7 +25,7 @@ use crate::claims::{
     LocalAdmissionSeal,
     PrincipalId,
 };
-use crate::context::ContextId as RuntimeContextId;
+use crate::domain::context::ContextId as RuntimeContextId;
 use crate::fiber::{
     FiberErrorKind,
     FiberId,
@@ -714,7 +714,7 @@ pub enum CourierAppMetadataSubject {
     Courier,
     ChildCourier(CourierId),
     Fiber(FiberId),
-    Context(crate::context::ContextId),
+    Context(crate::domain::context::ContextId),
     AsyncLane,
 }
 

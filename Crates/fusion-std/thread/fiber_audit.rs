@@ -21,7 +21,7 @@ use fusion_sys::fiber::{
     ManagedFiber,
     yield_now,
 };
-use fusion_sys::protocol::{
+use fusion_sys::transport::protocol::{
     Protocol,
     ProtocolBootstrapKind,
     ProtocolCaps,

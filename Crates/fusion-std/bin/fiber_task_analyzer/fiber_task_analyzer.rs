@@ -1886,13 +1886,13 @@ fn render_red_inline_contract(rendered: &mut String, entry: &RedInlineContractEn
     rendered.push_str(", ");
     rendered.push_str(match entry.fallback_lane {
         RedInlineFallbackLane::DeferredPrimary => {
-            "fusion_sys::vector::VectorDispatchLane::DeferredPrimary"
+            "fusion_sys::thread::vector::VectorDispatchLane::DeferredPrimary"
         }
         RedInlineFallbackLane::DeferredSecondary => {
-            "fusion_sys::vector::VectorDispatchLane::DeferredSecondary"
+            "fusion_sys::thread::vector::VectorDispatchLane::DeferredSecondary"
         }
     });
-    rendered.push_str(", fusion_sys::vector::VectorDispatchCookie(");
+    rendered.push_str(", fusion_sys::thread::vector::VectorDispatchCookie(");
     rendered.push_str(&entry.fallback_cookie.to_string());
     rendered.push_str(")).with_current_exception_stack_bytes(");
     rendered.push_str(&entry.current_exception_stack_bytes.to_string());

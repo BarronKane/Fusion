@@ -8,6 +8,8 @@ mod handle;
 mod pool;
 mod system;
 mod time;
+/// Scheduler-adjacent vector-dispatch ownership contracts and wrappers.
+pub mod vector;
 
 pub use fusion_pal::sys::thread::{
     RawThreadEntry,

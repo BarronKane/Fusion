@@ -4,22 +4,12 @@ pub mod atomic;
 #[path = "context/context.rs"]
 /// Linux fusion-pal user-space context backend implementation.
 pub mod context;
+#[path = "dma/dma.rs"]
+/// Linux fusion-pal DMA backend implementation.
+pub mod dma;
 #[path = "event/event.rs"]
 /// Linux fusion-pal event backend implementation.
 pub mod event;
-/// Linux GPIO surface remains unsupported for now.
-pub mod gpio {
-    pub use crate::contract::drivers::gpio::{
-        UnsupportedGpio as PlatformGpio,
-        UnsupportedGpioPin as PlatformGpioPin,
-    };
-
-    /// Returns the unsupported GPIO provider for the selected backend.
-    #[must_use]
-    pub const fn system_gpio() -> PlatformGpio {
-        PlatformGpio::new()
-    }
-}
 #[path = "fiber/fiber.rs"]
 /// Linux fusion-pal hosted-fiber helper implementation.
 pub mod fiber;

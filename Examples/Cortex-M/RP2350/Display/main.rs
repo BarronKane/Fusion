@@ -4,6 +4,7 @@
 use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
 use core::pin::pin;
+use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use core::time::Duration;
@@ -16,15 +17,19 @@ use fusion_example_rp2350_on_device::pcu::{
     run_pcu_pio_smoke_suite,
     suite_pass_display_code,
 };
+use fusion_example_rp2350_on_device::gpio::{
+    Rp2350FiberGpioOutputPin,
+    Rp2350FiberGpioService,
+};
 use fusion_example_rp2350_on_device::runtime::{drive_once, spawn_with_stack};
-use fusion_std::gpio::{Gpio, GpioDriveStrength, GpioPin};
-use fusion_std::pcu::PCU;
-use fusion_std::thread::yield_now;
-use fusion_sys::hardware::peripheral::{
+use fusion_hal::contract::drivers::bus::gpio::GpioDriveStrength;
+use fusion_hal::drivers::peripheral::{
     SevenSegmentGlyph,
     SevenSegmentPolarity,
     ShiftedFourDigitSevenSegmentDisplay,
 };
+use fusion_std::pcu::PCU;
+use fusion_std::thread::yield_now;
 use fusion_sys::thread::system_monotonic_time;
 
 const DISPLAY_DATA_PIN: u8 = 12;
@@ -39,36 +44,67 @@ const TEST_PHASE_PERIOD: Duration = Duration::from_millis(250);
 const PANIC_PHASE_PERIOD: Duration = Duration::from_millis(500);
 const DISPLAY_REFRESH_PERIOD: Duration = Duration::from_millis(2);
 const QUIESCE_IRQS: &[u16] = &[10, 11, 12, 13, 15, 16, 17, 18, 19, 20];
+const GPIO_SERVICE_STACK_BYTES: usize = 4096;
 
 // Flip this if your module turns out to be the opposite electrical contract. The pinout is the
 // same on both variants because apparently the universe enjoys cheap practical jokes.
 const DISPLAY_POLARITY: SevenSegmentPolarity = SevenSegmentPolarity::common_cathode();
 
-type PicoDisplay = ShiftedFourDigitSevenSegmentDisplay<GpioPin, GpioPin, GpioPin, GpioPin>;
+type PicoGpioService = Rp2350FiberGpioService<4>;
+type PicoGpioPin = Rp2350FiberGpioOutputPin<16, 16>;
+type PicoDisplay =
+    ShiftedFourDigitSevenSegmentDisplay<PicoGpioPin, PicoGpioPin, PicoGpioPin, PicoGpioPin>;
 
 static mut DISPLAY_STORAGE: MaybeUninit<PicoDisplay> = MaybeUninit::uninit();
+static mut GPIO_SERVICE_STORAGE: MaybeUninit<PicoGpioService> = MaybeUninit::uninit();
 static DISPLAY_READY: AtomicBool = AtomicBool::new(false);
 static DISPLAY_GLYPHS: [AtomicU8; 4] = [const { AtomicU8::new(0) }; 4];
 static PANIC_DISPLAY_CODE: AtomicU16 = AtomicU16::new(0xDEAD);
 
-fn configure_output_pin(pin: u8) -> GpioPin {
-    let mut gpio = Gpio::take(pin).expect("gpio pin should be claimable");
-    gpio.set_drive_strength(GpioDriveStrength::MilliAmps4)
-        .expect("drive strength should be configurable");
-    gpio.configure_output(false)
-        .expect("gpio pin should configure for output");
-    gpio
+fn init_gpio_service() -> *mut PicoGpioService {
+    unsafe {
+        let service = core::ptr::addr_of_mut!(GPIO_SERVICE_STORAGE).cast::<PicoGpioService>();
+        service.write(PicoGpioService::new().expect("gpio service should build"));
+        service
+    }
 }
 
 fn init_display() -> &'static mut PicoDisplay {
+    let gpio_service = init_gpio_service();
+    let data = unsafe {
+        Pin::new_unchecked(&mut *gpio_service)
+            .claim_output_pin(DISPLAY_DATA_PIN, GpioDriveStrength::MilliAmps4)
+            .expect("display data pin should be claimable")
+    };
+    let shift_clock = unsafe {
+        Pin::new_unchecked(&mut *gpio_service)
+            .claim_output_pin(DISPLAY_SHIFT_CLOCK_PIN, GpioDriveStrength::MilliAmps4)
+            .expect("display shift clock pin should be claimable")
+    };
+    let latch_clock = unsafe {
+        Pin::new_unchecked(&mut *gpio_service)
+            .claim_output_pin(DISPLAY_LATCH_PIN, GpioDriveStrength::MilliAmps4)
+            .expect("display latch pin should be claimable")
+    };
+    let output_enable = unsafe {
+        Pin::new_unchecked(&mut *gpio_service)
+            .claim_output_pin(DISPLAY_ENABLE_PIN, GpioDriveStrength::MilliAmps4)
+            .expect("display output-enable pin should be claimable")
+    };
+    unsafe {
+        Pin::new_unchecked(&mut *gpio_service)
+            .spawn::<GPIO_SERVICE_STACK_BYTES>()
+            .expect("display gpio service should spawn");
+    }
+
     unsafe {
         let display = core::ptr::addr_of_mut!(DISPLAY_STORAGE).cast::<PicoDisplay>();
         display.write(
             ShiftedFourDigitSevenSegmentDisplay::with_output_enable(
-                configure_output_pin(DISPLAY_DATA_PIN),
-                configure_output_pin(DISPLAY_SHIFT_CLOCK_PIN),
-                configure_output_pin(DISPLAY_LATCH_PIN),
-                configure_output_pin(DISPLAY_ENABLE_PIN),
+                data,
+                shift_clock,
+                latch_clock,
+                output_enable,
                 DISPLAY_POLARITY,
             )
             .expect("shifted display should configure"),

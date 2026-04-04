@@ -22,7 +22,7 @@ mod system;
 mod tier;
 
 #[cfg(all(test, feature = "std"))]
-pub(crate) fn hosted_test_guard() -> MutexGuard<'static, ()> {
+pub(crate) fn runtime_test_guard() -> MutexGuard<'static, ()> {
     static HOSTED_TEST_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     HOSTED_TEST_GUARD
         .get_or_init(|| Mutex::new(()))

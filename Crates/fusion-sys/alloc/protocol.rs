@@ -8,7 +8,7 @@
 //! Direct allocator APIs remain first-class. These protocols exist so allocator-domain truth can
 //! ride protocol/transport/channel composition when the caller actually needs that boundary.
 
-use crate::protocol::{
+use crate::transport::protocol::{
     Protocol,
     ProtocolBootstrapKind,
     ProtocolCaps,

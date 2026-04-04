@@ -4,6 +4,8 @@ pub mod caps;
 #[path = "claims/claims.rs"]
 pub mod claims;
 pub mod cpu;
+#[path = "dma/dma.rs"]
+pub mod dma;
 #[path = "domain/domain.rs"]
 pub mod domain;
 pub mod error;
@@ -22,6 +24,7 @@ pub mod vector;
 pub use caps::*;
 pub use claims::*;
 pub use cpu::*;
+pub use dma::*;
 use crate::contract::pal::runtime::thread::{
     ThreadClusterId,
     ThreadCoreClassId,

@@ -178,11 +178,14 @@ pub mod cortex_m {
         EventSourceHandle,
     };
     #[cfg(feature = "soc-rp2350")]
-    use fusion_pal::sys::soc::cortex_m::hal::soc::board::{
-        CortexMDmaRequestClass,
-        CortexMDmaRequestDescriptor,
-        CortexMDmaTransferCaps,
+    use fusion_pal::sys::dma::{
+        DmaRequestClass,
+        DmaRequestDescriptor,
+        DmaTransferCaps,
         dma_requests as rp2350_dma_requests,
+    };
+    #[cfg(feature = "soc-rp2350")]
+    use fusion_pal::sys::soc::cortex_m::hal::soc::board::{
         gpio_irq_clear_edges as rp2350_gpio_irq_clear_edges,
         gpio_irq_summary as rp2350_gpio_irq_summary,
         pio_irq_clear_internal_flags as rp2350_pio_irq_clear_internal_flags,
@@ -371,14 +374,14 @@ pub mod cortex_m {
     /// Typed RP2350 DMA request helper over the selected board descriptor table.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct Rp2350DmaRequest {
-        descriptor: &'static CortexMDmaRequestDescriptor,
+        descriptor: &'static DmaRequestDescriptor,
     }
 
     #[cfg(feature = "soc-rp2350")]
     impl Rp2350DmaRequest {
         /// Returns all surfaced RP2350 DMA request descriptors.
         #[must_use]
-        pub fn all() -> &'static [CortexMDmaRequestDescriptor] {
+        pub fn all() -> &'static [DmaRequestDescriptor] {
             rp2350_dma_requests()
         }
 
@@ -393,7 +396,7 @@ pub mod cortex_m {
 
         /// Returns the underlying board descriptor for this DMA request.
         #[must_use]
-        pub const fn descriptor(self) -> &'static CortexMDmaRequestDescriptor {
+        pub const fn descriptor(self) -> &'static DmaRequestDescriptor {
             self.descriptor
         }
 
@@ -405,7 +408,7 @@ pub mod cortex_m {
 
         /// Returns the coarse request class.
         #[must_use]
-        pub const fn class(self) -> CortexMDmaRequestClass {
+        pub const fn class(self) -> DmaRequestClass {
             self.descriptor.class
         }
 
@@ -423,7 +426,7 @@ pub mod cortex_m {
 
         /// Returns the coarse transfer capabilities for this request.
         #[must_use]
-        pub const fn transfer_caps(self) -> CortexMDmaTransferCaps {
+        pub const fn transfer_caps(self) -> DmaTransferCaps {
             self.descriptor.transfer_caps
         }
 

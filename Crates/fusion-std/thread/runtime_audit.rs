@@ -22,13 +22,13 @@ use fusion_sys::fiber::{
     ManagedFiber,
     yield_now,
 };
-use fusion_sys::insight::{
+use fusion_sys::channel::insight::{
     InsightCaptureMode,
     InsightChannelClass,
     InsightError,
     LocalInsightChannel,
 };
-use fusion_sys::protocol::{
+use fusion_sys::transport::protocol::{
     Protocol,
     ProtocolBootstrapKind,
     ProtocolCaps,

@@ -313,65 +313,10 @@ pub struct CortexMEventTimeoutSupport {
     pub max_relative_timeout: Option<Duration>,
 }
 
-bitflags::bitflags! {
-    /// Supported DMA transfer shapes surfaced by a Cortex-M SoC board.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct CortexMDmaTransferCaps: u32 {
-        /// DMA can copy between ordinary memory endpoints.
-        const MEMORY_TO_MEMORY     = 1 << 0;
-        /// DMA can copy from memory to one peripheral endpoint.
-        const MEMORY_TO_PERIPHERAL = 1 << 1;
-        /// DMA can copy from one peripheral endpoint to memory.
-        const PERIPHERAL_TO_MEMORY = 1 << 2;
-        /// DMA can chain or trigger one channel from another.
-        const CHANNEL_CHAINING     = 1 << 3;
-    }
-}
-
-/// Static DMA controller descriptor surfaced by a Cortex-M SoC board.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CortexMDmaControllerDescriptor {
-    /// Human-readable DMA controller name.
-    pub name: &'static str,
-    /// Base address of the controller register block.
-    pub base: usize,
-    /// Number of hardware channels exposed by the controller.
-    pub channel_count: u8,
-    /// Coarse transfer capabilities supported by the controller.
-    pub transfer_caps: CortexMDmaTransferCaps,
-}
-
-/// Static DMA request descriptor surfaced by a Cortex-M SoC board.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CortexMDmaRequestClass {
-    /// Peripheral transmit-side pacing or drain request.
-    PeripheralTx,
-    /// Peripheral receive-side pacing or fill request.
-    PeripheralRx,
-    /// Peripheral-generated pacing request that is not a plain TX/RX FIFO endpoint.
-    PeripheralPacer,
-    /// DMA timer pacing source.
-    TimerPacer,
-    /// Unconditional software-force request.
-    Force,
-}
-
-/// Static DMA request descriptor surfaced by a Cortex-M SoC board.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CortexMDmaRequestDescriptor {
-    /// Human-readable request-line name.
-    pub name: &'static str,
-    /// Board-defined request-line selector.
-    pub request_line: u16,
-    /// Peripheral associated with the request line when one exists.
-    pub peripheral: Option<&'static str>,
-    /// Coarse request classification for routing and pacing semantics.
-    pub class: CortexMDmaRequestClass,
-    /// Peripheral-local endpoint selector when one exists.
-    pub endpoint: Option<&'static str>,
-    /// Coarse transfer capabilities supported by this request line.
-    pub transfer_caps: CortexMDmaTransferCaps,
-}
+pub use crate::contract::pal::dma::DmaControllerDescriptor as CortexMDmaControllerDescriptor;
+pub use crate::contract::pal::dma::DmaRequestClass as CortexMDmaRequestClass;
+pub use crate::contract::pal::dma::DmaRequestDescriptor as CortexMDmaRequestDescriptor;
+pub use crate::contract::pal::dma::DmaTransferCaps as CortexMDmaTransferCaps;
 
 /// Static sleep/power-mode descriptor surfaced by a Cortex-M SoC board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

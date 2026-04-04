@@ -2,6 +2,8 @@
 
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
 use fusion_pal::sys::cpu::soc::board as cortex_m_board;
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+use fusion_sys::thread::vector::VectorInlineEligibility;
 use fusion_sys::thread::{
     ThreadConfig,
     ThreadError,
@@ -11,9 +13,7 @@ use fusion_sys::thread::{
     ThreadSupport,
     ThreadSystem,
 };
-#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-use fusion_sys::vector::VectorInlineEligibility;
-use fusion_sys::vector::{
+use fusion_sys::thread::vector::{
     VectorDispatchCookie,
     VectorDispatchLane,
     VectorInlineHandler,
@@ -615,9 +615,11 @@ impl RedInterrupt {
                 });
             builder
                 .bind_inline_with_eligibility(
-                    fusion_sys::vector::IrqSlot(config.irqn),
+                    fusion_sys::thread::vector::IrqSlot(config.irqn),
                     None,
-                    config.priority.map(fusion_sys::vector::VectorPriority),
+                    config
+                        .priority
+                        .map(fusion_sys::thread::vector::VectorPriority),
                     handler,
                     config.stack,
                     eligibility,
@@ -766,20 +768,22 @@ unsafe extern "C" fn red_inline_compatibility_allows_now(context: *const ()) -> 
 }
 
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-const fn map_vector_error(error: fusion_sys::vector::VectorError) -> ThreadError {
+const fn map_vector_error(error: fusion_sys::thread::vector::VectorError) -> ThreadError {
     match error.kind() {
-        fusion_sys::vector::VectorErrorKind::Unsupported => ThreadError::unsupported(),
-        fusion_sys::vector::VectorErrorKind::Invalid
-        | fusion_sys::vector::VectorErrorKind::Reserved
-        | fusion_sys::vector::VectorErrorKind::CoreMismatch
-        | fusion_sys::vector::VectorErrorKind::WorldMismatch => ThreadError::invalid(),
-        fusion_sys::vector::VectorErrorKind::AlreadyBound
-        | fusion_sys::vector::VectorErrorKind::NotBound
-        | fusion_sys::vector::VectorErrorKind::StateConflict
-        | fusion_sys::vector::VectorErrorKind::SealViolation
-        | fusion_sys::vector::VectorErrorKind::Sealed => ThreadError::state_conflict(),
-        fusion_sys::vector::VectorErrorKind::ResourceExhausted => ThreadError::resource_exhausted(),
-        fusion_sys::vector::VectorErrorKind::Platform(code) => ThreadError::platform(code),
+        fusion_sys::thread::vector::VectorErrorKind::Unsupported => ThreadError::unsupported(),
+        fusion_sys::thread::vector::VectorErrorKind::Invalid
+        | fusion_sys::thread::vector::VectorErrorKind::Reserved
+        | fusion_sys::thread::vector::VectorErrorKind::CoreMismatch
+        | fusion_sys::thread::vector::VectorErrorKind::WorldMismatch => ThreadError::invalid(),
+        fusion_sys::thread::vector::VectorErrorKind::AlreadyBound
+        | fusion_sys::thread::vector::VectorErrorKind::NotBound
+        | fusion_sys::thread::vector::VectorErrorKind::StateConflict
+        | fusion_sys::thread::vector::VectorErrorKind::SealViolation
+        | fusion_sys::thread::vector::VectorErrorKind::Sealed => ThreadError::state_conflict(),
+        fusion_sys::thread::vector::VectorErrorKind::ResourceExhausted => {
+            ThreadError::resource_exhausted()
+        }
+        fusion_sys::thread::vector::VectorErrorKind::Platform(code) => ThreadError::platform(code),
     }
 }
 

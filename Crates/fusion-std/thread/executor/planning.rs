@@ -301,7 +301,7 @@ const fn executor_partition_backing_kind(
     }
 }
 
-fn partition_executor_bound_resource(
+pub(super) fn partition_executor_bound_resource(
     handle: &MemoryResourceHandle,
     range: ResourceRange,
 ) -> Result<MemoryResourceHandle, ExecutorError> {
@@ -336,7 +336,7 @@ const fn executor_resource_base_alignment_from_addr(addr: usize) -> usize {
     }
 }
 
-fn executor_resource_base_alignment(handle: &MemoryResourceHandle) -> usize {
+pub(super) fn executor_resource_base_alignment(handle: &MemoryResourceHandle) -> usize {
     executor_resource_base_alignment_from_addr(handle.view().base_addr().get())
 }
 

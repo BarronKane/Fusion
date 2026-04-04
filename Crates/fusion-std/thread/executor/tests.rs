@@ -25,7 +25,7 @@ use fusion_sys::claims::{
     ClaimAwareness,
     ClaimContextId,
 };
-use fusion_sys::context::{
+use fusion_sys::domain::context::{
     ContextCaps,
     ContextKind,
 };
@@ -127,6 +127,7 @@ fn aligned_bound_resource(len: usize, align: usize) -> MemoryResourceHandle {
 
 #[test]
 fn compiled_executor_planning_support_matches_compiled_layout() {
+    let _guard = crate::thread::runtime_test_guard();
     let support = ExecutorPlanningSupport::compiled_binary();
     let control = ControlLease::<ExecutorCore>::extent_request()
         .expect("executor control extent request should build");
@@ -180,6 +181,7 @@ fn compiled_executor_planning_support_matches_compiled_layout() {
 
 #[test]
 fn explicit_executor_planning_support_shapes_current_runtime_backing() {
+    let _guard = crate::thread::runtime_test_guard();
     let config = ExecutorConfig::new().with_capacity(1);
     let compiled = CurrentAsyncRuntime::backing_plan_with_layout_policy_and_planning_support(
         config,
@@ -203,6 +205,7 @@ fn explicit_executor_planning_support_shapes_current_runtime_backing() {
 
 #[test]
 fn backing_plan_memory_footprint_matches_domain_requests() {
+    let _guard = crate::thread::runtime_test_guard();
     let config = ExecutorConfig::new().with_capacity(2);
     let plan = CurrentAsyncRuntime::backing_plan(config).expect("backing plan should build");
     let footprint = plan.memory_footprint();
@@ -220,6 +223,7 @@ fn backing_plan_memory_footprint_matches_domain_requests() {
 
 #[test]
 fn combined_backing_plan_memory_footprint_captures_padding() {
+    let _guard = crate::thread::runtime_test_guard();
     let config = ExecutorConfig::new().with_capacity(2);
     let combined = CurrentAsyncRuntime::backing_plan_with_layout_policy(
         config,
@@ -417,6 +421,7 @@ const fn is_unsupported_fiber_error(error: fusion_sys::fiber::FiberError) -> boo
 
 #[test]
 fn registry_reuses_slots_with_new_generations() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
 
     let first = executor
@@ -436,6 +441,7 @@ fn registry_reuses_slots_with_new_generations() {
 
 #[test]
 fn join_set_drives_current_thread_tasks_to_completion() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let join_set = JoinSet::<u8>::new();
 
@@ -454,6 +460,7 @@ fn join_set_drives_current_thread_tasks_to_completion() {
 
 #[test]
 fn async_yield_now_reschedules_current_thread_task() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let polls = Arc::new(AtomicUsize::new(0));
     let task_polls = Arc::clone(&polls);
@@ -478,6 +485,7 @@ fn async_yield_now_reschedules_current_thread_task() {
 
 #[test]
 fn task_handle_reports_concrete_admission_layout() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor =
         Executor::new(ExecutorConfig::thread_pool().with_mode(ExecutorMode::CurrentThread));
     let sample = async { [1_u16, 2, 3, 4] };
@@ -504,6 +512,7 @@ fn task_handle_reports_concrete_admission_layout() {
 
 #[test]
 fn task_handle_reports_exact_backing_and_poll_stack_contract() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let sample_payload = [0_u8; 384];
     let sample = async move {
@@ -538,6 +547,7 @@ fn task_handle_reports_exact_backing_and_poll_stack_contract() {
 
 #[test]
 fn exact_backing_tracks_larger_output_shape() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let sample = async { [9_u8; 384] };
     let handle = executor
@@ -557,6 +567,7 @@ fn exact_backing_tracks_larger_output_shape() {
 
 #[test]
 fn generated_async_poll_stack_contract_overrides_default_heuristic() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     assert_eq!(
         generated_async_poll_stack_bytes_by_type_name(type_name::<
@@ -577,6 +588,7 @@ fn generated_async_poll_stack_contract_overrides_default_heuristic() {
 
 #[test]
 fn build_generated_async_poll_stack_trait_supports_spawn_generated() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let handle = executor
         .spawn_generated(GeneratedAsyncPollStackMetadataAnchorFuture)
@@ -590,6 +602,7 @@ fn build_generated_async_poll_stack_trait_supports_spawn_generated() {
 
 #[test]
 fn missing_generated_async_poll_stack_contract_is_rejected_by_default() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let payload = [0_u8; 384];
     assert!(matches!(
@@ -603,6 +616,7 @@ fn missing_generated_async_poll_stack_contract_is_rejected_by_default() {
 
 #[test]
 fn run_until_idle_drains_ready_current_thread_tasks() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let handle = executor
         .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
@@ -619,6 +633,7 @@ fn run_until_idle_drains_ready_current_thread_tasks() {
 
 #[test]
 fn executor_runtime_summary_reports_active_async_lane_state() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let idle = executor
         .runtime_summary()
@@ -656,6 +671,7 @@ fn executor_runtime_summary_reports_active_async_lane_state() {
 
 #[test]
 fn exact_future_spill_accepts_medium_future_frames() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let sample_payload = [0_u8; 384];
     let sample = async move { sample_payload.len() };
@@ -671,6 +687,7 @@ fn exact_future_spill_accepts_medium_future_frames() {
 
 #[test]
 fn larger_futures_can_exceed_default_per_task_spill_budget_when_domain_has_room() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let oversized = [0_u8; 64 * 1024];
 
@@ -694,6 +711,7 @@ fn larger_futures_can_exceed_default_per_task_spill_budget_when_domain_has_room(
 
 #[test]
 fn futures_without_one_spill_domain_are_rejected_honestly() {
+    let _guard = crate::thread::runtime_test_guard();
     let spill_store = AsyncTaskSpillStore::new(true, None);
     let oversized = [0_u8; 2048];
     let mut future = InlineAsyncFutureStorage::empty();
@@ -706,6 +724,7 @@ fn futures_without_one_spill_domain_are_rejected_honestly() {
 
 #[test]
 fn exact_result_spill_accepts_medium_outputs() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
 
     let handle = executor
@@ -719,6 +738,7 @@ fn exact_result_spill_accepts_medium_outputs() {
 
 #[test]
 fn future_and_result_share_one_exact_spill_envelope() {
+    let _guard = crate::thread::runtime_test_guard();
     let request = ExecutorBackingRequest::from_extent_request(MemoryPoolExtentRequest {
         len: DEFAULT_ASYNC_SPILL_BUDGET_PER_TASK_BYTES * 2,
         align: default_async_spill_align(),
@@ -786,6 +806,7 @@ fn future_and_result_share_one_exact_spill_envelope() {
 
 #[test]
 fn larger_results_can_exceed_default_per_task_spill_budget_when_domain_has_room() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
 
     let handle = executor
@@ -799,6 +820,7 @@ fn larger_results_can_exceed_default_per_task_spill_budget_when_domain_has_room(
 
 #[test]
 fn results_without_one_spill_domain_are_rejected_honestly() {
+    let _guard = crate::thread::runtime_test_guard();
     let spill_store = AsyncTaskSpillStore::new(true, None);
     let result = ExecutorCell::new(true, InlineAsyncResultStorage::empty());
 
@@ -812,6 +834,7 @@ fn results_without_one_spill_domain_are_rejected_honestly() {
 
 #[test]
 fn dropping_executor_shuts_down_live_pending_slots() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let handle = executor
         .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, core::future::pending::<u8>())
@@ -845,7 +868,7 @@ fn dropping_executor_shuts_down_live_pending_slots() {
 #[cfg(feature = "std")]
 #[test]
 fn executor_binds_to_hosted_fiber_runtime() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = match HostedFiberRuntime::fixed_with_stack(
         hosted_green_executor_stack_size().expect("green executor stack size should resolve"),
         2,
@@ -867,7 +890,7 @@ fn executor_binds_to_hosted_fiber_runtime() {
 #[cfg(feature = "std")]
 #[test]
 fn executor_runs_on_thread_pool_carriers() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let pool = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -890,6 +913,7 @@ fn executor_runs_on_thread_pool_carriers() {
 
 #[test]
 fn current_async_runtime_drives_async_fn_to_completion() {
+    let _guard = crate::thread::runtime_test_guard();
     async fn value() -> u8 {
         async_yield_now().await;
         34
@@ -905,6 +929,7 @@ fn current_async_runtime_drives_async_fn_to_completion() {
 
 #[test]
 fn current_async_runtime_binds_current_courier_identity() {
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = CurrentAsyncRuntime::with_executor_config(
         ExecutorConfig::new().with_courier_id(CourierId::new(91)),
     );
@@ -922,6 +947,7 @@ fn current_async_runtime_binds_current_courier_identity() {
 
 #[test]
 fn current_async_runtime_queries_courier_truth() {
+    let _guard = crate::thread::runtime_test_guard();
     const COURIER: CourierId = CourierId::new(91);
     const CONTEXT: ContextId = ContextId::new(0x440);
 
@@ -969,6 +995,7 @@ fn current_async_runtime_queries_courier_truth() {
 
 #[test]
 fn current_async_runtime_updates_courier_owned_metadata_and_obligations() {
+    let _guard = crate::thread::runtime_test_guard();
     const COURIER: CourierId = CourierId::new(92);
     const CONTEXT: ContextId = ContextId::new(0x441);
 
@@ -1062,6 +1089,7 @@ fn current_async_runtime_updates_courier_owned_metadata_and_obligations() {
 
 #[test]
 fn current_async_runtime_preserves_zero_identity_in_tls_context() {
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = CurrentAsyncRuntime::with_executor_config(
         ExecutorConfig::new()
             .with_courier_id(CourierId::new(0))
@@ -1085,6 +1113,7 @@ fn current_async_runtime_preserves_zero_identity_in_tls_context() {
 
 #[test]
 fn task_handle_is_awaitable_on_current_runtime() {
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = CurrentAsyncRuntime::new();
     let handle = runtime
         .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
@@ -1100,6 +1129,7 @@ fn task_handle_is_awaitable_on_current_runtime() {
 
 #[test]
 fn current_runtime_spawn_with_poll_stack_bytes_preserves_contract() {
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = CurrentAsyncRuntime::new();
     let handle = runtime
         .spawn_with_poll_stack_bytes(2048, async { 9_u8 })
@@ -1113,6 +1143,7 @@ fn current_runtime_spawn_with_poll_stack_bytes_preserves_contract() {
 
 #[test]
 fn current_runtime_spawn_generated_preserves_contract() {
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = CurrentAsyncRuntime::new();
     let handle = runtime
         .spawn_generated(ExplicitGeneratedPollStackFuture)
@@ -1126,6 +1157,7 @@ fn current_runtime_spawn_generated_preserves_contract() {
 
 #[test]
 fn current_runtime_spawn_local_accepts_non_send_future() {
+    let _guard = crate::thread::runtime_test_guard();
     use std::rc::Rc;
 
     let runtime = CurrentAsyncRuntime::new();
@@ -1147,6 +1179,7 @@ fn current_runtime_spawn_local_accepts_non_send_future() {
 
 #[test]
 fn current_runtime_spawn_local_with_poll_stack_bytes_preserves_contract() {
+    let _guard = crate::thread::runtime_test_guard();
     use std::rc::Rc;
 
     let runtime = CurrentAsyncRuntime::new();
@@ -1169,6 +1202,7 @@ fn current_runtime_spawn_local_with_poll_stack_bytes_preserves_contract() {
 
 #[test]
 fn current_runtime_spawn_local_generated_preserves_contract() {
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = CurrentAsyncRuntime::new();
     let handle = runtime
         .spawn_local_generated(ExplicitGeneratedPollStackFuture)
@@ -1186,6 +1220,7 @@ fn current_runtime_spawn_local_generated_preserves_contract() {
 #[cfg(feature = "debug-insights")]
 #[test]
 fn current_runtime_task_lifecycle_insight_reports_spawn_poll_and_complete() {
+    let _guard = crate::thread::runtime_test_guard();
     use fusion_sys::transport::TransportAttachmentRequest;
 
     let runtime = CurrentAsyncRuntime::new();
@@ -1260,6 +1295,7 @@ fn current_runtime_task_lifecycle_insight_reports_spawn_poll_and_complete() {
 
 #[test]
 fn task_handle_abort_reports_cancelled() {
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = CurrentAsyncRuntime::new();
     let handle = runtime
         .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
@@ -1277,6 +1313,7 @@ fn task_handle_abort_reports_cancelled() {
 #[cfg(feature = "std")]
 #[test]
 fn current_runtime_waits_for_readiness() {
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = CurrentAsyncRuntime::new();
     let pipe = Arc::new(TestPipe::new());
     let handle = runtime
@@ -1313,6 +1350,7 @@ fn current_runtime_waits_for_readiness() {
 #[cfg(feature = "std")]
 #[test]
 fn current_runtime_sleep_for_completes() {
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = CurrentAsyncRuntime::new();
     let handle = runtime
         .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
@@ -1335,6 +1373,7 @@ fn current_runtime_sleep_for_completes() {
 #[cfg(feature = "std")]
 #[test]
 fn current_runtime_sleep_until_instant_completes() {
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = CurrentAsyncRuntime::new();
     let clock = system_monotonic_time();
     let start = clock
@@ -1364,6 +1403,7 @@ fn current_runtime_sleep_until_instant_completes() {
 #[cfg(feature = "std")]
 #[test]
 fn current_task_handle_join_drives_timer_only_waits() {
+    let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new_fast_current();
     let handle = executor
         .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
@@ -1380,7 +1420,7 @@ fn current_task_handle_join_drives_timer_only_waits() {
 #[cfg(feature = "std")]
 #[test]
 fn thread_async_runtime_runs_async_fn() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     async fn value() -> u8 {
         async_yield_now().await;
         55
@@ -1401,7 +1441,7 @@ fn thread_async_runtime_runs_async_fn() {
 #[cfg(feature = "std")]
 #[test]
 fn thread_async_runtime_defaults_to_direct_hosted_workers() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1419,7 +1459,7 @@ fn thread_async_runtime_defaults_to_direct_hosted_workers() {
 #[cfg(feature = "std")]
 #[test]
 fn thread_async_runtime_spawn_generated_preserves_contract() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1439,7 +1479,7 @@ fn thread_async_runtime_spawn_generated_preserves_contract() {
 #[cfg(all(feature = "std", feature = "debug-insights"))]
 #[test]
 fn thread_async_runtime_task_lifecycle_insight_reports_thread_workers_scheduler() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     use fusion_sys::transport::TransportAttachmentRequest;
 
     let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
@@ -1493,7 +1533,7 @@ fn thread_async_runtime_task_lifecycle_insight_reports_thread_workers_scheduler(
 #[cfg(feature = "std")]
 #[test]
 fn thread_runtime_block_on_awaits_task_handles() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1528,7 +1568,7 @@ fn thread_runtime_block_on_awaits_task_handles() {
 #[cfg(feature = "std")]
 #[test]
 fn thread_async_runtime_falls_back_to_composed_thread_pool_for_non_inherit_placement() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let cpu = ThreadLogicalCpuId {
         group: ThreadProcessorGroupId(0),
         index: 0,
@@ -1554,6 +1594,7 @@ fn thread_async_runtime_falls_back_to_composed_thread_pool_for_non_inherit_place
 #[cfg(feature = "std")]
 #[test]
 fn current_runtime_executor_capacity_can_be_shaped_explicitly() {
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = CurrentAsyncRuntime::with_executor_config(ExecutorConfig::new().with_capacity(1));
     let _first = runtime
         .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async {
@@ -1571,6 +1612,7 @@ fn current_runtime_executor_capacity_can_be_shaped_explicitly() {
 
 #[test]
 fn current_runtime_from_explicit_backing_runs_task() {
+    let _guard = crate::thread::runtime_test_guard();
     let config = ExecutorConfig::new().with_capacity(2);
     let plan = CurrentAsyncRuntime::backing_plan(config).expect("backing plan should build");
     assert!(plan.control.bytes >= size_of::<ExecutorCore>());
@@ -1596,6 +1638,7 @@ fn current_runtime_from_explicit_backing_runs_task() {
 
 #[test]
 fn global_nearest_round_up_executor_sizing_inflates_backing_requests() {
+    let _guard = crate::thread::runtime_test_guard();
     let exact = CurrentAsyncRuntime::backing_plan(ExecutorConfig::new().with_capacity(2))
         .expect("exact backing plan should build");
     let rounded = CurrentAsyncRuntime::backing_plan(
@@ -1616,6 +1659,7 @@ fn global_nearest_round_up_executor_sizing_inflates_backing_requests() {
 
 #[test]
 fn global_nearest_round_up_executor_internal_virtual_backing_uses_rounded_sizes() {
+    let _guard = crate::thread::runtime_test_guard();
     let exact = current_async_runtime_virtual_backing(ExecutorConfig::new().with_capacity(2))
         .expect("exact virtual backing should build");
     let rounded = current_async_runtime_virtual_backing(
@@ -1646,6 +1690,7 @@ fn global_nearest_round_up_executor_internal_virtual_backing_uses_rounded_sizes(
 
 #[test]
 fn current_runtime_from_bound_slab_runs_task() {
+    let _guard = crate::thread::runtime_test_guard();
     let config = ExecutorConfig::new().with_capacity(2);
     let layout = CurrentAsyncRuntime::backing_plan(config)
         .expect("backing plan should build")
@@ -1672,6 +1717,7 @@ fn current_runtime_from_bound_slab_runs_task() {
 
 #[test]
 fn current_runtime_from_exact_aligned_bound_slab_runs_task() {
+    let _guard = crate::thread::runtime_test_guard();
     let config = ExecutorConfig::new().with_capacity(2);
     let conservative = CurrentAsyncRuntime::backing_plan(config)
         .expect("backing plan should build")
@@ -1703,7 +1749,7 @@ fn current_runtime_from_exact_aligned_bound_slab_runs_task() {
 #[cfg(feature = "std")]
 #[test]
 fn thread_async_runtime_executor_capacity_can_be_shaped_explicitly() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = ThreadAsyncRuntime::with_executor_config(
         &ThreadPoolConfig {
             min_threads: 1,
@@ -1730,7 +1776,7 @@ fn thread_async_runtime_executor_capacity_can_be_shaped_explicitly() {
 #[cfg(feature = "std")]
 #[test]
 fn thread_async_runtime_repeated_create_drop_stays_alive() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     for _ in 0..64 {
         let runtime = ThreadAsyncRuntime::new(&ThreadPoolConfig {
             min_threads: 1,
@@ -1752,7 +1798,7 @@ fn thread_async_runtime_repeated_create_drop_stays_alive() {
 #[cfg(feature = "std")]
 #[test]
 fn thread_async_runtime_repeated_warm_yield_batches_stay_alive_multi_worker() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     const TASKS: usize = 16;
 
     let runtime = ThreadAsyncRuntime::with_executor_config(
@@ -1810,7 +1856,7 @@ fn thread_async_runtime_repeated_warm_yield_batches_stay_alive_multi_worker() {
 #[cfg(feature = "std")]
 #[test]
 fn thread_async_runtime_waits_for_readiness() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = match ThreadAsyncRuntime::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1849,7 +1895,7 @@ fn thread_async_runtime_waits_for_readiness() {
 #[cfg(feature = "std")]
 #[test]
 fn thread_async_runtime_sleep_for_completes() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = match ThreadAsyncRuntime::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1876,7 +1922,7 @@ fn thread_async_runtime_sleep_for_completes() {
 #[cfg(feature = "std")]
 #[test]
 fn fiber_async_runtime_binds_owned_hosted_fibers() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let hosted = match HostedFiberRuntime::fixed_with_stack(
         hosted_green_executor_stack_size().expect("green executor stack size should resolve"),
         2,
@@ -1897,7 +1943,7 @@ fn fiber_async_runtime_binds_owned_hosted_fibers() {
 #[cfg(feature = "std")]
 #[test]
 fn fiber_async_runtime_rejects_undersized_hosted_fibers() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let hosted = match HostedFiberRuntime::fixed(2) {
         Ok(hosted) => hosted,
         Err(error) if is_unsupported_fiber_error(error) => return,
@@ -1912,7 +1958,7 @@ fn fiber_async_runtime_rejects_undersized_hosted_fibers() {
 #[cfg(feature = "std")]
 #[test]
 fn fiber_async_runtime_spawn_generated_preserves_contract() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = match FiberAsyncRuntime::fixed(2) {
         Ok(runtime) => runtime,
         Err(error) if is_unsupported_executor_error(error) => return,
@@ -1931,7 +1977,7 @@ fn fiber_async_runtime_spawn_generated_preserves_contract() {
 #[cfg(all(feature = "std", feature = "debug-insights"))]
 #[test]
 fn fiber_async_runtime_task_lifecycle_insight_reports_green_pool_scheduler() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     use fusion_sys::transport::TransportAttachmentRequest;
 
     let runtime = FiberAsyncRuntime::fixed(2).expect("fiber async runtime should build");
@@ -1980,7 +2026,7 @@ fn fiber_async_runtime_task_lifecycle_insight_reports_green_pool_scheduler() {
 #[cfg(feature = "std")]
 #[test]
 fn fiber_async_runtime_repeated_create_drop_stays_alive() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     for _ in 0..32 {
         let runtime = match FiberAsyncRuntime::fixed(2) {
             Ok(runtime) => runtime,
@@ -2001,7 +2047,7 @@ fn fiber_async_runtime_repeated_create_drop_stays_alive() {
 #[cfg(feature = "std")]
 #[test]
 fn fiber_async_runtime_sleep_for_completes() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = match FiberAsyncRuntime::fixed(2) {
         Ok(runtime) => runtime,
         Err(error) if is_unsupported_executor_error(error) => return,
@@ -2018,7 +2064,7 @@ fn fiber_async_runtime_sleep_for_completes() {
 #[cfg(feature = "std")]
 #[test]
 fn fiber_async_runtime_waits_for_readiness() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = match FiberAsyncRuntime::fixed(2) {
         Ok(runtime) => runtime,
         Err(error) if is_unsupported_executor_error(error) => return,

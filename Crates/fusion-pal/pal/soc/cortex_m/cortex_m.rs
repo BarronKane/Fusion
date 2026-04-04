@@ -4,12 +4,12 @@ pub mod atomic;
 #[path = "context/context.rs"]
 /// Cortex-M bare-metal context backend implementation.
 pub mod context;
+#[path = "dma/dma.rs"]
+/// Cortex-M bare-metal DMA backend implementation.
+pub mod dma;
 #[path = "event/event.rs"]
 /// Cortex-M bare-metal event backend implementation.
 pub mod event;
-#[path = "gpio/gpio.rs"]
-/// Cortex-M GPIO backend implementation backed by selected static topology.
-pub mod gpio;
 /// Cortex-M hosted-fiber surface (unsupported — fibers are managed directly).
 pub mod fiber {
     pub use crate::contract::pal::runtime::fiber::{

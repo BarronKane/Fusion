@@ -2,6 +2,7 @@ use super::*;
 
 #[test]
 fn automatic_carrier_selection_prefers_visible_core_count() {
+    let _guard = crate::thread::runtime_test_guard();
     let summary = HardwareTopologySummary {
         logical_cpu_count: Some(8),
         core_count: Some(4),
@@ -22,6 +23,7 @@ fn automatic_carrier_selection_prefers_visible_core_count() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_carrier_count_policy_reads_requested_topology_count() {
+    let _guard = crate::thread::runtime_test_guard();
     let summary = HardwareTopologySummary {
         logical_cpu_count: Some(12),
         core_count: Some(6),
@@ -50,6 +52,7 @@ fn hosted_carrier_count_policy_reads_requested_topology_count() {
 
 #[test]
 fn per_carrier_capacity_rounds_total_budget_up() {
+    let _guard = crate::thread::runtime_test_guard();
     assert_eq!(
         per_carrier_capacity_for_total(8, 4).expect("capacity should divide cleanly"),
         2
@@ -73,6 +76,7 @@ fn per_carrier_capacity_rounds_total_budget_up() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_class_distribution_rounds_total_slots_and_growth_chunk_up() {
+    let _guard = crate::thread::runtime_test_guard();
     let classes = [
         HostedFiberClassConfig::new(FiberStackClass::MIN, 5)
             .expect("hosted class config should build")
@@ -98,6 +102,7 @@ fn hosted_class_distribution_rounds_total_slots_and_growth_chunk_up() {
 
 #[test]
 fn steal_seed_randomizes_the_first_victim_choice() {
+    let _guard = crate::thread::runtime_test_guard();
     let first = (xorshift64(initial_steal_seed(0)) % 7) + 1;
     let second = (xorshift64(initial_steal_seed(1)) % 7) + 1;
     assert_ne!(first, second);
@@ -105,6 +110,7 @@ fn steal_seed_randomizes_the_first_victim_choice() {
 
 #[test]
 fn current_fiber_pool_join_drives_yielding_closure_to_completion() {
+    let _guard = crate::thread::runtime_test_guard();
     let fibers =
         CurrentFiberPool::new(&FiberPoolConfig::new()).expect("current fiber pool should build");
     let stages = Arc::new(AtomicUsize::new(0));
@@ -136,6 +142,7 @@ fn current_fiber_pool_join_drives_yielding_closure_to_completion() {
 
 #[test]
 fn current_fiber_pool_from_explicit_backing_runs_task() {
+    let _guard = crate::thread::runtime_test_guard();
     let config = FiberPoolConfig::fixed(NonZeroUsize::new(8 * 1024).expect("non-zero stack"), 2)
         .with_guard_pages(0);
     let plan = CurrentFiberPool::backing_plan(&config).expect("backing plan should build");
@@ -186,6 +193,7 @@ fn current_fiber_pool_from_explicit_backing_runs_task() {
 
 #[test]
 fn global_nearest_round_up_fiber_sizing_inflates_backing_requests() {
+    let _guard = crate::thread::runtime_test_guard();
     let exact = FiberPoolConfig::fixed(NonZeroUsize::new(8 * 1024).expect("non-zero stack"), 2)
         .with_guard_pages(0);
     let rounded = exact.with_sizing_strategy(RuntimeSizingStrategy::GlobalNearestRoundUp);
@@ -207,6 +215,7 @@ fn global_nearest_round_up_fiber_sizing_inflates_backing_requests() {
 
 #[test]
 fn global_nearest_round_up_fiber_internal_mappers_use_rounded_sizes() {
+    let _guard = crate::thread::runtime_test_guard();
     let support = GreenPool::support();
     let alignment = support.context.min_stack_alignment.max(16);
     let exact = FiberPoolConfig::fixed(NonZeroUsize::new(8 * 1024).expect("non-zero stack"), 2)
@@ -236,6 +245,7 @@ fn global_nearest_round_up_fiber_internal_mappers_use_rounded_sizes() {
 
 #[test]
 fn current_fiber_pool_from_bound_slab_runs_task() {
+    let _guard = crate::thread::runtime_test_guard();
     let config = FiberPoolConfig::fixed(NonZeroUsize::new(8 * 1024).expect("non-zero stack"), 2)
         .with_guard_pages(0);
     let layout = CurrentFiberPool::backing_plan(&config)
@@ -267,6 +277,7 @@ fn current_fiber_pool_from_bound_slab_runs_task() {
 
 #[test]
 fn current_fiber_pool_from_exact_aligned_bound_slab_runs_task() {
+    let _guard = crate::thread::runtime_test_guard();
     let config = FiberPoolConfig::fixed(NonZeroUsize::new(8 * 1024).expect("non-zero stack"), 2)
         .with_guard_pages(0);
     let conservative = CurrentFiberPool::backing_plan(&config)
@@ -302,6 +313,7 @@ fn current_fiber_pool_from_exact_aligned_bound_slab_runs_task() {
 
 #[test]
 fn current_fiber_pool_from_bound_slab_reuses_slots_across_many_noop_spawns() {
+    let _guard = crate::thread::runtime_test_guard();
     let config = FiberPoolConfig::fixed(NonZeroUsize::new(8 * 1024).expect("non-zero stack"), 1)
         .with_guard_pages(0);
     let layout = CurrentFiberPool::backing_plan(&config)
@@ -326,6 +338,7 @@ fn current_fiber_pool_from_bound_slab_reuses_slots_across_many_noop_spawns() {
 
 #[test]
 fn uniform_bootstrap_uses_requested_stack_size() {
+    let _guard = crate::thread::runtime_test_guard();
     let bootstrap = FiberPoolBootstrap::uniform(
         4,
         NonZeroUsize::new(16 * 1024).expect("non-zero uniform stack"),
@@ -341,6 +354,7 @@ fn uniform_bootstrap_uses_requested_stack_size() {
 
 #[test]
 fn current_fiber_pool_run_until_idle_drives_multiple_ready_segments() {
+    let _guard = crate::thread::runtime_test_guard();
     let fibers =
         CurrentFiberPool::new(&FiberPoolConfig::new()).expect("current fiber pool should build");
     let total = Arc::new(AtomicUsize::new(0));
@@ -385,6 +399,7 @@ fn current_fiber_pool_run_until_idle_drives_multiple_ready_segments() {
 
 #[test]
 fn current_fiber_pool_runtime_summary_reports_active_fiber_lane_state() {
+    let _guard = crate::thread::runtime_test_guard();
     let fibers =
         CurrentFiberPool::new(&FiberPoolConfig::new()).expect("current fiber pool should build");
     let idle = fibers
@@ -427,6 +442,7 @@ fn current_fiber_pool_runtime_summary_reports_active_fiber_lane_state() {
 
 #[test]
 fn current_fiber_pool_binds_current_courier_identity() {
+    let _guard = crate::thread::runtime_test_guard();
     let fibers = CurrentFiberPool::new(&FiberPoolConfig::new().with_courier_id(CourierId::new(77)))
         .expect("current fiber pool should build");
     assert_eq!(fibers.courier_id(), Some(CourierId::new(77)));
@@ -449,6 +465,7 @@ fn current_fiber_pool_binds_current_courier_identity() {
 
 #[test]
 fn current_fiber_pool_publishes_courier_truth_to_runtime_sink() {
+    let _guard = crate::thread::runtime_test_guard();
     const COURIER: CourierId = CourierId::new(77);
     const CONTEXT: ContextId = ContextId::new(0x220);
 
@@ -492,6 +509,7 @@ fn current_fiber_pool_publishes_courier_truth_to_runtime_sink() {
 
 #[test]
 fn current_fiber_pool_realizes_child_launch_against_domain_registry() {
+    let _guard = crate::thread::runtime_test_guard();
     const ROOT_COURIER: CourierId = CourierId::new(1);
     const CHILD_COURIER: CourierId = CourierId::new(77);
     const CHILD_CONTEXT: ContextId = ContextId::new(0x220);
@@ -573,6 +591,7 @@ fn current_fiber_pool_realizes_child_launch_against_domain_registry() {
 
 #[test]
 fn current_fiber_pool_spawns_generated_contract_tasks() {
+    let _guard = crate::thread::runtime_test_guard();
     let classes = [
         FiberStackClassConfig::new(SUPPORTED_GENERATED_CONTRACT_CLASS, 1)
             .expect("valid class config"),
@@ -595,6 +614,7 @@ fn current_fiber_pool_spawns_generated_contract_tasks() {
 
 #[test]
 fn current_fiber_pool_spawn_with_stack_admits_closure_override() {
+    let _guard = crate::thread::runtime_test_guard();
     let classes = [FiberStackClassConfig::new(
         FiberStackClass::new(NonZeroUsize::new(4 * 1024).expect("non-zero class"))
             .expect("valid class"),
@@ -627,6 +647,7 @@ fn current_fiber_pool_spawn_with_stack_admits_closure_override() {
 
 #[test]
 fn current_fiber_pool_handles_report_execution_mode() {
+    let _guard = crate::thread::runtime_test_guard();
     let fibers =
         CurrentFiberPool::new(&FiberPoolConfig::new()).expect("current fiber pool should build");
 
@@ -690,6 +711,7 @@ fn current_fiber_pool_handles_report_execution_mode() {
 
 #[test]
 fn current_fiber_pool_runs_no_yield_tasks_inline_without_stack_admission() {
+    let _guard = crate::thread::runtime_test_guard();
     let fibers = CurrentFiberPool::new(
         &FiberPoolConfig::fixed(NonZeroUsize::new(4 * 1024).expect("non-zero stack"), 1)
             .with_telemetry(FiberTelemetry::Full),
@@ -719,6 +741,7 @@ fn current_fiber_pool_runs_no_yield_tasks_inline_without_stack_admission() {
 
 #[test]
 fn fiber_pool_bootstrap_fixed_builds_current_thread_pool() {
+    let _guard = crate::thread::runtime_test_guard();
     let fibers = FiberPoolBootstrap::fixed(2)
         .build_current()
         .expect("bootstrap should build one current-thread pool");
@@ -730,6 +753,7 @@ fn fiber_pool_bootstrap_fixed_builds_current_thread_pool() {
 
 #[test]
 fn fixed_growing_config_commits_by_requested_chunk() {
+    let _guard = crate::thread::runtime_test_guard();
     let config =
         FiberPoolConfig::fixed_growing(NonZeroUsize::new(4 * 1024).expect("non-zero stack"), 8, 2)
             .expect("fixed growing config should build");
@@ -747,6 +771,7 @@ fn fixed_growing_config_commits_by_requested_chunk() {
 
 #[test]
 fn fixed_growing_config_rejects_invalid_chunk() {
+    let _guard = crate::thread::runtime_test_guard();
     assert!(matches!(
         FiberPoolConfig::fixed_growing(
             NonZeroUsize::new(4 * 1024).expect("non-zero stack"),
@@ -767,6 +792,7 @@ fn fixed_growing_config_rejects_invalid_chunk() {
 
 #[test]
 fn current_fiber_pool_fixed_growing_runs_tasks() {
+    let _guard = crate::thread::runtime_test_guard();
     let fibers = CurrentFiberPool::new(
         &FiberPoolConfig::fixed_growing(NonZeroUsize::new(4 * 1024).expect("non-zero stack"), 4, 1)
             .expect("fixed growing config should build"),
@@ -790,7 +816,7 @@ fn current_fiber_pool_fixed_growing_runs_tasks() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_fiber_runtime_bootstrap_builds_automatic_carriers() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = FiberPoolBootstrap::fixed(2)
         .build_hosted()
         .expect("hosted runtime should build");
@@ -818,7 +844,7 @@ fn hosted_fiber_runtime_bootstrap_builds_automatic_carriers() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_fiber_runtime_fixed_growing_builds_from_total_budget() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = HostedFiberRuntime::fixed_growing_with_config(
         4,
         1,
@@ -838,6 +864,7 @@ fn hosted_fiber_runtime_fixed_growing_builds_from_total_budget() {
 #[cfg(feature = "std")]
 #[test]
 fn green_pool_skips_yield_budget_watchdog_without_budgeted_tasks() {
+    let _guard = crate::thread::runtime_test_guard();
     let carriers = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 2,
         max_threads: 2,
@@ -884,7 +911,7 @@ fn green_pool_skips_yield_budget_watchdog_without_budgeted_tasks() {
 #[cfg(feature = "std")]
 #[test]
 fn green_pool_starts_yield_budget_watchdog_for_budgeted_tasks() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let carriers = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 2,
         max_threads: 2,
@@ -941,7 +968,7 @@ fn green_pool_starts_yield_budget_watchdog_for_budgeted_tasks() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_green_yield_once_batch_fits_with_16k_stacks() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let carriers = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 4,
         max_threads: 4,
@@ -990,7 +1017,7 @@ fn hosted_green_yield_once_batch_fits_with_16k_stacks() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_green_inline_no_yield_spawn_join_stress_completes() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let carriers = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1025,7 +1052,7 @@ fn hosted_green_inline_no_yield_spawn_join_stress_completes() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_green_inline_no_yield_rapid_reuse_stays_alive() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let carriers = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1058,7 +1085,7 @@ fn hosted_green_inline_no_yield_rapid_reuse_stays_alive() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_green_yield_once_rapid_reuse_stays_alive() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let carriers = ThreadPool::new(&ThreadPoolConfig {
         min_threads: 1,
         max_threads: 1,
@@ -1093,7 +1120,7 @@ fn hosted_green_yield_once_rapid_reuse_stays_alive() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_fiber_runtime_classed_builds_from_total_budget() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = HostedFiberRuntime::classed(&[
         HostedFiberClassConfig::new(FiberStackClass::MIN, 2)
             .expect("hosted class config should build"),
@@ -1118,7 +1145,7 @@ fn hosted_fiber_runtime_classed_builds_from_total_budget() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_runtime_config_defaults_to_fusion_carrier_shape() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let automatic = HostedFiberRuntimeConfig::automatic();
     assert!(automatic.carrier_count >= 1);
     assert_eq!(automatic.name_prefix, Some("fusion-fiber"));
@@ -1134,7 +1161,7 @@ fn hosted_runtime_config_defaults_to_fusion_carrier_shape() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_fiber_runtime_respects_explicit_carrier_config() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = FiberPoolBootstrap::fixed(2)
         .build_hosted_with(
             HostedFiberRuntimeConfig::new(1)
@@ -1165,7 +1192,7 @@ fn hosted_fiber_runtime_respects_explicit_carrier_config() {
 #[cfg(feature = "std")]
 #[test]
 fn hosted_fiber_runtime_can_use_composed_thread_pool_bootstrap() {
-    let _guard = crate::thread::hosted_test_guard();
+    let _guard = crate::thread::runtime_test_guard();
     let runtime = FiberPoolBootstrap::fixed(2)
         .build_hosted_with(
             HostedFiberRuntimeConfig::new(1)

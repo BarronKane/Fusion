@@ -27,40 +27,40 @@
 //! # demo();
 //! ```
 
-use core::any::{
+use ::core::any::{
     TypeId,
     type_name,
 };
-use core::array;
-use core::cell::UnsafeCell;
-use core::fmt;
-use core::future::Future;
-use core::hint::spin_loop;
-use core::marker::PhantomData;
-use core::mem::{
+use ::core::array;
+use ::core::cell::UnsafeCell;
+use ::core::fmt;
+use ::core::future::Future;
+use ::core::hint::spin_loop;
+use ::core::marker::PhantomData;
+use ::core::mem::{
     align_of,
     size_of,
 };
-use core::num::NonZeroUsize;
-use core::pin::{
+use ::core::num::NonZeroUsize;
+use ::core::pin::{
     Pin,
     pin,
 };
-use core::ptr::NonNull;
-use core::sync::atomic::{
+use ::core::ptr::NonNull;
+use ::core::sync::atomic::{
     AtomicBool,
     AtomicU8,
     AtomicUsize,
     Ordering,
 };
-use core::task::{
+use ::core::task::{
     Context,
     Poll,
     RawWaker,
     RawWakerVTable,
     Waker,
 };
-use core::time::Duration;
+use ::core::time::Duration;
 
 #[cfg(feature = "std")]
 use std::string::String;
@@ -94,7 +94,7 @@ use fusion_sys::alloc::{
 use fusion_sys::channel::ChannelError;
 #[cfg(feature = "debug-insights")]
 use fusion_sys::channel::ChannelReceive;
-use fusion_sys::context::ContextId;
+use fusion_sys::domain::context::ContextId;
 use fusion_sys::courier::{
     CourierId,
     CourierLaneSummary,
@@ -133,7 +133,7 @@ use fusion_sys::fiber::{
     FiberError,
     FiberErrorKind,
 };
-use fusion_sys::insight::{
+use fusion_sys::channel::insight::{
     InsightCaptureMode,
     InsightChannelClass,
     InsightSupport,
@@ -193,6 +193,22 @@ use super::{
     default_runtime_sizing_strategy,
     yield_now as green_yield_now,
 };
+
+mod engine;
+use self::engine::*;
+
+#[cfg(feature = "std")]
+mod hosted;
+#[cfg(feature = "std")]
+pub use self::hosted::{
+    FiberAsyncRuntime,
+    ThreadAsyncRuntime,
+    ThreadAsyncRuntimeBootstrap,
+};
+#[cfg(feature = "std")]
+use self::hosted::executor_error_from_fiber_host;
+#[cfg(all(feature = "std", test))]
+use self::hosted::hosted_green_executor_stack_size;
 
 const GREEN_EXECUTOR_DISPATCH_STACK_BYTES: NonZeroUsize =
     NonZeroUsize::new(16 * 1024).expect("green executor dispatch stack must be non-zero");
@@ -1841,14 +1857,111 @@ impl CurrentAsyncRuntime {
     }
 }
 
-include!("hosted.rs");
+const fn executor_error_from_sync(error: SyncError) -> ExecutorError {
+    ExecutorError::Sync(error.kind)
+}
 
-#[cfg(feature = "std")]
-fn executor_error_from_std_thread(error: std::io::Error) -> ExecutorError {
-    if error.kind() == std::io::ErrorKind::OutOfMemory {
-        return ExecutorError::Sync(SyncErrorKind::Overflow);
+const fn executor_error_from_alloc(error: AllocError) -> ExecutorError {
+    match error.kind {
+        AllocErrorKind::Unsupported | AllocErrorKind::PolicyDenied => ExecutorError::Unsupported,
+        AllocErrorKind::Busy => ExecutorError::Sync(SyncErrorKind::Busy),
+        AllocErrorKind::CapacityExhausted
+        | AllocErrorKind::MetadataExhausted
+        | AllocErrorKind::OutOfMemory => ExecutorError::Sync(SyncErrorKind::Overflow),
+        AllocErrorKind::SynchronizationFailure(kind) => ExecutorError::Sync(kind),
+        AllocErrorKind::InvalidRequest
+        | AllocErrorKind::InvalidDomain
+        | AllocErrorKind::ResourceFailure(_)
+        | AllocErrorKind::PoolFailure(_) => ExecutorError::Sync(SyncErrorKind::Invalid),
     }
-    ExecutorError::Sync(SyncErrorKind::Invalid)
+}
+
+const fn executor_error_from_runtime_sink(
+    error: fusion_sys::courier::CourierRuntimeSinkError,
+) -> ExecutorError {
+    match error {
+        fusion_sys::courier::CourierRuntimeSinkError::Unsupported => ExecutorError::Unsupported,
+        fusion_sys::courier::CourierRuntimeSinkError::Invalid => {
+            ExecutorError::Sync(SyncErrorKind::Invalid)
+        }
+        fusion_sys::courier::CourierRuntimeSinkError::NotFound
+        | fusion_sys::courier::CourierRuntimeSinkError::StateConflict
+        | fusion_sys::courier::CourierRuntimeSinkError::Busy => {
+            ExecutorError::Sync(SyncErrorKind::Busy)
+        }
+        fusion_sys::courier::CourierRuntimeSinkError::ResourceExhausted => {
+            ExecutorError::Sync(SyncErrorKind::Overflow)
+        }
+    }
+}
+
+const fn executor_error_from_resource(error: ResourceError) -> ExecutorError {
+    match error.kind {
+        ResourceErrorKind::UnsupportedRequest | ResourceErrorKind::UnsupportedOperation => {
+            ExecutorError::Unsupported
+        }
+        ResourceErrorKind::OutOfMemory => ExecutorError::Sync(SyncErrorKind::Overflow),
+        ResourceErrorKind::SynchronizationFailure(kind) => ExecutorError::Sync(kind),
+        ResourceErrorKind::InvalidRequest
+        | ResourceErrorKind::ContractViolation
+        | ResourceErrorKind::InvalidRange
+        | ResourceErrorKind::Platform(_) => ExecutorError::Sync(SyncErrorKind::Invalid),
+    }
+}
+
+const fn executor_error_from_event(error: EventError) -> ExecutorError {
+    match error.kind() {
+        EventErrorKind::Unsupported => ExecutorError::Unsupported,
+        EventErrorKind::Busy | EventErrorKind::Timeout => ExecutorError::Sync(SyncErrorKind::Busy),
+        EventErrorKind::Invalid | EventErrorKind::StateConflict | EventErrorKind::Platform(_) => {
+            ExecutorError::Sync(SyncErrorKind::Invalid)
+        }
+        EventErrorKind::ResourceExhausted => ExecutorError::Sync(SyncErrorKind::Overflow),
+    }
+}
+
+const fn executor_error_from_thread_pool(error: super::ThreadPoolError) -> ExecutorError {
+    match error.kind() {
+        fusion_sys::thread::ThreadErrorKind::Unsupported => ExecutorError::Unsupported,
+        fusion_sys::thread::ThreadErrorKind::ResourceExhausted => {
+            ExecutorError::Sync(SyncErrorKind::Overflow)
+        }
+        fusion_sys::thread::ThreadErrorKind::Busy
+        | fusion_sys::thread::ThreadErrorKind::Timeout
+        | fusion_sys::thread::ThreadErrorKind::StateConflict => {
+            ExecutorError::Sync(SyncErrorKind::Busy)
+        }
+        fusion_sys::thread::ThreadErrorKind::Invalid
+        | fusion_sys::thread::ThreadErrorKind::PermissionDenied
+        | fusion_sys::thread::ThreadErrorKind::PlacementDenied
+        | fusion_sys::thread::ThreadErrorKind::SchedulerDenied
+        | fusion_sys::thread::ThreadErrorKind::StackDenied
+        | fusion_sys::thread::ThreadErrorKind::Platform(_) => {
+            ExecutorError::Sync(SyncErrorKind::Invalid)
+        }
+    }
+}
+
+const fn executor_error_from_thread(error: fusion_sys::thread::ThreadError) -> ExecutorError {
+    match error.kind() {
+        fusion_sys::thread::ThreadErrorKind::Unsupported => ExecutorError::Unsupported,
+        fusion_sys::thread::ThreadErrorKind::ResourceExhausted => {
+            ExecutorError::Sync(SyncErrorKind::Overflow)
+        }
+        fusion_sys::thread::ThreadErrorKind::Busy
+        | fusion_sys::thread::ThreadErrorKind::Timeout
+        | fusion_sys::thread::ThreadErrorKind::StateConflict => {
+            ExecutorError::Sync(SyncErrorKind::Busy)
+        }
+        fusion_sys::thread::ThreadErrorKind::Invalid
+        | fusion_sys::thread::ThreadErrorKind::PermissionDenied
+        | fusion_sys::thread::ThreadErrorKind::PlacementDenied
+        | fusion_sys::thread::ThreadErrorKind::SchedulerDenied
+        | fusion_sys::thread::ThreadErrorKind::StackDenied
+        | fusion_sys::thread::ThreadErrorKind::Platform(_) => {
+            ExecutorError::Sync(SyncErrorKind::Invalid)
+        }
+    }
 }
 
 const fn executor_error_from_fiber(error: FiberError) -> ExecutorError {

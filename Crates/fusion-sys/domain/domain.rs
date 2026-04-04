@@ -1,5 +1,9 @@
 //! fusion-sys domain registry and native domain/courier/context demonstration.
 
+#[path = "context/context.rs"]
+/// Visible-context contracts that belong inside the domain/courier model.
+pub mod context;
+
 pub use fusion_pal::sys::domain::*;
 
 use crate::claims::{
@@ -8,7 +12,7 @@ use crate::claims::{
     LocalAdmissionSeal,
     PrincipalId,
 };
-use crate::context::{
+use self::context::{
     ContextBase,
     ContextCaps,
     ContextId,

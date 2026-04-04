@@ -1,17 +1,21 @@
 //! fusion-sys channel wrappers and local fixed-capacity channel demonstration.
 
+#[path = "insight/insight.rs"]
+/// Channel-native debug and inspection side channels.
+pub mod insight;
+
 use core::array;
 use core::marker::PhantomData;
 
 pub use fusion_pal::sys::channel::*;
 
-use crate::protocol::Protocol;
 use crate::sync::{
     Mutex,
     SyncError,
     SyncErrorKind,
 };
 use crate::transport::{
+    protocol::Protocol,
     TransportAccessRequirement,
     TransportAttachmentControl,
     TransportAttachmentLaw,
@@ -435,13 +439,14 @@ const fn transport_error_from_sync(error: SyncError) -> TransportError {
 #[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     use super::*;
-    use crate::protocol::{
+    use crate::transport::protocol::{
         Protocol,
         ProtocolBootstrapKind,
         ProtocolCaps,
         ProtocolDebugView,
         ProtocolDescriptor,
         ProtocolId,
+        ProtocolImplementationKind,
         ProtocolTransportRequirements,
         ProtocolVersion,
     };
@@ -468,7 +473,7 @@ mod tests {
                 cross_courier_compatible: true,
                 cross_domain_compatible: false,
             },
-            implementation: crate::protocol::ProtocolImplementationKind::Native,
+            implementation: ProtocolImplementationKind::Native,
         };
     }
 
@@ -491,7 +496,7 @@ mod tests {
                 cross_courier_compatible: false,
                 cross_domain_compatible: false,
             },
-            implementation: crate::protocol::ProtocolImplementationKind::Native,
+            implementation: ProtocolImplementationKind::Native,
         };
     }
 

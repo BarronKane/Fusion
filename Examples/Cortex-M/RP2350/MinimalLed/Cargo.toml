@@ -16,6 +16,7 @@ sizing-global-nearest-round-up = []
 
 [dependencies]
 fusion-example-rp2350-on-device = { workspace = true }
+fusion-hal = { workspace = true }
 fusion-pal = { workspace = true, features = ["soc-rp2350"] }
 fusion-std = { workspace = true, features = ["soc-rp2350"] }
 fusion-sys = { workspace = true, features = ["soc-rp2350"] }

@@ -107,6 +107,7 @@ fn aligned_bound_resource(len: usize, align: usize) -> MemoryResourceHandle {
 
 #[test]
 fn combined_current_runtime_backing_plan_rounds_up_when_requested() {
+    let _guard = crate::thread::runtime_test_guard();
     let exact = CurrentFiberAsyncBootstrap::uniform(
         1,
         NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
@@ -132,6 +133,7 @@ fn combined_current_runtime_backing_plan_rounds_up_when_requested() {
 
 #[test]
 fn combined_current_runtime_exact_aligned_plan_reduces_padding() {
+    let _guard = crate::thread::runtime_test_guard();
     let bootstrap = CurrentFiberAsyncBootstrap::uniform(
         1,
         NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
@@ -151,6 +153,7 @@ fn combined_current_runtime_exact_aligned_plan_reduces_padding() {
 
 #[test]
 fn combined_current_runtime_target_planning_support_can_shrink_fiber_backing() {
+    let _guard = crate::thread::runtime_test_guard();
     let bootstrap = CurrentFiberAsyncBootstrap::uniform(
         1,
         NonZeroUsize::new((12 * 1024) + 8).expect("non-zero stack"),
@@ -189,6 +192,7 @@ fn combined_current_runtime_target_planning_support_can_shrink_fiber_backing() {
 
 #[test]
 fn current_runtime_from_bound_slab_parts_build_both_runtimes() {
+    let _guard = crate::thread::runtime_test_guard();
     let bootstrap = CurrentFiberAsyncBootstrap::uniform(
         1,
         NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
@@ -231,6 +235,7 @@ fn current_runtime_from_bound_slab_parts_build_both_runtimes() {
 
 #[test]
 fn current_runtime_from_exact_aligned_bound_slab_parts_builds() {
+    let _guard = crate::thread::runtime_test_guard();
     let bootstrap = CurrentFiberAsyncBootstrap::uniform(
         1,
         NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
@@ -272,6 +277,7 @@ fn current_runtime_from_exact_aligned_bound_slab_parts_builds() {
 
 #[test]
 fn current_runtime_reports_configured_memory_footprint() {
+    let _guard = crate::thread::runtime_test_guard();
     let bootstrap = CurrentFiberAsyncBootstrap::uniform(
         1,
         NonZeroUsize::new(8 * 1024).expect("non-zero stack"),
@@ -302,6 +308,7 @@ fn current_runtime_reports_configured_memory_footprint() {
 
 #[test]
 fn current_runtime_singleton_grows_fiber_capacity_quiescently() {
+    let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new();
 
     let initial_capacity = RUNTIME
@@ -342,6 +349,7 @@ fn current_runtime_singleton_grows_fiber_capacity_quiescently() {
 
 #[test]
 fn current_runtime_singleton_grows_async_capacity_quiescently() {
+    let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new();
 
     let initial_capacity = RUNTIME
@@ -388,6 +396,7 @@ fn current_runtime_singleton_grows_async_capacity_quiescently() {
 
 #[test]
 fn current_runtime_singleton_runtime_summary_combines_fiber_and_async_lanes() {
+    let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new();
 
     let idle = RUNTIME
@@ -443,6 +452,7 @@ fn current_runtime_singleton_runtime_summary_combines_fiber_and_async_lanes() {
 
 #[test]
 fn combined_current_runtime_realizes_child_launch_against_domain_registry() {
+    let _guard = crate::thread::runtime_test_guard();
     const ROOT_COURIER: CourierId = CourierId::new(1);
     const CHILD_COURIER: CourierId = CourierId::new(177);
     const CHILD_CONTEXT: ContextId = ContextId::new(0x620);
@@ -563,6 +573,7 @@ fn combined_current_runtime_realizes_child_launch_against_domain_registry() {
 
 #[test]
 fn current_runtime_singleton_courier_plan_surfaces_time_slice_policy() {
+    let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new()
         .with_courier_plan(CourierPlan::new(0, 1).with_time_slice_ticks(47));
 
@@ -577,6 +588,7 @@ fn current_runtime_singleton_courier_plan_surfaces_time_slice_policy() {
 
 #[test]
 fn current_runtime_singleton_binds_courier_identity() {
+    let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton =
         CurrentFiberAsyncSingleton::new().with_courier_id(CourierId::new(144));
 
@@ -610,6 +622,7 @@ fn current_runtime_singleton_binds_courier_identity() {
 
 #[test]
 fn current_runtime_singleton_respects_fiber_capacity_cap() {
+    let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton =
         CurrentFiberAsyncSingleton::new().with_fiber_capacity(1);
 
@@ -634,6 +647,7 @@ fn current_runtime_singleton_respects_fiber_capacity_cap() {
 
 #[test]
 fn current_runtime_singleton_respects_async_capacity_cap() {
+    let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton =
         CurrentFiberAsyncSingleton::new().with_async_capacity(1);
 
@@ -665,6 +679,7 @@ fn current_runtime_singleton_respects_async_capacity_cap() {
 
 #[test]
 fn current_runtime_singleton_courier_plan_respects_async_capacity_cap() {
+    let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new()
         .with_courier_plan(CourierPlan::new(0, 1).with_async_capacity(1));
 
@@ -690,6 +705,7 @@ fn current_runtime_singleton_courier_plan_respects_async_capacity_cap() {
 
 #[test]
 fn current_runtime_singleton_courier_plan_limits_total_runnable_units() {
+    let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new()
         .with_courier_plan(
             CourierPlan::new(0, 2)
@@ -721,6 +737,7 @@ fn current_runtime_singleton_courier_plan_limits_total_runnable_units() {
 
 #[test]
 fn current_runtime_singleton_block_on_drives_cross_segment_task_handles() {
+    let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new();
 
     let first = RUNTIME
