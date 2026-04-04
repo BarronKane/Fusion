@@ -25,7 +25,11 @@
 
 use bitflags::bitflags;
 
-use super::{AcpiError, AcpiSignature, read_unaligned_copy};
+use super::{
+    AcpiError,
+    AcpiSignature,
+    read_unaligned_copy,
+};
 
 const MIN_FACS_LENGTH: usize = 64;
 const OFFSET_SIGNATURE: usize = 0;

@@ -57,7 +57,11 @@
 //!
 //! I salute you, and good luck.
 
-use super::{AcpiError, AcpiSignature, AcpiTableView};
+use super::{
+    AcpiError,
+    AcpiSignature,
+    AcpiTableView,
+};
 
 /// Borrowed validated DSDT view.
 #[derive(Clone, Copy, Debug)]

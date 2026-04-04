@@ -13,15 +13,6 @@ mod shared;
 mod spin;
 mod thin_mutex;
 
-pub use left_right::*;
-pub use mutex::*;
-pub use once::*;
-pub use rwlock::*;
-pub use semaphore::*;
-pub use shared::*;
-pub use spin::*;
-pub use thin_mutex::*;
-
 pub use fusion_pal::sys::sync::{
     MutexCaps,
     MutexSupport,
@@ -50,3 +41,12 @@ pub use fusion_pal::sys::sync::{
     SyncSupport,
     TimeoutCaps,
 };
+
+pub use left_right::*;
+pub use mutex::*;
+pub use once::*;
+pub use rwlock::*;
+pub use semaphore::*;
+pub use shared::*;
+pub use spin::*;
+pub use thin_mutex::*;

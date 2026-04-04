@@ -1,7 +1,11 @@
 //! Simple LED peripherals backed by owned GPIO outputs.
 
-use crate::gpio::{GpioError, GpioOutputPin};
 use fusion_pal::contract::drivers::peripheral::LedContract;
+
+use crate::gpio::{
+    GpioError,
+    GpioOutputPin,
+};
 
 /// Simple binary LED peripheral backed by one owned GPIO output.
 #[derive(Debug)]

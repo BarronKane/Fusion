@@ -5,10 +5,12 @@ mod error;
 mod unsupported;
 
 pub use caps::*;
+use crate::contract::pal::claims::{
+    ClaimAwareness,
+    ClaimContextId,
+};
 pub use error::*;
 pub use unsupported::*;
-
-use crate::contract::pal::claims::{ClaimAwareness, ClaimContextId};
 
 /// Stable identifier for one native Fusion domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

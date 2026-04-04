@@ -5,16 +5,36 @@ use core::mem::size_of;
 use core::num::NonZeroUsize;
 use core::pin::Pin;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use core::task::{Context, Poll, Waker};
+use core::sync::atomic::{
+    AtomicUsize,
+    Ordering,
+};
+use core::task::{
+    Context,
+    Poll,
+    Waker,
+};
+
 use std::boxed::Box;
 use std::hint::black_box;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{
+    SyncSender,
+    sync_channel,
+};
+use std::sync::{
+    Arc,
+    Mutex,
+};
 use std::task::Wake;
-use std::thread::{self, JoinHandle};
+use std::thread::{
+    self,
+    JoinHandle,
+};
 use std::vec;
+
+use test::Bencher;
+use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 use fusion_std::thread::{
     CurrentAsyncRuntime,
@@ -43,10 +63,14 @@ use fusion_std::thread::{
     async_yield_now,
     yield_now as green_yield_now,
 };
-use fusion_sys::fiber::{Fiber, FiberReturn, FiberStack, FiberYield, yield_now as fiber_yield_now};
+use fusion_sys::fiber::{
+    Fiber,
+    FiberReturn,
+    FiberStack,
+    FiberYield,
+    yield_now as fiber_yield_now,
+};
 use fusion_sys::sync::Semaphore;
-use test::Bencher;
-use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 const LOW_LEVEL_STACK_WORDS: usize = 4096;
 const BENCH_POOL_STACK_BYTES: usize = 16 * 1024;
@@ -371,14 +395,16 @@ pub fn fiber_low_level_resume_yield_round_trip(b: &mut Bencher) {
 pub fn current_fiber_pool_spawn_join_noop(b: &mut Bencher) {
     let fibers = current_pool();
     let (): () = fibers
-        .spawn(noop_job)
+        .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(noop_job)
         .expect("warmup task should spawn")
         .join()
         .expect("warmup task should join");
     black_box(());
 
     b.iter(|| {
-        let handle = fibers.spawn(noop_job).expect("benchmark task should spawn");
+        let handle = fibers
+            .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(noop_job)
+            .expect("benchmark task should spawn");
         let (): () = handle.join().expect("benchmark task should join");
         black_box(());
     });
@@ -409,7 +435,7 @@ pub fn current_fiber_pool_spawn_with_stack_join_noop(b: &mut Bencher) {
 pub fn current_fiber_pool_spawn_join_yield_once(b: &mut Bencher) {
     let fibers = current_pool();
     let (): () = fibers
-        .spawn(yield_once_job)
+        .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(yield_once_job)
         .expect("warmup task should spawn")
         .join()
         .expect("warmup task should join");
@@ -417,7 +443,7 @@ pub fn current_fiber_pool_spawn_join_yield_once(b: &mut Bencher) {
 
     b.iter(|| {
         let handle = fibers
-            .spawn(yield_once_job)
+            .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(yield_once_job)
             .expect("benchmark task should spawn");
         let (): () = handle.join().expect("benchmark task should join");
         black_box(());
@@ -516,7 +542,7 @@ pub fn green_pool_spawn_with_stack_join_noop(b: &mut Bencher) {
 pub fn green_pool_spawn_join_yield_once(b: &mut Bencher) {
     let (_carriers, fibers) = green_pool();
     let (): () = fibers
-        .spawn(yield_once_job)
+        .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(yield_once_job)
         .expect("warmup task should spawn")
         .join()
         .expect("warmup task should join");
@@ -524,7 +550,7 @@ pub fn green_pool_spawn_join_yield_once(b: &mut Bencher) {
 
     b.iter(|| {
         let handle = fibers
-            .spawn(yield_once_job)
+            .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(yield_once_job)
             .expect("benchmark task should spawn");
         let (): () = handle.join().expect("benchmark task should join");
         black_box(());
@@ -743,7 +769,7 @@ pub fn tokio_multi_thread_lifecycle_yield_once_workers_4(b: &mut Bencher) {
 pub fn current_fiber_pool_spawn_join_yield_ten_local_state(b: &mut Bencher) {
     let fibers = current_pool();
     let (): () = fibers
-        .spawn(yield_ten_local_state_job)
+        .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(yield_ten_local_state_job)
         .expect("warmup task should spawn")
         .join()
         .expect("warmup task should join");
@@ -751,7 +777,7 @@ pub fn current_fiber_pool_spawn_join_yield_ten_local_state(b: &mut Bencher) {
 
     b.iter(|| {
         let handle = fibers
-            .spawn(yield_ten_local_state_job)
+            .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(yield_ten_local_state_job)
             .expect("benchmark task should spawn");
         let (): () = handle.join().expect("benchmark task should join");
         black_box(());
@@ -763,14 +789,14 @@ pub fn current_fiber_pool_spawn_join_yield_ten_local_state(b: &mut Bencher) {
 pub fn current_fiber_pool_spawn_join_recursive_stack(b: &mut Bencher) {
     let fibers = current_pool();
     let _: usize = fibers
-        .spawn(recursive_stack_job)
+        .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(recursive_stack_job)
         .expect("warmup task should spawn")
         .join()
         .expect("warmup task should join");
 
     b.iter(|| {
         let handle = fibers
-            .spawn(recursive_stack_job)
+            .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(recursive_stack_job)
             .expect("benchmark task should spawn");
         let depth = handle.join().expect("benchmark task should join");
         black_box(depth);
@@ -902,7 +928,7 @@ pub fn bench_green_pool_steady_state_throughput(b: &mut Bencher, carrier_count: 
     for _ in 0..THROUGHPUT_BATCH_SIZE {
         handles.push(
             fibers
-                .spawn(job)
+                .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(job)
                 .expect("warmup throughput task should spawn successfully"),
         );
     }
@@ -918,7 +944,7 @@ pub fn bench_green_pool_steady_state_throughput(b: &mut Bencher, carrier_count: 
         for _ in 0..THROUGHPUT_BATCH_SIZE {
             handles.push(
                 fibers
-                    .spawn(job)
+                    .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(job)
                     .expect("throughput task should spawn successfully"),
             );
         }
@@ -981,7 +1007,7 @@ pub fn bench_green_pool_lifecycle_throughput(b: &mut Bencher, carrier_count: usi
         for _ in 0..THROUGHPUT_BATCH_SIZE {
             handles.push(
                 fibers
-                    .spawn(job)
+                    .spawn_with_stack::<BENCH_POOL_STACK_BYTES, _, _>(job)
                     .expect("lifecycle throughput task should spawn successfully"),
             );
         }

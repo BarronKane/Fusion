@@ -234,7 +234,10 @@ pub const fn system_context_support() -> ContextSupport {
 mod tests {
     use core::num::NonZeroUsize;
     use core::ptr::NonNull;
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::sync::atomic::{
+        AtomicUsize,
+        Ordering,
+    };
 
     use super::*;
 

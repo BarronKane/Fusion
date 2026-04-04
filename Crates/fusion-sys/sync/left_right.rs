@@ -29,11 +29,17 @@
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
 use core::ops::Deref;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicUsize,
+    Ordering,
+};
 
 use fusion_pal::sys::cpu::CachePadded;
 
-use super::{SyncError, ThinMutex};
+use super::{
+    SyncError,
+    ThinMutex,
+};
 
 const LEFT_RIGHT_ACTIVE_LEFT: usize = 0;
 const LEFT_RIGHT_ACTIVE_RIGHT: usize = 1;
@@ -245,7 +251,10 @@ mod tests {
     use crate::sync::SyncErrorKind;
     extern crate std;
     use self::std::sync::Arc;
-    use self::std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
+    use self::std::sync::atomic::{
+        AtomicBool,
+        Ordering as StdOrdering,
+    };
     use self::std::thread;
     use self::std::time::Duration;
 

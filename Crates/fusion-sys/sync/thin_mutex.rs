@@ -7,7 +7,11 @@ use fusion_pal::sys::sync::{
 };
 
 use super::SpinMutex;
-use super::{MutexSupport, RawMutex, SyncError};
+use super::{
+    MutexSupport,
+    RawMutex,
+    SyncError,
+};
 
 #[derive(Debug)]
 enum ThinMutexInner {
@@ -107,7 +111,10 @@ impl Drop for ThinMutexGuard<'_> {
 #[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     use super::*;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{
+        AtomicU32,
+        Ordering,
+    };
     extern crate std;
     use self::std::sync::Arc;
     use self::std::thread;

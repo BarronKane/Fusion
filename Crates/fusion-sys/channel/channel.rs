@@ -1,12 +1,16 @@
 //! fusion-sys channel wrappers and local fixed-capacity channel demonstration.
 
-pub use fusion_pal::sys::channel::*;
-
 use core::array;
 use core::marker::PhantomData;
 
+pub use fusion_pal::sys::channel::*;
+
 use crate::protocol::Protocol;
-use crate::sync::{Mutex, SyncError, SyncErrorKind};
+use crate::sync::{
+    Mutex,
+    SyncError,
+    SyncErrorKind,
+};
 use crate::transport::{
     TransportAccessRequirement,
     TransportAttachmentControl,

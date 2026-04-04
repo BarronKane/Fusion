@@ -20,7 +20,11 @@
 use core::fmt;
 use core::mem::size_of;
 
-use super::{AcpiError, checksum_is_valid, read_unaligned_copy};
+use super::{
+    AcpiError,
+    checksum_is_valid,
+    read_unaligned_copy,
+};
 
 /// Four-byte ACPI table signature.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]

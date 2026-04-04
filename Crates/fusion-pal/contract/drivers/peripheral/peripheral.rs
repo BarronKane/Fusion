@@ -1,7 +1,6 @@
 //! Narrow single-purpose peripheral device contracts.
 
 #[allow(non_snake_case)]
-#[path = "P74HC595.rs"]
 pub mod P74HC595;
 pub mod button;
 pub mod led;

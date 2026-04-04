@@ -4,7 +4,10 @@
 //! daisy-chained 74HC595 devices. Optional output-enable wiring is supported when the board wants
 //! software blanking or PWM control; otherwise `CE` can stay tied low in hardware.
 
-use crate::gpio::{GpioError, GpioOutputPin};
+use crate::gpio::{
+    GpioError,
+    GpioOutputPin,
+};
 
 /// Marker for one 74HC595 chain without one software-controlled output-enable pin.
 #[derive(Debug, Clone, Copy, Default)]
@@ -472,7 +475,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpio::{GpioCapabilities, GpioOwnedPin};
+    use crate::gpio::{
+        GpioCapabilities,
+        GpioOwnedPin,
+    };
 
     #[derive(Debug)]
     struct FakeOutputPin {

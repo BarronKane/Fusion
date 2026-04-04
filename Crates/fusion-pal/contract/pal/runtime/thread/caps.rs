@@ -8,8 +8,10 @@ use super::{
 
 /// Shared authority bitset specialized for thread support.
 pub use crate::contract::pal::caps::AuthoritySet as ThreadAuthoritySet;
+
 /// Shared guarantee ladder specialized for thread support.
 pub use crate::contract::pal::caps::Guarantee as ThreadGuarantee;
+
 /// Shared implementation-category vocabulary specialized for thread support.
 pub use crate::contract::pal::caps::ImplementationKind as ThreadImplementationKind;
 

@@ -13,6 +13,8 @@ use fusion_pal::sys::pcu::{
     system_pcu as pal_system_pcu,
 };
 
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+use super::PcuStreamPattern;
 use super::{
     PcuBackendKind,
     PcuDispatchPlan,
@@ -25,9 +27,6 @@ use super::{
     PcuPreparedKernel,
     PcuStreamKernelIr,
 };
-
-#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-use super::PcuStreamPattern;
 
 /// fusion-sys wrapper around the selected generic PCU executor backend.
 #[derive(Debug, Clone, Copy)]

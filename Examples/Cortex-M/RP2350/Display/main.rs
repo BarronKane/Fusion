@@ -9,21 +9,22 @@ use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use core::time::Duration;
 
 use cortex_m_rt::{ExceptionFrame, entry, exception};
-use fusion_example_rp2350_on_device::runtime::{drive_once, spawn_with_stack};
+
 use fusion_example_rp2350_on_device::pcu::{
     PcuPioOnDeviceEvent,
     PcuPioOnDeviceFailure,
     run_pcu_pio_smoke_suite,
     suite_pass_display_code,
 };
+use fusion_example_rp2350_on_device::runtime::{drive_once, spawn_with_stack};
+use fusion_std::gpio::{Gpio, GpioDriveStrength, GpioPin};
+use fusion_std::pcu::PCU;
+use fusion_std::thread::yield_now;
 use fusion_sys::hardware::peripheral::{
     SevenSegmentGlyph,
     SevenSegmentPolarity,
     ShiftedFourDigitSevenSegmentDisplay,
 };
-use fusion_std::gpio::{Gpio, GpioDriveStrength, GpioPin};
-use fusion_std::pcu::PCU;
-use fusion_std::thread::yield_now;
 use fusion_sys::thread::system_monotonic_time;
 
 const DISPLAY_DATA_PIN: u8 = 12;

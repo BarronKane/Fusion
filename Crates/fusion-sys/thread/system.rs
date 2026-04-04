@@ -11,24 +11,11 @@ use fusion_pal::sys::mem::{
     MemResourceAttrs,
     system_mem,
 };
-use fusion_pal::sys::thread::{PlatformThread, system_thread as pal_system_thread};
-
-use super::{
-    RawThreadEntry,
-    ThreadConfig,
-    ThreadError,
-    ThreadId,
-    ThreadObservation,
-    ThreadPlacementOutcome,
-    ThreadPlacementRequest,
-    ThreadPriorityRange,
-    ThreadSchedulerClass,
-    ThreadSchedulerObservation,
-    ThreadSchedulerRequest,
-    ThreadStackObservation,
-    ThreadSupport,
-    ThreadTermination,
+use fusion_pal::sys::thread::{
+    PlatformThread,
+    system_thread as pal_system_thread,
 };
+
 use crate::alloc::{
     AllocError,
     AllocErrorKind,
@@ -46,8 +33,27 @@ use crate::mem::resource::{
     ResourceInfo,
     ResourceState,
 };
-use crate::sync::{OnceInitError, OnceLock};
+use crate::sync::{
+    OnceInitError,
+    OnceLock,
+};
 use crate::thread::handle::ThreadHandle;
+use super::{
+    RawThreadEntry,
+    ThreadConfig,
+    ThreadError,
+    ThreadId,
+    ThreadObservation,
+    ThreadPlacementOutcome,
+    ThreadPlacementRequest,
+    ThreadPriorityRange,
+    ThreadSchedulerClass,
+    ThreadSchedulerObservation,
+    ThreadSchedulerRequest,
+    ThreadStackObservation,
+    ThreadSupport,
+    ThreadTermination,
+};
 
 /// Preferred runtime-backing realization reported by PAL/sys truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

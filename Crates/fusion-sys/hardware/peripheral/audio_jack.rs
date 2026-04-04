@@ -4,7 +4,10 @@
 //! owned GPIO line. The actual analog audio output requires DAC, PWM, or PIO-driven I2S;
 //! this peripheral owns the pins and exposes the wiring truth for each conductor.
 
-use crate::gpio::{GpioError, GpioOutputPin};
+use crate::gpio::{
+    GpioError,
+    GpioOutputPin,
+};
 
 /// Conductor role in a TRRS 3.5mm audio jack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -186,7 +189,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpio::{GpioCapabilities, GpioOwnedPin};
+    use crate::gpio::{
+        GpioCapabilities,
+        GpioOwnedPin,
+    };
 
     #[derive(Debug)]
     struct FakeOutputPin {

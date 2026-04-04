@@ -1,14 +1,27 @@
 use core::future::Future;
-use core::task::{Context, Poll, Waker};
+use core::task::{
+    Context,
+    Poll,
+    Waker,
+};
+
 use std::env;
 use std::hint::black_box;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{
+    AtomicBool,
+    Ordering,
+};
 use std::task::Wake;
 use std::thread;
 use std::time::Instant;
 
-use fusion_std::thread::{ExecutorConfig, ThreadAsyncRuntime, ThreadPoolConfig, async_yield_now};
+use fusion_std::thread::{
+    ExecutorConfig,
+    ThreadAsyncRuntime,
+    ThreadPoolConfig,
+    async_yield_now,
+};
 
 const DEFAULT_SAMPLES: usize = 100;
 const PROBE_TASK_CAPACITY: usize = 16;

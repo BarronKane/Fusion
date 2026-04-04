@@ -2,7 +2,10 @@
 
 use core::time::Duration;
 
-use super::{RwLockSupport, SyncError};
+use super::{
+    RwLockSupport,
+    SyncError,
+};
 
 /// Low-level reader/writer lock contract implemented by selected platform backends.
 ///

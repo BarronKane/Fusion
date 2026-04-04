@@ -2,8 +2,14 @@ use std::hint::spin_loop;
 use std::num::NonZeroUsize;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{
+    AtomicBool,
+    Ordering,
+};
+use std::time::{
+    Duration,
+    Instant,
+};
 
 use fusion_std::thread::{
     FiberStackBacking,

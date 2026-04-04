@@ -4,9 +4,10 @@ pub mod context;
 #[path = "event/event.rs"]
 /// Cortex-M bare-metal event backend implementation.
 pub mod event;
-#[path = "../unsupported/fiber.rs"]
 /// Cortex-M hosted-fiber surface (unsupported — fibers are managed directly).
-pub mod fiber;
+pub mod fiber {
+    pub use crate::fusion_pal::sys::unsupported::fiber::*;
+}
 #[path = "hal/hal.rs"]
 /// Cortex-M hardware backend implementation.
 pub mod hal;

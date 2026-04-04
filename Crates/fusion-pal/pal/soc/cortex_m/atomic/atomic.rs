@@ -10,7 +10,10 @@ use core::arch::asm;
 use core::cell::UnsafeCell;
 #[cfg(not(target_has_atomic = "32"))]
 use core::sync::atomic::compiler_fence;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
 use core::time::Duration;
 
 use crate::contract::pal::runtime::atomic::{

@@ -1,4 +1,7 @@
-use core::ops::{Deref, DerefMut};
+use core::ops::{
+    Deref,
+    DerefMut,
+};
 
 use bitflags::bitflags;
 

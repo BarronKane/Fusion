@@ -1,3 +1,4 @@
+use crate::mem::resource::ResourceRange;
 use super::assessment::{
     MemoryPoolAssessmentVerdict,
     analyze_pool_request,
@@ -11,7 +12,6 @@ use super::{
     MemoryProviderInventory,
     MemoryProviderSupport,
 };
-use crate::mem::resource::ResourceRange;
 
 /// Coarse result of building a pool provisioning plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

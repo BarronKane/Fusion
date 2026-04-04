@@ -1,8 +1,16 @@
 use core::array;
 
-use super::extent::{ExtentDisposition, ExtentRecord, MemoryPoolLease, MemoryPoolLeaseId};
+use super::extent::{
+    ExtentDisposition,
+    ExtentRecord,
+    MemoryPoolLease,
+    MemoryPoolLeaseId,
+};
 use super::member::MemberUsageStats;
-use super::{MemoryPoolError, MemoryPoolStats};
+use super::{
+    MemoryPoolError,
+    MemoryPoolStats,
+};
 
 #[derive(Debug)]
 pub(super) struct MemoryPoolState<const EXTENTS: usize> {

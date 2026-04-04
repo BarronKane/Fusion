@@ -1,7 +1,10 @@
 //! Small spin-based mutex fallback for platforms without a stronger backend lock.
 
 use core::hint::spin_loop;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{
+    AtomicBool,
+    Ordering,
+};
 
 use fusion_pal::sys::sync::{
     MutexCaps,
@@ -94,7 +97,10 @@ unsafe impl RawMutex for SpinMutex {
 #[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     use super::*;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{
+        AtomicU32,
+        Ordering,
+    };
     extern crate std;
     use self::std::sync::Arc;
     use self::std::thread;

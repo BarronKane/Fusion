@@ -1,7 +1,12 @@
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
-use fusion_pal::sys::mem::{Address, CachePolicy, Protect, Region};
+use fusion_pal::sys::mem::{
+    Address,
+    CachePolicy,
+    Protect,
+    Region,
+};
 use fusion_sys::alloc::{
     MemoryPool,
     MemoryPoolContributor,
@@ -40,9 +45,15 @@ use fusion_sys::mem::resource::{
 };
 
 extern crate std;
-use self::std::alloc::{Layout, alloc_zeroed};
+use self::std::alloc::{
+    Layout,
+    alloc_zeroed,
+};
 use self::std::sync::Arc;
-use self::std::sync::atomic::{AtomicUsize, Ordering};
+use self::std::sync::atomic::{
+    AtomicUsize,
+    Ordering,
+};
 use self::std::thread;
 use self::std::time::Duration;
 

@@ -1,6 +1,9 @@
 //! iOS fusion-pal thread backend stub.
 
-use crate::contract::pal::runtime::thread::{UnsupportedThread, UnsupportedThreadHandle};
+use crate::contract::pal::runtime::thread::{
+    UnsupportedThread,
+    UnsupportedThreadHandle,
+};
 
 /// Selected thread handle type for iOS builds.
 pub type PlatformThreadHandle = UnsupportedThreadHandle;

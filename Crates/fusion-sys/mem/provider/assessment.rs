@@ -1,5 +1,12 @@
-use super::groups::{CandidateGroupRecord, preferred_candidate_group};
-use super::support::{CandidateStageCounts, MemoryPoolAssessmentIssues, candidate_stage_counts};
+use super::groups::{
+    CandidateGroupRecord,
+    preferred_candidate_group,
+};
+use super::support::{
+    CandidateStageCounts,
+    MemoryPoolAssessmentIssues,
+    candidate_stage_counts,
+};
 use super::{
     MemoryPoolClassId,
     MemoryPoolRequest,

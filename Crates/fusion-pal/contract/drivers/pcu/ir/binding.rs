@@ -1,6 +1,9 @@
 //! Memory/resource attachment vocabulary for the PCU IR core.
 
-use super::{PcuScalarType, PcuValueType};
+use super::{
+    PcuScalarType,
+    PcuValueType,
+};
 
 /// Storage-class vocabulary for one resource binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

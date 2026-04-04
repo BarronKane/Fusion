@@ -5,7 +5,10 @@
 //! left to the caller or a future PCU/timer contract; these peripherals own the GPIO pin and
 //! expose an honest on/off surface.
 
-use crate::gpio::{GpioError, GpioOutputPin};
+use crate::gpio::{
+    GpioError,
+    GpioOutputPin,
+};
 
 /// Buzzer variant describing the electrical behavior of the connected device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -131,7 +134,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpio::{GpioCapabilities, GpioOwnedPin};
+    use crate::gpio::{
+        GpioCapabilities,
+        GpioOwnedPin,
+    };
 
     #[derive(Debug)]
     struct FakeOutputPin {

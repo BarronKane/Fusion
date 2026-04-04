@@ -1,7 +1,9 @@
 //! Simple paired LED indicators backed by two owned GPIO outputs.
 
-use crate::gpio::{GpioError, GpioOutputPin};
-
+use crate::gpio::{
+    GpioError,
+    GpioOutputPin,
+};
 use super::Led;
 
 /// One paired LED indicator backed by two owned GPIO outputs.
@@ -114,7 +116,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpio::{GpioCapabilities, GpioOwnedPin};
+    use crate::gpio::{
+        GpioCapabilities,
+        GpioOwnedPin,
+    };
 
     #[derive(Debug)]
     struct FakeOutputPin {

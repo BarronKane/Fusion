@@ -1,6 +1,9 @@
 use core::time::Duration;
 
-use super::{MutexSupport, SyncError};
+use super::{
+    MutexSupport,
+    SyncError,
+};
 
 /// Low-level raw mutex contract implemented by selected platform backends.
 ///

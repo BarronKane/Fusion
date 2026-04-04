@@ -2,9 +2,20 @@
 
 use core::str;
 
-use rustix::fs::{CWD, Mode, OFlags, openat};
-use rustix::io::{Errno, read};
-use rustix::thread::{self as rustix_thread, CpuSet};
+use rustix::fs::{
+    CWD,
+    Mode,
+    OFlags,
+    openat,
+};
+use rustix::io::{
+    Errno,
+    read,
+};
+use rustix::thread::{
+    self as rustix_thread,
+    CpuSet,
+};
 
 use crate::contract::pal::cpu::{
     CachePadded64,
@@ -525,9 +536,17 @@ const fn runtime_vendor() -> HardwareCpuVendor {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn runtime_simd_set() -> HardwareSimdSet {
     #[cfg(target_arch = "x86")]
-    use core::arch::x86::{__cpuid, __cpuid_count, _xgetbv};
+    use core::arch::x86::{
+        __cpuid,
+        __cpuid_count,
+        _xgetbv,
+    };
     #[cfg(target_arch = "x86_64")]
-    use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
+    use core::arch::x86_64::{
+        __cpuid,
+        __cpuid_count,
+        _xgetbv,
+    };
 
     let leaf0 = unsafe { __cpuid(0) };
     if leaf0.eax < 1 {

@@ -8,11 +8,13 @@ use bitflags::bitflags;
 /// canonical bit layout so context evidence can be composed safely with thread and
 /// hardware evidence later without manual remapping.
 pub use crate::contract::pal::caps::AuthoritySet as ContextAuthoritySet;
+
 /// Shared guarantee ladder specialized for context support.
 ///
 /// Context providers currently use a subset of this ladder in practice; `Controllable` is
 /// reserved but not presently emitted by the context backends.
 pub use crate::contract::pal::caps::Guarantee as ContextGuarantee;
+
 /// Shared implementation-category vocabulary specialized for context support.
 pub use crate::contract::pal::caps::ImplementationKind as ContextImplementationKind;
 

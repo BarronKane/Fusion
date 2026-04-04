@@ -19,8 +19,10 @@ use crate::protocol::{
     ProtocolTransportRequirements,
     ProtocolVersion,
 };
-use crate::transport::{TransportDirection, TransportFraming};
-
+use crate::transport::{
+    TransportDirection,
+    TransportFraming,
+};
 use super::{
     AllocErrorKind,
     AllocatorDomainAudit,

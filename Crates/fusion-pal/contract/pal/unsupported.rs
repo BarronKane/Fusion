@@ -6,7 +6,6 @@ use crate::contract::pal::runtime::thread::{
     ThreadCoreId,
     ThreadLogicalCpuId,
 };
-
 use super::{
     HardwareBase,
     HardwareCpuDescription,

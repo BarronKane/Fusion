@@ -7,13 +7,27 @@
 use core::ffi::c_void;
 use core::num::NonZeroUsize;
 use core::str;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{
+    AtomicU64,
+    Ordering,
+};
 
 use rustix::fd::BorrowedFd;
-use rustix::fs::{CWD, Mode, OFlags, openat};
+use rustix::fs::{
+    CWD,
+    Mode,
+    OFlags,
+    openat,
+};
 use rustix::io::Errno;
 use rustix::io::read;
-use rustix::mm::{self, Advice as MmAdvice, MapFlags as MmMapFlags, MprotectFlags, ProtFlags};
+use rustix::mm::{
+    self,
+    Advice as MmAdvice,
+    MapFlags as MmMapFlags,
+    MprotectFlags,
+    ProtFlags,
+};
 use rustix::param;
 use rustix::system;
 
@@ -48,7 +62,11 @@ use crate::contract::pal::mem::{
     RegionInfo,
     ReplacePlacement,
 };
-use crate::sys::sync::{OnceBeginResult, PlatformRawOnce, RawOnce};
+use crate::sys::sync::{
+    OnceBeginResult,
+    PlatformRawOnce,
+    RawOnce,
+};
 
 /// Linux implementation of the fusion-pal memory provider contract.
 #[derive(Debug, Clone, Copy, Default)]
@@ -736,7 +754,12 @@ const fn supports_thp_advice_at(version: Option<KernelVersion>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::pal::mem::{MapFlags, MemAdviceCaps, MemPlacementCaps, RegionAttrs};
+    use crate::contract::pal::mem::{
+        MapFlags,
+        MemAdviceCaps,
+        MemPlacementCaps,
+        RegionAttrs,
+    };
 
     fn anon_request(len: usize) -> MapRequest<'static> {
         MapRequest {

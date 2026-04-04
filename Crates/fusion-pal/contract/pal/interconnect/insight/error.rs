@@ -2,7 +2,10 @@
 
 use core::fmt;
 
-use crate::contract::pal::interconnect::channel::{ChannelError, ChannelErrorKind};
+use crate::contract::pal::interconnect::channel::{
+    ChannelError,
+    ChannelErrorKind,
+};
 
 /// Error returned by one insight-side-channel surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

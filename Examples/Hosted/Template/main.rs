@@ -1,4 +1,9 @@
-use fusion_std::sync::{Mutex, OnceLock, RwLock, Semaphore};
+use fusion_std::sync::{
+    Mutex,
+    OnceLock,
+    RwLock,
+    Semaphore,
+};
 use fusion_std::thread::{
     Executor,
     ExecutorConfig,

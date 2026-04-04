@@ -1,6 +1,9 @@
 //! Linux fusion-pal PCU executor backend.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{
+    AtomicBool,
+    Ordering,
+};
 
 use crate::contract::drivers::pcu::{
     PcuBase,

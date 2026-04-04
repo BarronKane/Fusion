@@ -10,7 +10,11 @@ use core::ffi::c_int;
 use core::fmt;
 
 use fusion_kn::client::FusionKnTransport;
-use fusion_kn::contract::wire::{FusionKnMessageHeader, FusionKnTransportKind, FusionKnWireError};
+use fusion_kn::contract::wire::{
+    FusionKnMessageHeader,
+    FusionKnTransportKind,
+    FusionKnWireError,
+};
 
 /// Default Linux device path for the mediated Fusion kernel transport.
 pub const DEFAULT_DEVICE_PATH: &[u8] = b"/dev/fusion_kn\0";

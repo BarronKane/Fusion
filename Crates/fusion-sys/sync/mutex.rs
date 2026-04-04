@@ -1,9 +1,16 @@
 //! Data-carrying mutex built on top of [`ThinMutex`].
 
 use core::cell::UnsafeCell;
-use core::ops::{Deref, DerefMut};
+use core::ops::{
+    Deref,
+    DerefMut,
+};
 
-use super::{SyncError, ThinMutex, ThinMutexGuard};
+use super::{
+    SyncError,
+    ThinMutex,
+    ThinMutexGuard,
+};
 
 /// Data-carrying mutex with no poisoning or hidden allocation.
 #[derive(Debug)]

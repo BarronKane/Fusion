@@ -4,7 +4,10 @@
 //! The speaker requires an external amplifier or direct PWM/timer-driven signal to produce audio;
 //! this peripheral owns the signal pin and exposes the wiring truth.
 
-use crate::gpio::{GpioError, GpioOutputPin};
+use crate::gpio::{
+    GpioError,
+    GpioOutputPin,
+};
 
 /// Passive enclosed speaker peripheral backed by one owned GPIO signal output.
 ///
@@ -110,7 +113,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpio::{GpioCapabilities, GpioOwnedPin};
+    use crate::gpio::{
+        GpioCapabilities,
+        GpioOwnedPin,
+    };
 
     #[derive(Debug)]
     struct FakeOutputPin {

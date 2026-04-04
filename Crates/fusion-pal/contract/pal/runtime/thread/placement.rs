@@ -1,5 +1,4 @@
 use crate::contract::pal::HardwareTopologyNodeId;
-
 use super::{
     ThreadClusterId,
     ThreadCoreClassId,

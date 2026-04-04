@@ -250,7 +250,10 @@ impl PcuKernelIr for PcuStreamKernelIr<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::drivers::pcu::{PcuParameterBinding, PcuParameterValue};
+    use crate::contract::drivers::pcu::{
+        PcuParameterBinding,
+        PcuParameterValue,
+    };
 
     #[test]
     fn stream_ir_reports_simple_transform_shape() {

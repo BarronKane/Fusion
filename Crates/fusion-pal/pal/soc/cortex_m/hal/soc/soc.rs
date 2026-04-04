@@ -6,10 +6,9 @@
 mod board_contract;
 
 #[cfg(not(feature = "soc-rp2350"))]
-#[path = "generic.rs"]
 pub mod generic;
 #[cfg(feature = "soc-rp2350")]
-#[path = "rp2350.rs"]
+#[path = "rp2350/rp2350.rs"]
 pub mod rp2350;
 
 #[cfg(not(feature = "soc-rp2350"))]

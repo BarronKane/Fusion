@@ -1,10 +1,16 @@
 use fusion_pal::sys::mem::Region;
 
 use super::attrs::ResourceAttrs;
-use super::domain::{MemoryDomain, ResourceBackingKind};
+use super::domain::{
+    MemoryDomain,
+    ResourceBackingKind,
+};
 use super::geometry::MemoryGeometry;
 use super::layout::AllocatorLayoutPolicy;
-use super::ops::{ResourceHazardSet, ResourcePreferenceSet};
+use super::ops::{
+    ResourceHazardSet,
+    ResourcePreferenceSet,
+};
 use super::request::ResourceContract;
 use super::state::ResourceState;
 use super::support::ResourceSupport;

@@ -19,7 +19,12 @@
 //! parser that assumes direct physical access everywhere is how elegant code
 //! turns into boot-time fiction.
 
-use super::{AcpiError, AcpiSignature, AcpiTableView, read_unaligned_copy};
+use super::{
+    AcpiError,
+    AcpiSignature,
+    AcpiTableView,
+    read_unaligned_copy,
+};
 
 /// Borrowed validated XSDT view.
 #[derive(Clone, Copy, Debug)]

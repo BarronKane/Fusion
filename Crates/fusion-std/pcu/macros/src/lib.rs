@@ -1,9 +1,12 @@
 #![allow(non_snake_case)]
 
-use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
+use proc_macro::TokenStream;
 use quote::quote;
-use syn::parse::{Parse, ParseStream};
+use syn::parse::{
+    Parse,
+    ParseStream,
+};
 use syn::spanned::Spanned;
 use syn::{
     Error,

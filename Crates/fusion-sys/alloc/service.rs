@@ -3,7 +3,13 @@
 use core::array;
 use core::pin::Pin;
 
-use crate::channel::{ChannelError, ChannelErrorKind, ChannelReceive, ChannelSend, LocalChannel};
+use crate::channel::{
+    ChannelError,
+    ChannelErrorKind,
+    ChannelReceive,
+    ChannelSend,
+    LocalChannel,
+};
 use crate::fiber::{
     Fiber,
     FiberError,
@@ -19,7 +25,6 @@ use crate::transport::{
     TransportError,
     TransportErrorKind,
 };
-
 use super::{
     AllocError,
     AllocErrorKind,

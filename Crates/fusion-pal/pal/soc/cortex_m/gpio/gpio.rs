@@ -1,7 +1,10 @@
 //! Cortex-M GPIO backend backed by the selected SoC's static topology.
 
 use core::ptr;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
 
 use crate::contract::drivers::gpio::{
     GpioBase,
@@ -20,7 +23,6 @@ use crate::contract::drivers::gpio::{
     GpioPullPin,
     GpioSupport,
 };
-
 use crate::pal::soc::cortex_m::hal::soc::board;
 
 const RP2350_GPIO_COUNT: u8 = 30;

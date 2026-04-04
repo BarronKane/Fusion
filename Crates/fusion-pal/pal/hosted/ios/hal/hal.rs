@@ -1,6 +1,9 @@
 //! iOS fusion-pal hardware backend stub.
 
-use crate::contract::pal::{CachePadded64, UnsupportedHardware};
+use crate::contract::pal::{
+    CachePadded64,
+    UnsupportedHardware,
+};
 
 /// Selected hardware provider type for iOS builds.
 pub type PlatformHardware = UnsupportedHardware;

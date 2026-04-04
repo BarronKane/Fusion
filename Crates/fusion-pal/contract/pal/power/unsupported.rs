@@ -1,6 +1,12 @@
 //! Backend-neutral unsupported power implementation.
 
-use super::{PowerBase, PowerControl, PowerError, PowerModeDescriptor, PowerSupport};
+use super::{
+    PowerBase,
+    PowerControl,
+    PowerError,
+    PowerModeDescriptor,
+    PowerSupport,
+};
 
 /// Unsupported power provider placeholder.
 #[derive(Debug, Clone, Copy, Default)]

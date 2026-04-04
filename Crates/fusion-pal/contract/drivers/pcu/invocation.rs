@@ -6,7 +6,13 @@
 
 use core::num::NonZeroU32;
 
-use super::{PcuKernel, PcuParameter, PcuParameterBinding, PcuParameterSlot, PcuParameterValue};
+use super::{
+    PcuKernel,
+    PcuParameter,
+    PcuParameterBinding,
+    PcuParameterSlot,
+    PcuParameterValue,
+};
 
 /// Invocation geometry for one kernel dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

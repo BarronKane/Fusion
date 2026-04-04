@@ -1,9 +1,15 @@
 extern crate std;
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
 use core::time::Duration;
 
-use fusion_sys::event::{EventInterest, EventRegistrationMode};
+use fusion_sys::event::{
+    EventInterest,
+    EventRegistrationMode,
+};
 use fusion_sys::thread::{
     MonotonicDeadlineWaitKind,
     MonotonicRuntimeTimeCaps,

@@ -1,5 +1,8 @@
-use super::{AllocError, align_up};
 use crate::mem::resource::AllocatorLayoutPolicy;
+use super::{
+    AllocError,
+    align_up,
+};
 
 /// Allocator-managed subsystem kind that owns one front-loaded metadata region.
 #[repr(u16)]

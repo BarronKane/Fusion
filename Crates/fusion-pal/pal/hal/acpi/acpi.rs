@@ -110,6 +110,10 @@ mod madt;
 mod mcfg;
 mod xsdt;
 
+use core::mem::MaybeUninit;
+use core::mem::size_of;
+use core::ptr;
+
 pub use dsdt::*;
 pub use error::*;
 pub use facs::*;
@@ -118,10 +122,6 @@ pub use header::*;
 pub use madt::*;
 pub use mcfg::*;
 pub use xsdt::*;
-
-use core::mem::MaybeUninit;
-use core::mem::size_of;
-use core::ptr;
 
 pub(crate) fn read_unaligned_copy<T: Copy>(bytes: &[u8]) -> Result<T, AcpiError> {
     if bytes.len() < size_of::<T>() {

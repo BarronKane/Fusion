@@ -1,7 +1,9 @@
 //! Unsupported channel placeholder.
 
-use super::{ChannelBase, ChannelError, ChannelReceive, ChannelSend, ChannelSupport};
-use crate::contract::pal::interconnect::protocol::{Protocol, UnsupportedProtocol};
+use crate::contract::pal::interconnect::protocol::{
+    Protocol,
+    UnsupportedProtocol,
+};
 use crate::contract::pal::interconnect::transport::{
     TransportAttachmentControl,
     TransportAttachmentRequest,
@@ -10,6 +12,13 @@ use crate::contract::pal::interconnect::transport::{
     TransportSupport,
     TransportTopology,
     UnsupportedTransport,
+};
+use super::{
+    ChannelBase,
+    ChannelError,
+    ChannelReceive,
+    ChannelSend,
+    ChannelSupport,
 };
 
 /// Unsupported channel placeholder.

@@ -1,7 +1,14 @@
-use fusion_sys::alloc::{AllocErrorKind, AllocationStrategy, Allocator};
+use fusion_sys::alloc::{
+    AllocErrorKind,
+    AllocationStrategy,
+    Allocator,
+};
 
 extern crate std;
-use self::std::sync::{Arc, Barrier};
+use self::std::sync::{
+    Arc,
+    Barrier,
+};
 use self::std::thread;
 
 #[test]

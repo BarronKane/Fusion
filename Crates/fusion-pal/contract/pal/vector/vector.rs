@@ -6,11 +6,10 @@ mod types;
 mod unsupported;
 
 pub use caps::*;
+use crate::contract::pal::runtime::thread::ThreadCoreId;
 pub use error::*;
 pub use types::*;
 pub use unsupported::*;
-
-use crate::contract::pal::runtime::thread::ThreadCoreId;
 
 /// Capability trait for vector-ownership backends.
 pub trait VectorBase {

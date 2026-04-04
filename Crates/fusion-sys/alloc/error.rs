@@ -1,7 +1,13 @@
 use core::fmt;
 
-use crate::mem::pool::{MemoryPoolError, MemoryPoolErrorKind};
-use crate::mem::resource::{ResourceError, ResourceErrorKind};
+use crate::mem::pool::{
+    MemoryPoolError,
+    MemoryPoolErrorKind,
+};
+use crate::mem::resource::{
+    ResourceError,
+    ResourceErrorKind,
+};
 use crate::sync::SyncErrorKind;
 
 /// Allocation-layer failure classification.

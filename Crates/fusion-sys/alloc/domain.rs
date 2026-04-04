@@ -5,8 +5,10 @@ use crate::mem::resource::{
     ResourceAttrs,
     ResourceHazardSet,
 };
-
-use super::{AllocPolicy, MemoryPoolStats};
+use super::{
+    AllocPolicy,
+    MemoryPoolStats,
+};
 
 /// Stable identifier for one allocator-owned domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

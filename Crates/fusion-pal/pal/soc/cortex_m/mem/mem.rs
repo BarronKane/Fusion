@@ -56,7 +56,6 @@ use crate::contract::pal::mem::{
     RegionAttrs,
     RegionInfo,
 };
-
 use crate::pal::soc::cortex_m::hal::soc::board::{
     self,
     CortexMMemoryRegionDescriptor,
@@ -399,8 +398,17 @@ const fn usable_len_from_descriptor(descriptor: CortexMMemoryRegionDescriptor) -
 
 #[cfg(test)]
 mod tests {
-    use super::{CortexMMemoryRegionDescriptor, CortexMMemoryRegionKind, region_from_descriptor};
-    use crate::contract::pal::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
+    use super::{
+        CortexMMemoryRegionDescriptor,
+        CortexMMemoryRegionKind,
+        region_from_descriptor,
+    };
+    use crate::contract::pal::mem::{
+        CachePolicy,
+        MemResourceBackingKind,
+        Protect,
+        RegionAttrs,
+    };
 
     #[test]
     fn address_zero_region_is_not_materialized_as_region_handle() {

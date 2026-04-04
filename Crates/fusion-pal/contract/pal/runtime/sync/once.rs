@@ -1,6 +1,9 @@
 //! Backend-neutral fusion-pal contract for one-time initialization primitives.
 
-use super::{OnceSupport, SyncError};
+use super::{
+    OnceSupport,
+    SyncError,
+};
 
 /// Current state of a raw once primitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

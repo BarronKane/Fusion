@@ -18,12 +18,6 @@ pub mod cortex_m;
 
 use core::num::NonZeroU32;
 
-pub use dispatch::*;
-pub use ingestor::*;
-pub use ir::*;
-pub use stream::*;
-pub use system::*;
-
 pub use fusion_pal::sys::pcu::{
     PcuAttachmentTableHandle,
     PcuBase,
@@ -63,6 +57,12 @@ pub use fusion_pal::sys::pcu::{
     PcuSupport,
     PcuWordStreamBindings,
 };
+
+pub use dispatch::*;
+pub use ingestor::*;
+pub use ir::*;
+pub use stream::*;
+pub use system::*;
 
 /// Reusable dispatch profile for one family of PCU submissions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

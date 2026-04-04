@@ -4,7 +4,10 @@
 //! directly in an ISA-specific record and resumes contexts with a small assembly shim. No libc
 //! coroutine surface is involved, which is the whole point.
 
-use core::arch::{asm, global_asm};
+use core::arch::{
+    asm,
+    global_asm,
+};
 use core::mem;
 
 use crate::contract::pal::runtime::context::{
@@ -239,7 +242,10 @@ pub const fn system_context_support() -> ContextSupport {
 mod tests {
     use core::num::NonZeroUsize;
     use core::ptr::NonNull;
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::sync::atomic::{
+        AtomicUsize,
+        Ordering,
+    };
 
     use super::*;
 

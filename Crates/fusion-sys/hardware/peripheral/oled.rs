@@ -4,7 +4,10 @@
 //! GND + VCC + SCL + SDA. The actual I2C protocol driver and display command sequences belong
 //! to a future I2C/display contract; this peripheral owns the pins and exposes the wiring truth.
 
-use crate::gpio::{GpioError, GpioOutputPin};
+use crate::gpio::{
+    GpioError,
+    GpioOutputPin,
+};
 
 /// I2C wiring contract for one OLED display module.
 ///
@@ -68,7 +71,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpio::{GpioCapabilities, GpioOwnedPin};
+    use crate::gpio::{
+        GpioCapabilities,
+        GpioOwnedPin,
+    };
 
     #[derive(Debug)]
     struct FakeOutputPin {

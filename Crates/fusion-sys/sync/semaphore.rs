@@ -2,7 +2,11 @@
 
 use core::time::Duration;
 
-use fusion_pal::sys::sync::{PlatformSemaphore, RawSemaphore, SemaphoreSupport};
+use fusion_pal::sys::sync::{
+    PlatformSemaphore,
+    RawSemaphore,
+    SemaphoreSupport,
+};
 
 use super::SyncError;
 

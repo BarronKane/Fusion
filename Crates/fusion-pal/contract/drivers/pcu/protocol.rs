@@ -19,9 +19,17 @@ use crate::contract::pal::interconnect::protocol::{
     ProtocolTransportRequirements,
     ProtocolVersion,
 };
-use crate::contract::pal::interconnect::transport::{TransportDirection, TransportFraming};
-
-use super::{PcuErrorKind, PcuExecutorDescriptor, PcuExecutorId, PcuInvocationShape, PcuKernelId};
+use crate::contract::pal::interconnect::transport::{
+    TransportDirection,
+    TransportFraming,
+};
+use super::{
+    PcuErrorKind,
+    PcuExecutorDescriptor,
+    PcuExecutorId,
+    PcuInvocationShape,
+    PcuKernelId,
+};
 
 /// Opaque submission identifier assigned by the submitter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

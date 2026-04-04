@@ -8,7 +8,13 @@ use core::mem::MaybeUninit;
 use core::ptr;
 use core::time::Duration;
 
-use libc::{self, PTHREAD_CREATE_DETACHED, PTHREAD_CREATE_JOINABLE, pthread_attr_t, pthread_t};
+use libc::{
+    self,
+    PTHREAD_CREATE_DETACHED,
+    PTHREAD_CREATE_JOINABLE,
+    pthread_attr_t,
+    pthread_t,
+};
 
 use crate::contract::pal::runtime::thread::{
     RawThreadEntry,

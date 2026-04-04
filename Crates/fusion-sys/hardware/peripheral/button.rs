@@ -1,7 +1,11 @@
 //! Simple button peripherals backed by owned GPIO inputs.
 
-use crate::gpio::{GpioError, GpioInputPin};
 use fusion_pal::contract::drivers::peripheral::ButtonContract;
+
+use crate::gpio::{
+    GpioError,
+    GpioInputPin,
+};
 
 /// Simple binary button peripheral backed by one owned GPIO input.
 #[derive(Debug)]
@@ -68,7 +72,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpio::{GpioCapabilities, GpioOwnedPin};
+    use crate::gpio::{
+        GpioCapabilities,
+        GpioOwnedPin,
+    };
 
     #[derive(Debug)]
     struct FakeInputPin {

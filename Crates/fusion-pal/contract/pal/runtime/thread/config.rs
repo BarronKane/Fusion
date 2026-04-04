@@ -1,4 +1,8 @@
-use super::{ThreadPlacementRequest, ThreadSchedulerRequest, ThreadStackRequest};
+use super::{
+    ThreadPlacementRequest,
+    ThreadSchedulerRequest,
+    ThreadStackRequest,
+};
 
 /// Joinability policy requested for a new thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

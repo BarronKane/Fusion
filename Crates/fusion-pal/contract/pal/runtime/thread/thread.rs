@@ -26,17 +26,17 @@ mod scheduler;
 mod stack;
 mod unsupported;
 
-pub use crate::contract::pal::HardwareTopologyNodeId;
+use core::time::Duration;
+
 pub use caps::*;
 pub use config::*;
+pub use crate::contract::pal::HardwareTopologyNodeId;
 pub use error::*;
 pub use id::*;
 pub use placement::*;
 pub use scheduler::*;
 pub use stack::*;
 pub use unsupported::*;
-
-use core::time::Duration;
 
 /// Raw thread entry point type used by fusion-pal backends.
 ///
@@ -356,7 +356,11 @@ pub trait ThreadStackObservationControl: ThreadBase {
 
 #[cfg(test)]
 mod tests {
-    use super::{ThreadEntryReturn, ThreadTermination, ThreadTerminationKind};
+    use super::{
+        ThreadEntryReturn,
+        ThreadTermination,
+        ThreadTerminationKind,
+    };
 
     #[test]
     fn termination_from_entry_return_stays_normal() {

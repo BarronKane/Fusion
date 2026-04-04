@@ -23,6 +23,27 @@ use fusion_pal::sys::mem::{
     MemTopologyNode,
 };
 
+use crate::mem::resource::{
+    AllocatorLayoutPolicy,
+    AllocatorLayoutRealization,
+    IntegrityConstraints,
+    MemoryDomain,
+    MemoryGeometry,
+    OvercommitPolicy,
+    ResourceAcquireSupport,
+    ResourceAttrs,
+    ResourceBackingKind,
+    ResourceFeatureSupport,
+    ResourceHazardSet,
+    ResourceInfo,
+    ResourceOpSet,
+    ResourcePreferenceSet,
+    ResourceResidencySupport,
+    ResourceState,
+    ResourceSupport,
+    SharingPolicy,
+    StateValue,
+};
 use super::{
     CriticalSafetyRequirements,
     MemoryCompatibilityEnvelope,
@@ -44,27 +65,6 @@ use super::{
     MemoryTopologyNode,
     MemoryTopologyNodeId,
     MemoryTopologyNodeKind,
-};
-use crate::mem::resource::{
-    AllocatorLayoutPolicy,
-    AllocatorLayoutRealization,
-    IntegrityConstraints,
-    MemoryDomain,
-    MemoryGeometry,
-    OvercommitPolicy,
-    ResourceAcquireSupport,
-    ResourceAttrs,
-    ResourceBackingKind,
-    ResourceFeatureSupport,
-    ResourceHazardSet,
-    ResourceInfo,
-    ResourceOpSet,
-    ResourcePreferenceSet,
-    ResourceResidencySupport,
-    ResourceState,
-    ResourceSupport,
-    SharingPolicy,
-    StateValue,
 };
 
 /// Converts a fusion-pal catalog resource into a broad provider memory-object descriptor.

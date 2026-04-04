@@ -621,9 +621,19 @@ mod tests {
     use crate::thread::CurrentFiberAsyncBootstrap;
     use core::num::NonZeroUsize;
     use core::pin::pin;
-    use fusion_sys::channel::{ChannelReceive, ChannelSend};
-    use fusion_sys::fiber::{FiberMetadataMessage, FiberStack, FiberYield};
-    use fusion_sys::transport::{TransportAttachmentControl, TransportAttachmentRequest};
+    use fusion_sys::channel::{
+        ChannelReceive,
+        ChannelSend,
+    };
+    use fusion_sys::fiber::{
+        FiberMetadataMessage,
+        FiberStack,
+        FiberYield,
+    };
+    use fusion_sys::transport::{
+        TransportAttachmentControl,
+        TransportAttachmentRequest,
+    };
     use std::vec;
 
     #[test]

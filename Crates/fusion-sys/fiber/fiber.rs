@@ -10,7 +10,10 @@ use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 use core::pin::Pin;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicUsize,
+    Ordering,
+};
 
 pub use fusion_pal::sys::execution_context::{
     ContextAuthoritySet,
@@ -33,8 +36,15 @@ pub use fusion_pal::sys::execution_context::{
     system_context_support,
 };
 
-use crate::channel::{ChannelError, ChannelSend, LocalChannel};
-use crate::claims::{ClaimAwareness, ClaimContextId};
+use crate::channel::{
+    ChannelError,
+    ChannelSend,
+    LocalChannel,
+};
+use crate::claims::{
+    ClaimAwareness,
+    ClaimContextId,
+};
 use crate::context::ContextId;
 use crate::courier::CourierId;
 use crate::protocol::{
@@ -48,8 +58,17 @@ use crate::protocol::{
     ProtocolTransportRequirements,
     ProtocolVersion,
 };
-use crate::sync::{OnceLock, SyncError, SyncErrorKind, ThinMutex};
-use crate::thread::{ThreadErrorKind, ThreadId, ThreadSystem};
+use crate::sync::{
+    OnceLock,
+    SyncError,
+    SyncErrorKind,
+    ThinMutex,
+};
+use crate::thread::{
+    ThreadErrorKind,
+    ThreadId,
+    ThreadSystem,
+};
 use crate::transport::{
     TransportAttachmentControl,
     TransportAttachmentLaw,
@@ -1370,7 +1389,22 @@ const fn fiber_error_from_channel(error: ChannelError) -> FiberError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::sync::atomic::{
+        AtomicUsize,
+        Ordering,
+    };
+    use std::sync::{
+        Mutex,
+        OnceLock,
+    };
+
+    fn fiber_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static FIBER_TEST_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        FIBER_TEST_GUARD
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     fn reset_active_slots() {
         with_active_slots(|slots| {
@@ -1382,6 +1416,7 @@ mod tests {
 
     #[test]
     fn install_active_fiber_rejects_duplicate_thread_slot() {
+        let _guard = fiber_test_guard();
         reset_active_slots();
 
         let thread_id = current_thread_id().expect("thread id should be available");
@@ -1446,6 +1481,7 @@ mod tests {
 
     #[test]
     fn managed_fiber_claim_mode_requires_context_for_black() {
+        let _guard = fiber_test_guard();
         let mut stack = [0u128; 512];
         let stack = FiberStack::from_slice(&mut stack).expect("stack should build");
         let mut state = YieldOnce;
@@ -1473,6 +1509,7 @@ mod tests {
 
     #[test]
     fn managed_fiber_resume_exposes_current_fiber_id() {
+        let _guard = fiber_test_guard();
         let mut stack = [0u128; 512];
         let stack = FiberStack::from_slice(&mut stack).expect("stack should build");
         let observed = AtomicUsize::new(0);
@@ -1491,6 +1528,7 @@ mod tests {
 
     #[test]
     fn managed_fiber_resume_exposes_current_courier_id_when_bound() {
+        let _guard = fiber_test_guard();
         let mut stack = [0u128; 512];
         let stack = FiberStack::from_slice(&mut stack).expect("stack should build");
         let observed = AtomicUsize::new(0);

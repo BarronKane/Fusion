@@ -1,9 +1,24 @@
 use core::pin::pin;
 
-use fusion_sys::alloc::{AllocErrorKind, Allocator, AllocatorControlRequest};
-use fusion_sys::channel::{ChannelReceive, ChannelSend};
-use fusion_sys::fiber::{FiberMetadataMessage, FiberStack, FiberYield, ManagedFiber};
-use fusion_sys::transport::{TransportAttachmentControl, TransportAttachmentRequest};
+use fusion_sys::alloc::{
+    AllocErrorKind,
+    Allocator,
+    AllocatorControlRequest,
+};
+use fusion_sys::channel::{
+    ChannelReceive,
+    ChannelSend,
+};
+use fusion_sys::fiber::{
+    FiberMetadataMessage,
+    FiberStack,
+    FiberYield,
+    ManagedFiber,
+};
+use fusion_sys::transport::{
+    TransportAttachmentControl,
+    TransportAttachmentRequest,
+};
 
 #[test]
 fn allocator_channel_service_advertises_domains_and_serves_audits() {

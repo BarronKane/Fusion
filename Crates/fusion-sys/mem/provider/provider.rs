@@ -77,7 +77,11 @@ mod request;
 mod support;
 mod topology;
 
-pub use assessment::{MemoryPoolAssessment, MemoryPoolAssessmentVerdict, assess_pool_request};
+pub use assessment::{
+    MemoryPoolAssessment,
+    MemoryPoolAssessmentVerdict,
+    assess_pool_request,
+};
 pub use builder::{
     MemoryProviderBuildSpec,
     MemoryProviderConflictPolicy,
@@ -125,7 +129,10 @@ pub use plan::{
     MemoryPoolPreparationKind,
     plan_pool_request,
 };
-pub use request::{MemoryPoolContractRequirements, MemoryPoolRequest};
+pub use request::{
+    MemoryPoolContractRequirements,
+    MemoryPoolRequest,
+};
 pub use support::{
     CriticalSafetyRequirements,
     MemoryPoolAssessmentIssues,

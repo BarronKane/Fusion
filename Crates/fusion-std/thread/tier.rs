@@ -1,8 +1,10 @@
 //! Tier-aware green-thread orchestration.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
 
-use crate::sync::{Mutex as SyncMutex, SyncError};
 use fusion_pal::contract::pal::HardwareTopologyQuery as _;
 use fusion_pal::sys::cpu::system_cpu;
 use fusion_sys::fiber::FiberError;
@@ -17,6 +19,10 @@ use fusion_sys::vector::{
     VectorTableBuilder,
 };
 
+use crate::sync::{
+    Mutex as SyncMutex,
+    SyncError,
+};
 use super::{
     ExplicitFiberTask,
     FiberTaskAttributes,
@@ -29,8 +35,10 @@ use super::{
     ThreadPoolConfig,
     ThreadPoolError,
 };
-
-use super::{GeneratedExplicitFiberTaskContract, generated_explicit_task_contract_attributes};
+use super::{
+    GeneratedExplicitFiberTaskContract,
+    generated_explicit_task_contract_attributes,
+};
 
 const TIERED_VECTOR_TARGET_CAPACITY: usize = 128;
 
@@ -866,8 +874,10 @@ fn tiered_vector_dispatch_callback(cookie: VectorDispatchCookie) {
 mod tests {
     extern crate std;
 
-    use core::sync::atomic::{AtomicU32, Ordering};
-
+    use core::sync::atomic::{
+        AtomicU32,
+        Ordering,
+    };
     use super::*;
     use crate::thread::FiberStackClass;
 
@@ -898,6 +908,7 @@ mod tests {
 
     #[test]
     fn vector_lane_mapping_tracks_resolved_tier() {
+        let _guard = crate::thread::hosted_test_guard();
         let pool = match TieredGreenPool::new(&TieredGreenPoolConfig::new()) {
             Ok(pool) => pool,
             Err(error) if tiered_pool_is_unsupported(error) => return,
@@ -927,6 +938,7 @@ mod tests {
 
     #[test]
     fn draining_vector_dispatch_routes_registered_targets() {
+        let _guard = crate::thread::hosted_test_guard();
         PERFORMANCE_RUNS.store(0, Ordering::Release);
         EFFICIENCY_RUNS.store(0, Ordering::Release);
 
@@ -984,6 +996,7 @@ mod tests {
 
     #[test]
     fn draining_vector_dispatch_handles_burst_callbacks() {
+        let _guard = crate::thread::hosted_test_guard();
         PERFORMANCE_RUNS.store(0, Ordering::Release);
         EFFICIENCY_RUNS.store(0, Ordering::Release);
 

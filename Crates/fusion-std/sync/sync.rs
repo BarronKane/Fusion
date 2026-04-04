@@ -23,17 +23,12 @@
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
 use core::num::NonZeroU16;
-use core::ops::{Deref, DerefMut};
-
-use fusion_sys::sync as sys_sync;
-
-use crate::thread::{
-    CooperativeExclusionSpan,
-    CooperativeGreenLockToken,
-    enter_current_green_cooperative_lock,
-    exit_current_green_cooperative_lock,
+use core::ops::{
+    Deref,
+    DerefMut,
 };
 
+use fusion_sys::sync as sys_sync;
 pub use fusion_sys::sync::{
     LeftRight,
     LeftRightReadGuard,
@@ -71,6 +66,13 @@ pub use fusion_sys::sync::{
     ThinMutex,
     ThinMutexGuard,
     TimeoutCaps,
+};
+
+use crate::thread::{
+    CooperativeExclusionSpan,
+    CooperativeGreenLockToken,
+    enter_current_green_cooperative_lock,
+    exit_current_green_cooperative_lock,
 };
 
 /// Explicit cooperative lock rank used for ordered green-context lock acquisition.

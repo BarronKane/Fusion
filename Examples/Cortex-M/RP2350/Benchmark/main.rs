@@ -5,6 +5,7 @@ use core::hint::black_box;
 use core::panic::PanicInfo;
 
 use cortex_m_rt::{entry, exception};
+
 use fusion_example_rp2350_on_device::runtime::{
     block_on_with_poll_stack_bytes,
     shutdown_fibers,

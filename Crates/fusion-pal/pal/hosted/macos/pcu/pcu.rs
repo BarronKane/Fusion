@@ -5,7 +5,10 @@
 //! The executor is explicit in metadata (`origin: Synthetic`) and never claims
 //! device-backed behavior.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{
+    AtomicBool,
+    Ordering,
+};
 
 use crate::contract::drivers::pcu::{
     PcuBase,

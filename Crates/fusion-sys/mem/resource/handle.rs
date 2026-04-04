@@ -1,3 +1,8 @@
+use fusion_pal::sys::mem::{
+    Address,
+    RegionInfo,
+};
+
 use super::{
     BoundMemoryResource,
     MemoryResource,
@@ -10,7 +15,6 @@ use super::{
     ResourceState,
     VirtualMemoryResource,
 };
-use fusion_pal::sys::mem::{Address, RegionInfo};
 
 /// Owned sum type for concrete `fusion-sys::mem::resource` instances.
 ///

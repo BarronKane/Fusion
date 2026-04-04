@@ -7,8 +7,12 @@ use crate::mem::provider::{
     MemoryStrategyId,
     MemoryTopologyNodeId,
 };
-use crate::mem::resource::{MemoryResource, MemoryResourceHandle, ResourceInfo, ResourceRange};
-
+use crate::mem::resource::{
+    MemoryResource,
+    MemoryResourceHandle,
+    ResourceInfo,
+    ResourceRange,
+};
 use super::MemoryPoolError;
 
 /// Stable identifier for a member resource owned by a `MemoryPool`.

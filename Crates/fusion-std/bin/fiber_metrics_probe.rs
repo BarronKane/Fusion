@@ -1,6 +1,10 @@
 use core::any::type_name_of_val;
 use core::num::NonZeroUsize;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{
+    AtomicU64,
+    Ordering,
+};
+
 use std::hint::black_box;
 
 use fusion_std::thread::{

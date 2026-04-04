@@ -12,9 +12,6 @@ pub struct SelectedPalLane;
 
 #[path = "acpi/acpi.rs"]
 pub mod acpi;
-#[path = "devicetree.rs"]
 pub mod devicetree;
-#[path = "hardware.rs"]
 pub mod hardware;
-#[path = "runtime.rs"]
 pub mod runtime;

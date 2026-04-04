@@ -1,8 +1,7 @@
 //! Urgent red-execution class.
 
-use crate::thread::fiber::{CooperativeExclusionSpan, CooperativeExclusionSummaryTree};
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-use crate::thread::fiber::{current_green_exclusion_allows, current_green_exclusion_allows_tree};
+use fusion_pal::sys::cpu::soc::board as cortex_m_board;
 use fusion_sys::thread::{
     ThreadConfig,
     ThreadError,
@@ -12,6 +11,8 @@ use fusion_sys::thread::{
     ThreadSupport,
     ThreadSystem,
 };
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+use fusion_sys::vector::VectorInlineEligibility;
 use fusion_sys::vector::{
     VectorDispatchCookie,
     VectorDispatchLane,
@@ -20,10 +21,15 @@ use fusion_sys::vector::{
     VectorTableBuilder,
 };
 
+use crate::thread::fiber::{
+    CooperativeExclusionSpan,
+    CooperativeExclusionSummaryTree,
+};
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-use fusion_pal::sys::cpu::soc::board as cortex_m_board;
-#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-use fusion_sys::vector::VectorInlineEligibility;
+use crate::thread::fiber::{
+    current_green_exclusion_allows,
+    current_green_exclusion_allows_tree,
+};
 
 /// Dispatch policy for one red-thread request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

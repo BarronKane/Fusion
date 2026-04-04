@@ -41,7 +41,12 @@ use fusion_sys::transport::{
     TransportFraming,
 };
 
-use super::{CurrentFiberPool, FiberPlanningSupport, FiberPoolMemoryFootprint, FiberStackStats};
+use super::{
+    CurrentFiberPool,
+    FiberPlanningSupport,
+    FiberPoolMemoryFootprint,
+    FiberStackStats,
+};
 
 /// Public metadata surfaced over the current-thread fiber audit metadata channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -425,7 +430,10 @@ mod tests {
     use super::*;
     use crate::thread::FiberPoolBootstrap;
     use core::pin::pin;
-    use fusion_sys::fiber::{FiberMetadataMessage, FiberYield};
+    use fusion_sys::fiber::{
+        FiberMetadataMessage,
+        FiberYield,
+    };
     use std::vec;
 
     #[test]

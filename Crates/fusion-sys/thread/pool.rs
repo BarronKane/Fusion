@@ -23,6 +23,15 @@ use fusion_pal::sys::thread::{
     ThreadStartMode,
 };
 
+use crate::sync::{
+    OnceInitError,
+    OnceLock,
+    Semaphore,
+    SyncError,
+    SyncErrorKind,
+    ThinMutex,
+};
+use crate::thread::handle::ThreadHandle;
 use super::{
     RawThreadEntry,
     ThreadConfig,
@@ -35,8 +44,6 @@ use super::{
     ThreadSupport,
     ThreadSystem,
 };
-use crate::sync::{OnceInitError, OnceLock, Semaphore, SyncError, SyncErrorKind, ThinMutex};
-use crate::thread::handle::ThreadHandle;
 
 #[cfg(feature = "sys-cortex-m")]
 const MAX_POOL_SLOTS: usize = 1;

@@ -10,11 +10,19 @@
 //! while allocator surfaces are still being built so callers migrate toward the right public
 //! namespace instead of wiring themselves directly into lower plumbing.
 
-use core::mem::{ManuallyDrop, align_of, size_of};
+use core::mem::{
+    ManuallyDrop,
+    align_of,
+    size_of,
+};
 use core::ptr::NonNull;
+
 use fusion_pal::sys::mem::Region;
 
-use crate::sync::{SharedHeader, SharedRelease};
+use crate::sync::{
+    SharedHeader,
+    SharedRelease,
+};
 
 mod arena;
 mod control;
@@ -29,7 +37,12 @@ mod root;
 mod service;
 mod slab;
 
-pub use arena::{ArenaAllocation, ArenaInitError, ArenaSlice, BoundedArena};
+pub use arena::{
+    ArenaAllocation,
+    ArenaInitError,
+    ArenaSlice,
+    BoundedArena,
+};
 pub use control::ControlLease;
 pub use domain::{
     AllocatorDomainAudit,
@@ -38,15 +51,28 @@ pub use domain::{
     AllocatorDomainKind,
 };
 #[allow(unused_imports)]
-pub use error::{AllocError, AllocErrorKind};
+pub use error::{
+    AllocError,
+    AllocErrorKind,
+};
 pub use heap::HeapAllocator;
-pub use lifetime::{Immortal, LifetimePolicy, Mortal};
+pub use lifetime::{
+    Immortal,
+    LifetimePolicy,
+    Mortal,
+};
+
 pub(crate) use metadata::{
     AllocSubsystemKind,
     MetadataPageHeader,
     front_metadata_layout_with_policy,
 };
-pub use policy::{AllocCapabilities, AllocHazards, AllocModeSet, AllocPolicy};
+pub use policy::{
+    AllocCapabilities,
+    AllocHazards,
+    AllocModeSet,
+    AllocPolicy,
+};
 pub use protocol::{
     AllocatorControlRequest,
     AllocatorControlStatusMessage,
@@ -56,13 +82,19 @@ pub use protocol::{
     AllocatorDomainMetadataProtocol,
 };
 #[allow(unused_imports)]
-pub use root::{Allocator, AllocatorBuilder};
+pub use root::{
+    Allocator,
+    AllocatorBuilder,
+};
 pub use service::{
     AllocatorChannelService,
     AllocatorChannelServiceError,
     AllocatorChannelServiceErrorKind,
 };
-pub use slab::{Slab, SlabAllocation};
+pub use slab::{
+    Slab,
+    SlabAllocation,
+};
 
 #[allow(unused_imports)]
 pub use crate::mem::pool::{

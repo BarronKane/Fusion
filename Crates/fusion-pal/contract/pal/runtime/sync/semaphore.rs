@@ -1,6 +1,9 @@
 use core::time::Duration;
 
-use super::{SemaphoreSupport, SyncError};
+use super::{
+    SemaphoreSupport,
+    SyncError,
+};
 
 /// Low-level counting semaphore contract implemented by selected platform backends.
 pub trait RawSemaphore: Send + Sync {

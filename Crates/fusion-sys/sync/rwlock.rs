@@ -1,11 +1,20 @@
 //! Data-carrying reader/writer lock built on top of the selected fusion-pal raw rwlock backend.
 
 use core::cell::UnsafeCell;
-use core::ops::{Deref, DerefMut};
+use core::ops::{
+    Deref,
+    DerefMut,
+};
 
-use fusion_pal::sys::sync::{PlatformRawRwLock, RawRwLock};
+use fusion_pal::sys::sync::{
+    PlatformRawRwLock,
+    RawRwLock,
+};
 
-use super::{RwLockSupport, SyncError};
+use super::{
+    RwLockSupport,
+    SyncError,
+};
 
 /// Data-carrying reader/writer lock with no poisoning or hidden allocation.
 #[derive(Debug)]
@@ -140,7 +149,10 @@ impl<T: ?Sized> Drop for RwLockWriteGuard<'_, T> {
 #[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     use super::*;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{
+        AtomicU32,
+        Ordering,
+    };
     extern crate std;
     use self::std::sync::Arc;
     use self::std::thread;

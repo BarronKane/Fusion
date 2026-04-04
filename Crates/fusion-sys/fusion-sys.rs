@@ -7,7 +7,10 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 /// Target platform discriminator re-exported from `fusion-pal`.
-pub use fusion_pal::{Platform, TARGET_PLATFORM};
+pub use fusion_pal::{
+    Platform,
+    TARGET_PLATFORM,
+};
 
 #[path = "alloc/alloc.rs"]
 /// fusion-sys allocation contracts and allocator-facing surfaces.

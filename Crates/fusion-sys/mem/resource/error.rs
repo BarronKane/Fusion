@@ -1,7 +1,11 @@
 use core::fmt;
 
+use fusion_pal::sys::mem::{
+    MemError,
+    MemErrorKind,
+};
+
 use crate::sync::SyncErrorKind;
-use fusion_pal::sys::mem::{MemError, MemErrorKind};
 
 /// Resource-layer error categories derived from request validation and fusion-pal failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

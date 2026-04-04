@@ -1,4 +1,10 @@
-use fusion_pal::sys::mem::{BorrowedBackingHandle, CachePolicy, IntegrityMode, Protect, TagMode};
+use fusion_pal::sys::mem::{
+    BorrowedBackingHandle,
+    CachePolicy,
+    IntegrityMode,
+    Protect,
+    TagMode,
+};
 
 use super::ops::ResourcePreferenceSet;
 

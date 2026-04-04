@@ -1,6 +1,5 @@
 //! fusion-sys-level power wrappers built on top of fusion-pal-truthful backends.
 
-use fusion_pal::sys::power::{PlatformPower, system_power as pal_system_power};
 pub use fusion_pal::sys::power::{
     PowerBase,
     PowerCaps,
@@ -11,6 +10,10 @@ pub use fusion_pal::sys::power::{
     PowerModeDepth,
     PowerModeDescriptor,
     PowerSupport,
+};
+use fusion_pal::sys::power::{
+    PlatformPower,
+    system_power as pal_system_power,
 };
 
 /// fusion-sys power provider wrapper around the selected fusion-pal backend.

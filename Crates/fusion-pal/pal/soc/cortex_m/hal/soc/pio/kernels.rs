@@ -1,7 +1,16 @@
 //! Reusable deterministic PIO kernel helpers.
 
 use crate::contract::drivers::pcu::PcuError;
-
+use super::PcuIrInstruction::{
+    In,
+    Jump,
+    Mov,
+    Nop,
+    Out,
+    Pull,
+    Push,
+};
+use super::PcuIrJumpCondition;
 use super::{
     PcuIrExecutionConfig,
     PcuIrInSource,
@@ -17,9 +26,6 @@ use super::{
     PcuIrShiftDirection,
     PcuProgramId,
 };
-
-use super::PcuIrInstruction::{In, Jump, Mov, Nop, Out, Pull, Push};
-use super::PcuIrJumpCondition;
 
 pub fn streaming_parallel_tx(
     id: PcuProgramId,

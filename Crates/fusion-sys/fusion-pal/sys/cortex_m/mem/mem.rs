@@ -56,7 +56,6 @@ use crate::pal::mem::{
     RegionAttrs,
     RegionInfo,
 };
-
 use super::super::hal::soc::board::{self, CortexMMemoryRegionDescriptor, CortexMMemoryRegionKind};
 
 /// Cortex-M bare-metal memory provider.

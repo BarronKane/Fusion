@@ -1,8 +1,16 @@
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
-use fusion_pal::sys::mem::{Address, CachePolicy, Protect, Region};
-use fusion_sys::alloc::{Allocator, MemoryPoolExtentRequest};
+use fusion_pal::sys::mem::{
+    Address,
+    CachePolicy,
+    Protect,
+    Region,
+};
+use fusion_sys::alloc::{
+    Allocator,
+    MemoryPoolExtentRequest,
+};
 use fusion_sys::mem::resource::{
     AllocatorLayoutPolicy,
     BoundMemoryResource,
@@ -23,7 +31,10 @@ use fusion_sys::mem::resource::{
 };
 
 extern crate std;
-use self::std::alloc::{Layout, alloc_zeroed};
+use self::std::alloc::{
+    Layout,
+    alloc_zeroed,
+};
 
 pub(super) fn aligned_region(len: usize, align: usize) -> Region {
     let layout = Layout::from_size_align(len, align).expect("test layout should be valid");

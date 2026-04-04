@@ -13,7 +13,6 @@ use crate::mem::resource::{
     ResourceRequest,
     VirtualMemoryResource,
 };
-
 use super::{
     AllocCapabilities,
     AllocError,

@@ -494,7 +494,10 @@ fn wait_for_interrupt() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::pal::runtime::event::{EventCompletionOpKind, EventSource};
+    use crate::contract::pal::runtime::event::{
+        EventCompletionOpKind,
+        EventSource,
+    };
 
     #[test]
     fn cortex_m_event_support_reports_completion_queue() {

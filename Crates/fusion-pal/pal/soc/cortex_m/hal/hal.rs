@@ -37,9 +37,11 @@ use crate::contract::pal::{
     HardwareTopologySummary,
     HardwareWriteSummary,
 };
-
 #[allow(unused_imports)]
-pub use self::core::{CortexMCpuid, read_cpuid};
+pub use self::core::{
+    CortexMCpuid,
+    read_cpuid,
+};
 #[allow(unused_imports)]
 pub use self::soc::board::{
     CortexMExceptionStackObservation,

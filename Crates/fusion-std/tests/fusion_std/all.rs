@@ -1,4 +1,10 @@
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
+
+use std::sync::Arc;
+use std::thread;
 
 use fusion_std::sync::{
     Mutex,
@@ -24,8 +30,6 @@ use fusion_std::thread::{
     ThreadPoolConfig,
     system_thread,
 };
-use std::sync::Arc;
-use std::thread;
 
 use super::lock_fusion_std_tests;
 

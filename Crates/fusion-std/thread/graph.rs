@@ -1,6 +1,10 @@
 //! Domain 4: public task-graph surface.
 
-use super::{Executor, GreenPool, ThreadPool};
+use super::{
+    Executor,
+    GreenPool,
+    ThreadPool,
+};
 
 /// Public task target kind for graph dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

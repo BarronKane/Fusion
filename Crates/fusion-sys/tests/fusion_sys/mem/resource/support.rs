@@ -1,6 +1,9 @@
 //! Shared helpers for `fusion_sys::mem::resource` integration tests.
 
-use fusion_pal::sys::mem::{MemBase, system_mem};
+use fusion_pal::sys::mem::{
+    MemBase,
+    system_mem,
+};
 
 /// Returns a multiple of the backend's base page size.
 ///

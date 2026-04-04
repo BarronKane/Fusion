@@ -1,18 +1,17 @@
 //! Domain 1: public carrier thread-pool surface.
 
 use core::fmt;
-use core::mem::{MaybeUninit, align_of, size_of};
-use core::ops::Deref;
-use core::ptr::{self, NonNull};
-
-use crate::sync::{
-    Mutex as SyncMutex,
-    OnceLock,
-    SharedHeader,
-    SharedRelease,
-    SyncError,
-    SyncErrorKind,
+use core::mem::{
+    MaybeUninit,
+    align_of,
+    size_of,
 };
+use core::ops::Deref;
+use core::ptr::{
+    self,
+    NonNull,
+};
+
 use fusion_pal::sys::cpu::CachePadded;
 use fusion_pal::sys::mem::{
     Backing,
@@ -27,7 +26,13 @@ use fusion_pal::sys::mem::{
     RegionAttrs,
     system_mem,
 };
-use fusion_sys::alloc::{AllocRequest, AllocationStrategy, Allocator, ControlLease, Slab};
+use fusion_sys::alloc::{
+    AllocRequest,
+    AllocationStrategy,
+    Allocator,
+    ControlLease,
+    Slab,
+};
 use fusion_sys::thread::{
     SystemPoolPlacement,
     SystemResizePolicy,
@@ -44,6 +49,15 @@ use fusion_sys::thread::{
     ThreadStackRequest,
     ThreadSupport,
     ThreadSystem,
+};
+
+use crate::sync::{
+    Mutex as SyncMutex,
+    OnceLock,
+    SharedHeader,
+    SharedRelease,
+    SyncError,
+    SyncErrorKind,
 };
 
 /// Public placement strategy for carrier workers.
@@ -749,7 +763,10 @@ impl ThreadPool {
 fn run_inline_job_contained(job: InlineThreadJobRunner) {
     #[cfg(feature = "std")]
     {
-        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::panic::{
+            AssertUnwindSafe,
+            catch_unwind,
+        };
 
         let _ = catch_unwind(AssertUnwindSafe(|| job.run()));
     }

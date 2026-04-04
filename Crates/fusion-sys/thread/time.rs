@@ -5,14 +5,24 @@
 //! policy belong elsewhere.
 
 use core::convert::TryFrom;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
 use core::time::Duration;
+
+use bitflags::bitflags;
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+use fusion_pal::sys::soc::cortex_m::hal::soc::board as cortex_m_soc_board;
 
 use crate::event::EventRegistration;
 #[cfg(feature = "sys-cortex-m")]
-use crate::event::{EventInterest, EventRegistrationMode, cortex_m::CortexMIrqSource};
-use bitflags::bitflags;
-
+use crate::event::{
+    EventInterest,
+    EventRegistrationMode,
+    cortex_m::CortexMIrqSource,
+};
 use super::{
     ThreadAuthoritySet,
     ThreadError,
@@ -22,9 +32,6 @@ use super::{
     ThreadSupport,
     ThreadSystem,
 };
-
-#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-use fusion_pal::sys::soc::cortex_m::hal::soc::board as cortex_m_soc_board;
 
 #[cfg(not(feature = "sys-cortex-m"))]
 const NANOS_PER_SECOND: u128 = 1_000_000_000;

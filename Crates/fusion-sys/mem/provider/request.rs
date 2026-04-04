@@ -1,15 +1,12 @@
-use fusion_pal::sys::mem::{CachePolicy, Protect};
-
-use super::{
-    CriticalSafetyRequirements,
-    MemoryObjectDescriptor,
-    MemoryObjectEnvelope,
-    MemoryPoolClass,
-    MemoryResourceDescriptor,
-    MemoryStrategyDescriptor,
-    MemoryTopologyPreference,
+use fusion_pal::sys::mem::{
+    CachePolicy,
+    Protect,
 };
-use crate::mem::provider::support::{matches_node_requirement, matches_safety_envelope};
+
+use crate::mem::provider::support::{
+    matches_node_requirement,
+    matches_safety_envelope,
+};
 use crate::mem::resource::{
     IntegrityConstraints,
     MemoryDomain,
@@ -21,6 +18,15 @@ use crate::mem::resource::{
     ResourceOpSet,
     ResourceResidencySupport,
     SharingPolicy,
+};
+use super::{
+    CriticalSafetyRequirements,
+    MemoryObjectDescriptor,
+    MemoryObjectEnvelope,
+    MemoryPoolClass,
+    MemoryResourceDescriptor,
+    MemoryStrategyDescriptor,
+    MemoryTopologyPreference,
 };
 
 /// Contract filters that a pool request may require from all candidate resources.

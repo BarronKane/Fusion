@@ -36,7 +36,12 @@ use core::mem::size_of;
 
 use bitflags::bitflags;
 
-use super::{AcpiError, AcpiSignature, AcpiTableView, read_unaligned_copy};
+use super::{
+    AcpiError,
+    AcpiSignature,
+    AcpiTableView,
+    read_unaligned_copy,
+};
 
 bitflags! {
     /// MADT table-level flags.

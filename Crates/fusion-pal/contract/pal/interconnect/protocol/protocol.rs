@@ -5,9 +5,6 @@ mod error;
 mod unsupported;
 
 pub use caps::*;
-pub use error::*;
-pub use unsupported::*;
-
 use crate::contract::pal::interconnect::transport::{
     TransportAccessRequirement,
     TransportDirection,
@@ -16,6 +13,8 @@ use crate::contract::pal::interconnect::transport::{
     TransportReliability,
     TransportSupport,
 };
+pub use error::*;
+pub use unsupported::*;
 
 /// Stable protocol identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

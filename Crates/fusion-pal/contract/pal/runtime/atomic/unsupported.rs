@@ -4,7 +4,10 @@
 //! form. They are useful for hosted stubs and any other backend path that needs to report truthful
 //! absence of runtime atomic surfaces without fabricating behavior.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
 use core::time::Duration;
 
 use super::{

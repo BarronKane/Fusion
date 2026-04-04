@@ -1,7 +1,10 @@
 //! High-level kernel blueprint records composed from metadata and evidence plans.
 
 use crate::contract::KernelBoundaryContract;
-use crate::evidence::{DO_178C_KERNEL_BASELINE, KernelEvidenceExpectation};
+use crate::evidence::{
+    DO_178C_KERNEL_BASELINE,
+    KernelEvidenceExpectation,
+};
 use crate::module::{
     KernelBuildRequirements,
     KernelIntegrationModel,

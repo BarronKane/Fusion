@@ -1,12 +1,24 @@
 use core::fmt;
-use core::mem::{ManuallyDrop, align_of, size_of};
+use core::mem::{
+    ManuallyDrop,
+    align_of,
+    size_of,
+};
 use core::ops::Deref;
-use core::ptr::{self, NonNull, addr_of_mut};
-
-use crate::sync::{Retainable, SharedBacking, SharedHeader, SharedRelease};
+use core::ptr::{
+    self,
+    NonNull,
+    addr_of_mut,
+};
 
 use fusion_pal::sys::mem::Region;
 
+use crate::sync::{
+    Retainable,
+    SharedBacking,
+    SharedHeader,
+    SharedRelease,
+};
 use super::{
     AllocError,
     AssignedPoolExtent,

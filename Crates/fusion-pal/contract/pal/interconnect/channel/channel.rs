@@ -5,11 +5,16 @@ mod error;
 mod unsupported;
 
 pub use caps::*;
+use crate::contract::pal::interconnect::protocol::{
+    Protocol,
+    ProtocolDescriptor,
+};
+use crate::contract::pal::interconnect::transport::{
+    TransportAttachmentControl,
+    TransportSupport,
+};
 pub use error::*;
 pub use unsupported::*;
-
-use crate::contract::pal::interconnect::protocol::{Protocol, ProtocolDescriptor};
-use crate::contract::pal::interconnect::transport::{TransportAttachmentControl, TransportSupport};
 
 /// Active channel mode for the first universal channel transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

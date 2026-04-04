@@ -5,7 +5,10 @@
 //! directly onto process-local futex operations.
 
 use core::convert::TryFrom;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
 use core::time::Duration;
 
 use rustix::io::Errno;

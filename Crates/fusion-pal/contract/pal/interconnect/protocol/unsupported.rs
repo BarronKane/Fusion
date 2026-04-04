@@ -1,6 +1,9 @@
 //! Unsupported protocol placeholder.
 
-use super::{Protocol, ProtocolDescriptor};
+use super::{
+    Protocol,
+    ProtocolDescriptor,
+};
 
 /// Unsupported protocol descriptor placeholder.
 #[derive(Debug, Clone, Copy, Default)]

@@ -4,9 +4,17 @@ use core::cell::UnsafeCell;
 use core::convert::Infallible;
 use core::mem::MaybeUninit;
 
-use fusion_pal::sys::sync::{PlatformRawOnce, RawOnce};
+use fusion_pal::sys::sync::{
+    PlatformRawOnce,
+    RawOnce,
+};
 
-use super::{OnceBeginResult, OnceState, OnceSupport, SyncError};
+use super::{
+    OnceBeginResult,
+    OnceState,
+    OnceSupport,
+    SyncError,
+};
 
 /// Error returned when one-time initialization fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,9 +235,15 @@ unsafe impl<T: Send + Sync> Sync for OnceLock<T> {}
 #[cfg(all(test, feature = "std", not(target_os = "none")))]
 mod tests {
     use super::*;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{
+        AtomicU32,
+        Ordering,
+    };
     extern crate std;
-    use self::std::panic::{AssertUnwindSafe, catch_unwind};
+    use self::std::panic::{
+        AssertUnwindSafe,
+        catch_unwind,
+    };
     use self::std::sync::Arc;
     use self::std::thread;
 

@@ -20,7 +20,13 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::pin::Pin;
 
-use crate::channel::{ChannelError, ChannelErrorKind, ChannelReceive, ChannelSend, LocalChannel};
+use crate::channel::{
+    ChannelError,
+    ChannelErrorKind,
+    ChannelReceive,
+    ChannelSend,
+    LocalChannel,
+};
 use crate::fiber::{
     Fiber,
     FiberError,
@@ -49,7 +55,6 @@ use crate::transport::{
     TransportDirection,
     TransportFraming,
 };
-
 use super::{
     PcuError,
     PcuErrorKind,

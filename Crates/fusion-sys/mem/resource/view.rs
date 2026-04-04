@@ -1,9 +1,15 @@
 use core::fmt;
 use core::marker::PhantomData;
 
-use fusion_pal::sys::mem::{Address, Region};
+use fusion_pal::sys::mem::{
+    Address,
+    Region,
+};
 
-use super::{ResourceError, ResourceRange};
+use super::{
+    ResourceError,
+    ResourceRange,
+};
 
 /// Borrowed view of a governed contiguous range.
 ///

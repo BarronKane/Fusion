@@ -2,8 +2,15 @@
 
 //! Cortex-M SoC board contract and generic helpers.
 
+use core::time::Duration;
+
 use crate::contract::pal::mem::MemTopologyNodeId;
-use crate::contract::pal::mem::{CachePolicy, MemResourceBackingKind, Protect, RegionAttrs};
+use crate::contract::pal::mem::{
+    CachePolicy,
+    MemResourceBackingKind,
+    Protect,
+    RegionAttrs,
+};
 use crate::contract::pal::runtime::thread::{
     ThreadAuthoritySet,
     ThreadClusterId,
@@ -25,7 +32,6 @@ use crate::contract::pal::{
     HardwareTopologySupport,
     HardwareWriteSummary,
 };
-use core::time::Duration;
 
 /// Runtime chip-identity surface available from the selected SoC board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

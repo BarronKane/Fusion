@@ -165,12 +165,20 @@ pub mod insight {
 }
 /// Public event module re-exported from the selected platform backend.
 pub mod event {
-    pub use super::platform::event::{PlatformEvent, PlatformPoller, system_event};
+    pub use super::platform::event::{
+        PlatformEvent,
+        PlatformPoller,
+        system_event,
+    };
     pub use crate::contract::pal::runtime::event::*;
 }
 /// Public GPIO driver module re-exported from the selected platform backend.
 pub mod gpio {
-    pub use super::platform::gpio::{PlatformGpio, PlatformGpioPin, system_gpio};
+    pub use super::platform::gpio::{
+        PlatformGpio,
+        PlatformGpioPin,
+        system_gpio,
+    };
     pub use crate::contract::drivers::gpio::*;
 }
 /// Public hosted-fiber helper module re-exported from the selected platform backend.
@@ -215,17 +223,26 @@ pub mod domain {
 }
 /// Public memory module re-exported from the selected platform backend.
 pub mod mem {
-    pub use super::platform::mem::{PlatformMem, system_mem};
+    pub use super::platform::mem::{
+        PlatformMem,
+        system_mem,
+    };
     pub use crate::contract::pal::mem::*;
 }
 /// Public programmable-IO module re-exported from the selected platform backend.
 pub mod pcu {
-    pub use super::platform::pcu::{PlatformPcu, system_pcu};
+    pub use super::platform::pcu::{
+        PlatformPcu,
+        system_pcu,
+    };
     pub use crate::contract::drivers::pcu::*;
 }
 /// Public power module re-exported from the selected platform backend.
 pub mod power {
-    pub use super::platform::power::{PlatformPower, system_power};
+    pub use super::platform::power::{
+        PlatformPower,
+        system_power,
+    };
     pub use crate::contract::pal::power::*;
 }
 /// Public synchronization module re-exported from the selected platform backend.
@@ -245,7 +262,11 @@ pub mod sync {
 }
 /// Public thread module re-exported from the selected platform backend.
 pub mod thread {
-    pub use super::platform::thread::{PlatformThread, PlatformThreadHandle, system_thread};
+    pub use super::platform::thread::{
+        PlatformThread,
+        PlatformThreadHandle,
+        system_thread,
+    };
     pub use crate::contract::pal::runtime::thread::*;
 }
 /// Public transport-layer contract surface.

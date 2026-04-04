@@ -3,7 +3,10 @@ extern crate std;
 use core::mem;
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicUsize,
+    Ordering,
+};
 
 use fusion_sys::channel::ChannelReceive;
 use fusion_sys::fiber::{
@@ -24,7 +27,10 @@ use fusion_sys::fiber::{
     system_context,
     yield_now,
 };
-use fusion_sys::transport::{TransportAttachmentControl, TransportAttachmentRequest};
+use fusion_sys::transport::{
+    TransportAttachmentControl,
+    TransportAttachmentRequest,
+};
 use std::thread;
 use std::vec;
 

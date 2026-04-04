@@ -6,7 +6,6 @@
 
 use bitflags::bitflags;
 
-#[path = "wire.rs"]
 /// Fixed-layout bitflat wire protocol for mediated kernel exchanges.
 pub mod wire;
 

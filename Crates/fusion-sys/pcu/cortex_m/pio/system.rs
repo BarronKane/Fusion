@@ -1,6 +1,5 @@
 //! fusion-sys programmable-IO wrapper over the selected fusion-pal backend.
 
-use crate::event::EventSourceHandle;
 #[cfg(all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350"))]
 use fusion_pal::sys::soc::cortex_m::hal::soc::pio::lower_rp2350_program;
 use fusion_pal::sys::soc::cortex_m::hal::soc::pio::{
@@ -10,6 +9,7 @@ use fusion_pal::sys::soc::cortex_m::hal::soc::pio::{
     system_pio as pal_system_pio,
 };
 
+use crate::event::EventSourceHandle;
 use super::{
     PcuBase,
     PcuControl,

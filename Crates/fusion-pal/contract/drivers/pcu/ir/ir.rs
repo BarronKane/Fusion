@@ -1,20 +1,13 @@
 //! Fusion-owned PCU IR core and profile vocabulary.
 
-#[path = "binding.rs"]
 mod binding;
-#[path = "invocation.rs"]
 mod invocation;
-#[path = "kernel.rs"]
 mod kernel;
-#[path = "op.rs"]
 mod op;
-#[path = "parameter.rs"]
 mod parameter;
-#[path = "port.rs"]
 mod port;
 #[path = "profile/profile.rs"]
 mod profile;
-#[path = "types.rs"]
 mod types;
 
 pub use binding::*;

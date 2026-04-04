@@ -4,8 +4,10 @@ use bitflags::bitflags;
 
 /// Shared implementation-category vocabulary specialized for native domain support.
 pub use crate::contract::pal::caps::ImplementationKind as DomainImplementationKind;
+
 /// Shared implementation-category vocabulary specialized for courier support.
 pub use crate::contract::pal::caps::ImplementationKind as CourierImplementationKind;
+
 /// Shared implementation-category vocabulary specialized for native context support.
 pub use crate::contract::pal::caps::ImplementationKind as ContextImplementationKind;
 

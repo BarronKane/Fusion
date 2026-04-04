@@ -5,7 +5,10 @@
 
 use core::cell::UnsafeCell;
 #[cfg(not(feature = "critical-safe"))]
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
 
 #[cfg(feature = "critical-safe")]
 use crate::contract::pal::runtime::sync::UnsupportedRawOnce;

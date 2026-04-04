@@ -13,9 +13,16 @@ mod lowering;
 mod types;
 mod unsupported;
 
-pub use crate::contract::drivers::pcu::{PcuError as PioError, PcuErrorKind as PioErrorKind};
+pub use crate::contract::drivers::pcu::{
+    PcuError as PioError,
+    PcuErrorKind as PioErrorKind,
+};
 #[doc(hidden)]
-pub use caps::{PcuCaps, PcuImplementationKind, PcuSupport};
+pub use caps::{
+    PcuCaps,
+    PcuImplementationKind,
+    PcuSupport,
+};
 pub use caps::{
     PcuCaps as PioCaps,
     PcuImplementationKind as PioImplementationKind,

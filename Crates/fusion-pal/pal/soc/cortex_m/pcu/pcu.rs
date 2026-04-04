@@ -1,6 +1,9 @@
 //! Cortex-M coprocessor backend.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{
+    AtomicBool,
+    Ordering,
+};
 
 use crate::contract::drivers::pcu::{
     PcuBase,
@@ -14,8 +17,10 @@ use crate::contract::drivers::pcu::{
     PcuExecutorOrigin,
     PcuSupport,
 };
-
-use crate::pal::soc::cortex_m::hal::soc::pio::{PioBase, system_pio};
+use crate::pal::soc::cortex_m::hal::soc::pio::{
+    PioBase,
+    system_pio,
+};
 
 const CORTEX_M_CPU_EXECUTOR_ID: PcuExecutorId = PcuExecutorId(0);
 const MAX_CORTEX_M_PIO_EXECUTORS: usize = 8;

@@ -1,6 +1,11 @@
 //! Backend-neutral unsupported hosted-fiber helper implementation.
 
-use super::{FiberHostError, FiberHostSupport, PlatformElasticFaultHandler, PlatformWakeToken};
+use super::{
+    FiberHostError,
+    FiberHostSupport,
+    PlatformElasticFaultHandler,
+    PlatformWakeToken,
+};
 
 /// Unsupported hosted-fiber helper provider.
 #[derive(Debug, Clone, Copy, Default)]

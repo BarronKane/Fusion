@@ -5,15 +5,21 @@
 //! framebuffer and exposes one refresh step at a time so callers can drive multiplex timing
 //! from a timer, fiber, or interrupt that matches the platform truth.
 
-use crate::gpio::{GpioError, GpioOutputPin};
 use fusion_pal::contract::drivers::peripheral::{
     SevenSegmentDisplayContract,
     SevenSegmentGlyph as PeripheralSevenSegmentGlyph,
     SevenSegmentPolarity as PeripheralSevenSegmentPolarity,
 };
 
+use crate::gpio::{
+    GpioError,
+    GpioOutputPin,
+};
 use super::shift_register_74hc595::OutputEnableControl;
-use super::{NoOutputEnable, ShiftRegister74hc595};
+use super::{
+    NoOutputEnable,
+    ShiftRegister74hc595,
+};
 
 const SEGMENT_A: u8 = 1 << 0;
 const SEGMENT_B: u8 = 1 << 1;
@@ -724,7 +730,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpio::{GpioCapabilities, GpioOwnedPin};
+    use crate::gpio::{
+        GpioCapabilities,
+        GpioOwnedPin,
+    };
 
     #[derive(Debug)]
     struct FakeOutputPin {

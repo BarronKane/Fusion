@@ -27,7 +27,11 @@ pub use fusion_pal::sys::event::{
     EventSourceHandle,
     EventSupport,
 };
-use fusion_pal::sys::event::{PlatformEvent, PlatformPoller, system_event as pal_system_event};
+use fusion_pal::sys::event::{
+    PlatformEvent,
+    PlatformPoller,
+    system_event as pal_system_event,
+};
 
 /// fusion-sys event provider wrapper around the selected fusion-pal backend.
 #[derive(Debug, Clone, Copy)]
@@ -167,7 +171,12 @@ impl Default for EventSystem {
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
 /// Cortex-M-specific event source helpers.
 pub mod cortex_m {
-    use super::{EventInterest, EventRegistration, EventRegistrationMode, EventSourceHandle};
+    use super::{
+        EventInterest,
+        EventRegistration,
+        EventRegistrationMode,
+        EventSourceHandle,
+    };
     #[cfg(feature = "soc-rp2350")]
     use fusion_pal::sys::soc::cortex_m::hal::soc::board::{
         CortexMDmaRequestClass,

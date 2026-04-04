@@ -4,7 +4,11 @@
 //! Probes are intentionally conservative and drive truthful support reporting elsewhere.
 
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU8,
+    AtomicU32,
+    Ordering,
+};
 
 /// Snapshot of Darwin runtime-probed capability facts used by hosted macOS backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

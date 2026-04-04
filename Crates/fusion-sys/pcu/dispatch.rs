@@ -1,21 +1,5 @@
 //! Generic PCU invocation, planning, and execution vocabulary.
 
-use super::{
-    PcuError,
-    PcuExecutorId,
-    PcuInvocationBindings,
-    PcuInvocationParameters,
-    PcuInvocationShape,
-    PcuKernel,
-    PcuParameterSlot,
-    PcuStreamKernelIr,
-    PcuStreamPattern,
-    PcuStreamValueType,
-};
-
-#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-use super::PcuErrorKind;
-
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
 use crate::pcu::cortex_m::pio::{
     PcuIrExecutionConfig,
@@ -33,6 +17,20 @@ use crate::pcu::cortex_m::pio::{
     shift_left_stream_transform,
     shift_right_stream_transform,
     system_pio,
+};
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+use super::PcuErrorKind;
+use super::{
+    PcuError,
+    PcuExecutorId,
+    PcuInvocationBindings,
+    PcuInvocationParameters,
+    PcuInvocationShape,
+    PcuKernel,
+    PcuParameterSlot,
+    PcuStreamKernelIr,
+    PcuStreamPattern,
+    PcuStreamValueType,
 };
 
 /// Concrete backend kind selected for one prepared or completed invocation.

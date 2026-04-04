@@ -1,6 +1,9 @@
 use core::array;
 
-use super::member::{MemoryPoolContributor, MemoryPoolMember};
+use super::member::{
+    MemoryPoolContributor,
+    MemoryPoolMember,
+};
 use super::{
     MemoryPool,
     MemoryPoolError,

@@ -1,7 +1,15 @@
-use fusion_pal::sys::mem::{MemAdviceCaps, MemBackingCaps, MemPlacementCaps, Protect};
+use fusion_pal::sys::mem::{
+    MemAdviceCaps,
+    MemBackingCaps,
+    MemPlacementCaps,
+    Protect,
+};
 
 use super::domain::MemoryDomainSet;
-use super::ops::{ResourceOpSet, ResourcePreferenceSet};
+use super::ops::{
+    ResourceOpSet,
+    ResourcePreferenceSet,
+};
 
 bitflags::bitflags! {
     /// Residency behaviors a live resource instance can support.

@@ -1,7 +1,8 @@
 #![cfg(all(feature = "std", not(target_os = "none")))]
 
-use fusion_std::sync::Mutex;
 use std::sync::OnceLock as StdOnceLock;
+
+use fusion_std::sync::Mutex;
 
 pub(crate) fn lock_fusion_std_tests() -> fusion_std::sync::MutexGuard<'static, ()> {
     static LOCK: StdOnceLock<Mutex<()>> = StdOnceLock::new();
@@ -13,9 +14,5 @@ pub(crate) fn lock_fusion_std_tests() -> fusion_std::sync::MutexGuard<'static, (
     }
 }
 
-#[path = "fusion_std/all.rs"]
-mod all;
-
-#[cfg(target_os = "linux")]
-#[path = "fusion_std/linux.rs"]
-mod linux;
+#[path = "fusion_std/fusion_std.rs"]
+mod suite;

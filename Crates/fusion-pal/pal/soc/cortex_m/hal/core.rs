@@ -2,7 +2,11 @@
 
 use cortex_m::peripheral::CPUID;
 
-use crate::contract::pal::{HardwareCpuVendor, HardwareStackAbi, HardwareStackDirection};
+use crate::contract::pal::{
+    HardwareCpuVendor,
+    HardwareStackAbi,
+    HardwareStackDirection,
+};
 
 /// Decoded view of the architected Cortex-M CPUID register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

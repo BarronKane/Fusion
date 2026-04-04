@@ -26,7 +26,12 @@
 
 use bitflags::bitflags;
 
-use super::{AcpiError, AcpiSignature, AcpiTableView, read_unaligned_copy};
+use super::{
+    AcpiError,
+    AcpiSignature,
+    AcpiTableView,
+    read_unaligned_copy,
+};
 
 const OFFSET_FIRMWARE_CTRL: usize = 36;
 const OFFSET_DSDT: usize = 40;

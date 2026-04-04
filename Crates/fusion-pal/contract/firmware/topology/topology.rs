@@ -2,7 +2,6 @@
 
 pub mod acpi;
 pub mod devicetree;
-#[path = "static_topology.rs"]
 pub mod static_topology;
 
 pub use acpi::*;

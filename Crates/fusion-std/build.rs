@@ -45,7 +45,10 @@ use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{
+    Path,
+    PathBuf,
+};
 
 const AUTO_MANIFEST_NAME: &str = "fusion-std-fiber-task.generated";
 const AUTO_REPORT_NAME: &str = "fusion-std-fiber-task.report";

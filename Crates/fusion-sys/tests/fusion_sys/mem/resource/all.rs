@@ -4,7 +4,11 @@
 //! backend may satisfy a request or reject it, but it must do so consistently with the
 //! support surface it advertises.
 
-use fusion_pal::sys::mem::{IntegrityMode, MemPlacementCaps, Protect};
+use fusion_pal::sys::mem::{
+    IntegrityMode,
+    MemPlacementCaps,
+    Protect,
+};
 use fusion_sys::mem::resource::{
     CommitControlledResource,
     IntegrityConstraints,

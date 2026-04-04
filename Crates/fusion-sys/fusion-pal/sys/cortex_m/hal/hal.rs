@@ -24,7 +24,6 @@ use crate::pal::hal::{
     HardwareWriteSummary,
 };
 use crate::pal::thread::{ThreadClusterId, ThreadCoreClassId, ThreadCoreId, ThreadLogicalCpuId};
-
 #[allow(unused_imports)]
 pub use self::core::{CortexMCpuid, read_cpuid};
 #[allow(unused_imports)]

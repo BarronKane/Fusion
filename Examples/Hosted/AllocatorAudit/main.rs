@@ -16,7 +16,10 @@ use fusion_sys::alloc::{
     MemoryPoolMemberId,
     MemoryPoolMemberInfo,
 };
-use fusion_sys::channel::{ChannelReceive, ChannelSend};
+use fusion_sys::channel::{
+    ChannelReceive,
+    ChannelSend,
+};
 use fusion_sys::fiber::{
     ContextCaps,
     FiberMetadataMessage,
@@ -28,9 +31,17 @@ use fusion_sys::fiber::{
     ManagedFiber,
     yield_now,
 };
-use fusion_sys::insight::{InsightCaptureMode, InsightChannelClass, LocalInsightChannel};
+use fusion_sys::insight::{
+    InsightCaptureMode,
+    InsightChannelClass,
+    LocalInsightChannel,
+};
 use fusion_sys::mem::resource::AllocatorLayoutRealization;
-use fusion_sys::mem::resource::{MemoryResourceHandle, ResourceRequest, VirtualMemoryResource};
+use fusion_sys::mem::resource::{
+    MemoryResourceHandle,
+    ResourceRequest,
+    VirtualMemoryResource,
+};
 use fusion_sys::protocol::{
     Protocol,
     ProtocolBootstrapKind,
@@ -42,7 +53,10 @@ use fusion_sys::protocol::{
     ProtocolTransportRequirements,
     ProtocolVersion,
 };
-use fusion_sys::transport::{TransportAttachmentControl, TransportAttachmentRequest};
+use fusion_sys::transport::{
+    TransportAttachmentControl,
+    TransportAttachmentRequest,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum DemoTimelineEvent {

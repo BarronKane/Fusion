@@ -3,7 +3,10 @@
 //! This backend reports only machine facts it can surface honestly on Darwin through
 //! architecture facts and `sysctlbyname` runtime queries.
 
-use core::ffi::{c_char, c_void};
+use core::ffi::{
+    c_char,
+    c_void,
+};
 use core::mem::MaybeUninit;
 
 use crate::contract::pal::cpu::{
@@ -371,9 +374,17 @@ const fn runtime_simd_guarantee() -> HardwareGuarantee {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn runtime_simd_set() -> HardwareSimdSet {
     #[cfg(target_arch = "x86")]
-    use core::arch::x86::{__cpuid, __cpuid_count, _xgetbv};
+    use core::arch::x86::{
+        __cpuid,
+        __cpuid_count,
+        _xgetbv,
+    };
     #[cfg(target_arch = "x86_64")]
-    use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
+    use core::arch::x86_64::{
+        __cpuid,
+        __cpuid_count,
+        _xgetbv,
+    };
 
     let leaf0 = unsafe { __cpuid(0) };
     if leaf0.eax < 1 {

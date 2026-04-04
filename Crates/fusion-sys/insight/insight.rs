@@ -5,17 +5,30 @@
 
 mod timeline;
 
-pub use fusion_pal::sys::insight::*;
-pub use timeline::*;
-
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicU8,
+    AtomicUsize,
+    Ordering,
+};
+
+pub use fusion_pal::sys::insight::*;
 
 #[cfg(feature = "debug-insights")]
 use crate::channel::LocalChannel;
-use crate::channel::{ChannelBase, ChannelError, ChannelReceive, ChannelSend, ChannelSupport};
+use crate::channel::{
+    ChannelBase,
+    ChannelError,
+    ChannelReceive,
+    ChannelSend,
+    ChannelSupport,
+};
 #[cfg(not(feature = "debug-insights"))]
-use crate::channel::{ChannelCaps, ChannelImplementationKind, ChannelMode};
+use crate::channel::{
+    ChannelCaps,
+    ChannelImplementationKind,
+    ChannelMode,
+};
 use crate::protocol::Protocol;
 use crate::transport::{
     TransportAttachmentControl,
@@ -25,6 +38,7 @@ use crate::transport::{
     TransportSupport,
     TransportTopology,
 };
+pub use timeline::*;
 
 /// One local insight side channel.
 ///

@@ -12,7 +12,6 @@ use fusion_pal::sys::gpio::{
     PlatformGpioPin,
     system_gpio as pal_system_gpio,
 };
-
 pub use fusion_pal::sys::gpio::{
     GpioCapabilities,
     GpioDriveStrength,

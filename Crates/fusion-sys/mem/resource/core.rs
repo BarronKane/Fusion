@@ -9,12 +9,24 @@
 //! That keeps the runtime panic-free and no-alloc today without pretending every target already
 //! exposes the same native synchronization substrate.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
 
-use crate::sync::{ThinMutex, ThinMutexGuard};
 use fusion_pal::sys::mem::Protect;
 
-use super::{ResolvedResource, ResourceInfo, ResourceState, ResourceStateProvenance, StateValue};
+use crate::sync::{
+    ThinMutex,
+    ThinMutexGuard,
+};
+use super::{
+    ResolvedResource,
+    ResourceInfo,
+    ResourceState,
+    ResourceStateProvenance,
+    StateValue,
+};
 
 const PROVENANCE_SHIFT: u32 = 0;
 const PROTECT_TAG_SHIFT: u32 = 2;

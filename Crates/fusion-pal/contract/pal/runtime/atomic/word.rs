@@ -1,7 +1,11 @@
 use core::sync::atomic::Ordering;
 use core::time::Duration;
 
-use super::{AtomicError, AtomicWaitWord32Support, AtomicWord32Support};
+use super::{
+    AtomicError,
+    AtomicWaitWord32Support,
+    AtomicWord32Support,
+};
 
 /// Result of a compare-and-exchange attempt on one 32-bit atomic word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

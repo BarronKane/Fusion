@@ -1,6 +1,10 @@
 //! fusion-sys-level vector-ownership wrappers built on top of fusion-pal-truthful backends.
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    AtomicUsize,
+    Ordering,
+};
 
 use fusion_pal::sys::thread::ThreadCoreId;
 pub use fusion_pal::sys::vector::{
@@ -523,7 +527,10 @@ fn reserve_vector_cookie(cookie: VectorDispatchCookie) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{
+        AtomicU32,
+        Ordering,
+    };
 
     static TEST_CALLBACK_HITS: AtomicU32 = AtomicU32::new(0);
 

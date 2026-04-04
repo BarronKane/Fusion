@@ -3,7 +3,10 @@
 //! This backend saves the SysV callee-saved register set plus floating-point control words
 //! in an ISA-specific record and resumes contexts with a small assembly shim.
 
-use core::arch::{asm, global_asm};
+use core::arch::{
+    asm,
+    global_asm,
+};
 use core::mem;
 
 use crate::contract::pal::runtime::context::{

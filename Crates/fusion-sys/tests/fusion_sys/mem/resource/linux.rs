@@ -6,10 +6,26 @@
 
 use std::fs::File;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::ptr::{read_volatile, write_bytes, write_volatile};
+use std::os::fd::{
+    AsRawFd,
+    FromRawFd,
+};
+use std::ptr::{
+    read_volatile,
+    write_bytes,
+    write_volatile,
+};
 
-use fusion_pal::sys::mem::{BorrowedBackingHandle, Protect};
+use rustix::fd::IntoRawFd;
+use rustix::fs::{
+    MemfdFlags,
+    memfd_create,
+};
+
+use fusion_pal::sys::mem::{
+    BorrowedBackingHandle,
+    Protect,
+};
 use fusion_sys::mem::resource::{
     AddressReservation,
     InitialResidency,
@@ -26,8 +42,6 @@ use fusion_sys::mem::resource::{
     StateValue,
     VirtualMemoryResource,
 };
-use rustix::fd::IntoRawFd;
-use rustix::fs::{MemfdFlags, memfd_create};
 
 use super::support::page_len;
 

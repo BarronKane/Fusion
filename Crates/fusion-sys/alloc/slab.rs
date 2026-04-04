@@ -1,14 +1,24 @@
 use core::array;
 use core::fmt;
 use core::marker::PhantomData;
-use core::mem::{ManuallyDrop, align_of, size_of};
-use core::ptr::{self, NonNull};
+use core::mem::{
+    ManuallyDrop,
+    align_of,
+    size_of,
+};
+use core::ptr::{
+    self,
+    NonNull,
+};
 use core::slice;
 
-use crate::mem::resource::AllocatorLayoutPolicy;
-use crate::sync::{Mutex, RetainedHandle};
 use fusion_pal::sys::mem::MemBase;
 
+use crate::mem::resource::AllocatorLayoutPolicy;
+use crate::sync::{
+    Mutex,
+    RetainedHandle,
+};
 use super::{
     AllocCapabilities,
     AllocError,

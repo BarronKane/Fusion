@@ -22,18 +22,17 @@ pub mod vector;
 pub use caps::*;
 pub use claims::*;
 pub use cpu::*;
-pub use error::*;
-pub use mem::*;
-pub use power::*;
-pub use unsupported::*;
-pub use vector::*;
-
 use crate::contract::pal::runtime::thread::{
     ThreadClusterId,
     ThreadCoreClassId,
     ThreadCoreId,
     ThreadLogicalCpuId,
 };
+pub use error::*;
+pub use mem::*;
+pub use power::*;
+pub use unsupported::*;
+pub use vector::*;
 
 /// Common platform-truth surface for a selected PAL provider.
 pub trait HardwareBase {

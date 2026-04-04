@@ -2,21 +2,13 @@
 
 //! Generic Cortex-M SoC fallback used when no board feature is selected.
 
-use super::pio::{
-    PioEngineClaim as PcuEngineClaim,
-    PioEngineDescriptor as PcuEngineDescriptor,
-    PioEngineId as PcuEngineId,
-    PioError as PcuError,
-    PioLaneClaim as PcuLaneClaim,
-    PioLaneDescriptor as PcuLaneDescriptor,
-    PioLaneId as PcuLaneId,
-    PioLaneMask as PcuLaneMask,
-    PioProgramImage as PcuProgramImage,
-    PioProgramLease as PcuProgramLease,
-    PioSupport as PcuSupport,
-};
+use core::time::Duration;
+
 use crate::contract::pal::HardwareTopologyNodeId;
-use crate::contract::pal::runtime::thread::{ThreadClusterId, ThreadCoreClassId};
+use crate::contract::pal::runtime::thread::{
+    ThreadClusterId,
+    ThreadCoreClassId,
+};
 use crate::contract::pal::runtime::thread::{
     ThreadCoreId,
     ThreadError,
@@ -29,10 +21,6 @@ use crate::contract::pal::{
     HardwareTopologySummary,
     HardwareWriteSummary,
 };
-use core::time::Duration;
-
-use super::board_contract::{self, CortexMSocBoard};
-
 pub use super::board_contract::{
     CortexMClockDescriptor,
     CortexMDmaControllerDescriptor,
@@ -53,6 +41,23 @@ pub use super::board_contract::{
     CortexMSocDeviceIdSupport,
     CortexMSocDeviceIdentity,
     CortexMSocExecutionObservation,
+};
+use super::board_contract::{
+    self,
+    CortexMSocBoard,
+};
+use super::pio::{
+    PioEngineClaim as PcuEngineClaim,
+    PioEngineDescriptor as PcuEngineDescriptor,
+    PioEngineId as PcuEngineId,
+    PioError as PcuError,
+    PioLaneClaim as PcuLaneClaim,
+    PioLaneDescriptor as PcuLaneDescriptor,
+    PioLaneId as PcuLaneId,
+    PioLaneMask as PcuLaneMask,
+    PioProgramImage as PcuProgramImage,
+    PioProgramLease as PcuProgramLease,
+    PioSupport as PcuSupport,
 };
 
 const DESCRIPTOR: CortexMSocDescriptor = CortexMSocDescriptor {

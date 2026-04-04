@@ -7,11 +7,16 @@
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicUsize,
+    Ordering,
+};
 
-use libc::{self, c_void};
+use libc::{
+    self,
+    c_void,
+};
 
-use super::mem::system_mem;
 use crate::contract::pal::mem::{
     Backing,
     CachePolicy,
@@ -31,6 +36,7 @@ use crate::contract::pal::runtime::fiber::{
     PlatformElasticFaultHandler,
     PlatformWakeToken,
 };
+use super::mem::system_mem;
 
 /// Linux hosted-fiber helper provider.
 #[derive(Debug, Clone, Copy, Default)]

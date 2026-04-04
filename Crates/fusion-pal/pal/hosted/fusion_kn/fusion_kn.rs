@@ -5,17 +5,23 @@
 //! the public backend family stays generic even when a given target currently talks over a
 //! Linux character device.
 
-#[cfg(target_os = "linux")]
-#[path = "../linux/linux.rs"]
-mod linux_platform;
-
 pub use fusion_kn::client::*;
 pub use fusion_kn::contract::*;
 
 #[cfg(target_os = "linux")]
-pub use linux_platform::{atomic, context, event, fiber, gpio, hal, mem, power, sync, thread};
+pub use crate::pal::hosted::linux::{
+    atomic,
+    context,
+    event,
+    fiber,
+    gpio,
+    hal,
+    mem,
+    power,
+    sync,
+    thread,
+};
 
 #[cfg(target_os = "linux")]
-#[path = "linux.rs"]
 /// Linux transport adapters for the mediated Fusion kernel backend.
 pub mod linux;

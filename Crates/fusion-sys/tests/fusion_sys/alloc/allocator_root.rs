@@ -7,9 +7,18 @@ use fusion_sys::alloc::{
     Allocator,
     CriticalSafetyRequirements,
 };
-use fusion_sys::mem::resource::{MemoryDomain, ResourceAttrs, ResourceBackingKind};
+use fusion_sys::mem::resource::{
+    MemoryDomain,
+    ResourceAttrs,
+    ResourceBackingKind,
+};
 
-use super::support::{bound_resource, bound_resource_with_region, byte_geometry, shifted_region};
+use super::support::{
+    bound_resource,
+    bound_resource_with_region,
+    byte_geometry,
+    shifted_region,
+};
 
 #[test]
 fn allocator_builder_creates_default_domain_and_tracks_owned_resources() {

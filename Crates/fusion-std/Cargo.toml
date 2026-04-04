@@ -19,7 +19,7 @@ path = "bin/fiber_fault_probe.rs"
 
 [[bin]]
 name = "fusion_std_fiber_task_analyzer"
-path = "bin/fiber_task_analyzer.rs"
+path = "bin/fiber_task_analyzer/fiber_task_analyzer.rs"
 
 [[bin]]
 name = "fusion_std_fiber_task_pipeline"

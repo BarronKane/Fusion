@@ -97,13 +97,30 @@ mod support;
 mod view;
 
 pub use attrs::ResourceAttrs;
-pub use bound::{BoundMemoryResource, BoundResourceSpec};
-pub use domain::{MemoryDomain, MemoryDomainSet, ResourceBackingKind};
-pub use error::{ResourceError, ResourceErrorKind};
+pub use bound::{
+    BoundMemoryResource,
+    BoundResourceSpec,
+};
+pub use domain::{
+    MemoryDomain,
+    MemoryDomainSet,
+    ResourceBackingKind,
+};
+pub use error::{
+    ResourceError,
+    ResourceErrorKind,
+};
 pub use geometry::MemoryGeometry;
 pub use handle::MemoryResourceHandle;
-pub use layout::{AllocatorLayoutPolicy, AllocatorLayoutRealization};
-pub use ops::{ResourceHazardSet, ResourceOpSet, ResourcePreferenceSet};
+pub use layout::{
+    AllocatorLayoutPolicy,
+    AllocatorLayoutRealization,
+};
+pub use ops::{
+    ResourceHazardSet,
+    ResourceOpSet,
+    ResourcePreferenceSet,
+};
 pub use range::ResourceRange;
 pub use request::{
     InitialResidency,
@@ -126,8 +143,16 @@ pub use reservation::{
     ReservationSupport,
     ResolvedAddressReservation,
 };
-pub use resolved::{ResolvedResource, ResourceInfo};
-pub use state::{ResourceState, ResourceStateProvenance, StateValue};
+pub use resolved::{
+    ResolvedResource,
+    ResourceInfo,
+};
+use self::core::ResourceCore;
+pub use state::{
+    ResourceState,
+    ResourceStateProvenance,
+    StateValue,
+};
 pub use support::{
     ResourceAcquireSupport,
     ResourceFeatureSupport,
@@ -135,8 +160,6 @@ pub use support::{
     ResourceSupport,
 };
 pub use view::RangeView;
-
-use self::core::ResourceCore;
 
 /// Base contract for all contiguous governed memory resources.
 pub trait MemoryResource {

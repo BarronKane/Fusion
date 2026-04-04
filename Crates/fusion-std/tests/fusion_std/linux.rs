@@ -1,9 +1,25 @@
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU32, Ordering};
-use core::task::{Context, Poll};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
+use core::task::{
+    Context,
+    Poll,
+};
 
-use fusion_pal::sys::mem::{MemAdviceCaps, MemBase, system_mem};
+use std::num::NonZeroUsize;
+use std::process::Command;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+use fusion_pal::sys::mem::{
+    MemAdviceCaps,
+    MemBase,
+    system_mem,
+};
 use fusion_std::sync::Mutex as FusionMutex;
 use fusion_std::thread::{
     AsyncPollStackContract,
@@ -51,11 +67,6 @@ use fusion_std::thread::{
 };
 use fusion_sys::fiber::FiberError;
 use fusion_sys::fiber::FiberSystem;
-use std::num::NonZeroUsize;
-use std::process::Command;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 
 use super::lock_fusion_std_tests;
 

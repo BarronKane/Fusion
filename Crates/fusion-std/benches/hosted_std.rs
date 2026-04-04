@@ -2,15 +2,27 @@
 
 extern crate test;
 
-#[path = "support/mod.rs"]
+#[path = "support/support.rs"]
 mod support;
 
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::OnceLock;
 use test::Bencher;
+
+fn hosted_std_bench_guard() -> MutexGuard<'static, ()> {
+    static HOSTED_STD_BENCH_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    HOSTED_STD_BENCH_GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 macro_rules! bench_wrap {
     ($name:ident) => {
         #[bench]
         fn $name(b: &mut Bencher) {
+            let _guard = hosted_std_bench_guard();
             support::$name(b);
         }
     };

@@ -2,7 +2,10 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicUsize,
+    Ordering,
+};
 
 use fusion_pal::sys::sync::SyncError;
 
@@ -190,7 +193,10 @@ impl<T: 'static> fmt::Debug for RetainedHandle<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SharedHeader, SharedRelease};
+    use super::{
+        SharedHeader,
+        SharedRelease,
+    };
     use crate::sync::SyncErrorKind;
 
     #[test]

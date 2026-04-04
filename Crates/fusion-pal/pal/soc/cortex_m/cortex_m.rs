@@ -37,7 +37,6 @@ pub mod pcu;
 /// Cortex-M bare-metal power backend implementation.
 pub mod power;
 #[cfg(feature = "soc-rp2350")]
-#[path = "rp2350.rs"]
 /// RP2350 SoC surface under the Cortex-M lane.
 pub mod rp2350;
 #[path = "sync/sync.rs"]

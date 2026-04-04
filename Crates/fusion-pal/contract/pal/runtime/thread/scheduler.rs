@@ -136,7 +136,11 @@ impl ThreadSchedulerObservation {
 
 #[cfg(test)]
 mod tests {
-    use super::{ThreadPriority, ThreadPriorityOrder, ThreadPriorityRange};
+    use super::{
+        ThreadPriority,
+        ThreadPriorityOrder,
+        ThreadPriorityRange,
+    };
 
     #[test]
     fn priority_range_contains_inclusive_bounds() {

@@ -1,6 +1,12 @@
 //! Instruction-family vocabulary for the PCU IR core.
 
-use super::{PcuBinding, PcuBindingAccess, PcuBindingRef, PcuImageDimension, PcuValueType};
+use super::{
+    PcuBinding,
+    PcuBindingAccess,
+    PcuBindingRef,
+    PcuImageDimension,
+    PcuValueType,
+};
 
 /// Value-construction or representation-changing operation families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

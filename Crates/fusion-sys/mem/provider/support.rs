@@ -1,7 +1,14 @@
+use crate::mem::resource::{
+    MemoryDomainSet,
+    ResourceAttrs,
+    ResourceHazardSet,
+};
 use super::inventory::MemoryProviderInventory;
 use super::request::MemoryPoolRequest;
-use super::{MemoryObjectEnvelope, MemoryTopologyNodeId};
-use crate::mem::resource::{MemoryDomainSet, ResourceAttrs, ResourceHazardSet};
+use super::{
+    MemoryObjectEnvelope,
+    MemoryTopologyNodeId,
+};
 
 bitflags::bitflags! {
     /// Coarse capabilities of a provider implementation.

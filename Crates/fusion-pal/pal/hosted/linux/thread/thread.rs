@@ -6,10 +6,16 @@
 //! supposed to tell the truth rather than audition for folklore.
 
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_void};
+use core::ffi::{
+    c_char,
+    c_void,
+};
 use core::mem::MaybeUninit;
 use core::ptr;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
 use core::time::Duration;
 
 use libc::{
@@ -23,7 +29,11 @@ use libc::{
 };
 use rustix::io::Errno;
 use rustix::process::Pid;
-use rustix::thread::{self as rustix_thread, CpuSet, futex};
+use rustix::thread::{
+    self as rustix_thread,
+    CpuSet,
+    futex,
+};
 
 use crate::contract::pal::runtime::thread::{
     RawThreadEntry,
@@ -1014,7 +1024,10 @@ fn last_errno() -> Errno {
 mod tests {
     extern crate std;
 
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{
+        AtomicU32,
+        Ordering,
+    };
 
     use super::*;
 

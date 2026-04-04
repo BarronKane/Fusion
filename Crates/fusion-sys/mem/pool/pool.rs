@@ -19,7 +19,21 @@ mod state;
 mod stats;
 
 pub use builder::MemoryPoolBuilder;
-pub use error::{MemoryPoolError, MemoryPoolErrorKind};
+use crate::mem::provider::{
+    MemoryCompatibilityEnvelope,
+    MemoryPoolClassId,
+    MemoryTopologyNodeId,
+};
+use crate::mem::resource::{
+    MemoryResource,
+    ResourceAttrs,
+    ResourceRange,
+};
+use crate::sync::Mutex;
+pub use error::{
+    MemoryPoolError,
+    MemoryPoolErrorKind,
+};
 pub use extent::{
     MemoryPoolExtentDisposition,
     MemoryPoolExtentInfo,
@@ -35,17 +49,18 @@ pub use member::{
     MemoryPoolMemberInfo,
 };
 pub use metadata::MemoryPoolMetadataLayout;
-pub use policy::{MemoryPoolPolicy, MemoryPoolProvisioningPolicy};
-pub use stats::MemoryPoolStats;
-
-use crate::mem::provider::{MemoryCompatibilityEnvelope, MemoryPoolClassId, MemoryTopologyNodeId};
-use crate::mem::resource::{MemoryResource, ResourceAttrs, ResourceRange};
-use crate::sync::Mutex;
-
+pub use policy::{
+    MemoryPoolPolicy,
+    MemoryPoolProvisioningPolicy,
+};
 use self::builder::MemoryPoolBuilder as Builder;
-use self::extent::{ExtentDisposition, ExtentRecord};
+use self::extent::{
+    ExtentDisposition,
+    ExtentRecord,
+};
 use self::member::MemoryPoolMember;
 use self::state::MemoryPoolState;
+pub use stats::MemoryPoolStats;
 
 /// Fixed-capacity pool over compatible realized memory resources.
 #[derive(Debug)]

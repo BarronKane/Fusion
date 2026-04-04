@@ -9,11 +9,6 @@ mod pool;
 mod system;
 mod time;
 
-pub use handle::*;
-pub use pool::*;
-pub use system::*;
-pub use time::*;
-
 pub use fusion_pal::sys::thread::{
     RawThreadEntry,
     ThreadAuthoritySet,
@@ -75,3 +70,8 @@ pub use fusion_pal::sys::thread::{
     ThreadTermination,
     ThreadTerminationKind,
 };
+
+pub use handle::*;
+pub use pool::*;
+pub use system::*;
+pub use time::*;

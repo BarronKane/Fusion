@@ -23,7 +23,12 @@
 
 use core::mem::size_of;
 
-use super::{AcpiError, AcpiSignature, AcpiTableView, read_unaligned_copy};
+use super::{
+    AcpiError,
+    AcpiSignature,
+    AcpiTableView,
+    read_unaligned_copy,
+};
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]

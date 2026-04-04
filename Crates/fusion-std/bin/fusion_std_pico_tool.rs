@@ -2,12 +2,26 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::path::{
+    Path,
+    PathBuf,
+};
+use std::process::{
+    Command,
+    ExitStatus,
+    Stdio,
+};
 use std::thread;
-use std::time::{Duration as StdDuration, Instant};
+use std::time::{
+    Duration as StdDuration,
+    Instant,
+};
 
-use object::{Object, ObjectSegment, ObjectSymbol};
+use object::{
+    Object,
+    ObjectSegment,
+    ObjectSymbol,
+};
 
 const DEFAULT_MANIFEST_PATH: &str = "Examples/Cortex-M/RP2350/MinimalLed/Cargo.toml";
 const DEFAULT_TARGET: &str = "thumbv8m.main-none-eabihf";

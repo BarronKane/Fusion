@@ -10,7 +10,11 @@ use super::{
     Region,
     TagMode,
 };
-use super::{MemTopologyLink, MemTopologyNode, MemTopologyNodeId};
+use super::{
+    MemTopologyLink,
+    MemTopologyNode,
+    MemTopologyNodeId,
+};
 
 bitflags::bitflags! {
     /// Set of memory domains a fusion-pal catalog can describe or acquire.

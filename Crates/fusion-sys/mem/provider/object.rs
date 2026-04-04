@@ -10,7 +10,6 @@ use crate::mem::resource::{
     ResourceInfo,
     ResourceSupport,
 };
-
 use super::MemoryTopologyNodeId;
 
 /// Stable identifier for a provider-known memory object.

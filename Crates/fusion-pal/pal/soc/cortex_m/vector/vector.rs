@@ -9,10 +9,20 @@ compile_error!(
 );
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-use core::arch::{asm, global_asm};
+use core::arch::{
+    asm,
+    global_asm,
+};
 use core::cell::UnsafeCell;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering, compiler_fence};
+use core::sync::atomic::{
+    AtomicBool,
+    AtomicU8,
+    AtomicU32,
+    AtomicUsize,
+    Ordering,
+    compiler_fence,
+};
 
 use crate::contract::pal::runtime::thread::ThreadCoreId;
 use crate::contract::pal::vector::{

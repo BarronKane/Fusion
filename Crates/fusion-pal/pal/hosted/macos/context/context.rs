@@ -4,12 +4,15 @@
 //! save/restore paths. Other macOS ISAs remain explicitly unsupported.
 
 #[cfg(target_arch = "x86_64")]
-#[path = "x86_64.rs"]
-mod implementation;
+mod x86_64;
 
 #[cfg(target_arch = "aarch64")]
-#[path = "aarch64.rs"]
-mod implementation;
+mod aarch64;
+
+#[cfg(target_arch = "aarch64")]
+use aarch64 as implementation;
+#[cfg(target_arch = "x86_64")]
+use x86_64 as implementation;
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod implementation {

@@ -7,7 +7,10 @@
 use core::cell::Cell;
 use core::marker::PhantomData;
 
-use crate::channel::{ChannelError, ChannelReceive};
+use crate::channel::{
+    ChannelError,
+    ChannelReceive,
+};
 use crate::insight::{
     InsightCaptureMode,
     InsightChannelClass,
@@ -26,7 +29,11 @@ use crate::protocol::{
     ProtocolTransportRequirements,
     ProtocolVersion,
 };
-use crate::transport::{TransportAttachmentControl, TransportAttachmentRequest, TransportError};
+use crate::transport::{
+    TransportAttachmentControl,
+    TransportAttachmentRequest,
+    TransportError,
+};
 
 /// One timeline/flamegraph span identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
