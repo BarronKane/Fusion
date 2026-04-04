@@ -37,7 +37,7 @@ pub mod fiber;
 /// fusion-sys memory contracts and resource abstractions.
 pub mod mem;
 #[path = "pcu/pcu.rs"]
-/// fusion-sys programmable control-unit composition and execution substrate.
+/// fusion-sys programmable control-unit composition and runtime glue.
 pub mod pcu;
 #[path = "sync/sync.rs"]
 /// fusion-sys synchronization primitives, atomics, and wrappers.

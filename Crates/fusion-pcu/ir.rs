@@ -1,4 +1,4 @@
-//! Thin PCU IR re-export over the lowered fusion-pal driver contract.
+//! Thin PCU IR re-export over the canonical PCU contract surface.
 
 pub use fusion_pal::sys::pcu::{
     PcuAluOp,

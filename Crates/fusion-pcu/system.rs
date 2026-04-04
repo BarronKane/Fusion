@@ -1,4 +1,4 @@
-//! Generic fusion-sys wrapper over the selected PCU executor backend.
+//! Generic fusion-pcu wrapper over the selected PCU executor backend.
 
 use fusion_pal::sys::pcu::{
     PcuBase,
@@ -14,6 +14,8 @@ use fusion_pal::sys::pcu::{
 };
 
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+use fusion_pal::sys::soc::cortex_m::hal::soc::pio::PioBase;
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
 use super::PcuStreamPattern;
 use super::{
     PcuBackendKind,
@@ -28,7 +30,7 @@ use super::{
     PcuStreamKernelIr,
 };
 
-/// fusion-sys wrapper around the selected generic PCU executor backend.
+/// fusion-pcu wrapper around the selected generic PCU executor backend.
 #[derive(Debug, Clone, Copy)]
 pub struct PcuSystem {
     inner: PlatformPcu,
@@ -108,7 +110,7 @@ impl PcuSystem {
     fn stream_kernel_supports_pio(&self, kernel: PcuStreamKernelIr<'_>) -> bool {
         #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
         {
-            use crate::pcu::cortex_m::pio::system_pio;
+            use fusion_pal::sys::soc::cortex_m::hal::soc::pio::system_pio;
 
             if !kernel.simple_transform_patterns_are_valid()
                 || !kernel.parameters.is_empty()
@@ -374,7 +376,7 @@ mod tests {
     use core::num::NonZeroU32;
 
     use super::PcuSystem;
-    use crate::pcu::{
+    use crate::{
         PcuByteStreamBindings,
         PcuDispatchPolicy,
         PcuExecutorClass,
@@ -430,7 +432,7 @@ mod tests {
             })
             .expect("host fallback planning should succeed");
 
-        assert_eq!(plan.backend(), crate::pcu::PcuBackendKind::Cpu);
+        assert_eq!(plan.backend(), crate::PcuBackendKind::Cpu);
         assert_eq!(plan.device(), None);
     }
 
@@ -457,11 +459,11 @@ mod tests {
             .plan(PcuInvocationDescriptor {
                 kernel: &kernel,
                 shape: PcuInvocationShape::threads(NonZeroU32::new(1).unwrap()),
-                policy: PcuDispatchPolicy::Prefer(crate::pcu::PcuBackendKind::CortexMPio),
+                policy: PcuDispatchPolicy::Prefer(crate::PcuBackendKind::CortexMPio),
             })
             .expect("prefer-pio planning should fall back to CPU on host");
 
-        assert_eq!(plan.backend(), crate::pcu::PcuBackendKind::Cpu);
+        assert_eq!(plan.backend(), crate::PcuBackendKind::Cpu);
         assert_eq!(plan.device(), None);
     }
 
@@ -500,7 +502,7 @@ mod tests {
             )
             .expect("CPU fallback dispatch should succeed");
 
-        assert_eq!(handle.backend(), crate::pcu::PcuBackendKind::Cpu);
+        assert_eq!(handle.backend(), crate::PcuBackendKind::Cpu);
         handle
             .wait()
             .expect("completed CPU fallback should succeed");
@@ -542,7 +544,7 @@ mod tests {
             )
             .expect("byte CPU fallback dispatch should succeed");
 
-        assert_eq!(handle.backend(), crate::pcu::PcuBackendKind::Cpu);
+        assert_eq!(handle.backend(), crate::PcuBackendKind::Cpu);
         handle
             .wait()
             .expect("completed byte CPU fallback should succeed");
@@ -576,7 +578,7 @@ mod tests {
             })
             .expect_err("invalid pattern/type pairing should be rejected at planning time");
 
-        assert_eq!(error.kind(), crate::pcu::PcuError::invalid().kind());
+        assert_eq!(error.kind(), crate::PcuError::invalid().kind());
     }
 
     #[test]
@@ -631,7 +633,7 @@ mod tests {
             )
             .expect("host cpu executor planning should succeed");
 
-        assert_eq!(plan.backend(), crate::pcu::PcuBackendKind::Cpu);
+        assert_eq!(plan.backend(), crate::PcuBackendKind::Cpu);
         assert_eq!(plan.executor(), None);
     }
 }

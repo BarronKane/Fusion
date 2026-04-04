@@ -1,9 +1,13 @@
 //! Generic PCU invocation, planning, and execution vocabulary.
 
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
-use crate::pcu::cortex_m::pio::{
+use fusion_pal::sys::soc::cortex_m::hal::soc::pio::{
+    PlatformPio,
+    PioBase,
+    PioControl,
     PcuIrExecutionConfig,
     PcuIrInstruction,
+    PcuIrProgram,
     PcuLaneId,
     PcuLaneMask,
     PcuProgramId,
@@ -14,10 +18,14 @@ use crate::pcu::cortex_m::pio::{
     extract_bits_stream_transform,
     increment_stream_transform,
     mask_lower_stream_transform,
+    rp2350_build_execution_registers,
+    rp2350_execution_is_default,
     shift_left_stream_transform,
     shift_right_stream_transform,
     system_pio,
 };
+#[cfg(all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350"))]
+use fusion_pal::sys::soc::cortex_m::hal::soc::pio::lower_rp2350_program;
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
 use super::PcuErrorKind;
 use super::{
@@ -32,6 +40,68 @@ use super::{
     PcuStreamPattern,
     PcuStreamValueType,
 };
+
+#[cfg(all(
+    target_os = "none",
+    feature = "sys-cortex-m",
+    not(feature = "soc-rp2350")
+))]
+fn lower_selected_pio_program<'a>(
+    program: &PcuIrProgram<'_>,
+    storage: &'a mut [u16],
+) -> Result<PcuProgramImage<'a>, PcuError> {
+    let _ = program;
+    let _ = storage;
+    Err(PcuError::unsupported())
+}
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350"))]
+fn lower_selected_pio_program<'a>(
+    program: &PcuIrProgram<'_>,
+    storage: &'a mut [u16],
+) -> Result<PcuProgramImage<'a>, PcuError> {
+    lower_rp2350_program(program, storage)
+}
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350"))]
+fn initialize_selected_pio_lanes(claim: &PcuLaneMaskClaim, initial_pc: u8) -> Result<(), PcuError> {
+    fusion_pal::sys::soc::cortex_m::hal::soc::board::initialize_pcu_lanes(claim, initial_pc)
+}
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m", not(feature = "soc-rp2350")))]
+fn initialize_selected_pio_lanes(claim: &PcuLaneMaskClaim, initial_pc: u8) -> Result<(), PcuError> {
+    let _ = claim;
+    let _ = initial_pc;
+    Err(PcuError::unsupported())
+}
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+type PcuLaneMaskClaim = fusion_pal::sys::soc::cortex_m::hal::soc::pio::PcuLaneClaim;
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350"))]
+fn apply_selected_pio_execution_config(
+    claim: &PcuLaneMaskClaim,
+    execution: &PcuIrExecutionConfig,
+) -> Result<(), PcuError> {
+    if rp2350_execution_is_default(execution) {
+        return Ok(());
+    }
+    let (clkdiv, execctrl, shiftctrl, pinctrl) =
+        rp2350_build_execution_registers(execution, None)?;
+    fusion_pal::sys::soc::cortex_m::hal::soc::board::apply_pcu_execution_config(
+        claim, clkdiv, execctrl, shiftctrl, pinctrl,
+    )
+}
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m", not(feature = "soc-rp2350")))]
+fn apply_selected_pio_execution_config(
+    claim: &PcuLaneMaskClaim,
+    execution: &PcuIrExecutionConfig,
+) -> Result<(), PcuError> {
+    let _ = claim;
+    let _ = execution;
+    Err(PcuError::unsupported())
+}
 
 /// Concrete backend kind selected for one prepared or completed invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -386,9 +456,8 @@ fn prepare_cortex_m_pio(plan: PcuDispatchPlan<'_>) -> Result<PcuPreparedKernel<'
         _ => return Err(PcuError::unsupported()),
     };
 
-    let pio = system_pio();
     let mut lowering_storage = [0u16; 32];
-    let image = pio.lower_program(&program, &mut lowering_storage)?;
+    let image = lower_selected_pio_program(&program, &mut lowering_storage)?;
     let mut words = [0u16; 32];
     words[..image.words.len()].copy_from_slice(image.words);
 
@@ -426,7 +495,7 @@ fn dispatch_cortex_m_pio(
         return Err(PcuError::invalid());
     }
 
-    let generic_pcu = crate::pcu::system_pcu();
+    let generic_pcu = crate::system_pcu();
     let executor_claim = generic_pcu.claim_executor(prepared.executor_id)?;
     let pio = system_pio();
     let engine_index = prepared
@@ -477,16 +546,14 @@ fn dispatch_cortex_m_pio(
     };
 
     let dispatch_result = (|| {
-        pio.configure_execution(&lane_claim, &prepared.execution)?;
-        pio.initialize_lanes(&lane_claim, 0)?;
+        apply_selected_pio_execution_config(&lane_claim, &prepared.execution)?;
+        initialize_selected_pio_lanes(&lane_claim, 0)?;
 
         let chunk_width = usize::from(lanes_in_use);
         let mut input_chunks = bindings.input.chunks(chunk_width);
         let mut output_chunks = bindings.output.chunks_mut(chunk_width);
 
-        let write_chunk = |input_chunk: &[u32],
-                           pio: &crate::pcu::cortex_m::pio::PioSystem|
-         -> Result<(), PcuError> {
+        let write_chunk = |input_chunk: &[u32], pio: &PlatformPio| -> Result<(), PcuError> {
             for (lane_offset, input) in input_chunk.iter().copied().enumerate() {
                 let lane = PcuLaneId {
                     engine: engine.id,
@@ -510,9 +577,7 @@ fn dispatch_cortex_m_pio(
             Ok(())
         };
 
-        let read_chunk = |output_chunk: &mut [u32],
-                          pio: &crate::pcu::cortex_m::pio::PioSystem|
-         -> Result<(), PcuError> {
+        let read_chunk = |output_chunk: &mut [u32], pio: &PlatformPio| -> Result<(), PcuError> {
             for (lane_offset, output) in output_chunk.iter_mut().enumerate() {
                 let lane = PcuLaneId {
                     engine: engine.id,
@@ -744,7 +809,7 @@ mod tests {
         PcuParameterSlot,
         PcuStreamPattern,
     };
-    use crate::pcu::{
+    use crate::{
         PcuByteStreamBindings,
         PcuHalfWordStreamBindings,
         PcuParameterBinding,

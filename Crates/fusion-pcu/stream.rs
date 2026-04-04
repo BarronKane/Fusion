@@ -1,4 +1,4 @@
-//! Ergonomic stream-kernel builders layered over `fusion-sys::pcu`.
+//! Ergonomic stream-kernel builders layered over `fusion-pcu`.
 
 use core::num::NonZeroU32;
 
@@ -134,19 +134,19 @@ impl<'a, const MAX_PATTERNS: usize> PcuStreamDispatchBuilder<'a, MAX_PATTERNS> {
         self.parameters
     }
 
-    /// Synthesizes the corresponding `fusion-sys` stream-kernel IR payload.
+    /// Synthesizes the corresponding `fusion-pcu` stream-kernel IR payload.
     #[must_use]
     pub fn ir(&self) -> PcuStreamKernelIr<'_> {
         self.kernel_ir()
     }
 
-    /// Synthesizes the corresponding `fusion-sys` generic kernel wrapper.
+    /// Synthesizes the corresponding `fusion-pcu` generic kernel wrapper.
     #[must_use]
     pub fn kernel(&self) -> PcuKernel<'_> {
         PcuKernel::Stream(self.ir())
     }
 
-    /// Builds the corresponding `fusion-sys` invocation descriptor around one caller-owned kernel.
+    /// Builds the corresponding `fusion-pcu` invocation descriptor around one caller-owned kernel.
     #[must_use]
     pub fn descriptor<'kernel>(
         &self,
@@ -553,7 +553,7 @@ const fn pattern_capabilities(pattern: PcuStreamPattern) -> PcuStreamCapabilitie
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcu::PcuInvocationHandle;
+    use crate::PcuInvocationHandle;
 
     #[test]
     fn stream_builder_cpu_fallback_executes_bit_reverse_words() {
@@ -653,6 +653,6 @@ mod tests {
             .with_thread_count(0)
             .expect_err("zero threads should be rejected");
 
-        assert_eq!(error.kind(), super::super::PcuErrorKind::Invalid);
+        assert_eq!(error.kind(), crate::PcuErrorKind::Invalid);
     }
 }
