@@ -9,7 +9,7 @@ use crate::contract::drivers::bus::gpio::{
     GpioPull,
     GpioSupport,
 };
-use crate::drivers::bus::gpio::contract::{
+use crate::drivers::bus::gpio::interface::contract::{
     GpioHardware,
     GpioHardwarePin,
 };

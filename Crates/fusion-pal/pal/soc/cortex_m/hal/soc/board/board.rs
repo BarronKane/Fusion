@@ -187,6 +187,63 @@ pub struct CortexMPeripheralDescriptor {
     pub len: usize,
 }
 
+/// Board-visible Bluetooth transport binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CortexMBluetoothTransportBinding {
+    /// Three-wire SPI-style link where data and interrupt share one GPIO line.
+    Spi3WireSharedDataIrq {
+        /// Clock GPIO driven by the Cortex-M host.
+        clock_gpio: u8,
+        /// Chip-select GPIO driven by the Cortex-M host.
+        chip_select_gpio: u8,
+        /// Shared bidirectional data and IRQ GPIO.
+        data_irq_gpio: u8,
+    },
+    /// Four-wire SPI transport with one dedicated IRQ GPIO.
+    Spi4Wire {
+        /// Clock GPIO driven by the Cortex-M host.
+        clock_gpio: u8,
+        /// Chip-select GPIO driven by the Cortex-M host.
+        chip_select_gpio: u8,
+        /// Host-to-controller data GPIO.
+        mosi_gpio: u8,
+        /// Controller-to-host data GPIO.
+        miso_gpio: u8,
+        /// Dedicated IRQ GPIO when the controller exposes one.
+        irq_gpio: Option<u8>,
+    },
+    /// UART HCI transport.
+    Uart {
+        /// TX GPIO driven by the Cortex-M host.
+        tx_gpio: u8,
+        /// RX GPIO sampled by the Cortex-M host.
+        rx_gpio: u8,
+        /// Optional host-to-controller flow-control line.
+        cts_gpio: Option<u8>,
+        /// Optional controller-to-host flow-control line.
+        rts_gpio: Option<u8>,
+    },
+}
+
+/// Static Bluetooth controller binding surfaced by one Cortex-M board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CortexMBluetoothControllerBinding {
+    /// Human-readable binding name.
+    pub name: &'static str,
+    /// Controller vendor name.
+    pub vendor: &'static str,
+    /// Controller chip or family name.
+    pub chip: &'static str,
+    /// Transport wiring surfaced by the board.
+    pub transport: CortexMBluetoothTransportBinding,
+    /// Optional power-enable GPIO controlled by the Cortex-M host.
+    pub power_gpio: Option<u8>,
+    /// Optional reset GPIO controlled by the Cortex-M host.
+    pub reset_gpio: Option<u8>,
+    /// Optional wake GPIO controlled by the Cortex-M host.
+    pub wake_gpio: Option<u8>,
+}
+
 /// Coarse class for a board-visible Cortex-M IRQ line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CortexMIrqClass {
@@ -622,6 +679,12 @@ pub trait CortexMSocBoard: Copy {
     /// Returns the named peripheral blocks surfaced by this SoC board.
     #[must_use]
     fn peripherals(&self) -> &'static [CortexMPeripheralDescriptor] {
+        &[]
+    }
+
+    /// Returns the board-visible Bluetooth controller bindings surfaced by this SoC board.
+    #[must_use]
+    fn bluetooth_controllers(&self) -> &'static [CortexMBluetoothControllerBinding] {
         &[]
     }
 
@@ -1093,6 +1156,14 @@ pub fn owned_memory_region<T: CortexMSocBoard>(
 #[must_use]
 pub fn peripherals<T: CortexMSocBoard>(soc: T) -> &'static [CortexMPeripheralDescriptor] {
     soc.peripherals()
+}
+
+/// Returns the board-visible Bluetooth controller bindings for the selected SoC board.
+#[must_use]
+pub fn bluetooth_controllers<T: CortexMSocBoard>(
+    soc: T,
+) -> &'static [CortexMBluetoothControllerBinding] {
+    soc.bluetooth_controllers()
 }
 
 /// Returns the named IRQ lines for the selected SoC board.

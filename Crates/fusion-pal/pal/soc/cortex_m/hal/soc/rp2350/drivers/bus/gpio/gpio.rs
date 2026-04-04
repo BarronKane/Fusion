@@ -17,14 +17,15 @@ use fusion_hal::contract::drivers::bus::gpio::{
     GpioPull,
     GpioSupport,
 };
-use fusion_hal::drivers::bus::gpio::contract::{
+use fusion_hal::drivers::bus::gpio::interface::contract::{
     GpioHardware as GpioHardwareContract,
     GpioHardwarePin as GpioHardwarePinContract,
 };
 
+use crate::pal::soc::cortex_m::hal::soc::rp2350::RP2350_PICO2W_RESERVED_GPIO_PINS;
 use crate::pal::soc::cortex_m::hal::soc::board;
 
-const RP2350_GPIO_COUNT: u8 = 30;
+const RP2350_GPIO_COUNT: u8 = 30 - RP2350_PICO2W_RESERVED_GPIO_PINS.len() as u8;
 const RP2350_PAD_PDE_BIT: u32 = 1 << 2;
 const RP2350_PAD_PUE_BIT: u32 = 1 << 3;
 const RP2350_PAD_DRIVE_LSB: u32 = 4;
@@ -70,8 +71,7 @@ macro_rules! rp2350_gpio_descriptors {
 }
 
 static RP2350_GPIO_PINS: [GpioPinDescriptor; RP2350_GPIO_COUNT as usize] = rp2350_gpio_descriptors![
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-    26, 27, 28, 29,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 26, 27, 28,
 ];
 
 /// RP2350 hardware-facing GPIO provider.
@@ -180,6 +180,14 @@ fn validate_pin(pin: u8) -> Result<(), GpioError> {
     }
 }
 
+fn validate_board_owned_pin(pin: u8) -> Result<(), GpioError> {
+    if RP2350_PICO2W_RESERVED_GPIO_PINS.contains(&pin) {
+        Ok(())
+    } else {
+        Err(GpioError::invalid())
+    }
+}
+
 fn claim(pin: u8) -> Result<(), GpioError> {
     validate_pin(pin)?;
     let mask = 1_u32 << pin;
@@ -198,6 +206,37 @@ fn claim(pin: u8) -> Result<(), GpioError> {
             Err(observed) => claimed = observed,
         }
     }
+}
+
+fn claim_any(pin: u8) -> Result<(), GpioError> {
+    let mask = 1_u32 << pin;
+    let mut claimed = CLAIMED_GPIO.load(Ordering::Acquire);
+    loop {
+        if claimed & mask != 0 {
+            return Err(GpioError::state_conflict());
+        }
+        match CLAIMED_GPIO.compare_exchange_weak(
+            claimed,
+            claimed | mask,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(observed) => claimed = observed,
+        }
+    }
+}
+
+/// Claims one board-reserved GPIO pin for internal Pico 2 W wiring use.
+///
+/// # Errors
+///
+/// Returns an error when the pin is not part of the board-reserved radio wiring or is already
+/// claimed.
+pub(crate) fn claim_board_owned_pin(pin: u8) -> Result<GpioPinHardware, GpioError> {
+    validate_board_owned_pin(pin)?;
+    claim_any(pin)?;
+    Ok(GpioPinHardware { pin })
 }
 
 fn release(pin: u8) {

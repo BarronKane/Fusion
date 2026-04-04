@@ -1,7 +1,9 @@
 use super::{
+    BLUETOOTH_CONTROLLERS,
     CLK_REF_AUX_SOURCES,
     CLK_REF_MAIN_SOURCES,
     CLOCK_TREE,
+    CortexMBluetoothTransportBinding,
     CortexMDmaRequestClass,
     CortexMEventTimeoutImplementation,
     CortexMIrqClass,
@@ -19,6 +21,7 @@ use super::{
     RP2350_EVENT_TIMEOUT_MAX_RELATIVE_TIMEOUT,
     RP2350_EVENT_TIMEOUT_TICK_HZ,
     RP2350_OVERCLOCK_PROFILES,
+    RP2350_PICO2W_RESERVED_GPIO_PINS,
     Rp2350PowerModeAction,
     event_timeout_support,
     rp2350_chip_manufacturer,
@@ -101,6 +104,27 @@ fn dma_and_power_surfaces_are_exposed_for_rp2350() {
     assert_eq!(DMA_REQUESTS[0].name, "pio0-tx0");
     assert_eq!(DMA_REQUESTS[55].name, "dma-timer0");
     assert_eq!(POWER_MODES[0].name, "sleep-wfi");
+}
+
+#[test]
+fn bluetooth_binding_tracks_pico2w_wiring_truth() {
+    assert_eq!(BLUETOOTH_CONTROLLERS.len(), 1);
+    let controller = BLUETOOTH_CONTROLLERS[0];
+    assert_eq!(controller.vendor, "infineon");
+    assert_eq!(controller.chip, "CYW43439");
+    assert_eq!(controller.power_gpio, Some(23));
+    assert_eq!(controller.reset_gpio, None);
+    assert_eq!(controller.wake_gpio, None);
+    assert_eq!(RP2350_PICO2W_RESERVED_GPIO_PINS, [23, 24, 25, 29]);
+
+    assert!(matches!(
+        controller.transport,
+        CortexMBluetoothTransportBinding::Spi3WireSharedDataIrq {
+            clock_gpio: 29,
+            chip_select_gpio: 25,
+            data_irq_gpio: 24,
+        }
+    ));
 }
 
 #[test]

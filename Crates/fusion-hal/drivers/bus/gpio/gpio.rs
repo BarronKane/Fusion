@@ -4,10 +4,11 @@ use core::marker::PhantomData;
 
 pub use crate::contract::drivers::bus::gpio::*;
 
-pub mod contract;
+#[path = "interface/interface.rs"]
+pub mod interface;
 mod unsupported;
 
-pub use contract::{
+use self::interface::contract::{
     GpioHardware,
     GpioHardwarePin,
 };
@@ -67,6 +68,12 @@ impl<P> GpioPin<P>
 where
     P: GpioHardwarePin,
 {
+    /// Wraps one already-owned hardware-facing GPIO pin.
+    #[must_use]
+    pub fn from_inner(inner: P) -> Self {
+        Self { inner }
+    }
+
     /// Returns the concrete pin number.
     #[must_use]
     pub fn pin(&self) -> u8 {

@@ -22,6 +22,7 @@ use crate::contract::pal::{
     HardwareWriteSummary,
 };
 pub use super::board_contract::{
+    CortexMBluetoothControllerBinding,
     CortexMClockDescriptor,
     CortexMDmaControllerDescriptor,
     CortexMDmaRequestClass,
@@ -275,6 +276,12 @@ pub fn owned_memory_region(index: usize) -> Option<CortexMMemoryRegionDescriptor
 #[must_use]
 pub fn peripherals() -> &'static [CortexMPeripheralDescriptor] {
     board_contract::peripherals(system_soc())
+}
+
+/// Returns the selected generic Cortex-M board's Bluetooth controller bindings.
+#[must_use]
+pub fn bluetooth_controllers() -> &'static [CortexMBluetoothControllerBinding] {
+    board_contract::bluetooth_controllers(system_soc())
 }
 
 /// Returns the selected generic Cortex-M IRQ descriptors.

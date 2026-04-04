@@ -7,3 +7,6 @@
 
 #[cfg(all(target_os = "none", feature = "soc-rp2350"))]
 pub use crate::pal::soc::cortex_m::rp2350::drivers::bus;
+
+#[cfg(all(target_os = "none", feature = "soc-rp2350"))]
+pub use crate::pal::soc::cortex_m::rp2350::drivers::net;

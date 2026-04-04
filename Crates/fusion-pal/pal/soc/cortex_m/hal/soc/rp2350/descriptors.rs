@@ -1692,6 +1692,25 @@ pub(crate) const PAL_POWER_MODES: [PowerModeDescriptor; 2] = [
     },
 ];
 
+/// Pico 2 W board-reserved RP2350 GPIO pins consumed by the onboard CYW43439 wiring.
+pub(crate) const RP2350_PICO2W_RESERVED_GPIO_PINS: [u8; 4] = [23, 24, 25, 29];
+
+/// Board-visible Bluetooth controller bindings for the current RP2350 / Pico 2 W contract.
+pub(crate) const BLUETOOTH_CONTROLLERS: [CortexMBluetoothControllerBinding; 1] =
+    [CortexMBluetoothControllerBinding {
+        name: "pico2w-cyw43439",
+        vendor: "infineon",
+        chip: "CYW43439",
+        transport: CortexMBluetoothTransportBinding::Spi3WireSharedDataIrq {
+            clock_gpio: 29,
+            chip_select_gpio: 25,
+            data_irq_gpio: 24,
+        },
+        power_gpio: Some(23),
+        reset_gpio: None,
+        wake_gpio: None,
+    }];
+
 // NOTE: the current selected RP2350 board contract follows the open Pico 2 W schematic and the
 // local RP2350 example linker layout, both of which assume a 32 Mbit / 4 MiB external flash
 // population. Raspberry Pi's Pico 2 W prose datasheet currently disagrees and mentions a

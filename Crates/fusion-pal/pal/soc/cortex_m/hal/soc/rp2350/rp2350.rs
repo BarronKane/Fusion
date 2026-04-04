@@ -46,6 +46,8 @@ use crate::contract::pal::{
     HardwareWriteSummary,
 };
 pub use super::board_contract::{
+    CortexMBluetoothControllerBinding,
+    CortexMBluetoothTransportBinding,
     CortexMClockDescriptor,
     CortexMDmaControllerDescriptor,
     CortexMDmaRequestClass,
@@ -956,6 +958,10 @@ impl CortexMSocBoard for Rp2350Soc {
         &PERIPHERALS
     }
 
+    fn bluetooth_controllers(&self) -> &'static [CortexMBluetoothControllerBinding] {
+        &BLUETOOTH_CONTROLLERS
+    }
+
     fn irqs(&self) -> &'static [CortexMIrqDescriptor] {
         &IRQS
     }
@@ -1582,6 +1588,12 @@ pub fn owned_memory_region(index: usize) -> Option<CortexMMemoryRegionDescriptor
 #[must_use]
 pub fn peripherals() -> &'static [CortexMPeripheralDescriptor] {
     board_contract::peripherals(system_soc())
+}
+
+/// Returns the selected RP2350 board's Bluetooth controller bindings.
+#[must_use]
+pub fn bluetooth_controllers() -> &'static [CortexMBluetoothControllerBinding] {
+    board_contract::bluetooth_controllers(system_soc())
 }
 
 /// Returns the selected RP2350 IRQ descriptors.
