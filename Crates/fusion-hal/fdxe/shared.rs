@@ -1,3 +1,12 @@
+// Shared FDXE ABI body.
+//
+// This file is the single source of truth for the FDXE layout and is consumed in three places:
+// - directly by `fusion-hal::fdxe`
+// - staged into `OUT_DIR` by `fusion-firmware/build.rs`
+// - staged into `OUT_DIR` by the CYW43439 driver crate `build.rs`
+//
+// If this file moves, update the two build scripts and `fusion-hal/fdxe/fdxe.rs` together.
+
 use core::marker::PhantomData;
 use core::mem::{
     MaybeUninit,
@@ -130,6 +139,12 @@ unsafe impl Sync for FdxeModuleV1 {}
 
 impl FdxeModuleV1 {
     /// Creates one exported version-1 FDXE module header.
+    ///
+    /// `module_name` is the stable identity of the driver-module crate itself.
+    ///
+    /// `target_name` is the build/profile/board target identity that this concrete module image
+    /// was produced for. These are intentionally distinct even when early modules happen to use
+    /// very similar strings.
     #[must_use]
     pub const fn new(
         module_name: &'static str,

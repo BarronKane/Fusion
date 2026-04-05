@@ -9,7 +9,7 @@ use fusion_hal::contract::drivers::driver::{
     DriverIdentity,
 };
 
-include!("../../fusion-hal/fdxe/shared.rs");
+include!(concat!(env!("OUT_DIR"), "/fdxe_shared.rs"));
 
 #[cfg(target_os = "none")]
 unsafe extern "C" {

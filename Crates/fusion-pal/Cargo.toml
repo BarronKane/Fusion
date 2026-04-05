@@ -15,37 +15,34 @@ path = "fusion-pal.rs"
 
 [features]
 default = ["std", "hosted"]
-std = ["fd-net-chipset-infineon-cyw43439/std"]
-soc = ["fd-net-chipset-infineon-cyw43439/soc"]
+std = []
+soc = []
 hosted = ["std"]
-critical-safe = ["fd-net-chipset-infineon-cyw43439/critical-safe"]
-debug-profile = ["fd-net-chipset-infineon-cyw43439/debug-profile"]
-debug-insights = ["fd-net-chipset-infineon-cyw43439/debug-insights"]
+critical-safe = []
+debug-profile = []
+debug-insights = []
 sys-cortex-m = [
     "soc",
     "dep:cortex-m",
     "dep:cortex-m-rt",
-    "fd-net-chipset-infineon-cyw43439/sys-cortex-m",
 ]
-soc-rp2350 = ["sys-cortex-m", "fd-net-chipset-infineon-cyw43439/soc-rp2350"]
-sys-fusion-kn = ["hosted", "dep:fusion-kn", "fd-net-chipset-infineon-cyw43439/sys-fusion-kn"]
-cortex-m-vector-secure-world = ["fd-net-chipset-infineon-cyw43439/cortex-m-vector-secure-world"]
-cortex-m-vector-nonsecure-world = [
-    "fd-net-chipset-infineon-cyw43439/cortex-m-vector-nonsecure-world",
-]
+soc-rp2350 = ["sys-cortex-m", "dep:fd-net-chipset-infineon-cyw43439", "fd-net-chipset-infineon-cyw43439/soc-rp2350"]
+sys-fusion-kn = ["hosted", "dep:fusion-kn"]
+cortex-m-vector-secure-world = []
+cortex-m-vector-nonsecure-world = []
 
 [lints]
 workspace = true
 
 [dependencies]
 bitflags.workspace = true
-fd-net-chipset-infineon-cyw43439 = { workspace = true, default-features = false }
 fusion-hal = { workspace = true, default-features = false }
 fusion-kn = { workspace = true, optional = true, features = ["client"] }
 
 [target.'cfg(target_os = "none")'.dependencies]
 cortex-m = { workspace = true, optional = true }
 cortex-m-rt = { workspace = true, optional = true }
+fd-net-chipset-infineon-cyw43439 = { workspace = true, default-features = false, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true

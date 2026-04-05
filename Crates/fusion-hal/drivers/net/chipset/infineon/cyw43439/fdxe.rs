@@ -11,7 +11,7 @@ mod abi {
         DriverIdentity,
     };
 
-    include!("../../../../../fdxe/shared.rs");
+    include!(concat!(env!("OUT_DIR"), "/fdxe_shared.rs"));
 }
 
 use crate::{
@@ -32,10 +32,11 @@ const DRIVER_EXPORTS: [FdxeDriverExportV1; 2] = [
     FdxeDriverExportV1::new("net.wifi.infineon.cyw43439", wifi::driver_metadata),
 ];
 
+#[allow(non_upper_case_globals)]
 #[unsafe(no_mangle)]
 pub static fdxe_module_v1: FdxeModuleV1 = FdxeModuleV1::new(
     "fd-net-chipset-infineon-cyw43439",
-    "fd-net-chipset-infineon-cyw43439",
+    env!("FUSION_FDXE_TARGET_NAME"),
     &DRIVER_EXPORTS,
 );
 

@@ -1,4 +1,6 @@
 [toolchain]
 # Must match rust-gpu main.
+# The workspace is edition-2024 and uses syntax such as `#[unsafe(no_mangle)]`; do not drag the
+# toolchain/edition floor backward unless you want a deeply stupid failure mode.
 channel = "nightly-2025-06-30"
 components = ["rust-src", "rustc-dev", "llvm-tools", "rustfmt", "clippy"]
