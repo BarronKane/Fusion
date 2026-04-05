@@ -198,6 +198,8 @@ pub enum CortexMBluetoothTransportBinding {
         chip_select_gpio: u8,
         /// Shared bidirectional data and IRQ GPIO.
         data_irq_gpio: u8,
+        /// Intended host transport clock rate for this SPI-style lane.
+        target_clock_hz: Option<u32>,
     },
     /// Four-wire SPI transport with one dedicated IRQ GPIO.
     Spi4Wire {
@@ -211,6 +213,8 @@ pub enum CortexMBluetoothTransportBinding {
         miso_gpio: u8,
         /// Dedicated IRQ GPIO when the controller exposes one.
         irq_gpio: Option<u8>,
+        /// Intended host transport clock rate for this SPI lane.
+        target_clock_hz: Option<u32>,
     },
     /// UART HCI transport.
     Uart {
@@ -222,6 +226,8 @@ pub enum CortexMBluetoothTransportBinding {
         cts_gpio: Option<u8>,
         /// Optional controller-to-host flow-control line.
         rts_gpio: Option<u8>,
+        /// Intended host UART baud rate.
+        target_baud: Option<u32>,
     },
 }
 
@@ -236,6 +242,8 @@ pub enum CortexMWifiTransportBinding {
         chip_select_gpio: u8,
         /// Shared bidirectional data and IRQ GPIO.
         data_irq_gpio: u8,
+        /// Intended host transport clock rate for this SPI-style lane.
+        target_clock_hz: Option<u32>,
     },
     /// Four-wire SPI transport with one dedicated IRQ GPIO.
     Spi4Wire {
@@ -249,6 +257,8 @@ pub enum CortexMWifiTransportBinding {
         miso_gpio: u8,
         /// Dedicated IRQ GPIO when the controller exposes one.
         irq_gpio: Option<u8>,
+        /// Intended host transport clock rate for this SPI lane.
+        target_clock_hz: Option<u32>,
     },
     /// SDIO transport.
     Sdio {
@@ -260,7 +270,71 @@ pub enum CortexMWifiTransportBinding {
         data_gpios: [u8; 4],
         /// Dedicated IRQ GPIO when the controller exposes one.
         irq_gpio: Option<u8>,
+        /// Intended host SDIO clock rate.
+        target_clock_hz: Option<u32>,
     },
+}
+
+/// Board-visible controller reference/sleep clock truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CortexMControllerClockProfile {
+    /// Selected reference clock frequency driven into the controller when one is known.
+    pub reference_clock_hz: Option<u32>,
+    /// Selected external sleep clock frequency when one is known.
+    pub sleep_clock_hz: Option<u32>,
+}
+
+/// Board-visible controller asset source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CortexMControllerAssetSource {
+    /// No truthful asset source is currently surfaced by the board.
+    Missing,
+    /// The asset is compiled into the image as a static byte slice.
+    EmbeddedStatic {
+        /// Human-readable asset name.
+        name: &'static str,
+        /// Embedded asset payload.
+        image: &'static [u8],
+    },
+    /// The board can source the asset from some board-local storage later.
+    BoardStorage {
+        /// Human-readable asset name or lookup key.
+        name: &'static str,
+    },
+    /// The board can source the asset from firmware or ROM services later.
+    FirmwareService {
+        /// Human-readable asset name or lookup key.
+        name: &'static str,
+    },
+}
+
+impl CortexMControllerAssetSource {
+    /// Returns the embedded image when this source is `EmbeddedStatic`.
+    #[must_use]
+    pub const fn embedded_image(self) -> Option<&'static [u8]> {
+        match self {
+            Self::EmbeddedStatic { image, .. } => Some(image),
+            Self::Missing | Self::BoardStorage { .. } | Self::FirmwareService { .. } => None,
+        }
+    }
+}
+
+/// Board-visible Bluetooth controller asset bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CortexMBluetoothControllerAssets {
+    /// Optional Bluetooth patch image source.
+    pub patch: CortexMControllerAssetSource,
+}
+
+/// Board-visible Wi-Fi controller asset bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CortexMWifiControllerAssets {
+    /// WLAN firmware image source.
+    pub firmware: CortexMControllerAssetSource,
+    /// WLAN board/NVRAM configuration source.
+    pub nvram: CortexMControllerAssetSource,
+    /// Optional CLM/regulatory data source.
+    pub clm: CortexMControllerAssetSource,
 }
 
 /// Static Bluetooth controller binding surfaced by one Cortex-M board.
@@ -280,6 +354,10 @@ pub struct CortexMBluetoothControllerBinding {
     pub reset_gpio: Option<u8>,
     /// Optional wake GPIO controlled by the Cortex-M host.
     pub wake_gpio: Option<u8>,
+    /// Controller clock truth surfaced by the board.
+    pub clock: CortexMControllerClockProfile,
+    /// Controller asset sources surfaced by the board.
+    pub assets: CortexMBluetoothControllerAssets,
 }
 
 /// Static Wi-Fi controller binding surfaced by one Cortex-M board.
@@ -299,6 +377,10 @@ pub struct CortexMWifiControllerBinding {
     pub reset_gpio: Option<u8>,
     /// Optional wake GPIO controlled by the Cortex-M host.
     pub wake_gpio: Option<u8>,
+    /// Controller clock truth surfaced by the board.
+    pub clock: CortexMControllerClockProfile,
+    /// Controller asset sources surfaced by the board.
+    pub assets: CortexMWifiControllerAssets,
 }
 
 /// Coarse class for a board-visible Cortex-M IRQ line.

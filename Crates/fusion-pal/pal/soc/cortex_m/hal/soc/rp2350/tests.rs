@@ -3,6 +3,7 @@ use super::{
     CLK_REF_AUX_SOURCES,
     CLK_REF_MAIN_SOURCES,
     CLOCK_TREE,
+    CortexMControllerAssetSource,
     CortexMBluetoothTransportBinding,
     CortexMDmaRequestClass,
     CortexMEventTimeoutImplementation,
@@ -116,6 +117,12 @@ fn bluetooth_binding_tracks_pico2w_wiring_truth() {
     assert_eq!(controller.power_gpio, Some(23));
     assert_eq!(controller.reset_gpio, None);
     assert_eq!(controller.wake_gpio, None);
+    assert_eq!(controller.clock.reference_clock_hz, Some(37_400_000));
+    assert_eq!(controller.clock.sleep_clock_hz, None);
+    assert!(matches!(
+        controller.assets.patch,
+        CortexMControllerAssetSource::Missing
+    ));
     assert_eq!(RP2350_PICO2W_RESERVED_GPIO_PINS, [23, 24, 25, 29]);
 
     assert!(matches!(
@@ -124,6 +131,7 @@ fn bluetooth_binding_tracks_pico2w_wiring_truth() {
             clock_gpio: 29,
             chip_select_gpio: 25,
             data_irq_gpio: 24,
+            target_clock_hz: Some(31_250_000),
         }
     ));
 }
@@ -137,6 +145,20 @@ fn wifi_binding_tracks_pico2w_wiring_truth() {
     assert_eq!(controller.power_gpio, Some(23));
     assert_eq!(controller.reset_gpio, None);
     assert_eq!(controller.wake_gpio, None);
+    assert_eq!(controller.clock.reference_clock_hz, Some(37_400_000));
+    assert_eq!(controller.clock.sleep_clock_hz, None);
+    assert!(matches!(
+        controller.assets.firmware,
+        CortexMControllerAssetSource::Missing
+    ));
+    assert!(matches!(
+        controller.assets.nvram,
+        CortexMControllerAssetSource::Missing
+    ));
+    assert!(matches!(
+        controller.assets.clm,
+        CortexMControllerAssetSource::Missing
+    ));
     assert_eq!(RP2350_PICO2W_RESERVED_GPIO_PINS, [23, 24, 25, 29]);
 
     assert!(matches!(
@@ -145,6 +167,7 @@ fn wifi_binding_tracks_pico2w_wiring_truth() {
             clock_gpio: 29,
             chip_select_gpio: 25,
             data_irq_gpio: 24,
+            target_clock_hz: Some(31_250_000),
         }
     ));
 }

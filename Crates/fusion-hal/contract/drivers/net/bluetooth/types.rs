@@ -107,6 +107,126 @@ pub enum BluetoothTransport {
     Le,
 }
 
+/// Canonical HCI packet type carried over a controller-facing Bluetooth transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum BluetoothHciPacketType {
+    Command = 0x01,
+    AclData = 0x02,
+    ScoData = 0x03,
+    Event = 0x04,
+    IsoData = 0x05,
+}
+
+impl BluetoothHciPacketType {
+    /// Returns the canonical wire discriminator.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Parses one canonical wire discriminator.
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0x01 => Some(Self::Command),
+            0x02 => Some(Self::AclData),
+            0x03 => Some(Self::ScoData),
+            0x04 => Some(Self::Event),
+            0x05 => Some(Self::IsoData),
+            _ => None,
+        }
+    }
+}
+
+/// Canonical Bluetooth HCI command header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BluetoothHciCommandHeader {
+    pub opcode: u16,
+    pub parameter_length: u8,
+}
+
+impl BluetoothHciCommandHeader {
+    pub const ENCODED_LEN: usize = 3;
+
+    #[must_use]
+    pub const fn encode(self) -> [u8; Self::ENCODED_LEN] {
+        [
+            (self.opcode & 0x00ff) as u8,
+            ((self.opcode >> 8) & 0x00ff) as u8,
+            self.parameter_length,
+        ]
+    }
+
+    #[must_use]
+    pub const fn decode(bytes: [u8; Self::ENCODED_LEN]) -> Self {
+        Self {
+            opcode: u16::from_le_bytes([bytes[0], bytes[1]]),
+            parameter_length: bytes[2],
+        }
+    }
+}
+
+/// Canonical Bluetooth HCI event header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BluetoothHciEventHeader {
+    pub event_code: u8,
+    pub parameter_length: u8,
+}
+
+impl BluetoothHciEventHeader {
+    pub const ENCODED_LEN: usize = 2;
+
+    #[must_use]
+    pub const fn encode(self) -> [u8; Self::ENCODED_LEN] {
+        [self.event_code, self.parameter_length]
+    }
+
+    #[must_use]
+    pub const fn decode(bytes: [u8; Self::ENCODED_LEN]) -> Self {
+        Self {
+            event_code: bytes[0],
+            parameter_length: bytes[1],
+        }
+    }
+}
+
+/// Canonical Bluetooth HCI ACL header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BluetoothHciAclHeader {
+    pub handle_and_flags: u16,
+    pub payload_length: u16,
+}
+
+impl BluetoothHciAclHeader {
+    pub const ENCODED_LEN: usize = 4;
+
+    #[must_use]
+    pub const fn encode(self) -> [u8; Self::ENCODED_LEN] {
+        [
+            (self.handle_and_flags & 0x00ff) as u8,
+            ((self.handle_and_flags >> 8) & 0x00ff) as u8,
+            (self.payload_length & 0x00ff) as u8,
+            ((self.payload_length >> 8) & 0x00ff) as u8,
+        ]
+    }
+
+    #[must_use]
+    pub const fn decode(bytes: [u8; Self::ENCODED_LEN]) -> Self {
+        Self {
+            handle_and_flags: u16::from_le_bytes([bytes[0], bytes[1]]),
+            payload_length: u16::from_le_bytes([bytes[2], bytes[3]]),
+        }
+    }
+}
+
+/// One canonical Bluetooth HCI frame view over caller-owned storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BluetoothHciFrame<'a> {
+    pub packet_type: BluetoothHciPacketType,
+    pub bytes: &'a [u8],
+}
+
 /// LE PHY selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BluetoothLePhy {
@@ -203,6 +323,8 @@ pub struct BluetoothAdapterDescriptor {
     pub id: BluetoothAdapterId,
     pub name: &'static str,
     pub vendor_identity: Option<NetVendorIdentity>,
+    /// Whether this adapter shares one underlying chipset with other surfaced network facets.
+    pub shared_chipset: bool,
     pub address: Option<BluetoothAddress>,
     pub version: BluetoothVersionRange,
     pub support: BluetoothAdapterSupport,

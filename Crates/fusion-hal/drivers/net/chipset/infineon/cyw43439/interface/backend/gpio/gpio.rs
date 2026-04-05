@@ -37,12 +37,20 @@ use crate::drivers::bus::gpio::{
     GpioPin,
 };
 use crate::drivers::bus::gpio::interface::contract::GpioHardwarePin;
+use crate::drivers::net::chipset::infineon::cyw43439::firmware::Cyw43439FirmwareAssets;
 use crate::drivers::net::chipset::infineon::cyw43439::bluetooth::CYW43439_BLUETOOTH_VENDOR_IDENTITY;
 use crate::drivers::net::chipset::infineon::cyw43439::interface::contract::{
     Cyw43439ControllerCaps,
     Cyw43439Error,
     Cyw43439HardwareContract,
     Cyw43439Radio,
+};
+use crate::drivers::net::chipset::infineon::cyw43439::transport::{
+    Cyw43439BluetoothTransport,
+    Cyw43439BluetoothTransportClockProfile,
+    Cyw43439TransportTopology,
+    Cyw43439WlanTransport,
+    Cyw43439WlanTransportClockProfile,
 };
 use crate::drivers::net::chipset::infineon::cyw43439::wifi::CYW43439_WIFI_VENDOR_IDENTITY;
 
@@ -57,6 +65,7 @@ const CYW43439_BLUETOOTH_ADAPTERS: [BluetoothAdapterDescriptor; 1] = [BluetoothA
     id: CYW43439_BLUETOOTH_ADAPTER_ID,
     name: "CYW43439",
     vendor_identity: Some(CYW43439_BLUETOOTH_VENDOR_IDENTITY),
+    shared_chipset: true,
     address: None,
     version: BluetoothVersionRange {
         minimum: BluetoothVersion::new(5, 2),
@@ -88,6 +97,7 @@ const CYW43439_WIFI_ADAPTERS: [WifiAdapterDescriptor; 1] = [WifiAdapterDescripto
     id: CYW43439_WIFI_ADAPTER_ID,
     name: "CYW43439",
     vendor_identity: Some(CYW43439_WIFI_VENDOR_IDENTITY),
+    shared_chipset: true,
     mac_address: None,
     regulatory_domain: None,
     channels: &CYW43439_WIFI_CHANNELS,
@@ -115,15 +125,6 @@ const CYW43439_WIFI_ADAPTERS: [WifiAdapterDescriptor; 1] = [WifiAdapterDescripto
     },
 }];
 
-/// Optional firmware/config images surfaced for one CYW43439 combo chip.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Cyw43439Images {
-    pub bluetooth_firmware: Option<&'static [u8]>,
-    pub bluetooth_nvram: Option<&'static [u8]>,
-    pub wifi_firmware: Option<&'static [u8]>,
-    pub wifi_nvram: Option<&'static [u8]>,
-}
-
 /// CYW43439 backend composed over owned GPIO pins.
 #[derive(Debug)]
 pub struct GpioBackend<
@@ -140,12 +141,25 @@ pub struct GpioBackend<
     power: Option<GpioPin<PowerPin>>,
     reset: Option<GpioPin<ResetPin>>,
     wake: Option<GpioPin<WakePin>>,
+    bluetooth_transport: Cyw43439BluetoothTransport,
+    bluetooth_target_rate: Option<u32>,
+    wifi_transport: Cyw43439WlanTransport,
+    wifi_target_clock_hz: Option<u32>,
+    transport_topology: Cyw43439TransportTopology,
+    host_source_clock_hz: Option<fn() -> Option<u64>>,
+    reference_clock_hz: Option<u32>,
+    sleep_clock_hz: Option<u32>,
     delay: fn(u32),
-    images: Cyw43439Images,
+    firmware: Cyw43439FirmwareAssets,
     bluetooth_available: bool,
     wifi_available: bool,
     bluetooth_claimed: bool,
     wifi_claimed: bool,
+    bluetooth_enabled: bool,
+    wifi_enabled: bool,
+    shared_transport_owner: Option<Cyw43439Radio>,
+    bluetooth_transport_acquired: bool,
+    wifi_transport_acquired: bool,
     powered: bool,
     power_configured: bool,
     reset_configured: bool,
@@ -170,8 +184,16 @@ impl<
         power: Option<GpioPin<PowerPin>>,
         reset: Option<GpioPin<ResetPin>>,
         wake: Option<GpioPin<WakePin>>,
+        bluetooth_transport: Cyw43439BluetoothTransport,
+        bluetooth_target_rate: Option<u32>,
+        wifi_transport: Cyw43439WlanTransport,
+        wifi_target_clock_hz: Option<u32>,
+        transport_topology: Cyw43439TransportTopology,
+        host_source_clock_hz: Option<fn() -> Option<u64>>,
+        reference_clock_hz: Option<u32>,
+        sleep_clock_hz: Option<u32>,
         delay: fn(u32),
-        images: Cyw43439Images,
+        firmware: Cyw43439FirmwareAssets,
         bluetooth_available: bool,
         wifi_available: bool,
     ) -> Self {
@@ -182,12 +204,25 @@ impl<
             power,
             reset,
             wake,
+            bluetooth_transport,
+            bluetooth_target_rate,
+            wifi_transport,
+            wifi_target_clock_hz,
+            transport_topology,
+            host_source_clock_hz,
+            reference_clock_hz,
+            sleep_clock_hz,
             delay,
-            images,
+            firmware,
             bluetooth_available,
             wifi_available,
             bluetooth_claimed: false,
             wifi_claimed: false,
+            bluetooth_enabled: false,
+            wifi_enabled: false,
+            shared_transport_owner: None,
+            bluetooth_transport_acquired: false,
+            wifi_transport_acquired: false,
             powered: false,
             power_configured: false,
             reset_configured: false,
@@ -224,6 +259,64 @@ impl<
             Cyw43439Radio::Bluetooth => &mut self.bluetooth_claimed,
             Cyw43439Radio::Wifi => &mut self.wifi_claimed,
         }
+    }
+
+    fn claim_flag(&self, radio: Cyw43439Radio) -> bool {
+        match radio {
+            Cyw43439Radio::Bluetooth => self.bluetooth_claimed,
+            Cyw43439Radio::Wifi => self.wifi_claimed,
+        }
+    }
+
+    fn enabled_flag_mut(&mut self, radio: Cyw43439Radio) -> &mut bool {
+        match radio {
+            Cyw43439Radio::Bluetooth => &mut self.bluetooth_enabled,
+            Cyw43439Radio::Wifi => &mut self.wifi_enabled,
+        }
+    }
+
+    fn enabled_flag(&self, radio: Cyw43439Radio) -> bool {
+        match radio {
+            Cyw43439Radio::Bluetooth => self.bluetooth_enabled,
+            Cyw43439Radio::Wifi => self.wifi_enabled,
+        }
+    }
+
+    fn any_enabled(&self) -> bool {
+        self.bluetooth_enabled || self.wifi_enabled
+    }
+
+    fn transport_acquired_flag_mut(&mut self, radio: Cyw43439Radio) -> &mut bool {
+        match radio {
+            Cyw43439Radio::Bluetooth => &mut self.bluetooth_transport_acquired,
+            Cyw43439Radio::Wifi => &mut self.wifi_transport_acquired,
+        }
+    }
+
+    fn transport_acquired_flag(&self, radio: Cyw43439Radio) -> bool {
+        match radio {
+            Cyw43439Radio::Bluetooth => self.bluetooth_transport_acquired,
+            Cyw43439Radio::Wifi => self.wifi_transport_acquired,
+        }
+    }
+
+    fn transport_held(&self, radio: Cyw43439Radio) -> bool {
+        match self.transport_topology {
+            Cyw43439TransportTopology::SharedBoardTransport => {
+                self.shared_transport_owner == Some(radio)
+            }
+            Cyw43439TransportTopology::SplitHostTransports => self.transport_acquired_flag(radio),
+        }
+    }
+
+    #[must_use]
+    pub fn bluetooth_transport_target_rate(&self) -> Option<u32> {
+        self.bluetooth_target_rate
+    }
+
+    #[must_use]
+    pub fn wifi_transport_target_clock_hz(&self) -> Option<u32> {
+        self.wifi_target_clock_hz
     }
 
     fn controller_caps_inner(&self) -> Cyw43439ControllerCaps {
@@ -280,6 +373,38 @@ impl<
         }
     }
 
+    fn bluetooth_transport(&self) -> Result<Cyw43439BluetoothTransport, Cyw43439Error> {
+        if !self.bluetooth_available {
+            return Err(Cyw43439Error::unsupported());
+        }
+
+        Ok(self.bluetooth_transport)
+    }
+
+    fn bluetooth_transport_clock_profile(
+        &self,
+    ) -> Result<Cyw43439BluetoothTransportClockProfile, Cyw43439Error> {
+        if !self.bluetooth_available {
+            return Err(Cyw43439Error::unsupported());
+        }
+
+        let host_source_clock_hz = self.host_source_clock_hz.and_then(|f| f());
+        Ok(match self.bluetooth_transport {
+            Cyw43439BluetoothTransport::HciUartH4 | Cyw43439BluetoothTransport::HciUartH5 => {
+                Cyw43439BluetoothTransportClockProfile::HciUart {
+                    target_baud: self.bluetooth_target_rate,
+                    host_source_clock_hz,
+                }
+            }
+            Cyw43439BluetoothTransport::BoardSharedSpiHci => {
+                Cyw43439BluetoothTransportClockProfile::BoardSharedSpiHci {
+                    target_clock_hz: self.bluetooth_target_rate,
+                    host_source_clock_hz,
+                }
+            }
+        })
+    }
+
     fn wifi_support(&self) -> WifiSupport {
         if !self.wifi_available {
             return WifiSupport::unsupported();
@@ -308,6 +433,48 @@ impl<
         }
     }
 
+    fn wifi_transport(&self) -> Result<Cyw43439WlanTransport, Cyw43439Error> {
+        if !self.wifi_available {
+            return Err(Cyw43439Error::unsupported());
+        }
+
+        Ok(self.wifi_transport)
+    }
+
+    fn wifi_transport_clock_profile(
+        &self,
+    ) -> Result<Cyw43439WlanTransportClockProfile, Cyw43439Error> {
+        if !self.wifi_available {
+            return Err(Cyw43439Error::unsupported());
+        }
+
+        let host_source_clock_hz = self.host_source_clock_hz.and_then(|f| f());
+        Ok(match self.wifi_transport {
+            Cyw43439WlanTransport::Gspi => Cyw43439WlanTransportClockProfile::Gspi {
+                target_clock_hz: self.wifi_target_clock_hz,
+                host_source_clock_hz,
+            },
+            Cyw43439WlanTransport::Sdio => Cyw43439WlanTransportClockProfile::Sdio {
+                target_clock_hz: self.wifi_target_clock_hz,
+                host_source_clock_hz,
+            },
+            Cyw43439WlanTransport::BoardSharedSpi => {
+                Cyw43439WlanTransportClockProfile::BoardSharedSpi {
+                    target_clock_hz: self.wifi_target_clock_hz,
+                    host_source_clock_hz,
+                }
+            }
+        })
+    }
+
+    fn transport_topology(&self) -> Result<Cyw43439TransportTopology, Cyw43439Error> {
+        if !self.bluetooth_available && !self.wifi_available {
+            return Err(Cyw43439Error::unsupported());
+        }
+
+        Ok(self.transport_topology)
+    }
+
     fn controller_caps(&self, radio: Cyw43439Radio) -> Cyw43439ControllerCaps {
         if self.radio_available(radio) {
             self.controller_caps_inner()
@@ -333,9 +500,53 @@ impl<
     }
 
     fn release_controller(&mut self, radio: Cyw43439Radio) {
-        if self.radio_available(radio) {
-            *self.claim_flag_mut(radio) = false;
+        if !self.radio_available(radio) {
+            return;
         }
+
+        self.release_transport(radio);
+        let _ = self.set_facet_enabled(radio, false);
+        *self.claim_flag_mut(radio) = false;
+    }
+
+    fn facet_enabled(&self, radio: Cyw43439Radio) -> Result<bool, Cyw43439Error> {
+        if !self.radio_available(radio) {
+            return Err(Cyw43439Error::unsupported());
+        }
+
+        Ok(self.enabled_flag(radio))
+    }
+
+    fn set_facet_enabled(
+        &mut self,
+        radio: Cyw43439Radio,
+        enabled: bool,
+    ) -> Result<(), Cyw43439Error> {
+        if !self.radio_available(radio) {
+            return Err(Cyw43439Error::unsupported());
+        }
+
+        if !self.claim_flag(radio) {
+            return Err(Cyw43439Error::state_conflict());
+        }
+
+        if self.enabled_flag(radio) == enabled {
+            return Ok(());
+        }
+
+        if enabled {
+            if !self.powered {
+                self.set_controller_powered(true)?;
+            }
+            *self.enabled_flag_mut(radio) = true;
+            return Ok(());
+        }
+
+        *self.enabled_flag_mut(radio) = false;
+        if !self.any_enabled() && self.powered {
+            self.set_controller_powered(false)?;
+        }
+        Ok(())
     }
 
     fn controller_powered(&self) -> Result<bool, Cyw43439Error> {
@@ -362,6 +573,42 @@ impl<
         Self::configure_output_pin(wake, awake, &mut self.wake_configured)
     }
 
+    fn acquire_transport(&mut self, radio: Cyw43439Radio) -> Result<(), Cyw43439Error> {
+        if !self.radio_available(radio) {
+            return Err(Cyw43439Error::unsupported());
+        }
+        if !self.claim_flag(radio) {
+            return Err(Cyw43439Error::state_conflict());
+        }
+
+        match self.transport_topology {
+            Cyw43439TransportTopology::SharedBoardTransport => match self.shared_transport_owner {
+                Some(owner) if owner != radio => Err(Cyw43439Error::busy()),
+                _ => {
+                    self.shared_transport_owner = Some(radio);
+                    Ok(())
+                }
+            },
+            Cyw43439TransportTopology::SplitHostTransports => {
+                *self.transport_acquired_flag_mut(radio) = true;
+                Ok(())
+            }
+        }
+    }
+
+    fn release_transport(&mut self, radio: Cyw43439Radio) {
+        match self.transport_topology {
+            Cyw43439TransportTopology::SharedBoardTransport => {
+                if self.shared_transport_owner == Some(radio) {
+                    self.shared_transport_owner = None;
+                }
+            }
+            Cyw43439TransportTopology::SplitHostTransports => {
+                *self.transport_acquired_flag_mut(radio) = false;
+            }
+        }
+    }
+
     fn wait_for_controller_irq(
         &mut self,
         radio: Cyw43439Radio,
@@ -370,12 +617,18 @@ impl<
         if !self.radio_available(radio) {
             return Err(Cyw43439Error::unsupported());
         }
+        if !self.transport_held(radio) {
+            return Err(Cyw43439Error::state_conflict());
+        }
         Err(Cyw43439Error::unsupported())
     }
 
     fn acknowledge_controller_irq(&mut self, radio: Cyw43439Radio) -> Result<(), Cyw43439Error> {
         if !self.radio_available(radio) {
             return Err(Cyw43439Error::unsupported());
+        }
+        if !self.transport_held(radio) {
+            return Err(Cyw43439Error::state_conflict());
         }
         Err(Cyw43439Error::unsupported())
     }
@@ -388,6 +641,9 @@ impl<
         if !self.radio_available(radio) {
             return Err(Cyw43439Error::unsupported());
         }
+        if !self.transport_held(radio) {
+            return Err(Cyw43439Error::state_conflict());
+        }
         Err(Cyw43439Error::unsupported())
     }
 
@@ -399,6 +655,9 @@ impl<
         if !self.radio_available(radio) {
             return Err(Cyw43439Error::unsupported());
         }
+        if !self.transport_held(radio) {
+            return Err(Cyw43439Error::state_conflict());
+        }
         Err(Cyw43439Error::unsupported())
     }
 
@@ -407,8 +666,8 @@ impl<
             return Err(Cyw43439Error::unsupported());
         }
         Ok(match radio {
-            Cyw43439Radio::Bluetooth => self.images.bluetooth_firmware,
-            Cyw43439Radio::Wifi => self.images.wifi_firmware,
+            Cyw43439Radio::Bluetooth => self.firmware.bluetooth.patch_image,
+            Cyw43439Radio::Wifi => self.firmware.wifi.firmware_image,
         })
     }
 
@@ -417,9 +676,33 @@ impl<
             return Err(Cyw43439Error::unsupported());
         }
         Ok(match radio {
-            Cyw43439Radio::Bluetooth => self.images.bluetooth_nvram,
-            Cyw43439Radio::Wifi => self.images.wifi_nvram,
+            Cyw43439Radio::Bluetooth => None,
+            Cyw43439Radio::Wifi => self.firmware.wifi.nvram_image,
         })
+    }
+
+    fn clm_image(&self, radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error> {
+        if !self.radio_available(radio) {
+            return Err(Cyw43439Error::unsupported());
+        }
+        Ok(match radio {
+            Cyw43439Radio::Bluetooth => None,
+            Cyw43439Radio::Wifi => self.firmware.wifi.clm_image,
+        })
+    }
+
+    fn reference_clock_hz(&self) -> Result<Option<u32>, Cyw43439Error> {
+        if !self.bluetooth_available && !self.wifi_available {
+            return Err(Cyw43439Error::unsupported());
+        }
+        Ok(self.reference_clock_hz)
+    }
+
+    fn sleep_clock_hz(&self) -> Result<Option<u32>, Cyw43439Error> {
+        if !self.bluetooth_available && !self.wifi_available {
+            return Err(Cyw43439Error::unsupported());
+        }
+        Ok(self.sleep_clock_hz)
     }
 
     fn delay_ms(&self, milliseconds: u32) {
@@ -443,5 +726,191 @@ fn map_gpio_error(error: crate::contract::drivers::bus::gpio::GpioError) -> Cyw4
         crate::contract::drivers::bus::gpio::GpioErrorKind::Platform(code) => {
             Cyw43439Error::platform(code)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Cyw43439HardwareContract,
+        Cyw43439Radio,
+        GpioBackend,
+    };
+    use crate::contract::drivers::bus::gpio::{
+        GpioCapabilities,
+        GpioDriveStrength,
+        GpioError,
+        GpioFunction,
+        GpioPull,
+    };
+    use crate::drivers::bus::gpio::GpioPin;
+    use crate::drivers::bus::gpio::interface::contract::GpioHardwarePin;
+    use crate::drivers::net::chipset::infineon::cyw43439::firmware::Cyw43439FirmwareAssets;
+    use crate::drivers::net::chipset::infineon::cyw43439::interface::contract::Cyw43439ErrorKind;
+    use crate::drivers::net::chipset::infineon::cyw43439::transport::{
+        Cyw43439BluetoothTransport,
+        Cyw43439TransportTopology,
+        Cyw43439WlanTransport,
+    };
+
+    type Cyw43439GpioBackend = GpioBackend<FakePin, FakePin, FakePin, FakePin, FakePin, FakePin>;
+
+    #[derive(Debug)]
+    struct FakePin {
+        pin: u8,
+        level: bool,
+        function: GpioFunction,
+    }
+
+    impl FakePin {
+        const fn new(pin: u8) -> Self {
+            Self {
+                pin,
+                level: false,
+                function: GpioFunction::Sio,
+            }
+        }
+    }
+
+    impl GpioHardwarePin for FakePin {
+        fn pin(&self) -> u8 {
+            self.pin
+        }
+
+        fn capabilities(&self) -> GpioCapabilities {
+            GpioCapabilities::INPUT.union(GpioCapabilities::OUTPUT)
+        }
+
+        fn set_function(&mut self, function: GpioFunction) -> Result<(), GpioError> {
+            self.function = function;
+            Ok(())
+        }
+
+        fn configure_input(&mut self) -> Result<(), GpioError> {
+            Ok(())
+        }
+
+        fn read_level(&self) -> Result<bool, GpioError> {
+            Ok(self.level)
+        }
+
+        fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {
+            self.level = initial_high;
+            Ok(())
+        }
+
+        fn set_level(&mut self, high: bool) -> Result<(), GpioError> {
+            self.level = high;
+            Ok(())
+        }
+
+        fn set_pull(&mut self, _pull: GpioPull) -> Result<(), GpioError> {
+            Ok(())
+        }
+
+        fn set_drive_strength(&mut self, _strength: GpioDriveStrength) -> Result<(), GpioError> {
+            Ok(())
+        }
+    }
+
+    fn fake_backend() -> Cyw43439GpioBackend {
+        GpioBackend::new(
+            GpioPin::from_inner(FakePin::new(29)),
+            GpioPin::from_inner(FakePin::new(25)),
+            GpioPin::from_inner(FakePin::new(24)),
+            Some(GpioPin::from_inner(FakePin::new(23))),
+            None,
+            None,
+            Cyw43439BluetoothTransport::BoardSharedSpiHci,
+            Some(31_250_000),
+            Cyw43439WlanTransport::BoardSharedSpi,
+            Some(31_250_000),
+            Cyw43439TransportTopology::SharedBoardTransport,
+            Some(|| Some(150_000_000)),
+            Some(37_400_000),
+            None,
+            |_| {},
+            Cyw43439FirmwareAssets::default(),
+            true,
+            true,
+        )
+    }
+
+    #[test]
+    fn facet_power_tracks_logical_enable_without_last_write_wins() {
+        let mut backend = fake_backend();
+
+        backend.claim_controller(Cyw43439Radio::Bluetooth).unwrap();
+        backend.claim_controller(Cyw43439Radio::Wifi).unwrap();
+        backend
+            .set_facet_enabled(Cyw43439Radio::Bluetooth, true)
+            .unwrap();
+        backend
+            .set_facet_enabled(Cyw43439Radio::Wifi, true)
+            .unwrap();
+
+        assert!(backend.controller_powered().unwrap());
+        assert!(backend.facet_enabled(Cyw43439Radio::Bluetooth).unwrap());
+        assert!(backend.facet_enabled(Cyw43439Radio::Wifi).unwrap());
+
+        backend
+            .set_facet_enabled(Cyw43439Radio::Bluetooth, false)
+            .unwrap();
+
+        assert!(backend.controller_powered().unwrap());
+        assert!(!backend.facet_enabled(Cyw43439Radio::Bluetooth).unwrap());
+        assert!(backend.facet_enabled(Cyw43439Radio::Wifi).unwrap());
+
+        backend
+            .set_facet_enabled(Cyw43439Radio::Wifi, false)
+            .unwrap();
+
+        assert!(!backend.controller_powered().unwrap());
+        assert!(!backend.facet_enabled(Cyw43439Radio::Wifi).unwrap());
+    }
+
+    #[test]
+    fn shared_transport_is_exclusive_across_facets() {
+        let mut backend = fake_backend();
+
+        backend.claim_controller(Cyw43439Radio::Bluetooth).unwrap();
+        backend.claim_controller(Cyw43439Radio::Wifi).unwrap();
+
+        backend.acquire_transport(Cyw43439Radio::Bluetooth).unwrap();
+
+        let error = backend.acquire_transport(Cyw43439Radio::Wifi).unwrap_err();
+        assert_eq!(error.kind(), Cyw43439ErrorKind::Busy);
+
+        backend.release_transport(Cyw43439Radio::Bluetooth);
+        backend.acquire_transport(Cyw43439Radio::Wifi).unwrap();
+    }
+
+    #[test]
+    fn split_topology_allows_independent_transport_leases() {
+        let mut backend = GpioBackend::new(
+            GpioPin::from_inner(FakePin::new(29)),
+            GpioPin::from_inner(FakePin::new(25)),
+            GpioPin::from_inner(FakePin::new(24)),
+            Some(GpioPin::from_inner(FakePin::new(23))),
+            None::<GpioPin<FakePin>>,
+            None::<GpioPin<FakePin>>,
+            Cyw43439BluetoothTransport::HciUartH4,
+            Some(3_000_000),
+            Cyw43439WlanTransport::Gspi,
+            Some(31_250_000),
+            Cyw43439TransportTopology::SplitHostTransports,
+            Some(|| Some(150_000_000)),
+            Some(37_400_000),
+            None,
+            |_| {},
+            Cyw43439FirmwareAssets::default(),
+            true,
+            true,
+        );
+
+        backend.claim_controller(Cyw43439Radio::Bluetooth).unwrap();
+        backend.claim_controller(Cyw43439Radio::Wifi).unwrap();
+        backend.acquire_transport(Cyw43439Radio::Bluetooth).unwrap();
+        backend.acquire_transport(Cyw43439Radio::Wifi).unwrap();
     }
 }

@@ -45,7 +45,6 @@ use fusion_hal::drivers::net::chipset::infineon::cyw43439::{
     interface::{
         backend::{
             gpio::{
-                Cyw43439Images,
                 GpioBackend as Cyw43439GpioBackend,
             },
         },
@@ -56,6 +55,14 @@ use fusion_hal::drivers::net::chipset::infineon::cyw43439::{
             Cyw43439HardwareContract,
             Cyw43439Radio,
         },
+    },
+    firmware::Cyw43439FirmwareAssets,
+    transport::{
+        Cyw43439BluetoothTransport,
+        Cyw43439BluetoothTransportClockProfile,
+        Cyw43439TransportTopology,
+        Cyw43439WlanTransport,
+        Cyw43439WlanTransportClockProfile,
     },
     wifi::{
         CYW43439 as UniversalWifiCYW43439,
@@ -71,6 +78,7 @@ use crate::pal::soc::cortex_m::rp2350::{
     CortexMWifiControllerBinding,
     CortexMWifiTransportBinding,
     bluetooth_controllers,
+    current_sys_clock_hz,
     monotonic_raw_now,
     monotonic_tick_hz,
     wifi_controllers,
@@ -102,6 +110,14 @@ pub type Wifi = UniversalWifiCYW43439<SelectedCyw43439Hardware>;
 struct Rp2350Cyw43439Binding {
     bluetooth_available: bool,
     wifi_available: bool,
+    bluetooth_transport: Cyw43439BluetoothTransport,
+    bluetooth_target_rate: Option<u32>,
+    wifi_transport: Cyw43439WlanTransport,
+    wifi_target_clock_hz: Option<u32>,
+    transport_topology: Cyw43439TransportTopology,
+    reference_clock_hz: Option<u32>,
+    sleep_clock_hz: Option<u32>,
+    firmware: Cyw43439FirmwareAssets,
     clock_gpio: u8,
     chip_select_gpio: u8,
     data_irq_gpio: u8,
@@ -161,7 +177,7 @@ impl SharedCyw43439Slot {
 
     fn with_backend<R>(&self, f: impl FnOnce(&SharedBackend) -> R) -> Result<R, Cyw43439Error> {
         self.ensure_initialized()?;
-        self.lock()?;
+        self.lock();
         let result = {
             // SAFETY: the backend is initialized once `ensure_initialized` returns and protected by
             // the spin mutex while borrowed.
@@ -177,7 +193,7 @@ impl SharedCyw43439Slot {
         f: impl FnOnce(&mut SharedBackend) -> R,
     ) -> Result<R, Cyw43439Error> {
         self.ensure_initialized()?;
-        self.lock()?;
+        self.lock();
         let result = {
             // SAFETY: the backend is initialized once `ensure_initialized` returns and protected by
             // the spin mutex while mutably borrowed.
@@ -188,7 +204,39 @@ impl SharedCyw43439Slot {
         Ok(result)
     }
 
-    fn lock(&self) -> Result<(), Cyw43439Error> {
+    fn with_backend_result<R>(
+        &self,
+        f: impl FnOnce(&SharedBackend) -> Result<R, Cyw43439Error>,
+    ) -> Result<R, Cyw43439Error> {
+        self.ensure_initialized()?;
+        self.lock();
+        let result = {
+            // SAFETY: the backend is initialized once `ensure_initialized` returns and protected by
+            // the spin mutex while borrowed.
+            let backend = unsafe { (*self.backend.get()).assume_init_ref() };
+            f(backend)
+        };
+        self.unlock();
+        result
+    }
+
+    fn with_backend_mut_result<R>(
+        &self,
+        f: impl FnOnce(&mut SharedBackend) -> Result<R, Cyw43439Error>,
+    ) -> Result<R, Cyw43439Error> {
+        self.ensure_initialized()?;
+        self.lock();
+        let result = {
+            // SAFETY: the backend is initialized once `ensure_initialized` returns and protected by
+            // the spin mutex while mutably borrowed.
+            let backend = unsafe { (*self.backend.get()).assume_init_mut() };
+            f(backend)
+        };
+        self.unlock();
+        result
+    }
+
+    fn lock(&self) {
         while self
             .lock
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -196,7 +244,6 @@ impl SharedCyw43439Slot {
         {
             spin_loop();
         }
-        Ok(())
     }
 
     fn unlock(&self) {
@@ -300,6 +347,32 @@ impl Cyw43439HardwareContract for SelectedCyw43439Hardware {
             .unwrap_or(&[])
     }
 
+    fn bluetooth_transport(&self) -> Result<Cyw43439BluetoothTransport, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_result(Cyw43439HardwareContract::bluetooth_transport)
+    }
+
+    fn bluetooth_transport_clock_profile(
+        &self,
+    ) -> Result<Cyw43439BluetoothTransportClockProfile, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_result(|backend| {
+            let host_source_clock_hz = rp2350_cyw43439_host_source_clock_hz();
+            match backend.bluetooth_transport()? {
+                Cyw43439BluetoothTransport::HciUartH4 | Cyw43439BluetoothTransport::HciUartH5 => {
+                    Ok(Cyw43439BluetoothTransportClockProfile::HciUart {
+                        target_baud: backend.bluetooth_transport_target_rate(),
+                        host_source_clock_hz,
+                    })
+                }
+                Cyw43439BluetoothTransport::BoardSharedSpiHci => {
+                    Ok(Cyw43439BluetoothTransportClockProfile::BoardSharedSpiHci {
+                        target_clock_hz: backend.bluetooth_transport_target_rate(),
+                        host_source_clock_hz,
+                    })
+                }
+            }
+        })
+    }
+
     fn wifi_support(&self) -> WifiSupport {
         CYW43439_SLOT
             .with_backend(Cyw43439HardwareContract::wifi_support)
@@ -314,6 +387,38 @@ impl Cyw43439HardwareContract for SelectedCyw43439Hardware {
             .unwrap_or(&[])
     }
 
+    fn wifi_transport(&self) -> Result<Cyw43439WlanTransport, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_result(Cyw43439HardwareContract::wifi_transport)
+    }
+
+    fn wifi_transport_clock_profile(
+        &self,
+    ) -> Result<Cyw43439WlanTransportClockProfile, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_result(|backend| {
+            let host_source_clock_hz = rp2350_cyw43439_host_source_clock_hz();
+            match backend.wifi_transport()? {
+                Cyw43439WlanTransport::Gspi => Ok(Cyw43439WlanTransportClockProfile::Gspi {
+                    target_clock_hz: backend.wifi_transport_target_clock_hz(),
+                    host_source_clock_hz,
+                }),
+                Cyw43439WlanTransport::Sdio => Ok(Cyw43439WlanTransportClockProfile::Sdio {
+                    target_clock_hz: backend.wifi_transport_target_clock_hz(),
+                    host_source_clock_hz,
+                }),
+                Cyw43439WlanTransport::BoardSharedSpi => {
+                    Ok(Cyw43439WlanTransportClockProfile::BoardSharedSpi {
+                        target_clock_hz: backend.wifi_transport_target_clock_hz(),
+                        host_source_clock_hz,
+                    })
+                }
+            }
+        })
+    }
+
+    fn transport_topology(&self) -> Result<Cyw43439TransportTopology, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_result(Cyw43439HardwareContract::transport_topology)
+    }
+
     fn controller_caps(&self, radio: Cyw43439Radio) -> Cyw43439ControllerCaps {
         CYW43439_SLOT
             .with_backend(|backend| backend.controller_caps(radio))
@@ -321,27 +426,55 @@ impl Cyw43439HardwareContract for SelectedCyw43439Hardware {
     }
 
     fn claim_controller(&mut self, radio: Cyw43439Radio) -> Result<(), Cyw43439Error> {
-        CYW43439_SLOT.with_backend_mut(|backend| backend.claim_controller(radio))?
+        CYW43439_SLOT.with_backend_mut_result(|backend| backend.claim_controller(radio))
     }
 
     fn release_controller(&mut self, radio: Cyw43439Radio) {
-        let _ = CYW43439_SLOT.with_backend_mut(|backend| backend.release_controller(radio));
+        let result = CYW43439_SLOT.with_backend_mut(|backend| backend.release_controller(radio));
+        debug_assert!(
+            result.is_ok(),
+            "selected CYW43439 backend should remain initialized through controller release"
+        );
+    }
+
+    fn facet_enabled(&self, radio: Cyw43439Radio) -> Result<bool, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_result(|backend| backend.facet_enabled(radio))
+    }
+
+    fn set_facet_enabled(
+        &mut self,
+        radio: Cyw43439Radio,
+        enabled: bool,
+    ) -> Result<(), Cyw43439Error> {
+        CYW43439_SLOT.with_backend_mut_result(|backend| backend.set_facet_enabled(radio, enabled))
     }
 
     fn controller_powered(&self) -> Result<bool, Cyw43439Error> {
-        CYW43439_SLOT.with_backend(Cyw43439HardwareContract::controller_powered)?
+        CYW43439_SLOT.with_backend_result(Cyw43439HardwareContract::controller_powered)
     }
 
     fn set_controller_powered(&mut self, powered: bool) -> Result<(), Cyw43439Error> {
-        CYW43439_SLOT.with_backend_mut(|backend| backend.set_controller_powered(powered))?
+        CYW43439_SLOT.with_backend_mut_result(|backend| backend.set_controller_powered(powered))
     }
 
     fn set_controller_reset(&mut self, asserted: bool) -> Result<(), Cyw43439Error> {
-        CYW43439_SLOT.with_backend_mut(|backend| backend.set_controller_reset(asserted))?
+        CYW43439_SLOT.with_backend_mut_result(|backend| backend.set_controller_reset(asserted))
     }
 
     fn set_controller_wake(&mut self, awake: bool) -> Result<(), Cyw43439Error> {
-        CYW43439_SLOT.with_backend_mut(|backend| backend.set_controller_wake(awake))?
+        CYW43439_SLOT.with_backend_mut_result(|backend| backend.set_controller_wake(awake))
+    }
+
+    fn acquire_transport(&mut self, radio: Cyw43439Radio) -> Result<(), Cyw43439Error> {
+        CYW43439_SLOT.with_backend_mut_result(|backend| backend.acquire_transport(radio))
+    }
+
+    fn release_transport(&mut self, radio: Cyw43439Radio) {
+        let result = CYW43439_SLOT.with_backend_mut(|backend| backend.release_transport(radio));
+        debug_assert!(
+            result.is_ok(),
+            "selected CYW43439 backend should remain initialized through transport release"
+        );
     }
 
     fn wait_for_controller_irq(
@@ -350,11 +483,11 @@ impl Cyw43439HardwareContract for SelectedCyw43439Hardware {
         timeout_ms: Option<u32>,
     ) -> Result<bool, Cyw43439Error> {
         CYW43439_SLOT
-            .with_backend_mut(|backend| backend.wait_for_controller_irq(radio, timeout_ms))?
+            .with_backend_mut_result(|backend| backend.wait_for_controller_irq(radio, timeout_ms))
     }
 
     fn acknowledge_controller_irq(&mut self, radio: Cyw43439Radio) -> Result<(), Cyw43439Error> {
-        CYW43439_SLOT.with_backend_mut(|backend| backend.acknowledge_controller_irq(radio))?
+        CYW43439_SLOT.with_backend_mut_result(|backend| backend.acknowledge_controller_irq(radio))
     }
 
     fn write_controller_transport(
@@ -363,7 +496,7 @@ impl Cyw43439HardwareContract for SelectedCyw43439Hardware {
         payload: &[u8],
     ) -> Result<(), Cyw43439Error> {
         CYW43439_SLOT
-            .with_backend_mut(|backend| backend.write_controller_transport(radio, payload))?
+            .with_backend_mut_result(|backend| backend.write_controller_transport(radio, payload))
     }
 
     fn read_controller_transport(
@@ -371,15 +504,28 @@ impl Cyw43439HardwareContract for SelectedCyw43439Hardware {
         radio: Cyw43439Radio,
         out: &mut [u8],
     ) -> Result<usize, Cyw43439Error> {
-        CYW43439_SLOT.with_backend_mut(|backend| backend.read_controller_transport(radio, out))?
+        CYW43439_SLOT
+            .with_backend_mut_result(|backend| backend.read_controller_transport(radio, out))
     }
 
     fn firmware_image(&self, radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error> {
-        CYW43439_SLOT.with_backend(|backend| backend.firmware_image(radio))?
+        CYW43439_SLOT.with_backend_result(|backend| backend.firmware_image(radio))
     }
 
     fn nvram_image(&self, radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error> {
-        CYW43439_SLOT.with_backend(|backend| backend.nvram_image(radio))?
+        CYW43439_SLOT.with_backend_result(|backend| backend.nvram_image(radio))
+    }
+
+    fn clm_image(&self, radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_result(|backend| backend.clm_image(radio))
+    }
+
+    fn reference_clock_hz(&self) -> Result<Option<u32>, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_result(Cyw43439HardwareContract::reference_clock_hz)
+    }
+
+    fn sleep_clock_hz(&self) -> Result<Option<u32>, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_result(Cyw43439HardwareContract::sleep_clock_hz)
     }
 
     fn delay_ms(&self, milliseconds: u32) {
@@ -408,8 +554,16 @@ fn build_shared_backend() -> Result<SharedBackend, Cyw43439Error> {
         power,
         reset,
         wake,
+        binding.bluetooth_transport,
+        binding.bluetooth_target_rate,
+        binding.wifi_transport,
+        binding.wifi_target_clock_hz,
+        binding.transport_topology,
+        None,
+        binding.reference_clock_hz,
+        binding.sleep_clock_hz,
         rp2350_delay_ms,
-        Cyw43439Images::default(),
+        binding.firmware,
         binding.bluetooth_available,
         binding.wifi_available,
     ))
@@ -439,9 +593,20 @@ fn cyw43439_binding() -> Result<Rp2350Cyw43439Binding, Cyw43439Error> {
         return Err(Cyw43439Error::unsupported());
     }
 
-    let bluetooth_transport = bluetooth.and_then(bluetooth_transport);
-    let wifi_transport = wifi.and_then(wifi_transport);
-    let transport = match (bluetooth_transport, wifi_transport) {
+    let bluetooth_transport = bluetooth
+        .map(bluetooth_transport_kind)
+        .transpose()?
+        .unwrap_or(Cyw43439BluetoothTransport::BoardSharedSpiHci);
+    let bluetooth_target_rate = bluetooth.and_then(bluetooth_transport_target_rate);
+    let wifi_transport = wifi
+        .map(wifi_transport_kind)
+        .transpose()?
+        .unwrap_or(Cyw43439WlanTransport::BoardSharedSpi);
+    let wifi_target_clock_hz = wifi.and_then(wifi_transport_target_clock_hz);
+    let transport = match (
+        bluetooth.and_then(bluetooth_transport_pins),
+        wifi.and_then(wifi_transport_pins),
+    ) {
         (Some(transport), Some(other)) if transport == other => transport,
         (Some(_), Some(_)) => return Err(Cyw43439Error::unsupported()),
         (Some(transport), None) => transport,
@@ -461,10 +626,41 @@ fn cyw43439_binding() -> Result<Rp2350Cyw43439Binding, Cyw43439Error> {
         bluetooth.and_then(|binding| binding.wake_gpio),
         wifi.and_then(|binding| binding.wake_gpio),
     )?;
+    let reference_clock_hz = merge_optional_u32(
+        bluetooth.and_then(|binding| binding.clock.reference_clock_hz),
+        wifi.and_then(|binding| binding.clock.reference_clock_hz),
+    )?;
+    let sleep_clock_hz = merge_optional_u32(
+        bluetooth.and_then(|binding| binding.clock.sleep_clock_hz),
+        wifi.and_then(|binding| binding.clock.sleep_clock_hz),
+    )?;
+    let transport_topology = match (bluetooth_transport, wifi_transport) {
+        (Cyw43439BluetoothTransport::BoardSharedSpiHci, Cyw43439WlanTransport::BoardSharedSpi) => {
+            Cyw43439TransportTopology::SharedBoardTransport
+        }
+        _ => Cyw43439TransportTopology::SplitHostTransports,
+    };
 
     Ok(Rp2350Cyw43439Binding {
         bluetooth_available,
         wifi_available,
+        bluetooth_transport,
+        bluetooth_target_rate,
+        wifi_transport,
+        wifi_target_clock_hz,
+        transport_topology,
+        reference_clock_hz,
+        sleep_clock_hz,
+        firmware: Cyw43439FirmwareAssets {
+            bluetooth: fusion_hal::drivers::net::chipset::infineon::cyw43439::firmware::Cyw43439BluetoothFirmwareAssets {
+                patch_image: bluetooth.and_then(|binding| binding.assets.patch.embedded_image()),
+            },
+            wifi: fusion_hal::drivers::net::chipset::infineon::cyw43439::firmware::Cyw43439WlanFirmwareAssets {
+                firmware_image: wifi.and_then(|binding| binding.assets.firmware.embedded_image()),
+                nvram_image: wifi.and_then(|binding| binding.assets.nvram.embedded_image()),
+                clm_image: wifi.and_then(|binding| binding.assets.clm.embedded_image()),
+            },
+        },
         clock_gpio: transport.0,
         chip_select_gpio: transport.1,
         data_irq_gpio: transport.2,
@@ -474,25 +670,85 @@ fn cyw43439_binding() -> Result<Rp2350Cyw43439Binding, Cyw43439Error> {
     })
 }
 
-fn bluetooth_transport(binding: CortexMBluetoothControllerBinding) -> Option<(u8, u8, u8)> {
+fn bluetooth_transport_pins(binding: CortexMBluetoothControllerBinding) -> Option<(u8, u8, u8)> {
     match binding.transport {
         CortexMBluetoothTransportBinding::Spi3WireSharedDataIrq {
             clock_gpio,
             chip_select_gpio,
             data_irq_gpio,
+            ..
         } => Some((clock_gpio, chip_select_gpio, data_irq_gpio)),
         _ => None,
     }
 }
 
-fn wifi_transport(binding: CortexMWifiControllerBinding) -> Option<(u8, u8, u8)> {
+fn wifi_transport_pins(binding: CortexMWifiControllerBinding) -> Option<(u8, u8, u8)> {
     match binding.transport {
         CortexMWifiTransportBinding::Spi3WireSharedDataIrq {
             clock_gpio,
             chip_select_gpio,
             data_irq_gpio,
+            ..
         } => Some((clock_gpio, chip_select_gpio, data_irq_gpio)),
         _ => None,
+    }
+}
+
+fn bluetooth_transport_kind(
+    binding: CortexMBluetoothControllerBinding,
+) -> Result<Cyw43439BluetoothTransport, Cyw43439Error> {
+    match binding.transport {
+        CortexMBluetoothTransportBinding::Uart {
+            cts_gpio, rts_gpio, ..
+        } => {
+            if cts_gpio.is_some() && rts_gpio.is_some() {
+                Ok(Cyw43439BluetoothTransport::HciUartH4)
+            } else {
+                Ok(Cyw43439BluetoothTransport::HciUartH5)
+            }
+        }
+        CortexMBluetoothTransportBinding::Spi3WireSharedDataIrq { .. }
+        | CortexMBluetoothTransportBinding::Spi4Wire { .. } => {
+            Ok(Cyw43439BluetoothTransport::BoardSharedSpiHci)
+        }
+    }
+}
+
+fn bluetooth_transport_target_rate(binding: CortexMBluetoothControllerBinding) -> Option<u32> {
+    match binding.transport {
+        CortexMBluetoothTransportBinding::Spi3WireSharedDataIrq {
+            target_clock_hz, ..
+        }
+        | CortexMBluetoothTransportBinding::Spi4Wire {
+            target_clock_hz, ..
+        } => target_clock_hz,
+        CortexMBluetoothTransportBinding::Uart { target_baud, .. } => target_baud,
+    }
+}
+
+fn wifi_transport_kind(
+    binding: CortexMWifiControllerBinding,
+) -> Result<Cyw43439WlanTransport, Cyw43439Error> {
+    match binding.transport {
+        CortexMWifiTransportBinding::Sdio { .. } => Ok(Cyw43439WlanTransport::Sdio),
+        CortexMWifiTransportBinding::Spi4Wire { .. } => Ok(Cyw43439WlanTransport::Gspi),
+        CortexMWifiTransportBinding::Spi3WireSharedDataIrq { .. } => {
+            Ok(Cyw43439WlanTransport::BoardSharedSpi)
+        }
+    }
+}
+
+fn wifi_transport_target_clock_hz(binding: CortexMWifiControllerBinding) -> Option<u32> {
+    match binding.transport {
+        CortexMWifiTransportBinding::Spi3WireSharedDataIrq {
+            target_clock_hz, ..
+        }
+        | CortexMWifiTransportBinding::Spi4Wire {
+            target_clock_hz, ..
+        }
+        | CortexMWifiTransportBinding::Sdio {
+            target_clock_hz, ..
+        } => target_clock_hz,
     }
 }
 
@@ -500,6 +756,14 @@ fn merge_optional_pin(left: Option<u8>, right: Option<u8>) -> Result<Option<u8>,
     match (left, right) {
         (Some(left), Some(right)) if left != right => Err(Cyw43439Error::unsupported()),
         (Some(pin), _) | (_, Some(pin)) => Ok(Some(pin)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn merge_optional_u32(left: Option<u32>, right: Option<u32>) -> Result<Option<u32>, Cyw43439Error> {
+    match (left, right) {
+        (Some(left), Some(right)) if left != right => Err(Cyw43439Error::unsupported()),
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
         (None, None) => Ok(None),
     }
 }
@@ -527,6 +791,10 @@ fn rp2350_delay_ms(milliseconds: u32) {
         }
         spin_loop();
     }
+}
+
+fn rp2350_cyw43439_host_source_clock_hz() -> Option<u64> {
+    current_sys_clock_hz()
 }
 
 fn map_gpio_error(error: GpioError) -> Cyw43439Error {

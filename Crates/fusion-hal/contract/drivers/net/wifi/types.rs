@@ -115,6 +115,15 @@ pub enum WifiChannelWidth {
     Width320Mhz,
 }
 
+/// Canonical Wi-Fi frame family surfaced by public contracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WifiFrameKind {
+    Data,
+    Management,
+    Control,
+    Raw,
+}
+
 /// One currently selected or discovered Wi-Fi channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WifiChannelDescriptor {
@@ -182,6 +191,8 @@ pub struct WifiAdapterDescriptor {
     pub id: WifiAdapterId,
     pub name: &'static str,
     pub vendor_identity: Option<NetVendorIdentity>,
+    /// Whether this adapter shares one underlying chipset with other surfaced network facets.
+    pub shared_chipset: bool,
     pub mac_address: Option<WifiMacAddress>,
     pub regulatory_domain: Option<WifiRegulatoryDomain>,
     pub channels: &'static [WifiChannelDescriptor],
@@ -276,10 +287,20 @@ pub struct WifiAssociatedClient {
 /// One received Wi-Fi frame or MSDU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WifiReceivedFrame<'a> {
+    pub kind: WifiFrameKind,
     pub bytes: &'a [u8],
     pub source: Option<WifiMacAddress>,
     pub destination: Option<WifiMacAddress>,
     pub rssi_dbm: Option<i8>,
+}
+
+/// One transmitted Wi-Fi frame or MSDU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WifiTransmitFrame<'a> {
+    pub kind: WifiFrameKind,
+    pub bytes: &'a [u8],
+    pub source: Option<WifiMacAddress>,
+    pub destination: Option<WifiMacAddress>,
 }
 
 /// Monitor-mode configuration.

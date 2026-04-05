@@ -1694,6 +1694,21 @@ pub(crate) const PAL_POWER_MODES: [PowerModeDescriptor; 2] = [
 
 /// Pico 2 W board-reserved RP2350 GPIO pins consumed by the onboard CYW43439 wiring.
 pub(crate) const RP2350_PICO2W_RESERVED_GPIO_PINS: [u8; 4] = [23, 24, 25, 29];
+pub(crate) const RP2350_PICO2W_CYW43439_CLOCK: CortexMControllerClockProfile =
+    CortexMControllerClockProfile {
+        reference_clock_hz: Some(37_400_000),
+        sleep_clock_hz: None,
+    };
+pub(crate) const RP2350_PICO2W_CYW43439_BLUETOOTH_ASSETS: CortexMBluetoothControllerAssets =
+    CortexMBluetoothControllerAssets {
+        patch: CortexMControllerAssetSource::Missing,
+    };
+pub(crate) const RP2350_PICO2W_CYW43439_WIFI_ASSETS: CortexMWifiControllerAssets =
+    CortexMWifiControllerAssets {
+        firmware: CortexMControllerAssetSource::Missing,
+        nvram: CortexMControllerAssetSource::Missing,
+        clm: CortexMControllerAssetSource::Missing,
+    };
 
 /// Board-visible Bluetooth controller bindings for the current RP2350 / Pico 2 W contract.
 pub(crate) const BLUETOOTH_CONTROLLERS: [CortexMBluetoothControllerBinding; 1] =
@@ -1705,10 +1720,13 @@ pub(crate) const BLUETOOTH_CONTROLLERS: [CortexMBluetoothControllerBinding; 1] =
             clock_gpio: 29,
             chip_select_gpio: 25,
             data_irq_gpio: 24,
+            target_clock_hz: Some(31_250_000),
         },
         power_gpio: Some(23),
         reset_gpio: None,
         wake_gpio: None,
+        clock: RP2350_PICO2W_CYW43439_CLOCK,
+        assets: RP2350_PICO2W_CYW43439_BLUETOOTH_ASSETS,
     }];
 
 /// Board-visible Wi-Fi controller bindings for the current RP2350 / Pico 2 W contract.
@@ -1721,10 +1739,13 @@ pub(crate) const WIFI_CONTROLLERS: [CortexMWifiControllerBinding; 1] =
             clock_gpio: 29,
             chip_select_gpio: 25,
             data_irq_gpio: 24,
+            target_clock_hz: Some(31_250_000),
         },
         power_gpio: Some(23),
         reset_gpio: None,
         wake_gpio: None,
+        clock: RP2350_PICO2W_CYW43439_CLOCK,
+        assets: RP2350_PICO2W_CYW43439_WIFI_ASSETS,
     }];
 
 // NOTE: the current selected RP2350 board contract follows the open Pico 2 W schematic and the

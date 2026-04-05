@@ -64,7 +64,6 @@ use crate::drivers::net::chipset::infineon::cyw43439::{
     interface::{
         backend::UnsupportedBackend,
         contract::{
-            Cyw43439ControllerCaps,
             Cyw43439HardwareContract,
         },
     },
@@ -295,61 +294,6 @@ where
     fn unsupported<T>() -> Result<T, BluetoothError> {
         Err(BluetoothError::unsupported())
     }
-
-    /// Returns the truthful controller-plumbing capability surface for this adapter binding.
-    #[must_use]
-    pub fn controller_caps(&self) -> Cyw43439ControllerCaps {
-        self.chipset
-            .controller_caps(crate::drivers::net::chipset::infineon::cyw43439::interface::contract::Cyw43439Radio::Bluetooth)
-    }
-
-    /// Asserts or deasserts the controller reset line.
-    pub fn set_controller_reset(&mut self, asserted: bool) -> Result<(), BluetoothError> {
-        self.chipset.set_controller_reset_bluetooth(asserted)
-    }
-
-    /// Asserts or deasserts the controller wake line.
-    pub fn set_controller_wake(&mut self, awake: bool) -> Result<(), BluetoothError> {
-        self.chipset.set_controller_wake_bluetooth(awake)
-    }
-
-    /// Waits for one controller interrupt indication.
-    pub fn wait_for_controller_irq(
-        &mut self,
-        timeout_ms: Option<u32>,
-    ) -> Result<bool, BluetoothError> {
-        self.chipset.wait_for_controller_irq_bluetooth(timeout_ms)
-    }
-
-    /// Acknowledges one pending controller interrupt indication.
-    pub fn acknowledge_controller_irq(&mut self) -> Result<(), BluetoothError> {
-        self.chipset.acknowledge_controller_irq_bluetooth()
-    }
-
-    /// Writes one raw controller transport frame.
-    pub fn write_controller_transport(&mut self, payload: &[u8]) -> Result<(), BluetoothError> {
-        self.chipset.write_controller_transport_bluetooth(payload)
-    }
-
-    /// Reads one raw controller transport frame into caller-owned storage.
-    pub fn read_controller_transport(&mut self, out: &mut [u8]) -> Result<usize, BluetoothError> {
-        self.chipset.read_controller_transport_bluetooth(out)
-    }
-
-    /// Returns one optional controller firmware image.
-    pub fn firmware_image(&self) -> Result<Option<&'static [u8]>, BluetoothError> {
-        self.chipset.firmware_image_bluetooth()
-    }
-
-    /// Returns one optional controller NVRAM/config image.
-    pub fn nvram_image(&self) -> Result<Option<&'static [u8]>, BluetoothError> {
-        self.chipset.nvram_image_bluetooth()
-    }
-
-    /// Sleeps for one board-truthful delay interval.
-    pub fn delay_ms(&self, milliseconds: u32) {
-        self.chipset.delay_ms(milliseconds);
-    }
 }
 
 impl<H> BluetoothOwnedAdapterContract for Cyw43439Adapter<H>
@@ -366,11 +310,11 @@ where
     H: Cyw43439HardwareContract,
 {
     fn set_powered(&mut self, powered: bool) -> Result<(), BluetoothError> {
-        self.chipset.set_controller_powered_bluetooth(powered)
+        self.chipset.set_bluetooth_enabled(powered)
     }
 
     fn is_powered(&self) -> Result<bool, BluetoothError> {
-        self.chipset.controller_powered_bluetooth()
+        self.chipset.bluetooth_enabled()
     }
 }
 

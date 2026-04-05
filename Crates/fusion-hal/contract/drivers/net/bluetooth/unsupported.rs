@@ -85,6 +85,7 @@ impl BluetoothOwnedAdapterContract for UnsupportedBluetoothAdapter {
             id: BluetoothAdapterId(0),
             name: "unsupported-bluetooth",
             vendor_identity: None,
+            shared_chipset: false,
             address: None,
             version: BluetoothVersionRange {
                 minimum: BluetoothVersion::new(0, 0),

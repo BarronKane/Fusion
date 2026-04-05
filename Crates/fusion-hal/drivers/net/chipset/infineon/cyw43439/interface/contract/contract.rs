@@ -12,6 +12,13 @@ use crate::contract::drivers::net::wifi::{
     WifiAdapterDescriptor,
     WifiSupport,
 };
+use crate::drivers::net::chipset::infineon::cyw43439::transport::{
+    Cyw43439BluetoothTransport,
+    Cyw43439BluetoothTransportClockProfile,
+    Cyw43439TransportTopology,
+    Cyw43439WlanTransport,
+    Cyw43439WlanTransportClockProfile,
+};
 
 bitflags! {
     /// Truthful board/controller plumbing surfaced for one CYW43439 radio facet.
@@ -130,11 +137,31 @@ pub trait Cyw43439HardwareContract {
     /// Returns the surfaced Bluetooth adapter descriptors.
     fn bluetooth_adapters(&self) -> &'static [BluetoothAdapterDescriptor];
 
+    /// Returns the truthful Bluetooth host-transport shape for this substrate.
+    fn bluetooth_transport(&self) -> Result<Cyw43439BluetoothTransport, Cyw43439Error>;
+
+    /// Returns the truthful Bluetooth host-transport clock/baud plan for this substrate.
+    fn bluetooth_transport_clock_profile(
+        &self,
+    ) -> Result<Cyw43439BluetoothTransportClockProfile, Cyw43439Error>;
+
     /// Reports the truthful Wi-Fi surface for this substrate.
     fn wifi_support(&self) -> WifiSupport;
 
     /// Returns the surfaced Wi-Fi adapter descriptors.
     fn wifi_adapters(&self) -> &'static [WifiAdapterDescriptor];
+
+    /// Returns the truthful WLAN host-transport shape for this substrate.
+    fn wifi_transport(&self) -> Result<Cyw43439WlanTransport, Cyw43439Error>;
+
+    /// Returns the truthful WLAN host-transport clock plan for this substrate.
+    fn wifi_transport_clock_profile(
+        &self,
+    ) -> Result<Cyw43439WlanTransportClockProfile, Cyw43439Error>;
+
+    /// Returns whether the two radio facets reach the host through split or shared transport
+    /// plumbing.
+    fn transport_topology(&self) -> Result<Cyw43439TransportTopology, Cyw43439Error>;
 
     /// Returns the truthful controller-plumbing capability surface for one radio facet.
     fn controller_caps(&self, radio: Cyw43439Radio) -> Cyw43439ControllerCaps;
@@ -144,6 +171,16 @@ pub trait Cyw43439HardwareContract {
 
     /// Releases one previously claimed radio facet.
     fn release_controller(&mut self, radio: Cyw43439Radio);
+
+    /// Returns whether one logical radio facet is currently enabled.
+    fn facet_enabled(&self, radio: Cyw43439Radio) -> Result<bool, Cyw43439Error>;
+
+    /// Enables or disables one logical radio facet without pretending it owns the whole chip.
+    fn set_facet_enabled(
+        &mut self,
+        radio: Cyw43439Radio,
+        enabled: bool,
+    ) -> Result<(), Cyw43439Error>;
 
     /// Returns whether the shared controller rail is currently powered.
     fn controller_powered(&self) -> Result<bool, Cyw43439Error>;
@@ -156,6 +193,12 @@ pub trait Cyw43439HardwareContract {
 
     /// Asserts or deasserts the shared controller wake line.
     fn set_controller_wake(&mut self, awake: bool) -> Result<(), Cyw43439Error>;
+
+    /// Acquires the shared controller transport for one logical radio facet.
+    fn acquire_transport(&mut self, radio: Cyw43439Radio) -> Result<(), Cyw43439Error>;
+
+    /// Releases one previously acquired shared controller transport lease.
+    fn release_transport(&mut self, radio: Cyw43439Radio);
 
     /// Waits for one controller interrupt indication relevant to one radio facet.
     fn wait_for_controller_irq(
@@ -186,6 +229,15 @@ pub trait Cyw43439HardwareContract {
 
     /// Returns one optional controller NVRAM/config image for one radio facet.
     fn nvram_image(&self, radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error>;
+
+    /// Returns one optional controller CLM/regulatory image for one radio facet.
+    fn clm_image(&self, radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error>;
+
+    /// Returns the selected controller reference clock frequency when the board surfaces one.
+    fn reference_clock_hz(&self) -> Result<Option<u32>, Cyw43439Error>;
+
+    /// Returns the selected controller external sleep clock frequency when the board surfaces one.
+    fn sleep_clock_hz(&self) -> Result<Option<u32>, Cyw43439Error>;
 
     /// Sleeps for one board-truthful delay interval.
     fn delay_ms(&self, milliseconds: u32);

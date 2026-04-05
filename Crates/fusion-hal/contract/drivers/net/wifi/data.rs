@@ -4,15 +4,17 @@ use super::WifiError;
 use super::WifiLinkId;
 use super::WifiOwnedAdapterContract;
 use super::WifiReceivedFrame;
+use super::WifiTransmitFrame;
 
 /// Wi-Fi data-plane control for one opened adapter.
 pub trait WifiDataControlContract: WifiOwnedAdapterContract {
-    /// Transmits one payload over one active Wi-Fi link.
+    /// Transmits one canonical Wi-Fi frame over one active Wi-Fi link.
     ///
     /// # Errors
     ///
     /// Returns one honest error when data transmission is unsupported or fails.
-    fn transmit(&mut self, link: WifiLinkId, payload: &[u8]) -> Result<(), WifiError>;
+    fn transmit(&mut self, link: WifiLinkId, frame: WifiTransmitFrame<'_>)
+    -> Result<(), WifiError>;
 
     /// Receives one payload or raw Wi-Fi frame from one active link.
     ///

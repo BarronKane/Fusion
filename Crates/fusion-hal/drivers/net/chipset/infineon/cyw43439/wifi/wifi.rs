@@ -48,6 +48,7 @@ use crate::contract::drivers::net::wifi::{
     WifiSecurityControlContract,
     WifiStationControlContract,
     WifiSupport,
+    WifiTransmitFrame,
 };
 use crate::drivers::net::chipset::infineon::cyw43439::{
     core::{
@@ -56,9 +57,7 @@ use crate::drivers::net::chipset::infineon::cyw43439::{
     interface::{
         backend::UnsupportedBackend,
         contract::{
-            Cyw43439ControllerCaps,
             Cyw43439HardwareContract,
-            Cyw43439Radio,
         },
     },
 };
@@ -278,57 +277,6 @@ where
     fn unsupported<T>() -> Result<T, WifiError> {
         Err(WifiError::unsupported())
     }
-
-    /// Returns the truthful controller-plumbing capability surface for this adapter binding.
-    #[must_use]
-    pub fn controller_caps(&self) -> Cyw43439ControllerCaps {
-        self.chipset.controller_caps(Cyw43439Radio::Wifi)
-    }
-
-    /// Asserts or deasserts the controller reset line.
-    pub fn set_controller_reset(&mut self, asserted: bool) -> Result<(), WifiError> {
-        self.chipset.set_controller_reset_wifi(asserted)
-    }
-
-    /// Asserts or deasserts the controller wake line.
-    pub fn set_controller_wake(&mut self, awake: bool) -> Result<(), WifiError> {
-        self.chipset.set_controller_wake_wifi(awake)
-    }
-
-    /// Waits for one controller interrupt indication.
-    pub fn wait_for_controller_irq(&mut self, timeout_ms: Option<u32>) -> Result<bool, WifiError> {
-        self.chipset.wait_for_controller_irq_wifi(timeout_ms)
-    }
-
-    /// Acknowledges one pending controller interrupt indication.
-    pub fn acknowledge_controller_irq(&mut self) -> Result<(), WifiError> {
-        self.chipset.acknowledge_controller_irq_wifi()
-    }
-
-    /// Writes one raw controller transport frame.
-    pub fn write_controller_transport(&mut self, payload: &[u8]) -> Result<(), WifiError> {
-        self.chipset.write_controller_transport_wifi(payload)
-    }
-
-    /// Reads one raw controller transport frame into caller-owned storage.
-    pub fn read_controller_transport(&mut self, out: &mut [u8]) -> Result<usize, WifiError> {
-        self.chipset.read_controller_transport_wifi(out)
-    }
-
-    /// Returns one optional controller firmware image.
-    pub fn firmware_image(&self) -> Result<Option<&'static [u8]>, WifiError> {
-        self.chipset.firmware_image_wifi()
-    }
-
-    /// Returns one optional controller NVRAM/config image.
-    pub fn nvram_image(&self) -> Result<Option<&'static [u8]>, WifiError> {
-        self.chipset.nvram_image_wifi()
-    }
-
-    /// Sleeps for one board-truthful delay interval.
-    pub fn delay_ms(&self, milliseconds: u32) {
-        self.chipset.delay_ms(milliseconds);
-    }
 }
 
 impl<H> WifiOwnedAdapterContract for Cyw43439Adapter<H>
@@ -345,11 +293,11 @@ where
     H: Cyw43439HardwareContract,
 {
     fn set_powered(&mut self, powered: bool) -> Result<(), WifiError> {
-        self.chipset.set_controller_powered_wifi(powered)
+        self.chipset.set_wifi_enabled(powered)
     }
 
     fn is_powered(&self) -> Result<bool, WifiError> {
-        self.chipset.controller_powered_wifi()
+        self.chipset.wifi_enabled()
     }
 
     fn current_channel(
@@ -463,7 +411,11 @@ impl<H> WifiDataControlContract for Cyw43439Adapter<H>
 where
     H: Cyw43439HardwareContract,
 {
-    fn transmit(&mut self, _link: WifiLinkId, _payload: &[u8]) -> Result<(), WifiError> {
+    fn transmit(
+        &mut self,
+        _link: WifiLinkId,
+        _frame: WifiTransmitFrame<'_>,
+    ) -> Result<(), WifiError> {
         Self::unsupported()
     }
 

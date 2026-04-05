@@ -46,9 +46,12 @@ use crate::contract::pal::{
     HardwareWriteSummary,
 };
 pub use super::board_contract::{
+    CortexMBluetoothControllerAssets,
     CortexMBluetoothControllerBinding,
     CortexMBluetoothTransportBinding,
     CortexMClockDescriptor,
+    CortexMControllerAssetSource,
+    CortexMControllerClockProfile,
     CortexMDmaControllerDescriptor,
     CortexMDmaRequestClass,
     CortexMDmaRequestDescriptor,
@@ -74,6 +77,7 @@ pub use super::board_contract::{
     CortexMSocMonotonicTimeImpact,
     CortexMSocOverclockProfile,
     CortexMSocOverclockSupport,
+    CortexMWifiControllerAssets,
     CortexMWifiControllerBinding,
     CortexMWifiTransportBinding,
 };

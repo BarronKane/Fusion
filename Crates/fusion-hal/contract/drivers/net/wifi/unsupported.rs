@@ -38,6 +38,7 @@ use super::WifiSecurityControlContract;
 use super::WifiStationControlContract;
 use super::WifiStationCaps;
 use super::WifiSupport;
+use super::WifiTransmitFrame;
 use super::WifiProviderCaps;
 use super::WifiStandardFamilyCaps;
 use super::WifiConnectionDescriptor;
@@ -78,6 +79,7 @@ const UNSUPPORTED_ADAPTER: WifiAdapterDescriptor = WifiAdapterDescriptor {
     id: WifiAdapterId(0),
     name: "unsupported",
     vendor_identity: None,
+    shared_chipset: false,
     mac_address: None,
     regulatory_domain: None,
     channels: &UNSUPPORTED_CHANNELS,
@@ -228,7 +230,11 @@ impl WifiAccessPointControlContract for UnsupportedWifiAdapter {
 }
 
 impl WifiDataControlContract for UnsupportedWifiAdapter {
-    fn transmit(&mut self, _link: WifiLinkId, _payload: &[u8]) -> Result<(), WifiError> {
+    fn transmit(
+        &mut self,
+        _link: WifiLinkId,
+        _frame: WifiTransmitFrame<'_>,
+    ) -> Result<(), WifiError> {
         Err(WifiError::unsupported())
     }
 

@@ -8,6 +8,13 @@ use crate::drivers::net::chipset::infineon::cyw43439::interface::contract::{
     Cyw43439HardwareContract,
     Cyw43439Radio,
 };
+use crate::drivers::net::chipset::infineon::cyw43439::transport::{
+    Cyw43439BluetoothTransport,
+    Cyw43439BluetoothTransportClockProfile,
+    Cyw43439TransportTopology,
+    Cyw43439WlanTransport,
+    Cyw43439WlanTransportClockProfile,
+};
 
 #[path = "gpio/gpio.rs"]
 pub mod gpio;
@@ -27,6 +34,16 @@ impl Cyw43439HardwareContract for UnsupportedBackend {
         &[]
     }
 
+    fn bluetooth_transport(&self) -> Result<Cyw43439BluetoothTransport, Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    fn bluetooth_transport_clock_profile(
+        &self,
+    ) -> Result<Cyw43439BluetoothTransportClockProfile, Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
     fn wifi_support(&self) -> WifiSupport {
         WifiSupport::unsupported()
     }
@@ -35,6 +52,20 @@ impl Cyw43439HardwareContract for UnsupportedBackend {
         &self,
     ) -> &'static [crate::contract::drivers::net::wifi::WifiAdapterDescriptor] {
         &[]
+    }
+
+    fn wifi_transport(&self) -> Result<Cyw43439WlanTransport, Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    fn wifi_transport_clock_profile(
+        &self,
+    ) -> Result<Cyw43439WlanTransportClockProfile, Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    fn transport_topology(&self) -> Result<Cyw43439TransportTopology, Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
     }
 
     fn controller_caps(&self, _radio: Cyw43439Radio) -> Cyw43439ControllerCaps {
@@ -46,6 +77,18 @@ impl Cyw43439HardwareContract for UnsupportedBackend {
     }
 
     fn release_controller(&mut self, _radio: Cyw43439Radio) {}
+
+    fn facet_enabled(&self, _radio: Cyw43439Radio) -> Result<bool, Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    fn set_facet_enabled(
+        &mut self,
+        _radio: Cyw43439Radio,
+        _enabled: bool,
+    ) -> Result<(), Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
 
     fn controller_powered(&self) -> Result<bool, Cyw43439Error> {
         Err(Cyw43439Error::unsupported())
@@ -62,6 +105,12 @@ impl Cyw43439HardwareContract for UnsupportedBackend {
     fn set_controller_wake(&mut self, _awake: bool) -> Result<(), Cyw43439Error> {
         Err(Cyw43439Error::unsupported())
     }
+
+    fn acquire_transport(&mut self, _radio: Cyw43439Radio) -> Result<(), Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    fn release_transport(&mut self, _radio: Cyw43439Radio) {}
 
     fn wait_for_controller_irq(
         &mut self,
@@ -99,6 +148,18 @@ impl Cyw43439HardwareContract for UnsupportedBackend {
     }
 
     fn nvram_image(&self, _radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    fn clm_image(&self, _radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    fn reference_clock_hz(&self) -> Result<Option<u32>, Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    fn sleep_clock_hz(&self) -> Result<Option<u32>, Cyw43439Error> {
         Err(Cyw43439Error::unsupported())
     }
 
