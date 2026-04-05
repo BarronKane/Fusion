@@ -15,6 +15,7 @@ license = ""
 repository = ""
 
 [workspace.dependencies]
+fusion-firmware = { path = "../../../Crates/fusion-firmware", default-features = false }
 fusion-example-rp2350-on-device = { path = "OnDevice" }
 fusion-hal = { path = "../../../Crates/fusion-hal", default-features = false }
 fusion-pal = { path = "../../../Crates/fusion-pal", default-features = false }

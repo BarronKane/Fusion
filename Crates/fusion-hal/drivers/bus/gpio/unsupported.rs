@@ -1,6 +1,6 @@
 //! Unsupported hardware-facing GPIO substrate used when no SoC or interface backend is selected.
 
-use crate::contract::drivers::bus::gpio::{
+use fusion_hal::contract::drivers::bus::gpio::{
     GpioCapabilities,
     GpioDriveStrength,
     GpioError,
@@ -9,7 +9,7 @@ use crate::contract::drivers::bus::gpio::{
     GpioPull,
     GpioSupport,
 };
-use crate::drivers::bus::gpio::interface::contract::{
+use crate::interface::contract::{
     GpioHardware,
     GpioHardwarePin,
 };

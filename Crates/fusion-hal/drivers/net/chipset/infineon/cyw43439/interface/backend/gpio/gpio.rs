@@ -32,11 +32,11 @@ use fusion_hal::contract::drivers::net::wifi::{
     WifiStationCaps,
     WifiSupport,
 };
-use fusion_hal::drivers::bus::gpio::{
+use fd_bus_gpio::{
     GpioFunction,
     GpioPin,
 };
-use fusion_hal::drivers::bus::gpio::interface::contract::GpioHardwarePin;
+use fd_bus_gpio::interface::contract::GpioHardwarePin;
 use crate::firmware::Cyw43439FirmwareAssets;
 use crate::bluetooth::CYW43439_BLUETOOTH_VENDOR_IDENTITY;
 use crate::interface::contract::{
@@ -746,8 +746,8 @@ mod tests {
         GpioFunction,
         GpioPull,
     };
-    use fusion_hal::drivers::bus::gpio::GpioPin;
-    use fusion_hal::drivers::bus::gpio::interface::contract::GpioHardwarePin;
+    use fd_bus_gpio::GpioPin;
+    use fd_bus_gpio::interface::contract::GpioHardwarePin;
     use crate::firmware::Cyw43439FirmwareAssets;
     use crate::interface::contract::Cyw43439ErrorKind;
     use crate::transport::{

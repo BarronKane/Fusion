@@ -2,11 +2,11 @@
 //!
 //! `fusion-hal` owns:
 //! - driver contracts layered above PAL substrate truth
-//! - selected generic driver implementations
+//! - shared driver law and FDXE module ABI
 //! - reusable peripheral/device drivers that should not live in `fusion-sys`
 //!
-//! `fusion-hal` does not own hardware-specific implementations. Those live in external crates
-//! such as `fusion-pal`, which implement the driver contracts surfaced here.
+//! Concrete driver implementations live in external `fd-*` crates such as `fd-bus-gpio` and
+//! `fd-net-chipset-infineon-cyw43439`. PAL implements hardware-facing driver substrate contracts.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

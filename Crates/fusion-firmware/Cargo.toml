@@ -22,7 +22,15 @@ critical-safe = ["fusion-hal/critical-safe", "fusion-pal/critical-safe"]
 debug-profile = ["fusion-hal/debug-profile", "fusion-pal/debug-profile"]
 debug-insights = ["fusion-hal/debug-insights", "fusion-pal/debug-insights"]
 sys-cortex-m = ["soc", "fusion-hal/sys-cortex-m", "fusion-pal/sys-cortex-m"]
-soc-rp2350 = ["sys-cortex-m", "fusion-hal/soc-rp2350", "fusion-pal/soc-rp2350"]
+soc-rp2350 = [
+    "sys-cortex-m",
+    "fusion-hal/soc-rp2350",
+    "fusion-pal/soc-rp2350",
+    "dep:fd-bus-gpio",
+    "fd-bus-gpio/soc-rp2350",
+    "dep:fd-net-chipset-infineon-cyw43439",
+    "fd-net-chipset-infineon-cyw43439/soc-rp2350",
+]
 sys-fusion-kn = ["hosted", "fusion-hal/sys-fusion-kn", "fusion-pal/sys-fusion-kn"]
 cortex-m-vector-secure-world = [
     "fusion-hal/cortex-m-vector-secure-world",
@@ -37,6 +45,10 @@ cortex-m-vector-nonsecure-world = [
 bitflags.workspace = true
 fusion-hal = { workspace = true, default-features = false }
 fusion-pal = { workspace = true, default-features = false }
+
+[target.'cfg(target_os = "none")'.dependencies]
+fd-bus-gpio = { path = "../fusion-hal/drivers/bus/gpio", default-features = false, optional = true }
+fd-net-chipset-infineon-cyw43439 = { path = "../fusion-hal/drivers/net/chipset/infineon/cyw43439", default-features = false, optional = true }
 
 [lints]
 workspace = true

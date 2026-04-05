@@ -11,6 +11,7 @@ name = "fusion_example_rp2350_on_device"
 path = "lib.rs"
 
 [dependencies]
+fusion-firmware = { workspace = true, features = ["soc-rp2350"] }
 fusion-hal = { workspace = true }
 fusion-pal = { workspace = true, features = ["soc-rp2350"] }
 fusion-std = { workspace = true, features = ["soc-rp2350"] }

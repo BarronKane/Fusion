@@ -1,4 +1,3 @@
-//! Bus-facing driver implementations.
-
-#[path = "gpio/gpio.rs"]
-pub mod gpio;
+//! Bus-facing driver families.
+//!
+//! Concrete bus-driver implementations live in external `fd-*` crates such as `fd-bus-gpio`.

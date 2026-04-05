@@ -1,11 +1,12 @@
 // Shared FDXE ABI body.
 //
-// This file is the single source of truth for the FDXE layout and is consumed in three places:
+// This file is the single source of truth for the FDXE layout and is consumed in four places:
 // - directly by `fusion-hal::fdxe`
 // - staged into `OUT_DIR` by `fusion-firmware/build.rs`
+// - staged into `OUT_DIR` by the GPIO driver crate `build.rs`
 // - staged into `OUT_DIR` by the CYW43439 driver crate `build.rs`
 //
-// If this file moves, update the two build scripts and `fusion-hal/fdxe/fdxe.rs` together.
+// If this file moves, update the three build scripts and `fusion-hal/fdxe/fdxe.rs` together.
 
 use core::marker::PhantomData;
 use core::mem::{
@@ -29,6 +30,12 @@ pub const FDXE_MODULE_V1_ABI_VERSION: u32 = 1;
 pub const FDXE_ENDIANNESS_LITTLE: u8 = 1;
 /// Big-endian layout tag.
 pub const FDXE_ENDIANNESS_BIG: u8 = 2;
+/// Platform error code surfaced when one requested FDXE module carries the wrong magic tag.
+pub const FDXE_DRIVER_PLATFORM_BAD_MAGIC: i32 = -12_001;
+/// Platform error code surfaced when one requested FDXE module uses the wrong ABI version.
+pub const FDXE_DRIVER_PLATFORM_ABI_MISMATCH: i32 = -12_002;
+/// Platform error code surfaced when one requested FDXE module layout is malformed.
+pub const FDXE_DRIVER_PLATFORM_LAYOUT_MISMATCH: i32 = -12_003;
 
 /// One ABI-facing string slice.
 #[repr(C)]
@@ -91,6 +98,18 @@ impl FdxeDriverExportV1 {
             driver_key: FdxeStr::new(driver_key),
             metadata,
         }
+    }
+
+    /// Returns the truthful static metadata for this exported driver family.
+    #[must_use]
+    pub fn metadata(&self) -> &'static DriverMetadata {
+        (self.metadata)()
+    }
+
+    /// Returns the exported canonical driver key.
+    #[must_use]
+    pub fn driver_key(&self) -> &'static str {
+        self.metadata().key
     }
 }
 
@@ -228,6 +247,28 @@ impl FdxeModuleV1 {
 
         Ok(drivers)
     }
+
+    /// Returns the stable exported module identity string after validating the header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the module header is not valid for the current firmware image.
+    pub fn module_name(&self) -> Result<&'static str, FdxeModuleError> {
+        self.validate()?;
+        // SAFETY: validated FDXE headers only expose static UTF-8 strings built into the module.
+        Ok(unsafe { self.module_name.as_str() })
+    }
+
+    /// Returns the concrete target/profile identity string after validating the header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the module header is not valid for the current firmware image.
+    pub fn target_name(&self) -> Result<&'static str, FdxeModuleError> {
+        self.validate()?;
+        // SAFETY: validated FDXE headers only expose static UTF-8 strings built into the module.
+        Ok(unsafe { self.target_name.as_str() })
+    }
 }
 
 /// Error returned by FDXE module validation or registry population.
@@ -276,6 +317,22 @@ impl FdxeModuleError {
     #[must_use]
     pub const fn kind(self) -> FdxeModuleErrorKind {
         self.kind
+    }
+}
+
+impl From<FdxeModuleError> for DriverError {
+    fn from(error: FdxeModuleError) -> Self {
+        match error.kind() {
+            FdxeModuleErrorKind::BadMagic => DriverError::platform(FDXE_DRIVER_PLATFORM_BAD_MAGIC),
+            FdxeModuleErrorKind::AbiMismatch => {
+                DriverError::platform(FDXE_DRIVER_PLATFORM_ABI_MISMATCH)
+            }
+            FdxeModuleErrorKind::LayoutMismatch => {
+                DriverError::platform(FDXE_DRIVER_PLATFORM_LAYOUT_MISMATCH)
+            }
+            FdxeModuleErrorKind::DuplicateModule => DriverError::already_registered(),
+            FdxeModuleErrorKind::CapacityExhausted => DriverError::resource_exhausted(),
+        }
     }
 }
 

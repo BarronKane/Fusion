@@ -1,4 +1,4 @@
-//! FDXE module export for the CYW43439 driver family.
+//! FDXE module export for the generic GPIO driver family.
 
 #[allow(dead_code)]
 mod abi {
@@ -17,23 +17,14 @@ mod abi {
     include!(concat!(env!("OUT_DIR"), "/fdxe_shared.rs"));
 }
 
-use crate::{
-    bluetooth,
-    wifi,
-};
 use abi::{
     FdxeDriverExportV1,
     FdxeModuleV1,
     FdxeStaticModuleV1,
 };
 
-const DRIVER_EXPORTS: [FdxeDriverExportV1; 2] = [
-    FdxeDriverExportV1::new(
-        "net.bluetooth.infineon.cyw43439",
-        bluetooth::driver_metadata,
-    ),
-    FdxeDriverExportV1::new("net.wifi.infineon.cyw43439", wifi::driver_metadata),
-];
+const DRIVER_EXPORTS: [FdxeDriverExportV1; 1] =
+    [FdxeDriverExportV1::new("bus.gpio", crate::driver_metadata)];
 
 #[allow(non_upper_case_globals)]
 #[unsafe(no_mangle)]

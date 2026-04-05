@@ -19,4 +19,5 @@ pub mod interface;
 #[path = "transport/transport.rs"]
 pub mod transport;
 
+#[cfg(any(target_os = "none", feature = "fdxe-module"))]
 mod fdxe;

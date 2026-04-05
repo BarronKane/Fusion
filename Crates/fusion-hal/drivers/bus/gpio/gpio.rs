@@ -1,9 +1,29 @@
-//! Universal GPIO bus-driver implementation layered over a hardware-facing GPIO substrate.
+//! Universal GPIO driver crate layered over one hardware-facing GPIO substrate.
+
+#![cfg_attr(not(feature = "std"), no_std)]
 
 use core::marker::PhantomData;
 
-pub use crate::contract::drivers::bus::gpio::*;
+use fusion_hal::contract::drivers::driver::{
+    ActiveDriver,
+    DriverActivation,
+    DriverActivationContext,
+    DriverBindingSource,
+    DriverClass,
+    DriverContract,
+    DriverContractKey,
+    DriverDiscoveryContext,
+    DriverError,
+    DriverIdentity,
+    DriverMetadata,
+    DriverRegistration,
+    RegisteredDriver,
+};
 
+pub use fusion_hal::contract::drivers::bus::gpio::*;
+
+#[cfg(any(target_os = "none", feature = "fdxe-module"))]
+mod fdxe;
 #[path = "interface/interface.rs"]
 pub mod interface;
 mod unsupported;
@@ -12,6 +32,66 @@ use self::interface::contract::{
     GpioHardware,
     GpioHardwarePin,
 };
+
+const GPIO_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("bus.gpio")];
+const GPIO_DRIVER_BINDING_SOURCES: [DriverBindingSource; 5] = [
+    DriverBindingSource::StaticSoc,
+    DriverBindingSource::BoardManifest,
+    DriverBindingSource::Acpi,
+    DriverBindingSource::Devicetree,
+    DriverBindingSource::Manual,
+];
+const GPIO_DRIVER_METADATA: DriverMetadata = DriverMetadata {
+    key: "bus.gpio",
+    class: DriverClass::Bus,
+    identity: DriverIdentity {
+        vendor: "Fusion",
+        family: Some("Generic"),
+        package: None,
+        product: "GPIO driver",
+        advertised_interface: "GPIO",
+    },
+    contracts: &GPIO_DRIVER_CONTRACTS,
+    binding_sources: &GPIO_DRIVER_BINDING_SOURCES,
+    description: "Universal GPIO provider driver layered over one selected hardware substrate",
+};
+
+/// Discoverable GPIO provider binding surfaced by the universal GPIO driver family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpioBinding {
+    pub provider: u8,
+}
+
+/// Registerable universal GPIO driver family marker.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpioDriver<H: GpioHardware = unsupported::UnsupportedGpioHardware> {
+    marker: PhantomData<fn() -> H>,
+}
+
+/// One-shot driver discovery/activation context for the universal GPIO provider.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpioDriverContext<H: GpioHardware = unsupported::UnsupportedGpioHardware> {
+    marker: PhantomData<fn() -> H>,
+}
+
+impl<H> GpioDriverContext<H>
+where
+    H: GpioHardware,
+{
+    /// Creates one empty GPIO driver context.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            marker: PhantomData,
+        }
+    }
+}
+
+/// Returns the truthful static metadata for the universal GPIO driver family.
+#[must_use]
+pub const fn driver_metadata() -> &'static DriverMetadata {
+    &GPIO_DRIVER_METADATA
+}
 
 /// Universal GPIO provider composed over one selected hardware-facing GPIO substrate.
 #[derive(Debug, Clone, Copy, Default)]
@@ -243,5 +323,61 @@ where
 
     fn read_level(&self) -> Result<bool, GpioError> {
         self.read()
+    }
+}
+
+fn enumerate_gpio_bindings<H>(
+    _registered: &RegisteredDriver<GpioDriver<H>>,
+    context: &mut DriverDiscoveryContext<'_>,
+    out: &mut [GpioBinding],
+) -> Result<usize, DriverError>
+where
+    H: GpioHardware + 'static,
+{
+    let _ = context.downcast_mut::<GpioDriverContext<H>>()?;
+    if out.is_empty() {
+        return Err(DriverError::resource_exhausted());
+    }
+
+    let support = H::support();
+    if support.implementation == GpioImplementationKind::Unsupported
+        || support.caps.is_empty()
+        || support.pin_count == 0
+    {
+        return Ok(0);
+    }
+
+    out[0] = GpioBinding { provider: 0 };
+    Ok(1)
+}
+
+fn activate_gpio_binding<H>(
+    _registered: &RegisteredDriver<GpioDriver<H>>,
+    context: &mut DriverActivationContext<'_>,
+    binding: GpioBinding,
+) -> Result<ActiveDriver<GpioDriver<H>>, DriverError>
+where
+    H: GpioHardware + 'static,
+{
+    let _ = context.downcast_mut::<GpioDriverContext<H>>()?;
+    if binding.provider != 0 {
+        return Err(DriverError::invalid());
+    }
+
+    Ok(ActiveDriver::new(binding, Gpio::<H>::new()))
+}
+
+impl<H> DriverContract for GpioDriver<H>
+where
+    H: GpioHardware + 'static,
+{
+    type Binding = GpioBinding;
+    type Instance = Gpio<H>;
+
+    fn registration() -> DriverRegistration<Self> {
+        DriverRegistration::new(
+            driver_metadata,
+            DriverActivation::new(enumerate_gpio_bindings::<H>, activate_gpio_binding::<H>),
+        )
     }
 }

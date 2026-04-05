@@ -125,7 +125,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::bus::gpio::{
+    use crate::contract::drivers::bus::gpio::{
         GpioCapabilities,
         GpioOwnedPinContract,
     };

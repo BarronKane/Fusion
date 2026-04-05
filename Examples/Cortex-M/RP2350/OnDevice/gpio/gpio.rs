@@ -9,19 +9,16 @@ use core::sync::atomic::{
 
 use fusion_hal::contract::drivers::bus::gpio::{
     GpioCapabilities,
+    GpioControlContract,
     GpioDriveStrength,
     GpioError,
     GpioErrorKind,
     GpioOwnedPinContract,
     GpioOutputPinContract,
 };
-use fusion_hal::drivers::bus::gpio::{
-    Gpio,
-    GpioPin,
-};
-use fusion_pal::sys::soc::drivers::bus::gpio::{
-    GpioHardware,
-    GpioPinHardware,
+use fusion_firmware::sys::hal::drivers::bus::gpio::{
+    SystemGpioPin,
+    system_gpio,
 };
 use fusion_std::thread::yield_now;
 use fusion_sys::channel::{
@@ -59,8 +56,7 @@ use crate::runtime::{
     spawn_with_stack,
 };
 
-type SelectedHardwareGpio = Gpio<GpioHardware>;
-type SelectedHardwarePin = GpioPin<GpioPinHardware>;
+type SelectedHardwarePin = SystemGpioPin;
 
 const REQUEST_ID_WRAP_SENTINEL: u32 = u32::MAX;
 
@@ -243,7 +239,8 @@ impl<const MAX_PINS: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPACITY
             return Err(GpioError::resource_exhausted());
         }
 
-        let mut hardware_pin = SelectedHardwareGpio::take(pin)?;
+        let gpio = system_gpio()?;
+        let mut hardware_pin = gpio.take_pin(pin)?;
         hardware_pin.set_drive_strength(drive_strength)?;
 
         let slot_index = this.claimed_count;

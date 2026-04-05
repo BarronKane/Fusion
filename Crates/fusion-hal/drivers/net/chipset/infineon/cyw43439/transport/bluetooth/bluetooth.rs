@@ -148,7 +148,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use std::collections::VecDeque;
     use std::vec::Vec;

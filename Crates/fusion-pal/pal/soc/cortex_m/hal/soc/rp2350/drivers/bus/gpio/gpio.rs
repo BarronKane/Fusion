@@ -17,7 +17,7 @@ use fusion_hal::contract::drivers::bus::gpio::{
     GpioPull,
     GpioSupport,
 };
-use fusion_hal::drivers::bus::gpio::interface::contract::{
+use fd_bus_gpio::interface::contract::{
     GpioHardware as GpioHardwareContract,
     GpioHardwarePin as GpioHardwarePinContract,
 };

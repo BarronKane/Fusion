@@ -51,31 +51,10 @@ use fusion_hal::contract::drivers::bus::gpio::{
     GpioError,
     GpioErrorKind,
 };
-use fusion_hal::contract::drivers::driver::{
-    DriverActivationContext,
-    DriverDiscoveryContext,
-    DriverError,
-    DriverErrorKind,
-    DriverRegistry,
-};
-use fusion_hal::contract::drivers::net::bluetooth::{
-    BluetoothAdapterId,
-    BluetoothError,
-    BluetoothSupport,
-};
-use fusion_hal::contract::drivers::net::wifi::{
-    WifiAdapterId,
-    WifiError,
-    WifiSupport,
-};
-use fusion_hal::drivers::bus::gpio::GpioPin as HalGpioPin;
+use fusion_hal::contract::drivers::net::bluetooth::BluetoothSupport;
+use fusion_hal::contract::drivers::net::wifi::WifiSupport;
+use fd_bus_gpio::GpioPin as HalGpioPin;
 use fd_net_chipset_infineon_cyw43439::{
-    bluetooth::{
-        CYW43439 as UniversalBluetoothCYW43439,
-        Cyw43439Binding as Cyw43439BluetoothBinding,
-        Cyw43439Driver as Cyw43439BluetoothDriver,
-        Cyw43439DriverContext as Cyw43439BluetoothDriverContext,
-    },
     interface::{
         backend::{
             gpio::{
@@ -85,7 +64,6 @@ use fd_net_chipset_infineon_cyw43439::{
         contract::{
             Cyw43439ControllerCaps,
             Cyw43439Error,
-            Cyw43439ErrorKind,
             Cyw43439HardwareContract,
             Cyw43439Radio,
         },
@@ -100,12 +78,6 @@ use fd_net_chipset_infineon_cyw43439::{
         Cyw43439TransportTopology,
         Cyw43439WlanTransport,
         Cyw43439WlanTransportClockProfile,
-    },
-    wifi::{
-        CYW43439 as UniversalWifiCYW43439,
-        Cyw43439Binding as Cyw43439WifiBinding,
-        Cyw43439Driver as Cyw43439WifiDriver,
-        Cyw43439DriverContext as Cyw43439WifiDriverContext,
     },
 };
 
@@ -147,11 +119,6 @@ const PICO2W_CYW43439_WIFI_ONLY_FW_LEN: usize = 224_190;
 const PICO2W_CYW43439_WIFI_ONLY_CLM_LEN: usize = 984;
 const PICO2W_CYW43439_WIFI_BT_FW_LEN: usize = 231_077;
 const PICO2W_CYW43439_WIFI_BT_CLM_LEN: usize = 984;
-
-/// Selected universal Bluetooth driver composed over the RP2350 Pico 2 W CYW43439 wiring.
-pub type Bluetooth = UniversalBluetoothCYW43439<SelectedCyw43439Hardware>;
-/// Selected universal Wi-Fi driver composed over the RP2350 Pico 2 W CYW43439 wiring.
-pub type Wifi = UniversalWifiCYW43439<SelectedCyw43439Hardware>;
 
 #[derive(Debug, Clone, Copy)]
 struct Rp2350Cyw43439Binding {
@@ -309,74 +276,6 @@ static CYW43439_SLOT: SharedCyw43439Slot = SharedCyw43439Slot::new();
 pub fn system_cyw43439() -> Result<SelectedCyw43439Hardware, Cyw43439Error> {
     CYW43439_SLOT.ensure_initialized()?;
     Ok(SelectedCyw43439Hardware)
-}
-
-/// Returns the selected universal Bluetooth provider over the RP2350 Pico 2 W CYW43439 wiring.
-///
-/// # Errors
-///
-/// Returns an error if the selected board does not expose the CYW43439 Bluetooth facet honestly or
-/// shared combo-chip activation fails.
-pub fn system_bluetooth() -> Result<Bluetooth, BluetoothError> {
-    let hardware = system_cyw43439().map_err(map_cyw43439_to_bluetooth)?;
-    let mut registry = DriverRegistry::<1>::new();
-    let registered = registry
-        .register::<Cyw43439BluetoothDriver<SelectedCyw43439Hardware>>()
-        .map_err(map_driver_bluetooth)?;
-    let mut driver_context = Cyw43439BluetoothDriverContext::new(hardware);
-    let mut bindings = [Cyw43439BluetoothBinding {
-        adapter: BluetoothAdapterId(0),
-    }];
-
-    {
-        let mut discovery = DriverDiscoveryContext::new(&mut driver_context);
-        let count = registered
-            .enumerate_bindings(&mut discovery, &mut bindings)
-            .map_err(map_driver_bluetooth)?;
-        if count == 0 {
-            return Err(BluetoothError::unsupported());
-        }
-    }
-
-    let mut activation = DriverActivationContext::new(&mut driver_context);
-    let active = registered
-        .activate(&mut activation, bindings[0])
-        .map_err(map_driver_bluetooth)?;
-    Ok(active.into_instance())
-}
-
-/// Returns the selected universal Wi-Fi provider over the RP2350 Pico 2 W CYW43439 wiring.
-///
-/// # Errors
-///
-/// Returns an error if the selected board does not expose the CYW43439 Wi-Fi facet honestly or
-/// shared combo-chip activation fails.
-pub fn system_wifi() -> Result<Wifi, WifiError> {
-    let hardware = system_cyw43439().map_err(map_cyw43439_to_wifi)?;
-    let mut registry = DriverRegistry::<1>::new();
-    let registered = registry
-        .register::<Cyw43439WifiDriver<SelectedCyw43439Hardware>>()
-        .map_err(map_driver_wifi)?;
-    let mut driver_context = Cyw43439WifiDriverContext::new(hardware);
-    let mut bindings = [Cyw43439WifiBinding {
-        adapter: WifiAdapterId(0),
-    }];
-
-    {
-        let mut discovery = DriverDiscoveryContext::new(&mut driver_context);
-        let count = registered
-            .enumerate_bindings(&mut discovery, &mut bindings)
-            .map_err(map_driver_wifi)?;
-        if count == 0 {
-            return Err(WifiError::unsupported());
-        }
-    }
-
-    let mut activation = DriverActivationContext::new(&mut driver_context);
-    let active = registered
-        .activate(&mut activation, bindings[0])
-        .map_err(map_driver_wifi)?;
-    Ok(active.into_instance())
 }
 
 impl Cyw43439HardwareContract for SelectedCyw43439Hardware {
@@ -877,57 +776,5 @@ fn map_gpio_error(error: GpioError) -> Cyw43439Error {
         GpioErrorKind::ResourceExhausted => Cyw43439Error::resource_exhausted(),
         GpioErrorKind::StateConflict => Cyw43439Error::state_conflict(),
         GpioErrorKind::Platform(code) => Cyw43439Error::platform(code),
-    }
-}
-
-fn map_cyw43439_to_bluetooth(error: Cyw43439Error) -> BluetoothError {
-    match error.kind() {
-        Cyw43439ErrorKind::Unsupported => BluetoothError::unsupported(),
-        Cyw43439ErrorKind::Invalid => BluetoothError::invalid(),
-        Cyw43439ErrorKind::Busy => BluetoothError::busy(),
-        Cyw43439ErrorKind::ResourceExhausted => BluetoothError::resource_exhausted(),
-        Cyw43439ErrorKind::StateConflict => BluetoothError::state_conflict(),
-        Cyw43439ErrorKind::Platform(code) => BluetoothError::platform(code),
-    }
-}
-
-fn map_cyw43439_to_wifi(error: Cyw43439Error) -> WifiError {
-    match error.kind() {
-        Cyw43439ErrorKind::Unsupported => WifiError::unsupported(),
-        Cyw43439ErrorKind::Invalid => WifiError::invalid(),
-        Cyw43439ErrorKind::Busy => WifiError::busy(),
-        Cyw43439ErrorKind::ResourceExhausted => WifiError::resource_exhausted(),
-        Cyw43439ErrorKind::StateConflict => WifiError::state_conflict(),
-        Cyw43439ErrorKind::Platform(code) => WifiError::platform(code),
-    }
-}
-
-fn map_driver_bluetooth(error: DriverError) -> BluetoothError {
-    match error.kind() {
-        DriverErrorKind::Unsupported => BluetoothError::unsupported(),
-        DriverErrorKind::Invalid => BluetoothError::invalid(),
-        DriverErrorKind::Busy => BluetoothError::busy(),
-        DriverErrorKind::ResourceExhausted => BluetoothError::resource_exhausted(),
-        DriverErrorKind::StateConflict => BluetoothError::state_conflict(),
-        DriverErrorKind::MissingContext | DriverErrorKind::WrongContextType => {
-            BluetoothError::state_conflict()
-        }
-        DriverErrorKind::AlreadyRegistered => BluetoothError::state_conflict(),
-        DriverErrorKind::Platform(code) => BluetoothError::platform(code),
-    }
-}
-
-fn map_driver_wifi(error: DriverError) -> WifiError {
-    match error.kind() {
-        DriverErrorKind::Unsupported => WifiError::unsupported(),
-        DriverErrorKind::Invalid => WifiError::invalid(),
-        DriverErrorKind::Busy => WifiError::busy(),
-        DriverErrorKind::ResourceExhausted => WifiError::resource_exhausted(),
-        DriverErrorKind::StateConflict => WifiError::state_conflict(),
-        DriverErrorKind::MissingContext | DriverErrorKind::WrongContextType => {
-            WifiError::state_conflict()
-        }
-        DriverErrorKind::AlreadyRegistered => WifiError::state_conflict(),
-        DriverErrorKind::Platform(code) => WifiError::platform(code),
     }
 }

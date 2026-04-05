@@ -26,7 +26,13 @@ sys-cortex-m = [
     "dep:cortex-m",
     "dep:cortex-m-rt",
 ]
-soc-rp2350 = ["sys-cortex-m", "dep:fd-net-chipset-infineon-cyw43439", "fd-net-chipset-infineon-cyw43439/soc-rp2350"]
+soc-rp2350 = [
+    "sys-cortex-m",
+    "dep:fd-bus-gpio",
+    "fd-bus-gpio/soc-rp2350",
+    "dep:fd-net-chipset-infineon-cyw43439",
+    "fd-net-chipset-infineon-cyw43439/soc-rp2350",
+]
 sys-fusion-kn = ["hosted", "dep:fusion-kn"]
 cortex-m-vector-secure-world = []
 cortex-m-vector-nonsecure-world = []
@@ -42,7 +48,8 @@ fusion-kn = { workspace = true, optional = true, features = ["client"] }
 [target.'cfg(target_os = "none")'.dependencies]
 cortex-m = { workspace = true, optional = true }
 cortex-m-rt = { workspace = true, optional = true }
-fd-net-chipset-infineon-cyw43439 = { workspace = true, default-features = false, optional = true }
+fd-bus-gpio = { path = "../fusion-hal/drivers/bus/gpio", default-features = false, optional = true }
+fd-net-chipset-infineon-cyw43439 = { path = "../fusion-hal/drivers/net/chipset/infineon/cyw43439", default-features = false, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true

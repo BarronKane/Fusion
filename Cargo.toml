@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
     # fusion substrate crates.
-    "Crates/fusion-hal/drivers/net/chipset/infineon/cyw43439",
     "Crates/fusion-firmware",
     "Crates/fusion-hal",
     "Crates/fusion-pal",
@@ -26,7 +25,6 @@ repository = ""
 
 [workspace.dependencies]
 # Fusion substrate stack.
-fd-net-chipset-infineon-cyw43439 = { path = "Crates/fusion-hal/drivers/net/chipset/infineon/cyw43439", default-features = false }
 fusion-firmware = { path = "Crates/fusion-firmware", default-features = false }
 fusion-hal = { path = "Crates/fusion-hal", default-features = false }
 fusion-pal = { path = "Crates/fusion-pal", default-features = false }

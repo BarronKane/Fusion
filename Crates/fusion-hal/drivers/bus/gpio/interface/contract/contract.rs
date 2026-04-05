@@ -1,6 +1,6 @@
 //! Hardware-facing GPIO substrate contract consumed by the universal GPIO driver.
 
-use crate::contract::drivers::bus::gpio::{
+use fusion_hal::contract::drivers::bus::gpio::{
     GpioCapabilities,
     GpioDriveStrength,
     GpioError,
