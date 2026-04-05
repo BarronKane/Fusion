@@ -11,8 +11,8 @@ use fusion_pal::sys::soc::cortex_m::hal::soc::pio::{
 
 use crate::event::EventSourceHandle;
 use super::{
-    PcuBase,
-    PcuControl,
+    PcuBaseContract,
+    PcuControlContract,
     PcuDmaAttachment,
     PcuEngineClaim,
     PcuEngineDescriptor,
@@ -53,19 +53,19 @@ impl PcuSystem {
     /// Reports the truthful programmable-IO surface for the selected backend.
     #[must_use]
     pub fn support(&self) -> PcuSupport {
-        PcuBase::support(&self.inner)
+        PcuBaseContract::support(&self.inner)
     }
 
     /// Returns the surfaced engine descriptors.
     #[must_use]
     pub fn engines(&self) -> &'static [PcuEngineDescriptor] {
-        PcuBase::engines(&self.inner)
+        PcuBaseContract::engines(&self.inner)
     }
 
     /// Returns the surfaced lane descriptors for one engine.
     #[must_use]
     pub fn lanes(&self, engine: PcuEngineId) -> &'static [PcuLaneDescriptor] {
-        PcuBase::lanes(&self.inner, engine)
+        PcuBaseContract::lanes(&self.inner, engine)
     }
 
     fn engine_descriptor(
@@ -94,7 +94,7 @@ impl PcuSystem {
     ///
     /// Returns any honest backend claim failure.
     pub fn claim_engine(&self, engine: PcuEngineId) -> Result<PcuEngineClaim, PcuError> {
-        PcuControl::claim_engine(&self.inner, engine)
+        PcuControlContract::claim_engine(&self.inner, engine)
     }
 
     /// Releases one previously claimed engine.
@@ -103,7 +103,7 @@ impl PcuSystem {
     ///
     /// Returns any honest backend release failure.
     pub fn release_engine(&self, claim: PcuEngineClaim) -> Result<(), PcuError> {
-        PcuControl::release_engine(&self.inner, claim)
+        PcuControlContract::release_engine(&self.inner, claim)
     }
 
     /// Claims one or more lanes within one engine.
@@ -116,7 +116,7 @@ impl PcuSystem {
         engine: PcuEngineId,
         lanes: PcuLaneMask,
     ) -> Result<PcuLaneClaim, PcuError> {
-        PcuControl::claim_lanes(&self.inner, engine, lanes)
+        PcuControlContract::claim_lanes(&self.inner, engine, lanes)
     }
 
     /// Returns one DMA pacing attachment for the TX FIFO of the supplied lane.
@@ -184,7 +184,7 @@ impl PcuSystem {
     ///
     /// Returns any honest backend release failure.
     pub fn release_lanes(&self, claim: PcuLaneClaim) -> Result<(), PcuError> {
-        PcuControl::release_lanes(&self.inner, claim)
+        PcuControlContract::release_lanes(&self.inner, claim)
     }
 
     /// Loads one backend-native program image into one claimed engine.
@@ -197,7 +197,7 @@ impl PcuSystem {
         claim: &PcuEngineClaim,
         image: &PcuProgramImage<'_>,
     ) -> Result<PcuProgramLease, PcuError> {
-        PcuControl::load_program(&self.inner, claim, image)
+        PcuControlContract::load_program(&self.inner, claim, image)
     }
 
     /// Lowers one portable deterministic IO kernel into backend-native words.
@@ -305,7 +305,7 @@ impl PcuSystem {
         claim: &PcuEngineClaim,
         lease: PcuProgramLease,
     ) -> Result<(), PcuError> {
-        PcuControl::unload_program(&self.inner, claim, lease)
+        PcuControlContract::unload_program(&self.inner, claim, lease)
     }
 
     /// Starts one claimed lane set.
@@ -314,7 +314,7 @@ impl PcuSystem {
     ///
     /// Returns any honest backend control failure.
     pub fn start_lanes(&self, claim: &PcuLaneClaim) -> Result<(), PcuError> {
-        PcuControl::start_lanes(&self.inner, claim)
+        PcuControlContract::start_lanes(&self.inner, claim)
     }
 
     /// Stops one claimed lane set.
@@ -323,7 +323,7 @@ impl PcuSystem {
     ///
     /// Returns any honest backend control failure.
     pub fn stop_lanes(&self, claim: &PcuLaneClaim) -> Result<(), PcuError> {
-        PcuControl::stop_lanes(&self.inner, claim)
+        PcuControlContract::stop_lanes(&self.inner, claim)
     }
 
     /// Restarts one claimed lane set.
@@ -332,7 +332,7 @@ impl PcuSystem {
     ///
     /// Returns any honest backend control failure.
     pub fn restart_lanes(&self, claim: &PcuLaneClaim) -> Result<(), PcuError> {
-        PcuControl::restart_lanes(&self.inner, claim)
+        PcuControlContract::restart_lanes(&self.inner, claim)
     }
 
     /// Applies the backend-equivalent lane initialization sequence for one loaded program.
@@ -367,7 +367,7 @@ impl PcuSystem {
         lane: PcuLaneId,
         word: u32,
     ) -> Result<(), PcuError> {
-        PcuControl::write_tx_fifo(&self.inner, claim, lane, word)
+        PcuControlContract::write_tx_fifo(&self.inner, claim, lane, word)
     }
 
     /// Reads one word from one claimed RX FIFO.
@@ -376,7 +376,7 @@ impl PcuSystem {
     ///
     /// Returns any honest backend FIFO failure.
     pub fn read_rx_fifo(&self, claim: &PcuLaneClaim, lane: PcuLaneId) -> Result<u32, PcuError> {
-        PcuControl::read_rx_fifo(&self.inner, claim, lane)
+        PcuControlContract::read_rx_fifo(&self.inner, claim, lane)
     }
 
     /// Applies one execution-state bundle to a claimed lane set.

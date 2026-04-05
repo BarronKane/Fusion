@@ -6,9 +6,9 @@ use core::sync::atomic::{
 };
 
 use crate::contract::drivers::pcu::{
-    PcuBase,
+    PcuBaseContract,
     PcuCaps,
-    PcuControl,
+    PcuControlContract,
     PcuError,
     PcuExecutorClaim,
     PcuExecutorClass,
@@ -50,7 +50,7 @@ impl LinuxPcu {
     }
 }
 
-impl PcuBase for LinuxPcu {
+impl PcuBaseContract for LinuxPcu {
     fn support(&self) -> PcuSupport {
         PcuSupport {
             caps: PcuCaps::ENUMERATE_EXECUTORS
@@ -68,7 +68,7 @@ impl PcuBase for LinuxPcu {
     }
 }
 
-impl PcuControl for LinuxPcu {
+impl PcuControlContract for LinuxPcu {
     fn claim_executor(&self, executor: PcuExecutorId) -> Result<PcuExecutorClaim, PcuError> {
         if executor != HOST_CPU_EXECUTOR_ID {
             return Err(PcuError::invalid());

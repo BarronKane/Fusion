@@ -11,9 +11,9 @@ use core::sync::atomic::{
 };
 
 use crate::contract::drivers::pcu::{
-    PcuBase,
+    PcuBaseContract,
     PcuCaps,
-    PcuControl,
+    PcuControlContract,
     PcuError,
     PcuExecutorClaim,
     PcuExecutorClass,
@@ -57,7 +57,7 @@ impl MacOsPcu {
     }
 }
 
-impl PcuBase for MacOsPcu {
+impl PcuBaseContract for MacOsPcu {
     fn support(&self) -> PcuSupport {
         PcuSupport {
             caps: PcuCaps::ENUMERATE_EXECUTORS
@@ -75,7 +75,7 @@ impl PcuBase for MacOsPcu {
     }
 }
 
-impl PcuControl for MacOsPcu {
+impl PcuControlContract for MacOsPcu {
     fn claim_executor(&self, executor: PcuExecutorId) -> Result<PcuExecutorClaim, PcuError> {
         if executor != HOST_CPU_EXECUTOR_ID {
             return Err(PcuError::invalid());

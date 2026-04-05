@@ -1711,6 +1711,22 @@ pub(crate) const BLUETOOTH_CONTROLLERS: [CortexMBluetoothControllerBinding; 1] =
         wake_gpio: None,
     }];
 
+/// Board-visible Wi-Fi controller bindings for the current RP2350 / Pico 2 W contract.
+pub(crate) const WIFI_CONTROLLERS: [CortexMWifiControllerBinding; 1] =
+    [CortexMWifiControllerBinding {
+        name: "pico2w-cyw43439",
+        vendor: "infineon",
+        chip: "CYW43439",
+        transport: CortexMWifiTransportBinding::Spi3WireSharedDataIrq {
+            clock_gpio: 29,
+            chip_select_gpio: 25,
+            data_irq_gpio: 24,
+        },
+        power_gpio: Some(23),
+        reset_gpio: None,
+        wake_gpio: None,
+    }];
+
 // NOTE: the current selected RP2350 board contract follows the open Pico 2 W schematic and the
 // local RP2350 example linker layout, both of which assume a 32 Mbit / 4 MiB external flash
 // population. Raspberry Pi's Pico 2 W prose datasheet currently disagrees and mentions a

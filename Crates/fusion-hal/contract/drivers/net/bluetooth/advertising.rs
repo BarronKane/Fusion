@@ -3,10 +3,10 @@
 use super::BluetoothAdvertisingParameters;
 use super::BluetoothAdvertisingSetId;
 use super::BluetoothError;
-use super::BluetoothOwnedAdapter;
+use super::BluetoothOwnedAdapterContract;
 
 /// Advertising control for one opened Bluetooth adapter.
-pub trait BluetoothAdvertisingControl: BluetoothOwnedAdapter {
+pub trait BluetoothAdvertisingControlContract: BluetoothOwnedAdapterContract {
     /// Starts one advertising set.
     ///
     /// # Errors

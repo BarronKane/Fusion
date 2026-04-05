@@ -74,6 +74,8 @@ pub use super::board_contract::{
     CortexMSocMonotonicTimeImpact,
     CortexMSocOverclockProfile,
     CortexMSocOverclockSupport,
+    CortexMWifiControllerBinding,
+    CortexMWifiTransportBinding,
 };
 use super::board_contract::{
     self,
@@ -962,6 +964,10 @@ impl CortexMSocBoard for Rp2350Soc {
         &BLUETOOTH_CONTROLLERS
     }
 
+    fn wifi_controllers(&self) -> &'static [CortexMWifiControllerBinding] {
+        &WIFI_CONTROLLERS
+    }
+
     fn irqs(&self) -> &'static [CortexMIrqDescriptor] {
         &IRQS
     }
@@ -1594,6 +1600,12 @@ pub fn peripherals() -> &'static [CortexMPeripheralDescriptor] {
 #[must_use]
 pub fn bluetooth_controllers() -> &'static [CortexMBluetoothControllerBinding] {
     board_contract::bluetooth_controllers(system_soc())
+}
+
+/// Returns the selected RP2350 board's Wi-Fi controller bindings.
+#[must_use]
+pub fn wifi_controllers() -> &'static [CortexMWifiControllerBinding] {
+    board_contract::wifi_controllers(system_soc())
 }
 
 /// Returns the selected RP2350 IRQ descriptors.

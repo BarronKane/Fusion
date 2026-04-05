@@ -1,8 +1,8 @@
 //! Backend-neutral unsupported generic PCU implementation.
 
 use super::{
-    PcuBase,
-    PcuControl,
+    PcuBaseContract,
+    PcuControlContract,
     PcuError,
     PcuExecutorClaim,
     PcuExecutorDescriptor,
@@ -22,7 +22,7 @@ impl UnsupportedPcu {
     }
 }
 
-impl PcuBase for UnsupportedPcu {
+impl PcuBaseContract for UnsupportedPcu {
     fn support(&self) -> PcuSupport {
         PcuSupport::unsupported()
     }
@@ -32,7 +32,7 @@ impl PcuBase for UnsupportedPcu {
     }
 }
 
-impl PcuControl for UnsupportedPcu {
+impl PcuControlContract for UnsupportedPcu {
     fn claim_executor(&self, _executor: PcuExecutorId) -> Result<PcuExecutorClaim, PcuError> {
         Err(PcuError::unsupported())
     }

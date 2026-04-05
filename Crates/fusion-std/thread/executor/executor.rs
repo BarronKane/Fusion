@@ -79,7 +79,7 @@ use fusion_pal::sys::fiber::{
     PlatformFiberWakeSignal,
     system_fiber_host,
 };
-use fusion_pal::sys::mem::MemBase;
+use fusion_pal::sys::mem::MemBaseContract;
 use fusion_sys::alloc::{
     AllocError,
     AllocErrorKind,
@@ -93,7 +93,7 @@ use fusion_sys::alloc::{
 };
 use fusion_sys::channel::ChannelError;
 #[cfg(feature = "debug-insights")]
-use fusion_sys::channel::ChannelReceive;
+use fusion_sys::channel::ChannelReceiveContract;
 use fusion_sys::domain::context::ContextId;
 use fusion_sys::courier::{
     CourierId,
@@ -170,7 +170,7 @@ use fusion_sys::thread::{
     system_thread,
 };
 #[cfg(feature = "debug-insights")]
-use fusion_sys::transport::TransportAttachmentControl;
+use fusion_sys::transport::TransportAttachmentControlContract;
 use fusion_sys::transport::{
     TransportAttachmentRequest,
     TransportError,

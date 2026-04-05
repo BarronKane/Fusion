@@ -4,10 +4,10 @@ use super::BluetoothAttAttributeHandle;
 use super::BluetoothAttAttributeValue;
 use super::BluetoothConnectionId;
 use super::BluetoothError;
-use super::BluetoothOwnedAdapter;
+use super::BluetoothOwnedAdapterContract;
 
 /// ATT client control for one opened Bluetooth adapter.
-pub trait BluetoothAttClient: BluetoothOwnedAdapter {
+pub trait BluetoothAttClientContract: BluetoothOwnedAdapterContract {
     /// Negotiates ATT MTU for one active connection.
     ///
     /// # Errors

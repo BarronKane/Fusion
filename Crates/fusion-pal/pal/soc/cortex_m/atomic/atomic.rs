@@ -17,7 +17,7 @@ use core::sync::atomic::{
 use core::time::Duration;
 
 use crate::contract::pal::runtime::atomic::{
-    AtomicBase,
+    AtomicBaseContract,
     AtomicCompareExchangeOutcome32,
     AtomicError,
     AtomicFallbackKind,
@@ -25,7 +25,7 @@ use crate::contract::pal::runtime::atomic::{
     AtomicSupport,
     AtomicWaitOutcome,
     AtomicWaitWord32Support,
-    AtomicWord32,
+    AtomicWord32Contract,
     AtomicWord32Caps,
     AtomicWord32Support,
 };
@@ -168,7 +168,7 @@ impl CortexMAtomic {
     }
 }
 
-impl AtomicBase for CortexMAtomic {
+impl AtomicBaseContract for CortexMAtomic {
     type Word32 = CortexMAtomicWord32;
 
     fn support(&self) -> AtomicSupport {
@@ -209,7 +209,7 @@ impl Default for CortexMAtomicWord32 {
     }
 }
 
-impl AtomicWord32 for CortexMAtomicWord32 {
+impl AtomicWord32Contract for CortexMAtomicWord32 {
     fn support(&self) -> AtomicWord32Support {
         word32_support_surface()
     }

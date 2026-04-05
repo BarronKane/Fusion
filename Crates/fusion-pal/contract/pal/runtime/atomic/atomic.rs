@@ -16,9 +16,9 @@ pub use unsupported::*;
 pub use word::*;
 
 /// Backend-selected atomic support surface.
-pub trait AtomicBase {
+pub trait AtomicBaseContract {
     /// Concrete 32-bit atomic word handle returned by this backend.
-    type Word32: AtomicWord32;
+    type Word32: AtomicWord32Contract;
 
     /// Reports the atomic surfaces and semantics this backend can support honestly.
     fn support(&self) -> AtomicSupport;

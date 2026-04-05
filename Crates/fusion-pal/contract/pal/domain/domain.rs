@@ -212,7 +212,7 @@ impl ContextSupport {
 }
 
 /// Base contract for one native Fusion domain.
-pub trait DomainBase {
+pub trait DomainBaseContract {
     fn domain_id(&self) -> DomainId;
 
     fn name(&self) -> &str;
@@ -221,7 +221,7 @@ pub trait DomainBase {
 }
 
 /// Base contract for one native Fusion courier.
-pub trait CourierBase {
+pub trait CourierBaseContract {
     fn courier_id(&self) -> CourierId;
 
     fn name(&self) -> &str;
@@ -230,14 +230,14 @@ pub trait CourierBase {
 }
 
 /// Visibility surface for one courier.
-pub trait CourierVisibilityControl: CourierBase {
+pub trait CourierVisibilityControlContract: CourierBaseContract {
     fn visible_context_count(&self) -> usize;
 
     fn can_observe_context(&self, context: ContextId) -> bool;
 }
 
 /// Base contract for one visible Fusion context/endpoint.
-pub trait ContextBase {
+pub trait ContextBaseContract {
     fn context_id(&self) -> ContextId;
 
     fn name(&self) -> &str;

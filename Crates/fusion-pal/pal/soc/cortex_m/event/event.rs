@@ -12,7 +12,7 @@ use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::contract::pal::runtime::event::{
-    EventBase,
+    EventBaseContract,
     EventCaps,
     EventCompletion,
     EventCompletionOp,
@@ -25,7 +25,7 @@ use crate::contract::pal::runtime::event::{
     EventRecord,
     EventRegistration,
     EventRegistrationMode,
-    EventSource,
+    EventSourceContract,
     EventSourceHandle,
     EventSupport,
 };
@@ -267,7 +267,7 @@ impl CortexMPoller {
     }
 }
 
-impl EventBase for CortexMEvent {
+impl EventBaseContract for CortexMEvent {
     type Poller = CortexMPoller;
 
     fn support(&self) -> EventSupport {
@@ -275,7 +275,7 @@ impl EventBase for CortexMEvent {
     }
 }
 
-impl EventSource for CortexMEvent {
+impl EventSourceContract for CortexMEvent {
     fn create(&self) -> Result<Self::Poller, EventError> {
         Ok(CortexMPoller::new())
     }
@@ -496,7 +496,7 @@ mod tests {
     use super::*;
     use crate::contract::pal::runtime::event::{
         EventCompletionOpKind,
-        EventSource,
+        EventSourceContract,
     };
 
     #[test]

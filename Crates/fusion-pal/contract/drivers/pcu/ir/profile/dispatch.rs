@@ -5,7 +5,7 @@ use super::super::{
     PcuInvocationModel,
     PcuIrKind,
     PcuKernelId,
-    PcuKernelIr,
+    PcuKernelIrContract,
     PcuKernelSignature,
     PcuParameter,
     PcuPort,
@@ -44,7 +44,7 @@ pub struct PcuDispatchKernelIr<'a> {
     pub capabilities: PcuDispatchCapabilities,
 }
 
-impl PcuKernelIr for PcuDispatchKernelIr<'_> {
+impl PcuKernelIrContract for PcuDispatchKernelIr<'_> {
     fn id(&self) -> PcuKernelId {
         self.id
     }

@@ -243,6 +243,7 @@ fn release(pin: u8) {
     if GpioHardware::pins()
         .iter()
         .all(|descriptor| descriptor.pin != pin)
+        && !RP2350_PICO2W_RESERVED_GPIO_PINS.contains(&pin)
     {
         return;
     }

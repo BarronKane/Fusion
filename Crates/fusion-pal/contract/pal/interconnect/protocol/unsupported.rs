@@ -1,7 +1,7 @@
 //! Unsupported protocol placeholder.
 
 use super::{
-    Protocol,
+    ProtocolContract,
     ProtocolDescriptor,
 };
 
@@ -9,7 +9,7 @@ use super::{
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UnsupportedProtocol;
 
-impl Protocol for UnsupportedProtocol {
+impl ProtocolContract for UnsupportedProtocol {
     type Message = ();
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor::unsupported();

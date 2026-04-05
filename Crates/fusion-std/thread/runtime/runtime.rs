@@ -10,7 +10,7 @@ use core::mem::{
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
-use fusion_pal::sys::mem::MemBase;
+use fusion_pal::sys::mem::MemBaseContract;
 use fusion_sys::alloc::{
     AllocError,
     AllocErrorKind,

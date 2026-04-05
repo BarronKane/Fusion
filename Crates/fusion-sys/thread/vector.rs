@@ -11,7 +11,7 @@ pub use fusion_pal::sys::vector::{
     IrqSlot,
     SlotState,
     SystemException,
-    VectorBase,
+    VectorBaseContract,
     VectorCaps,
     VectorDispatchCookie,
     VectorDispatchLane,
@@ -21,16 +21,16 @@ pub use fusion_pal::sys::vector::{
     VectorInlineEligibility,
     VectorInlineHandler,
     VectorInlineStackPolicy,
-    VectorOwnershipControl,
+    VectorOwnershipControlContract,
     VectorOwnershipKind,
     VectorPriority,
-    VectorSealedQuery,
+    VectorSealedQueryContract,
     VectorSecurityDomain,
     VectorSlotBinding,
     VectorSlotTarget,
     VectorSupport,
     VectorSystemBinding,
-    VectorTableBuilderControl,
+    VectorTableBuilderControlContract,
     VectorTableMode,
     VectorTableTopology,
 };
@@ -82,13 +82,13 @@ impl VectorSystem {
     /// Reports the truthful vector-ownership surface for the selected backend.
     #[must_use]
     pub fn support(&self) -> VectorSupport {
-        VectorBase::support(&self.inner)
+        VectorBaseContract::support(&self.inner)
     }
 
     /// Returns the current vector-table mode known to the selected backend.
     #[must_use]
     pub fn table_mode(&self) -> VectorTableMode {
-        VectorBase::table_mode(&self.inner)
+        VectorBaseContract::table_mode(&self.inner)
     }
 
     /// Adopts the current vector table into owned RAM in one explicit mode.
@@ -100,7 +100,7 @@ impl VectorSystem {
         &self,
         mode: VectorTableMode,
     ) -> Result<VectorTableBuilder, VectorError> {
-        let builder = VectorOwnershipControl::adopt_and_clone(&self.inner, mode)?;
+        let builder = VectorOwnershipControlContract::adopt_and_clone(&self.inner, mode)?;
         Ok(VectorTableBuilder { inner: builder })
     }
 
@@ -142,13 +142,13 @@ impl VectorTableBuilder {
     /// Reports the truthful vector support captured by this builder.
     #[must_use]
     pub fn support(&self) -> VectorSupport {
-        VectorTableBuilderControl::support(&self.inner)
+        VectorTableBuilderControlContract::support(&self.inner)
     }
 
     /// Returns the active mode of this builder.
     #[must_use]
     pub fn mode(&self) -> VectorTableMode {
-        VectorTableBuilderControl::mode(&self.inner)
+        VectorTableBuilderControlContract::mode(&self.inner)
     }
 
     /// Binds one slot for ISR-inline execution.
@@ -203,7 +203,7 @@ impl VectorTableBuilder {
         stack: VectorInlineStackPolicy,
         eligibility: Option<VectorInlineEligibility>,
     ) -> Result<(), VectorError> {
-        VectorTableBuilderControl::bind(
+        VectorTableBuilderControlContract::bind(
             &mut self.inner,
             VectorSlotBinding {
                 slot,
@@ -302,7 +302,7 @@ impl VectorTableBuilder {
         priority: Option<VectorPriority>,
         cookie: VectorDispatchCookie,
     ) -> Result<(), VectorError> {
-        VectorTableBuilderControl::bind(
+        VectorTableBuilderControlContract::bind(
             &mut self.inner,
             VectorSlotBinding {
                 slot,
@@ -319,7 +319,7 @@ impl VectorTableBuilder {
     ///
     /// Returns any honest backend slot-unbind failure.
     pub fn unbind(&mut self, slot: IrqSlot) -> Result<(), VectorError> {
-        VectorTableBuilderControl::unbind(&mut self.inner, slot)
+        VectorTableBuilderControlContract::unbind(&mut self.inner, slot)
     }
 
     /// Binds one system exception inline.
@@ -333,7 +333,7 @@ impl VectorTableBuilder {
         priority: Option<VectorPriority>,
         handler: VectorInlineHandler,
     ) -> Result<(), VectorError> {
-        VectorTableBuilderControl::bind_system(
+        VectorTableBuilderControlContract::bind_system(
             &mut self.inner,
             VectorSystemBinding {
                 exception,
@@ -368,7 +368,7 @@ impl VectorTableBuilder {
     ///
     /// Returns any honest backend seal-time failure.
     pub fn seal(self) -> Result<SealedVectorTable, VectorError> {
-        let inner = VectorTableBuilderControl::seal(self.inner)?;
+        let inner = VectorTableBuilderControlContract::seal(self.inner)?;
         Ok(SealedVectorTable { inner })
     }
 }
@@ -377,13 +377,13 @@ impl SealedVectorTable {
     /// Returns the active mode of this sealed table.
     #[must_use]
     pub fn mode(&self) -> VectorTableMode {
-        VectorSealedQuery::mode(&self.inner)
+        VectorSealedQueryContract::mode(&self.inner)
     }
 
     /// Returns the number of peripheral IRQ slots in this sealed table.
     #[must_use]
     pub fn slot_count(&self) -> u16 {
-        VectorSealedQuery::slot_count(&self.inner)
+        VectorSealedQueryContract::slot_count(&self.inner)
     }
 
     /// Returns the visible state of one bound slot.
@@ -392,7 +392,7 @@ impl SealedVectorTable {
     ///
     /// Returns any honest backend observation failure.
     pub fn slot_state(&self, slot: IrqSlot) -> Result<SlotState, VectorError> {
-        VectorSealedQuery::slot_state(&self.inner, slot)
+        VectorSealedQueryContract::slot_state(&self.inner, slot)
     }
 
     /// Dispatches all currently pending callbacks from one deferred lane.
@@ -402,7 +402,7 @@ impl SealedVectorTable {
     /// Returns any honest backend pending-state extraction failure.
     pub fn dispatch_pending(&self, lane: VectorDispatchLane) -> Result<usize, VectorError> {
         let mut cookies = [VectorDispatchCookie(0); VECTOR_DEFERRED_REGISTRY_CAPACITY];
-        let count = VectorSealedQuery::take_pending(&self.inner, lane, &mut cookies)?;
+        let count = VectorSealedQueryContract::take_pending(&self.inner, lane, &mut cookies)?;
         for cookie in cookies.into_iter().take(count) {
             dispatch_cookie(cookie)?;
         }

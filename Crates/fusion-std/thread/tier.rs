@@ -5,7 +5,7 @@ use core::sync::atomic::{
     Ordering,
 };
 
-use fusion_pal::contract::pal::HardwareTopologyQuery as _;
+use fusion_pal::contract::pal::HardwareTopologyQueryContract as _;
 use fusion_pal::sys::cpu::system_cpu;
 use fusion_sys::fiber::FiberError;
 use fusion_sys::thread::vector::{

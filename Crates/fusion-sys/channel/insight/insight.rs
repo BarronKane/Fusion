@@ -17,10 +17,10 @@ pub use fusion_pal::sys::insight::*;
 #[cfg(feature = "debug-insights")]
 use crate::channel::LocalChannel;
 use crate::channel::{
-    ChannelBase,
+    ChannelBaseContract,
     ChannelError,
-    ChannelReceive,
-    ChannelSend,
+    ChannelReceiveContract,
+    ChannelSendContract,
     ChannelSupport,
 };
 #[cfg(not(feature = "debug-insights"))]
@@ -29,11 +29,11 @@ use crate::channel::{
     ChannelImplementationKind,
     ChannelMode,
 };
-use crate::transport::protocol::Protocol;
+use crate::transport::protocol::ProtocolContract;
 use crate::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentRequest,
-    TransportBase,
+    TransportBaseContract,
     TransportError,
     TransportSupport,
     TransportTopology,
@@ -46,7 +46,11 @@ pub use timeline::*;
 /// sheep's skin. When the `debug-insights` feature is disabled, construction returns
 /// `InsightError::not_enabled()` and the disabled implementation remains available only as a
 /// zero-cost front door for the optimizer to erase.
-pub struct LocalInsightChannel<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize = 8> {
+pub struct LocalInsightChannel<
+    P: ProtocolContract,
+    const CAPACITY: usize,
+    const MAX_CONSUMERS: usize = 8,
+> {
     class: InsightChannelClass,
     capture: InsightCaptureMode,
     #[cfg(feature = "debug-insights")]
@@ -76,7 +80,7 @@ pub enum InsightObservationTransition {
     Deactivated,
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     LocalInsightChannel<P, CAPACITY, MAX_CONSUMERS>
 {
     /// Returns the configured support surface for this insight channel class.
@@ -226,7 +230,7 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     }
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportBase
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportBaseContract
     for LocalInsightChannel<P, CAPACITY, MAX_CONSUMERS>
 {
     fn support(&self) -> TransportSupport {
@@ -267,8 +271,8 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportBa
     }
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAttachmentControl
-    for LocalInsightChannel<P, CAPACITY, MAX_CONSUMERS>
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
+    TransportAttachmentControlContract for LocalInsightChannel<P, CAPACITY, MAX_CONSUMERS>
 {
     type ProducerAttachment = usize;
     type ConsumerAttachment = usize;
@@ -370,10 +374,10 @@ const fn decode_observation_transition(code: u8) -> Option<InsightObservationTra
     }
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelBase
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelBaseContract
     for LocalInsightChannel<P, CAPACITY, MAX_CONSUMERS>
 {
-    type Protocol = P;
+    type ProtocolContract = P;
 
     fn channel_support(&self) -> ChannelSupport {
         #[cfg(feature = "debug-insights")]
@@ -395,13 +399,13 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelBase
     }
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelSend
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelSendContract
     for LocalInsightChannel<P, CAPACITY, MAX_CONSUMERS>
 {
     fn try_send(
         &self,
         producer: Self::ProducerAttachment,
-        message: <Self::Protocol as Protocol>::Message,
+        message: <Self::ProtocolContract as ProtocolContract>::Message,
     ) -> Result<(), ChannelError> {
         #[cfg(feature = "debug-insights")]
         {
@@ -415,13 +419,13 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelSend
     }
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelReceive
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelReceiveContract
     for LocalInsightChannel<P, CAPACITY, MAX_CONSUMERS>
 {
     fn try_receive(
         &self,
         consumer: Self::ConsumerAttachment,
-    ) -> Result<Option<<Self::Protocol as Protocol>::Message>, ChannelError> {
+    ) -> Result<Option<<Self::ProtocolContract as ProtocolContract>::Message>, ChannelError> {
         #[cfg(feature = "debug-insights")]
         {
             self.inner.try_receive(consumer)
@@ -448,7 +452,7 @@ mod tests {
     };
     struct LocalWordProtocol;
 
-    impl Protocol for LocalWordProtocol {
+    impl ProtocolContract for LocalWordProtocol {
         type Message = u32;
 
         const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {

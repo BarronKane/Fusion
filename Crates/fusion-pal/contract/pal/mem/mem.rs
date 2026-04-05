@@ -20,7 +20,7 @@ pub use catalog::*;
 pub use topology::*;
 
 bitflags::bitflags! {
-    /// Backend-native capabilities reported by a [`MemBase`] provider.
+    /// Backend-native capabilities reported by a [`MemBaseContract`] provider.
     ///
     /// These flags describe operations the backend knows how to perform at all. They are
     /// not, by themselves, a guarantee that every combination of request fields is valid.
@@ -40,9 +40,9 @@ bitflags::bitflags! {
         const MAP_FIXED_REPLACE     = 1 << 3;
         /// Supports an address hint that the backend may ignore if it cannot honor it safely.
         const MAP_HINT              = 1 << 4;
-        /// Supports changing protection on an existing region through [`MemProtect::protect`].
+        /// Supports changing protection on an existing region through [`MemProtectContract::protect`].
         const PROTECT               = 1 << 5;
-        /// Supports advisory usage hints through [`MemAdvise::advise`].
+        /// Supports advisory usage hints through [`MemAdviseContract::advise`].
         const ADVISE                = 1 << 6;
         /// Supports locking or pinning pages to improve residency guarantees.
         const LOCK                  = 1 << 7;
@@ -179,7 +179,7 @@ bitflags::bitflags! {
 }
 
 bitflags::bitflags! {
-    /// Mapping-construction flags for [`MemMap::map`].
+    /// Mapping-construction flags for [`MemMapContract::map`].
     ///
     /// These flags describe how a region should be created, shared, or populated. They are
     /// part of the request contract and may be rejected on platforms that do not support the
@@ -199,7 +199,7 @@ bitflags::bitflags! {
         const POPULATE        = 1 << 3;
         /// Request a backend-specific "locked on create" mapping hint.
         ///
-        /// This is not equivalent to a successful explicit [`MemLock::lock`] call unless the
+        /// This is not equivalent to a successful explicit [`MemLockContract::lock`] call unless the
         /// backend documents that stronger guarantee.
         const LOCKED          = 1 << 4;
         /// Request reservation without immediate commit where that model exists.
@@ -793,7 +793,7 @@ impl MemError {
 }
 
 /// Base capability and page-geometry surface shared by all memory providers.
-pub trait MemBase {
+pub trait MemBaseContract {
     /// Returns backend-native memory capabilities.
     fn caps(&self) -> MemCaps;
 
@@ -805,7 +805,7 @@ pub trait MemBase {
 }
 
 /// Ordinary low-level region mapping operations.
-pub trait MemMap: MemBase {
+pub trait MemMapContract: MemBaseContract {
     /// # Safety
     /// Caller is responsible for aliasing, lifetime, and ownership discipline of the
     /// returned region. The backend only acquires the region; it does not prove higher-level
@@ -834,7 +834,7 @@ pub trait MemMap: MemBase {
 /// Implementors must only expose replacement mapping when overwriting existing address-space
 /// contents is a real backend capability and callers can be held to the corresponding unsafe
 /// preconditions.
-pub unsafe trait MemMapReplace: MemBase {
+pub unsafe trait MemMapReplace: MemBaseContract {
     /// # Safety
     /// Caller must ensure the replacement range is fully owned and that destroying any
     /// overlapping mapping is valid for the current address space and synchronization model.
@@ -848,7 +848,7 @@ pub unsafe trait MemMapReplace: MemBase {
 }
 
 /// Protection-changing operations for existing regions.
-pub trait MemProtect: MemBase {
+pub trait MemProtectContract: MemBaseContract {
     /// # Safety
     /// Caller must ensure protection changes do not invalidate live references, executable
     /// assumptions, or synchronization guarantees relied on elsewhere in the program.
@@ -860,7 +860,7 @@ pub trait MemProtect: MemBase {
 }
 
 /// Reserve/commit style operations where the backend exposes them.
-pub trait MemCommit: MemBase {
+pub trait MemCommitContract: MemBaseContract {
     /// # Safety
     /// Caller must ensure the region is valid for commit and that making the backing
     /// accessible under `protect` does not violate higher-level invariants.
@@ -885,7 +885,7 @@ pub trait MemCommit: MemBase {
 }
 
 /// Query interface for discovering region metadata from an address.
-pub trait MemQuery: MemBase {
+pub trait MemQueryContract: MemBaseContract {
     /// Returns information about the region containing `addr`.
     ///
     /// The default implementation reports [`MemErrorKind::Unsupported`].
@@ -898,7 +898,7 @@ pub trait MemQuery: MemBase {
 }
 
 /// Advisory hint interface for existing regions.
-pub trait MemAdvise: MemBase {
+pub trait MemAdviseContract: MemBaseContract {
     /// # Safety
     /// Caller must ensure the region is valid for advisory updates.
     ///
@@ -914,7 +914,7 @@ pub trait MemAdvise: MemBase {
 }
 
 /// Locking or pinning operations for existing regions.
-pub trait MemLock: MemBase {
+pub trait MemLockContract: MemBaseContract {
     /// # Safety
     /// Caller must ensure the region is valid and that pinning it is legal in the current
     /// execution context and process policy.
@@ -940,7 +940,7 @@ pub trait MemLock: MemBase {
 /// # Safety
 /// Implementors must only expose cache-policy mutation when the backend can actually change
 /// cache behavior and callers can be held to the required coherency preconditions.
-pub unsafe trait MemAttrsControl: MemBase {
+pub unsafe trait MemAttrsControl: MemBaseContract {
     /// # Safety
     /// Caller must ensure cache changes are legal for the region and coherent with any
     /// active users of the mapping.
@@ -962,7 +962,7 @@ pub unsafe trait MemAttrsControl: MemBase {
 /// # Safety
 /// Implementors must only expose integrity control when the backend can enforce the requested
 /// transitions and callers can satisfy the corresponding platform rules.
-pub unsafe trait MemIntegrityControl: MemBase {
+pub unsafe trait MemIntegrityControl: MemBaseContract {
     /// # Safety
     /// Caller must ensure tag-mode transitions respect platform integrity rules.
     ///
@@ -993,7 +993,7 @@ pub unsafe trait MemIntegrityControl: MemBase {
 /// # Safety
 /// Implementors must only expose physical mapping when the backend can safely bind physical
 /// memory into the process and callers can uphold ownership and side-effect requirements.
-pub unsafe trait MemPhysical: MemBase {
+pub unsafe trait MemPhysical: MemBaseContract {
     /// # Safety
     /// Caller must ensure mapping the requested physical memory is legal and owned.
     ///
@@ -1010,7 +1010,7 @@ pub unsafe trait MemPhysical: MemBase {
 /// # Safety
 /// Implementors must only expose device mapping when the backend can legally create the
 /// mapping and callers can uphold device-specific ownership and synchronization rules.
-pub unsafe trait MemDevice: MemBase {
+pub unsafe trait MemDevice: MemBaseContract {
     /// # Safety
     /// Caller must ensure the device-local or MMIO mapping is legal for the target device.
     ///

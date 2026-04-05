@@ -31,9 +31,9 @@ use crate::contract::pal::runtime::sync::{
     PriorityInheritanceSupport,
     ProcessScopeSupport,
     RawMutex,
-    RawOnce,
+    RawOnceContract,
     RawRwLock,
-    RawSemaphore,
+    RawSemaphoreContract,
     RecursionSupport,
     RobustnessSupport,
     RwLockCaps,
@@ -41,7 +41,7 @@ use crate::contract::pal::runtime::sync::{
     RwLockSupport,
     SemaphoreCaps,
     SemaphoreSupport,
-    SyncBase,
+    SyncBaseContract,
     SyncError,
     SyncErrorKind,
     SyncFallbackKind,
@@ -147,7 +147,7 @@ impl LinuxSync {
     }
 }
 
-impl SyncBase for LinuxSync {
+impl SyncBaseContract for LinuxSync {
     fn support(&self) -> SyncSupport {
         SyncSupport {
             mutex: LINUX_MUTEX_SUPPORT,
@@ -180,7 +180,7 @@ impl Default for LinuxRawOnce {
     }
 }
 
-impl RawOnce for LinuxRawOnce {
+impl RawOnceContract for LinuxRawOnce {
     fn support(&self) -> OnceSupport {
         LINUX_ONCE_SUPPORT
     }
@@ -366,7 +366,7 @@ impl LinuxSemaphore {
     }
 }
 
-impl RawSemaphore for LinuxSemaphore {
+impl RawSemaphoreContract for LinuxSemaphore {
     fn support(&self) -> SemaphoreSupport {
         LINUX_SEMAPHORE_SUPPORT
     }

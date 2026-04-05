@@ -11,7 +11,7 @@ use core::mem;
 
 use crate::contract::pal::runtime::context::{
     ContextAuthoritySet,
-    ContextBase,
+    ContextBaseContract,
     ContextCaps,
     ContextError,
     ContextGuarantee,
@@ -113,7 +113,7 @@ impl MacOsSavedContext {
     }
 }
 
-impl ContextBase for MacOsContext {
+impl ContextBaseContract for MacOsContext {
     type Context = MacOsSavedContext;
 
     fn support(&self) -> ContextSupport {

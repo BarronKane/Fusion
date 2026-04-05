@@ -147,7 +147,7 @@ pub struct ThreadObservation {
 }
 
 /// Base thread support surface for a selected fusion-pal backend.
-pub trait ThreadBase {
+pub trait ThreadBaseContract {
     /// Backend-defined owned thread handle type.
     type Handle: Send + Sync;
 
@@ -162,7 +162,7 @@ pub trait ThreadBase {
 /// `spawn` accepts a raw entry function and opaque context pointer. The caller must ensure
 /// that the pointer remains valid for the thread entry and that the entry function does not
 /// unwind across the backend thread boundary.
-pub unsafe trait ThreadLifecycle: ThreadBase {
+pub unsafe trait ThreadLifecycle: ThreadBaseContract {
     /// Spawns a new thread using the provided configuration and entry point.
     ///
     /// # Safety
@@ -213,7 +213,7 @@ pub unsafe trait ThreadLifecycle: ThreadBase {
 }
 
 /// External thread suspension control for a selected fusion-pal backend.
-pub trait ThreadSuspendControl: ThreadBase {
+pub trait ThreadSuspendControlContract: ThreadBaseContract {
     /// Suspends a thread handle.
     ///
     /// Suspension is intentionally not part of the baseline lifecycle contract because it
@@ -236,7 +236,7 @@ pub trait ThreadSuspendControl: ThreadBase {
 }
 
 /// Scheduler control and voluntary execution operations for a selected fusion-pal backend.
-pub trait ThreadSchedulerControl: ThreadBase {
+pub trait ThreadSchedulerControlContract: ThreadBaseContract {
     /// Returns the valid numeric priority range for a scheduler class, when one exists.
     ///
     /// Some scheduler classes either do not use numeric priorities at all or use backend-
@@ -297,7 +297,7 @@ pub trait ThreadSchedulerControl: ThreadBase {
 }
 
 /// Placement and locality control for a selected fusion-pal backend.
-pub trait ThreadPlacementControl: ThreadBase {
+pub trait ThreadPlacementControlContract: ThreadBaseContract {
     /// Applies placement policy to a thread handle.
     ///
     /// # Errors
@@ -319,7 +319,7 @@ pub trait ThreadPlacementControl: ThreadBase {
 }
 
 /// Thread observation operations for a selected fusion-pal backend.
-pub trait ThreadObservationControl: ThreadBase {
+pub trait ThreadObservationControlContract: ThreadBaseContract {
     /// Observes the current thread.
     ///
     /// # Errors
@@ -336,7 +336,7 @@ pub trait ThreadObservationControl: ThreadBase {
 }
 
 /// Stack-usage observation for a selected fusion-pal backend.
-pub trait ThreadStackObservationControl: ThreadBase {
+pub trait ThreadStackObservationControlContract: ThreadBaseContract {
     /// Observes stack usage for the current thread.
     ///
     /// # Errors

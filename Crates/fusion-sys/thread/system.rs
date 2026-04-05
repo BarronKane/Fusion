@@ -4,9 +4,9 @@ use core::time::Duration;
 
 use fusion_pal::sys::mem::{
     MemBackingCaps,
-    MemBase,
+    MemBaseContract,
     MemCaps,
-    MemCatalog,
+    MemCatalogContract,
     MemCatalogCaps,
     MemResourceAttrs,
     system_mem,
@@ -347,7 +347,7 @@ impl ThreadSystem {
     /// Reports the supported thread surface.
     #[must_use]
     pub fn support(&self) -> ThreadSupport {
-        fusion_pal::sys::thread::ThreadBase::support(&self.inner)
+        fusion_pal::sys::thread::ThreadBaseContract::support(&self.inner)
     }
 
     /// Returns the coarse runtime-construction truth for the active platform.
@@ -420,7 +420,7 @@ impl ThreadSystem {
     /// Returns an error when the backend cannot suspend the handle honestly or does not
     /// support suspension at all.
     pub fn suspend(&self, handle: &ThreadHandle) -> Result<(), ThreadError> {
-        fusion_pal::sys::thread::ThreadSuspendControl::suspend(&self.inner, &handle.inner)
+        fusion_pal::sys::thread::ThreadSuspendControlContract::suspend(&self.inner, &handle.inner)
     }
 
     /// Resumes a suspended thread when the backend supports it.
@@ -430,7 +430,7 @@ impl ThreadSystem {
     /// Returns an error when the backend cannot resume the handle honestly or does not
     /// support resume at all.
     pub fn resume(&self, handle: &ThreadHandle) -> Result<(), ThreadError> {
-        fusion_pal::sys::thread::ThreadSuspendControl::resume(&self.inner, &handle.inner)
+        fusion_pal::sys::thread::ThreadSuspendControlContract::resume(&self.inner, &handle.inner)
     }
 
     /// Queries the class-specific numeric priority range.
@@ -442,7 +442,7 @@ impl ThreadSystem {
         &self,
         class: ThreadSchedulerClass,
     ) -> Result<Option<ThreadPriorityRange>, ThreadError> {
-        fusion_pal::sys::thread::ThreadSchedulerControl::priority_range(&self.inner, class)
+        fusion_pal::sys::thread::ThreadSchedulerControlContract::priority_range(&self.inner, class)
     }
 
     /// Applies scheduler policy to a thread handle.
@@ -456,7 +456,7 @@ impl ThreadSystem {
         handle: &ThreadHandle,
         request: &ThreadSchedulerRequest,
     ) -> Result<ThreadSchedulerObservation, ThreadError> {
-        fusion_pal::sys::thread::ThreadSchedulerControl::set_scheduler(
+        fusion_pal::sys::thread::ThreadSchedulerControlContract::set_scheduler(
             &self.inner,
             &handle.inner,
             request,
@@ -472,7 +472,10 @@ impl ThreadSystem {
         &self,
         handle: &ThreadHandle,
     ) -> Result<ThreadSchedulerObservation, ThreadError> {
-        fusion_pal::sys::thread::ThreadSchedulerControl::scheduler(&self.inner, &handle.inner)
+        fusion_pal::sys::thread::ThreadSchedulerControlContract::scheduler(
+            &self.inner,
+            &handle.inner,
+        )
     }
 
     /// Yields the current thread to the scheduler.
@@ -481,7 +484,7 @@ impl ThreadSystem {
     ///
     /// Returns an error if the backend cannot honestly yield the current thread.
     pub fn yield_now(&self) -> Result<(), ThreadError> {
-        fusion_pal::sys::thread::ThreadSchedulerControl::yield_now(&self.inner)
+        fusion_pal::sys::thread::ThreadSchedulerControlContract::yield_now(&self.inner)
     }
 
     /// Sleeps the current thread for a relative duration.
@@ -490,7 +493,7 @@ impl ThreadSystem {
     ///
     /// Returns an error if the backend cannot honestly sleep for the requested duration.
     pub fn sleep_for(&self, duration: Duration) -> Result<(), ThreadError> {
-        fusion_pal::sys::thread::ThreadSchedulerControl::sleep_for(&self.inner, duration)
+        fusion_pal::sys::thread::ThreadSchedulerControlContract::sleep_for(&self.inner, duration)
     }
 
     /// Returns the current backend monotonic time.
@@ -499,7 +502,7 @@ impl ThreadSystem {
     ///
     /// Returns an error if the backend cannot surface a truthful monotonic timestamp.
     pub fn monotonic_now(&self) -> Result<Duration, ThreadError> {
-        fusion_pal::sys::thread::ThreadSchedulerControl::monotonic_now(&self.inner)
+        fusion_pal::sys::thread::ThreadSchedulerControlContract::monotonic_now(&self.inner)
     }
 
     /// Applies placement policy to a thread handle.
@@ -513,7 +516,7 @@ impl ThreadSystem {
         handle: &ThreadHandle,
         request: &ThreadPlacementRequest<'_>,
     ) -> Result<ThreadPlacementOutcome, ThreadError> {
-        fusion_pal::sys::thread::ThreadPlacementControl::set_placement(
+        fusion_pal::sys::thread::ThreadPlacementControlContract::set_placement(
             &self.inner,
             &handle.inner,
             request,
@@ -526,7 +529,10 @@ impl ThreadSystem {
     ///
     /// Returns an error if the backend cannot observe the effective placement honestly.
     pub fn placement(&self, handle: &ThreadHandle) -> Result<ThreadPlacementOutcome, ThreadError> {
-        fusion_pal::sys::thread::ThreadPlacementControl::placement(&self.inner, &handle.inner)
+        fusion_pal::sys::thread::ThreadPlacementControlContract::placement(
+            &self.inner,
+            &handle.inner,
+        )
     }
 
     /// Observes the current thread.
@@ -535,7 +541,7 @@ impl ThreadSystem {
     ///
     /// Returns an error if the backend cannot produce a truthful current-thread observation.
     pub fn observe_current(&self) -> Result<ThreadObservation, ThreadError> {
-        fusion_pal::sys::thread::ThreadObservationControl::observe_current(&self.inner)
+        fusion_pal::sys::thread::ThreadObservationControlContract::observe_current(&self.inner)
     }
 
     /// Observes a specific thread handle.
@@ -544,7 +550,10 @@ impl ThreadSystem {
     ///
     /// Returns an error if the backend cannot observe the requested handle honestly.
     pub fn observe(&self, handle: &ThreadHandle) -> Result<ThreadObservation, ThreadError> {
-        fusion_pal::sys::thread::ThreadObservationControl::observe(&self.inner, &handle.inner)
+        fusion_pal::sys::thread::ThreadObservationControlContract::observe(
+            &self.inner,
+            &handle.inner,
+        )
     }
 
     /// Observes stack information for the current thread.
@@ -553,7 +562,9 @@ impl ThreadSystem {
     ///
     /// Returns an error if the backend cannot observe current-thread stack state honestly.
     pub fn observe_current_stack(&self) -> Result<ThreadStackObservation, ThreadError> {
-        fusion_pal::sys::thread::ThreadStackObservationControl::observe_current_stack(&self.inner)
+        fusion_pal::sys::thread::ThreadStackObservationControlContract::observe_current_stack(
+            &self.inner,
+        )
     }
 
     /// Observes stack information for a specific thread handle.
@@ -566,7 +577,7 @@ impl ThreadSystem {
         &self,
         handle: &ThreadHandle,
     ) -> Result<ThreadStackObservation, ThreadError> {
-        fusion_pal::sys::thread::ThreadStackObservationControl::observe_stack(
+        fusion_pal::sys::thread::ThreadStackObservationControlContract::observe_stack(
             &self.inner,
             &handle.inner,
         )

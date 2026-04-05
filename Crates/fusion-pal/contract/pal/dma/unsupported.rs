@@ -1,9 +1,9 @@
 //! Backend-neutral unsupported DMA implementation.
 
 use super::{
-    DmaBase,
+    DmaBaseContract,
     DmaControllerDescriptor,
-    DmaCatalog,
+    DmaCatalogContract,
     DmaRequestDescriptor,
     DmaSupport,
 };
@@ -20,13 +20,13 @@ impl UnsupportedDma {
     }
 }
 
-impl DmaBase for UnsupportedDma {
+impl DmaBaseContract for UnsupportedDma {
     fn support(&self) -> DmaSupport {
         DmaSupport::unsupported()
     }
 }
 
-impl DmaCatalog for UnsupportedDma {
+impl DmaCatalogContract for UnsupportedDma {
     fn controllers(&self) -> &'static [DmaControllerDescriptor] {
         &[]
     }

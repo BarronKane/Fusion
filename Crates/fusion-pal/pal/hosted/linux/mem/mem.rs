@@ -40,19 +40,19 @@ use crate::contract::pal::mem::{
     MapReplaceRequest,
     MapRequest,
     MemAdviceCaps,
-    MemAdvise,
+    MemAdviseContract,
     MemBackingCaps,
-    MemBase,
+    MemBaseContract,
     MemCaps,
-    MemCommit,
+    MemCommitContract,
     MemError,
     MemErrorKind,
-    MemLock,
-    MemMap,
+    MemLockContract,
+    MemMapContract,
     MemMapReplace,
     MemPlacementCaps,
-    MemProtect,
-    MemQuery,
+    MemProtectContract,
+    MemQueryContract,
     MemSupport,
     PageInfo,
     Placement,
@@ -65,7 +65,7 @@ use crate::contract::pal::mem::{
 use crate::sys::sync::{
     OnceBeginResult,
     PlatformRawOnce,
-    RawOnce,
+    RawOnceContract,
 };
 
 /// Linux implementation of the fusion-pal memory provider contract.
@@ -466,7 +466,7 @@ impl LinuxMem {
     }
 }
 
-impl MemBase for LinuxMem {
+impl MemBaseContract for LinuxMem {
     fn caps(&self) -> MemCaps {
         let version = Self::kernel_version();
         let mut caps = MemCaps::MAP_ANON
@@ -536,7 +536,7 @@ impl MemBase for LinuxMem {
     }
 }
 
-impl MemMap for LinuxMem {
+impl MemMapContract for LinuxMem {
     unsafe fn map(&self, req: &MapRequest<'_>) -> Result<Region, MemError> {
         Self::validate_common(req)?;
         Self::validate_safe_placement(req.placement)?;
@@ -595,7 +595,7 @@ unsafe impl MemMapReplace for LinuxMem {
     }
 }
 
-impl MemProtect for LinuxMem {
+impl MemProtectContract for LinuxMem {
     unsafe fn protect(&self, region: Region, protect: Protect) -> Result<(), MemError> {
         let flags = Self::to_mprotect_flags(protect)?;
         unsafe { mm::mprotect(region.base.as_ptr().cast::<c_void>(), region.len, flags) }
@@ -603,15 +603,15 @@ impl MemProtect for LinuxMem {
     }
 }
 
-impl MemCommit for LinuxMem {}
+impl MemCommitContract for LinuxMem {}
 
-impl MemQuery for LinuxMem {
+impl MemQueryContract for LinuxMem {
     fn query(&self, addr: Address) -> Result<RegionInfo, MemError> {
         Self::query_proc_maps(addr.get())
     }
 }
 
-impl MemAdvise for LinuxMem {
+impl MemAdviseContract for LinuxMem {
     unsafe fn advise(&self, region: Region, advice: Advise) -> Result<(), MemError> {
         let version = Self::kernel_version();
         match advice {
@@ -640,7 +640,7 @@ impl MemAdvise for LinuxMem {
     }
 }
 
-impl MemLock for LinuxMem {
+impl MemLockContract for LinuxMem {
     unsafe fn lock(&self, region: Region) -> Result<(), MemError> {
         unsafe { mm::mlock(region.base.as_ptr().cast::<c_void>(), region.len) }
             .map_err(Self::map_errno)
@@ -652,7 +652,7 @@ impl MemLock for LinuxMem {
     }
 }
 
-impl crate::contract::pal::mem::MemCatalog for LinuxMem {}
+impl crate::contract::pal::mem::MemCatalogContract for LinuxMem {}
 
 fn parse_kernel_release(release: &[u8]) -> Option<KernelVersion> {
     let (major, rest) = parse_release_component(release)?;

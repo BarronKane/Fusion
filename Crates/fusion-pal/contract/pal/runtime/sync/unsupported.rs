@@ -10,12 +10,12 @@ use super::{
     OnceState,
     OnceSupport,
     RawMutex,
-    RawOnce,
+    RawOnceContract,
     RawRwLock,
-    RawSemaphore,
+    RawSemaphoreContract,
     RwLockSupport,
     SemaphoreSupport,
-    SyncBase,
+    SyncBaseContract,
     SyncError,
     SyncSupport,
 };
@@ -48,7 +48,7 @@ impl UnsupportedSync {
     }
 }
 
-impl SyncBase for UnsupportedSync {
+impl SyncBaseContract for UnsupportedSync {
     fn support(&self) -> SyncSupport {
         SyncSupport::unsupported()
     }
@@ -88,7 +88,7 @@ unsafe impl RawMutex for UnsupportedRawMutex {
     unsafe fn unlock_unchecked(&self) {}
 }
 
-impl RawOnce for UnsupportedRawOnce {
+impl RawOnceContract for UnsupportedRawOnce {
     fn support(&self) -> OnceSupport {
         OnceSupport::unsupported()
     }
@@ -122,7 +122,7 @@ impl UnsupportedSemaphore {
     }
 }
 
-impl RawSemaphore for UnsupportedSemaphore {
+impl RawSemaphoreContract for UnsupportedSemaphore {
     fn support(&self) -> SemaphoreSupport {
         SemaphoreSupport::unsupported()
     }

@@ -12,7 +12,7 @@ pub use types::*;
 pub use unsupported::*;
 
 /// Capability trait for vector-ownership backends.
-pub trait VectorBase {
+pub trait VectorBaseContract {
     /// Reports the truthful vector-ownership surface for this backend.
     fn support(&self) -> VectorSupport;
 
@@ -39,9 +39,9 @@ pub trait VectorBase {
 }
 
 /// Ownership-control trait for vector-table backends.
-pub trait VectorOwnershipControl: VectorBase {
+pub trait VectorOwnershipControlContract: VectorBaseContract {
     /// Backend-defined mutable builder type.
-    type Builder: VectorTableBuilderControl;
+    type Builder: VectorTableBuilderControlContract;
 
     /// Adopts the current hardware vector table into one owned builder.
     ///
@@ -60,9 +60,9 @@ pub trait VectorOwnershipControl: VectorBase {
 }
 
 /// Mutable builder control for vector-table ownership backends.
-pub trait VectorTableBuilderControl {
+pub trait VectorTableBuilderControlContract {
     /// Backend-defined sealed table type.
-    type Sealed: VectorSealedQuery;
+    type Sealed: VectorSealedQueryContract;
 
     /// Returns the support surface captured by this builder.
     fn support(&self) -> VectorSupport;
@@ -100,7 +100,7 @@ pub trait VectorTableBuilderControl {
 }
 
 /// Immutable runtime query and deferred-pending surface for one sealed vector table.
-pub trait VectorSealedQuery {
+pub trait VectorSealedQueryContract {
     /// Returns the visible state of one slot.
     ///
     /// # Errors

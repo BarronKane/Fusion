@@ -35,13 +35,13 @@ pub struct PowerModeDescriptor {
 }
 
 /// Capability trait for power-control backends.
-pub trait PowerBase {
+pub trait PowerBaseContract {
     /// Reports the truthful power-management surface for this backend.
     fn support(&self) -> PowerSupport;
 }
 
 /// Enumeration and control contract for backend power providers.
-pub trait PowerControl: PowerBase {
+pub trait PowerControlContract: PowerBaseContract {
     /// Returns the named power modes surfaced by the backend.
     #[must_use]
     fn modes(&self) -> &'static [PowerModeDescriptor];

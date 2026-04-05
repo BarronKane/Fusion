@@ -29,7 +29,7 @@ pub struct ContextStackLayout {
 }
 
 /// Common capability surface for a context-switching backend.
-pub trait ContextBase {
+pub trait ContextBaseContract {
     /// Opaque saved context record owned by the selected backend.
     type Context;
 
@@ -47,7 +47,7 @@ pub trait ContextBase {
 /// Implementors must ensure that created contexts obey the reported stack alignment,
 /// migration, and TLS semantics, and that swapping between contexts never violates the
 /// calling convention or aliasing rules promised by the backend.
-pub unsafe trait ContextSwitch: ContextBase {
+pub unsafe trait ContextSwitch: ContextBaseContract {
     /// Creates a context on the supplied stack and arranges for it to start at `entry`.
     ///
     /// # Safety

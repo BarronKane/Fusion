@@ -1,19 +1,19 @@
 //! Backend-neutral unsupported generic GPIO implementation.
 
 use super::{
-    GpioBase,
+    GpioBaseContract,
     GpioCapabilities,
-    GpioControl,
+    GpioControlContract,
     GpioDriveStrength,
-    GpioDriveStrengthPin,
+    GpioDriveStrengthPinContract,
     GpioError,
     GpioFunction,
-    GpioFunctionPin,
-    GpioInputPin,
-    GpioOutputPin,
+    GpioFunctionPinContract,
+    GpioInputPinContract,
+    GpioOutputPinContract,
     GpioPinDescriptor,
     GpioPull,
-    GpioPullPin,
+    GpioPullPinContract,
     GpioSupport,
 };
 
@@ -145,7 +145,7 @@ impl UnsupportedGpioPin {
     }
 }
 
-impl GpioBase for UnsupportedGpio {
+impl GpioBaseContract for UnsupportedGpio {
     fn support(&self) -> GpioSupport {
         GpioSupport::unsupported()
     }
@@ -155,7 +155,7 @@ impl GpioBase for UnsupportedGpio {
     }
 }
 
-impl GpioControl for UnsupportedGpio {
+impl GpioControlContract for UnsupportedGpio {
     type Pin = UnsupportedGpioPin;
 
     fn take_pin(&self, _pin: u8) -> Result<Self::Pin, GpioError> {
@@ -163,7 +163,7 @@ impl GpioControl for UnsupportedGpio {
     }
 }
 
-impl super::GpioOwnedPin for UnsupportedGpioPin {
+impl super::GpioOwnedPinContract for UnsupportedGpioPin {
     fn pin(&self) -> u8 {
         self.pin()
     }
@@ -173,25 +173,25 @@ impl super::GpioOwnedPin for UnsupportedGpioPin {
     }
 }
 
-impl GpioFunctionPin for UnsupportedGpioPin {
+impl GpioFunctionPinContract for UnsupportedGpioPin {
     fn set_function(&mut self, function: GpioFunction) -> Result<(), GpioError> {
         self.set_function(function)
     }
 }
 
-impl GpioPullPin for UnsupportedGpioPin {
+impl GpioPullPinContract for UnsupportedGpioPin {
     fn set_pull(&mut self, pull: GpioPull) -> Result<(), GpioError> {
         self.set_pull(pull)
     }
 }
 
-impl GpioDriveStrengthPin for UnsupportedGpioPin {
+impl GpioDriveStrengthPinContract for UnsupportedGpioPin {
     fn set_drive_strength(&mut self, strength: GpioDriveStrength) -> Result<(), GpioError> {
         self.set_drive_strength(strength)
     }
 }
 
-impl GpioOutputPin for UnsupportedGpioPin {
+impl GpioOutputPinContract for UnsupportedGpioPin {
     fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {
         self.configure_output(initial_high)
     }
@@ -201,7 +201,7 @@ impl GpioOutputPin for UnsupportedGpioPin {
     }
 }
 
-impl GpioInputPin for UnsupportedGpioPin {
+impl GpioInputPinContract for UnsupportedGpioPin {
     fn configure_input(&mut self) -> Result<(), GpioError> {
         self.configure_input()
     }

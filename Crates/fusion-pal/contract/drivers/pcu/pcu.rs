@@ -1,4 +1,4 @@
-//! Driver-facing PCU contract vocabulary.
+//! DriverContract-facing PCU contract vocabulary.
 
 pub mod caps;
 pub mod device;
@@ -19,7 +19,7 @@ pub use protocol::*;
 pub use unsupported::*;
 
 /// Capability trait for generic PCU backends.
-pub trait PcuBase {
+pub trait PcuBaseContract {
     /// Reports the truthful generic PCU surface for this backend.
     fn support(&self) -> PcuSupport;
 
@@ -35,7 +35,7 @@ pub trait PcuBase {
 }
 
 /// Control contract for generic PCU backends.
-pub trait PcuControl: PcuBase {
+pub trait PcuControlContract: PcuBaseContract {
     /// Claims one PCU executor exclusively.
     ///
     /// # Errors

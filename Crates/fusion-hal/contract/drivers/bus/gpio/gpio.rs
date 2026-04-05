@@ -1,4 +1,4 @@
-//! Driver-facing GPIO contract vocabulary.
+//! DriverContract-facing GPIO contract vocabulary.
 
 mod caps;
 mod error;
@@ -11,7 +11,7 @@ pub use types::*;
 pub use unsupported::*;
 
 /// Capability trait for generic GPIO backends.
-pub trait GpioBase {
+pub trait GpioBaseContract {
     /// Reports the truthful GPIO surface for this backend.
     fn support(&self) -> GpioSupport;
 
@@ -34,9 +34,9 @@ pub trait GpioBase {
 }
 
 /// Control contract for generic GPIO backends.
-pub trait GpioControl: GpioBase {
+pub trait GpioControlContract: GpioBaseContract {
     /// Concrete owned-pin handle returned by this backend.
-    type Pin: GpioPinControl;
+    type Pin: GpioPinControlContract;
 
     /// Takes one pin exclusively.
     ///
@@ -47,7 +47,7 @@ pub trait GpioControl: GpioBase {
 }
 
 /// Shared contract for one owned GPIO handle.
-pub trait GpioOwnedPin {
+pub trait GpioOwnedPinContract {
     /// Returns the concrete backend pin number.
     fn pin(&self) -> u8;
 
@@ -56,7 +56,7 @@ pub trait GpioOwnedPin {
 }
 
 /// Alternate-function control for one owned GPIO handle.
-pub trait GpioFunctionPin: GpioOwnedPin {
+pub trait GpioFunctionPinContract: GpioOwnedPinContract {
     /// Selects one alternate-function mux setting for this pin.
     ///
     /// # Errors
@@ -66,7 +66,7 @@ pub trait GpioFunctionPin: GpioOwnedPin {
 }
 
 /// Pull-resistor control for one owned GPIO handle.
-pub trait GpioPullPin: GpioOwnedPin {
+pub trait GpioPullPinContract: GpioOwnedPinContract {
     /// Selects the pull-resistor mode for this pin.
     ///
     /// # Errors
@@ -76,7 +76,7 @@ pub trait GpioPullPin: GpioOwnedPin {
 }
 
 /// Drive-strength control for one owned GPIO handle.
-pub trait GpioDriveStrengthPin: GpioOwnedPin {
+pub trait GpioDriveStrengthPinContract: GpioOwnedPinContract {
     /// Selects one drive-strength mode for this pin.
     ///
     /// # Errors
@@ -86,7 +86,7 @@ pub trait GpioDriveStrengthPin: GpioOwnedPin {
 }
 
 /// Output-capable GPIO contract consumed by simple components such as LEDs.
-pub trait GpioOutputPin: GpioOwnedPin {
+pub trait GpioOutputPinContract: GpioOwnedPinContract {
     /// Configures this pin for software-controlled output.
     ///
     /// # Errors
@@ -103,7 +103,7 @@ pub trait GpioOutputPin: GpioOwnedPin {
 }
 
 /// Input-capable GPIO contract consumed by simple components such as buttons.
-pub trait GpioInputPin: GpioOwnedPin {
+pub trait GpioInputPinContract: GpioOwnedPinContract {
     /// Configures this pin for software-controlled input sampling.
     ///
     /// # Errors
@@ -120,17 +120,22 @@ pub trait GpioInputPin: GpioOwnedPin {
 }
 
 /// Full configuration/control surface for one owned GPIO pin.
-pub trait GpioPinControl:
-    GpioOwnedPin + GpioFunctionPin + GpioPullPin + GpioDriveStrengthPin + GpioOutputPin + GpioInputPin
+pub trait GpioPinControlContract:
+    GpioOwnedPinContract
+    + GpioFunctionPinContract
+    + GpioPullPinContract
+    + GpioDriveStrengthPinContract
+    + GpioOutputPinContract
+    + GpioInputPinContract
 {
 }
 
-impl<T> GpioPinControl for T where
-    T: GpioOwnedPin
-        + GpioFunctionPin
-        + GpioPullPin
-        + GpioDriveStrengthPin
-        + GpioOutputPin
-        + GpioInputPin
+impl<T> GpioPinControlContract for T where
+    T: GpioOwnedPinContract
+        + GpioFunctionPinContract
+        + GpioPullPinContract
+        + GpioDriveStrengthPinContract
+        + GpioOutputPinContract
+        + GpioInputPinContract
 {
 }

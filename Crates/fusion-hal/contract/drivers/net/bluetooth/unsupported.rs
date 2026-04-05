@@ -3,42 +3,42 @@
 use super::BluetoothAdapterSupport;
 use super::BluetoothAdapterDescriptor;
 use super::BluetoothAdapterId;
-use super::BluetoothAdvertisingControl;
+use super::BluetoothAdvertisingControlContract;
 use super::BluetoothAdvertisingParameters;
 use super::BluetoothAdvertisingSetId;
-use super::BluetoothBase;
+use super::BluetoothBaseContract;
 use super::BluetoothBondState;
-use super::BluetoothConnectionControl;
+use super::BluetoothConnectionControlContract;
 use super::BluetoothConnectionDescriptor;
 use super::BluetoothConnectionId;
 use super::BluetoothConnectionParameters;
 use super::BluetoothError;
 use super::BluetoothAttAttributeHandle;
 use super::BluetoothAttAttributeValue;
-use super::BluetoothAttClient;
+use super::BluetoothAttClientContract;
 use super::BluetoothGattAttributeValue;
 use super::BluetoothGattCharacteristicHandle;
 use super::BluetoothGattCharacteristicRange;
 use super::BluetoothGattDescriptorRange;
-use super::BluetoothGattClient;
-use super::BluetoothGattServer;
+use super::BluetoothGattClientContract;
+use super::BluetoothGattServerContract;
 use super::BluetoothL2capChannelDescriptor;
 use super::BluetoothL2capChannelId;
 use super::BluetoothL2capChannelParameters;
-use super::BluetoothL2capControl;
+use super::BluetoothL2capControlContract;
 use super::BluetoothL2capSdu;
 use super::BluetoothGattServiceDefinition;
 use super::BluetoothGattServiceRange;
-use super::BluetoothOwnedAdapter;
+use super::BluetoothOwnedAdapterContract;
 use super::BluetoothPairingParameters;
-use super::BluetoothRadioControl;
+use super::BluetoothRadioControlContract;
 use super::BluetoothScanParameters;
 use super::BluetoothScanReport;
 use super::BluetoothScanSessionId;
-use super::BluetoothScanningControl;
-use super::BluetoothSecurityControl;
+use super::BluetoothScanningControlContract;
+use super::BluetoothSecurityControlContract;
 use super::BluetoothSupport;
-use super::BluetoothControl;
+use super::BluetoothControlContract;
 use super::BluetoothVersion;
 use super::BluetoothVersionRange;
 
@@ -58,7 +58,7 @@ impl UnsupportedBluetooth {
     }
 }
 
-impl BluetoothBase for UnsupportedBluetooth {
+impl BluetoothBaseContract for UnsupportedBluetooth {
     fn support(&self) -> BluetoothSupport {
         BluetoothSupport::unsupported()
     }
@@ -68,7 +68,7 @@ impl BluetoothBase for UnsupportedBluetooth {
     }
 }
 
-impl BluetoothControl for UnsupportedBluetooth {
+impl BluetoothControlContract for UnsupportedBluetooth {
     type Adapter = UnsupportedBluetoothAdapter;
 
     fn open_adapter(
@@ -79,11 +79,12 @@ impl BluetoothControl for UnsupportedBluetooth {
     }
 }
 
-impl BluetoothOwnedAdapter for UnsupportedBluetoothAdapter {
+impl BluetoothOwnedAdapterContract for UnsupportedBluetoothAdapter {
     fn descriptor(&self) -> &'static BluetoothAdapterDescriptor {
         static DESCRIPTOR: BluetoothAdapterDescriptor = BluetoothAdapterDescriptor {
             id: BluetoothAdapterId(0),
             name: "unsupported-bluetooth",
+            vendor_identity: None,
             address: None,
             version: BluetoothVersionRange {
                 minimum: BluetoothVersion::new(0, 0),
@@ -115,7 +116,7 @@ impl BluetoothOwnedAdapter for UnsupportedBluetoothAdapter {
     }
 }
 
-impl BluetoothRadioControl for UnsupportedBluetoothAdapter {
+impl BluetoothRadioControlContract for UnsupportedBluetoothAdapter {
     fn set_powered(&mut self, _powered: bool) -> Result<(), BluetoothError> {
         Err(BluetoothError::unsupported())
     }
@@ -125,7 +126,7 @@ impl BluetoothRadioControl for UnsupportedBluetoothAdapter {
     }
 }
 
-impl BluetoothScanningControl for UnsupportedBluetoothAdapter {
+impl BluetoothScanningControlContract for UnsupportedBluetoothAdapter {
     fn start_scan(
         &mut self,
         _parameters: BluetoothScanParameters,
@@ -146,7 +147,7 @@ impl BluetoothScanningControl for UnsupportedBluetoothAdapter {
     }
 }
 
-impl BluetoothAdvertisingControl for UnsupportedBluetoothAdapter {
+impl BluetoothAdvertisingControlContract for UnsupportedBluetoothAdapter {
     fn start_advertising(
         &mut self,
         _parameters: BluetoothAdvertisingParameters,
@@ -164,7 +165,7 @@ impl BluetoothAdvertisingControl for UnsupportedBluetoothAdapter {
     }
 }
 
-impl BluetoothConnectionControl for UnsupportedBluetoothAdapter {
+impl BluetoothConnectionControlContract for UnsupportedBluetoothAdapter {
     fn connect(
         &mut self,
         _peer: super::BluetoothAddress,
@@ -185,7 +186,7 @@ impl BluetoothConnectionControl for UnsupportedBluetoothAdapter {
     }
 }
 
-impl BluetoothSecurityControl for UnsupportedBluetoothAdapter {
+impl BluetoothSecurityControlContract for UnsupportedBluetoothAdapter {
     fn pair(
         &mut self,
         _connection: BluetoothConnectionId,
@@ -206,7 +207,7 @@ impl BluetoothSecurityControl for UnsupportedBluetoothAdapter {
     }
 }
 
-impl BluetoothL2capControl for UnsupportedBluetoothAdapter {
+impl BluetoothL2capControlContract for UnsupportedBluetoothAdapter {
     fn open_l2cap_channel(
         &mut self,
         _connection: BluetoothConnectionId,
@@ -246,7 +247,7 @@ impl BluetoothL2capControl for UnsupportedBluetoothAdapter {
     }
 }
 
-impl BluetoothAttClient for UnsupportedBluetoothAdapter {
+impl BluetoothAttClientContract for UnsupportedBluetoothAdapter {
     fn exchange_mtu(
         &mut self,
         _connection: BluetoothConnectionId,
@@ -293,7 +294,7 @@ impl BluetoothAttClient for UnsupportedBluetoothAdapter {
     }
 }
 
-impl BluetoothGattClient for UnsupportedBluetoothAdapter {
+impl BluetoothGattClientContract for UnsupportedBluetoothAdapter {
     fn discover_primary_services(
         &mut self,
         _connection: BluetoothConnectionId,
@@ -350,7 +351,7 @@ impl BluetoothGattClient for UnsupportedBluetoothAdapter {
     }
 }
 
-impl BluetoothGattServer for UnsupportedBluetoothAdapter {
+impl BluetoothGattServerContract for UnsupportedBluetoothAdapter {
     fn publish_services(
         &mut self,
         _services: &[BluetoothGattServiceDefinition<'_>],

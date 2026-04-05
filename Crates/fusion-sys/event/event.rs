@@ -7,7 +7,7 @@
 use core::time::Duration;
 
 pub use fusion_pal::sys::event::{
-    EventBase,
+    EventBaseContract,
     EventCaps,
     EventCompletion,
     EventCompletionOp,
@@ -23,7 +23,7 @@ pub use fusion_pal::sys::event::{
     EventRecord,
     EventRegistration,
     EventRegistrationMode,
-    EventSource,
+    EventSourceContract,
     EventSourceHandle,
     EventSupport,
 };
@@ -57,7 +57,7 @@ impl EventSystem {
     /// Reports the truthful event surface for the selected backend.
     #[must_use]
     pub fn support(&self) -> EventSupport {
-        EventBase::support(&self.inner)
+        EventBaseContract::support(&self.inner)
     }
 
     /// Creates a new backend poller instance.
@@ -66,7 +66,7 @@ impl EventSystem {
     ///
     /// Returns any honest backend failure, including unsupported polling surfaces.
     pub fn create(&self) -> Result<EventPoller, EventError> {
-        let poller = EventSource::create(&self.inner)?;
+        let poller = EventSourceContract::create(&self.inner)?;
         Ok(EventPoller { inner: poller })
     }
 
@@ -81,7 +81,7 @@ impl EventSystem {
         source: EventSourceHandle,
         interest: EventInterest,
     ) -> Result<EventKey, EventError> {
-        EventSource::register(&self.inner, &mut poller.inner, source, interest)
+        EventSourceContract::register(&self.inner, &mut poller.inner, source, interest)
     }
 
     /// Registers a source with an explicit delivery policy.
@@ -94,7 +94,7 @@ impl EventSystem {
         poller: &mut EventPoller,
         registration: EventRegistration,
     ) -> Result<EventKey, EventError> {
-        EventSource::register_with(&self.inner, &mut poller.inner, registration)
+        EventSourceContract::register_with(&self.inner, &mut poller.inner, registration)
     }
 
     /// Updates an existing registration.
@@ -108,7 +108,7 @@ impl EventSystem {
         key: EventKey,
         interest: EventInterest,
     ) -> Result<(), EventError> {
-        EventSource::reregister(&self.inner, &mut poller.inner, key, interest)
+        EventSourceContract::reregister(&self.inner, &mut poller.inner, key, interest)
     }
 
     /// Updates an existing registration with an explicit delivery policy.
@@ -122,7 +122,7 @@ impl EventSystem {
         key: EventKey,
         registration: EventRegistration,
     ) -> Result<(), EventError> {
-        EventSource::reregister_with(&self.inner, &mut poller.inner, key, registration)
+        EventSourceContract::reregister_with(&self.inner, &mut poller.inner, key, registration)
     }
 
     /// Removes an existing registration.
@@ -131,7 +131,7 @@ impl EventSystem {
     ///
     /// Returns any honest backend deregistration failure.
     pub fn deregister(&self, poller: &mut EventPoller, key: EventKey) -> Result<(), EventError> {
-        EventSource::deregister(&self.inner, &mut poller.inner, key)
+        EventSourceContract::deregister(&self.inner, &mut poller.inner, key)
     }
 
     /// Submits a completion-style operation when the backend supports it.
@@ -144,7 +144,7 @@ impl EventSystem {
         poller: &mut EventPoller,
         operation: EventCompletionOp,
     ) -> Result<EventKey, EventError> {
-        EventSource::submit(&self.inner, &mut poller.inner, operation)
+        EventSourceContract::submit(&self.inner, &mut poller.inner, operation)
     }
 
     /// Polls the backend for ready or completed events.
@@ -158,7 +158,7 @@ impl EventSystem {
         events: &mut [EventRecord],
         timeout: Option<Duration>,
     ) -> Result<usize, EventError> {
-        EventSource::poll(&self.inner, &mut poller.inner, events, timeout)
+        EventSourceContract::poll(&self.inner, &mut poller.inner, events, timeout)
     }
 }
 

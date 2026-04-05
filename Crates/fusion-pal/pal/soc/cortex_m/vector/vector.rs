@@ -29,7 +29,7 @@ use crate::contract::pal::vector::{
     IrqSlot,
     SlotState,
     SystemException,
-    VectorBase,
+    VectorBaseContract,
     VectorCaps,
     VectorDispatchCookie,
     VectorDispatchLane,
@@ -38,16 +38,16 @@ use crate::contract::pal::vector::{
     VectorInlineHandler,
     VectorInlineReservedStack,
     VectorInlineStackPolicy,
-    VectorOwnershipControl,
+    VectorOwnershipControlContract,
     VectorOwnershipKind,
     VectorPriority,
-    VectorSealedQuery,
+    VectorSealedQueryContract,
     VectorSecurityDomain,
     VectorSlotBinding,
     VectorSlotTarget,
     VectorSupport,
     VectorSystemBinding,
-    VectorTableBuilderControl,
+    VectorTableBuilderControlContract,
     VectorTableMode,
     VectorTableTopology,
 };
@@ -237,7 +237,7 @@ impl CortexMVector {
     }
 }
 
-impl VectorBase for CortexMVector {
+impl VectorBaseContract for CortexMVector {
     fn support(&self) -> VectorSupport {
         let slot_count =
             u16::try_from(crate::pal::soc::cortex_m::hal::soc::board::irqs().len()).unwrap_or(0);
@@ -300,7 +300,7 @@ impl VectorBase for CortexMVector {
     }
 }
 
-impl VectorOwnershipControl for CortexMVector {
+impl VectorOwnershipControlContract for CortexMVector {
     type Builder = CortexMVectorBuilder;
 
     fn adopt_and_clone(&self, mode: VectorTableMode) -> Result<Self::Builder, VectorError> {
@@ -380,7 +380,7 @@ impl VectorOwnershipControl for CortexMVector {
     }
 }
 
-impl VectorTableBuilderControl for CortexMVectorBuilder {
+impl VectorTableBuilderControlContract for CortexMVectorBuilder {
     type Sealed = CortexMSealedVectorTable;
 
     fn support(&self) -> VectorSupport {
@@ -532,7 +532,7 @@ impl Drop for CortexMVectorBuilder {
     }
 }
 
-impl VectorSealedQuery for CortexMSealedVectorTable {
+impl VectorSealedQueryContract for CortexMSealedVectorTable {
     fn slot_state(&self, slot: IrqSlot) -> Result<SlotState, VectorError> {
         slot_state_for(self.scope_index, slot, self.slot_count)
     }

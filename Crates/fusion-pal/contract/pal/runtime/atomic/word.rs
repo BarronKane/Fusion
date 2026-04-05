@@ -30,7 +30,7 @@ pub enum AtomicWaitOutcome {
 }
 
 /// One semantic 32-bit atomic word surface.
-pub trait AtomicWord32: Send + Sync {
+pub trait AtomicWord32Contract: Send + Sync {
     /// Reports the truthful support surface of this atomic word.
     fn support(&self) -> AtomicWord32Support;
 

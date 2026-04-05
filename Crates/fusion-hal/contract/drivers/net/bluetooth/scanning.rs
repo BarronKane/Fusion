@@ -1,13 +1,13 @@
 //! Scanning and discovery control contracts.
 
 use super::BluetoothError;
-use super::BluetoothOwnedAdapter;
+use super::BluetoothOwnedAdapterContract;
 use super::BluetoothScanParameters;
 use super::BluetoothScanReport;
 use super::BluetoothScanSessionId;
 
 /// Scanning/discovery control for one opened Bluetooth adapter.
-pub trait BluetoothScanningControl: BluetoothOwnedAdapter {
+pub trait BluetoothScanningControlContract: BluetoothOwnedAdapterContract {
     /// Starts one scan session.
     ///
     /// # Errors

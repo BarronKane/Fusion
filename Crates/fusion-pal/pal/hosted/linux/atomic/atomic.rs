@@ -15,7 +15,7 @@ use rustix::io::Errno;
 use rustix::thread::futex;
 
 use crate::contract::pal::runtime::atomic::{
-    AtomicBase,
+    AtomicBaseContract,
     AtomicCompareExchangeOutcome32,
     AtomicError,
     AtomicErrorKind,
@@ -27,7 +27,7 @@ use crate::contract::pal::runtime::atomic::{
     AtomicWaitOutcome,
     AtomicWaitWord32Caps,
     AtomicWaitWord32Support,
-    AtomicWord32,
+    AtomicWord32Contract,
     AtomicWord32Caps,
     AtomicWord32Support,
 };
@@ -96,7 +96,7 @@ impl LinuxAtomic {
     }
 }
 
-impl AtomicBase for LinuxAtomic {
+impl AtomicBaseContract for LinuxAtomic {
     type Word32 = LinuxAtomicWord32;
 
     fn support(&self) -> AtomicSupport {
@@ -127,7 +127,7 @@ impl Default for LinuxAtomicWord32 {
     }
 }
 
-impl AtomicWord32 for LinuxAtomicWord32 {
+impl AtomicWord32Contract for LinuxAtomicWord32 {
     fn support(&self) -> AtomicWord32Support {
         LINUX_WORD32_SUPPORT
     }

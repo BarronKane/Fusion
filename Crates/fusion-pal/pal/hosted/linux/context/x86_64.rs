@@ -12,7 +12,7 @@ use core::mem;
 
 use crate::contract::pal::runtime::context::{
     ContextAuthoritySet,
-    ContextBase,
+    ContextBaseContract,
     ContextCaps,
     ContextError,
     ContextGuarantee,
@@ -114,7 +114,7 @@ impl LinuxSavedContext {
     }
 }
 
-impl ContextBase for LinuxContext {
+impl ContextBaseContract for LinuxContext {
     type Context = LinuxSavedContext;
 
     fn support(&self) -> ContextSupport {

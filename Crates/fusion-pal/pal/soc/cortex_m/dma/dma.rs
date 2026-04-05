@@ -1,9 +1,9 @@
 //! Cortex-M bare-metal DMA catalog backend.
 
 use crate::contract::pal::dma::{
-    DmaBase,
+    DmaBaseContract,
     DmaCaps,
-    DmaCatalog,
+    DmaCatalogContract,
     DmaControllerDescriptor,
     DmaImplementationKind,
     DmaRequestDescriptor,
@@ -43,7 +43,7 @@ impl Dma {
     }
 }
 
-impl DmaBase for Dma {
+impl DmaBaseContract for Dma {
     fn support(&self) -> DmaSupport {
         let controllers = dma_controllers();
         let requests = dma_requests();
@@ -68,7 +68,7 @@ impl DmaBase for Dma {
     }
 }
 
-impl DmaCatalog for Dma {
+impl DmaCatalogContract for Dma {
     fn controllers(&self) -> &'static [DmaControllerDescriptor] {
         dma_controllers()
     }

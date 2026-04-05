@@ -6,7 +6,7 @@ use core::mem::MaybeUninit;
 
 use fusion_pal::sys::sync::{
     PlatformRawOnce,
-    RawOnce,
+    RawOnceContract,
 };
 
 use super::{

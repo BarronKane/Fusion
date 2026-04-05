@@ -1,15 +1,15 @@
 //! Unsupported placeholders for native domain/courier/context contracts.
 
 use super::{
-    ContextBase,
+    ContextBaseContract,
     ContextId,
     ContextProjectionKind,
     ContextSupport,
-    CourierBase,
+    CourierBaseContract,
     CourierId,
     CourierSupport,
-    CourierVisibilityControl,
-    DomainBase,
+    CourierVisibilityControlContract,
+    DomainBaseContract,
     DomainId,
     DomainSupport,
 };
@@ -25,7 +25,7 @@ impl UnsupportedDomain {
     }
 }
 
-impl DomainBase for UnsupportedDomain {
+impl DomainBaseContract for UnsupportedDomain {
     fn domain_id(&self) -> DomainId {
         DomainId::new(0)
     }
@@ -50,7 +50,7 @@ impl UnsupportedCourier {
     }
 }
 
-impl CourierBase for UnsupportedCourier {
+impl CourierBaseContract for UnsupportedCourier {
     fn courier_id(&self) -> CourierId {
         CourierId::new(0)
     }
@@ -64,7 +64,7 @@ impl CourierBase for UnsupportedCourier {
     }
 }
 
-impl CourierVisibilityControl for UnsupportedCourier {
+impl CourierVisibilityControlContract for UnsupportedCourier {
     fn visible_context_count(&self) -> usize {
         0
     }
@@ -85,7 +85,7 @@ impl UnsupportedContext {
     }
 }
 
-impl ContextBase for UnsupportedContext {
+impl ContextBaseContract for UnsupportedContext {
     fn context_id(&self) -> ContextId {
         ContextId::new(0)
     }

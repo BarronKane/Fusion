@@ -7,7 +7,7 @@ use core::mem::MaybeUninit;
 use core::time::Duration;
 
 use crate::contract::pal::runtime::event::{
-    EventBase,
+    EventBaseContract,
     EventCaps,
     EventCompletionOp,
     EventError,
@@ -17,7 +17,7 @@ use crate::contract::pal::runtime::event::{
     EventNotification,
     EventReadiness,
     EventRecord,
-    EventSource,
+    EventSourceContract,
     EventSourceHandle,
     EventSupport,
 };
@@ -62,7 +62,7 @@ impl MacOsEvent {
     }
 }
 
-impl EventBase for MacOsEvent {
+impl EventBaseContract for MacOsEvent {
     type Poller = MacOsPoller;
 
     fn support(&self) -> EventSupport {
@@ -70,7 +70,7 @@ impl EventBase for MacOsEvent {
     }
 }
 
-impl EventSource for MacOsEvent {
+impl EventSourceContract for MacOsEvent {
     fn create(&self) -> Result<Self::Poller, EventError> {
         let fd = unsafe { libc::kqueue() };
         if fd < 0 {

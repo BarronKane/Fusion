@@ -225,6 +225,44 @@ pub enum CortexMBluetoothTransportBinding {
     },
 }
 
+/// Board-visible Wi-Fi transport binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CortexMWifiTransportBinding {
+    /// Three-wire SPI-style link where data and interrupt share one GPIO line.
+    Spi3WireSharedDataIrq {
+        /// Clock GPIO driven by the Cortex-M host.
+        clock_gpio: u8,
+        /// Chip-select GPIO driven by the Cortex-M host.
+        chip_select_gpio: u8,
+        /// Shared bidirectional data and IRQ GPIO.
+        data_irq_gpio: u8,
+    },
+    /// Four-wire SPI transport with one dedicated IRQ GPIO.
+    Spi4Wire {
+        /// Clock GPIO driven by the Cortex-M host.
+        clock_gpio: u8,
+        /// Chip-select GPIO driven by the Cortex-M host.
+        chip_select_gpio: u8,
+        /// Host-to-controller data GPIO.
+        mosi_gpio: u8,
+        /// Controller-to-host data GPIO.
+        miso_gpio: u8,
+        /// Dedicated IRQ GPIO when the controller exposes one.
+        irq_gpio: Option<u8>,
+    },
+    /// SDIO transport.
+    Sdio {
+        /// Clock GPIO driven by the Cortex-M host.
+        clock_gpio: u8,
+        /// Command GPIO driven by the Cortex-M host.
+        command_gpio: u8,
+        /// Data GPIO set used for SDIO transfer.
+        data_gpios: [u8; 4],
+        /// Dedicated IRQ GPIO when the controller exposes one.
+        irq_gpio: Option<u8>,
+    },
+}
+
 /// Static Bluetooth controller binding surfaced by one Cortex-M board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CortexMBluetoothControllerBinding {
@@ -236,6 +274,25 @@ pub struct CortexMBluetoothControllerBinding {
     pub chip: &'static str,
     /// Transport wiring surfaced by the board.
     pub transport: CortexMBluetoothTransportBinding,
+    /// Optional power-enable GPIO controlled by the Cortex-M host.
+    pub power_gpio: Option<u8>,
+    /// Optional reset GPIO controlled by the Cortex-M host.
+    pub reset_gpio: Option<u8>,
+    /// Optional wake GPIO controlled by the Cortex-M host.
+    pub wake_gpio: Option<u8>,
+}
+
+/// Static Wi-Fi controller binding surfaced by one Cortex-M board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CortexMWifiControllerBinding {
+    /// Human-readable binding name.
+    pub name: &'static str,
+    /// Controller vendor name.
+    pub vendor: &'static str,
+    /// Controller chip or family name.
+    pub chip: &'static str,
+    /// Transport wiring surfaced by the board.
+    pub transport: CortexMWifiTransportBinding,
     /// Optional power-enable GPIO controlled by the Cortex-M host.
     pub power_gpio: Option<u8>,
     /// Optional reset GPIO controlled by the Cortex-M host.
@@ -685,6 +742,12 @@ pub trait CortexMSocBoard: Copy {
     /// Returns the board-visible Bluetooth controller bindings surfaced by this SoC board.
     #[must_use]
     fn bluetooth_controllers(&self) -> &'static [CortexMBluetoothControllerBinding] {
+        &[]
+    }
+
+    /// Returns the board-visible Wi-Fi controller bindings surfaced by this SoC board.
+    #[must_use]
+    fn wifi_controllers(&self) -> &'static [CortexMWifiControllerBinding] {
         &[]
     }
 
@@ -1164,6 +1227,12 @@ pub fn bluetooth_controllers<T: CortexMSocBoard>(
     soc: T,
 ) -> &'static [CortexMBluetoothControllerBinding] {
     soc.bluetooth_controllers()
+}
+
+/// Returns the board-visible Wi-Fi controller bindings for the selected SoC board.
+#[must_use]
+pub fn wifi_controllers<T: CortexMSocBoard>(soc: T) -> &'static [CortexMWifiControllerBinding] {
+    soc.wifi_controllers()
 }
 
 /// Returns the named IRQ lines for the selected SoC board.

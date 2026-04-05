@@ -5,10 +5,10 @@ use super::BluetoothConnectionDescriptor;
 use super::BluetoothConnectionId;
 use super::BluetoothConnectionParameters;
 use super::BluetoothError;
-use super::BluetoothOwnedAdapter;
+use super::BluetoothOwnedAdapterContract;
 
 /// Connection control for one opened Bluetooth adapter.
-pub trait BluetoothConnectionControl: BluetoothOwnedAdapter {
+pub trait BluetoothConnectionControlContract: BluetoothOwnedAdapterContract {
     /// Creates one outbound connection to one peer.
     ///
     /// # Errors

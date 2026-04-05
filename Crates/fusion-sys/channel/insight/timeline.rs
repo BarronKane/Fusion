@@ -9,7 +9,7 @@ use core::marker::PhantomData;
 
 use crate::channel::{
     ChannelError,
-    ChannelReceive,
+    ChannelReceiveContract,
 };
 use crate::channel::insight::{
     InsightCaptureMode,
@@ -19,7 +19,7 @@ use crate::channel::insight::{
     LocalInsightChannel,
 };
 use crate::transport::protocol::{
-    Protocol,
+    ProtocolContract,
     ProtocolBootstrapKind,
     ProtocolCaps,
     ProtocolDebugView,
@@ -30,7 +30,7 @@ use crate::transport::protocol::{
     ProtocolVersion,
 };
 use crate::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentRequest,
     TransportError,
 };
@@ -80,7 +80,7 @@ pub enum InsightTimelineRecord<Meta> {
 /// Built-in protocol for timeline/flamegraph span records.
 pub struct InsightTimelineProtocol<Meta>(PhantomData<Meta>);
 
-impl<Meta> Protocol for InsightTimelineProtocol<Meta> {
+impl<Meta> ProtocolContract for InsightTimelineProtocol<Meta> {
     type Message = InsightTimelineRecord<Meta>;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {

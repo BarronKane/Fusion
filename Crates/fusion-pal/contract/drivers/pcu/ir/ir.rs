@@ -52,7 +52,7 @@ impl<'a> PcuKernel<'a> {
     }
 }
 
-impl PcuKernelIr for PcuKernel<'_> {
+impl PcuKernelIrContract for PcuKernel<'_> {
     fn id(&self) -> PcuKernelId {
         match self {
             Self::Dispatch(kernel) => kernel.id(),

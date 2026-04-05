@@ -11,13 +11,13 @@ use core::sync::atomic::{
 use core::time::Duration;
 
 use super::{
-    AtomicBase,
+    AtomicBaseContract,
     AtomicCompareExchangeOutcome32,
     AtomicError,
     AtomicSupport,
     AtomicWaitOutcome,
     AtomicWaitWord32Support,
-    AtomicWord32,
+    AtomicWord32Contract,
     AtomicWord32Support,
 };
 
@@ -39,7 +39,7 @@ impl UnsupportedAtomic {
     }
 }
 
-impl AtomicBase for UnsupportedAtomic {
+impl AtomicBaseContract for UnsupportedAtomic {
     type Word32 = UnsupportedAtomicWord32;
 
     fn support(&self) -> AtomicSupport {
@@ -67,7 +67,7 @@ impl Default for UnsupportedAtomicWord32 {
     }
 }
 
-impl AtomicWord32 for UnsupportedAtomicWord32 {
+impl AtomicWord32Contract for UnsupportedAtomicWord32 {
     fn support(&self) -> AtomicWord32Support {
         AtomicWord32Support::unsupported()
     }

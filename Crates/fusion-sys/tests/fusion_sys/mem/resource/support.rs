@@ -1,7 +1,7 @@
 //! Shared helpers for `fusion_sys::mem::resource` integration tests.
 
 use fusion_pal::sys::mem::{
-    MemBase,
+    MemBaseContract,
     system_mem,
 };
 

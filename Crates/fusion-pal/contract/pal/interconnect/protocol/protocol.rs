@@ -127,7 +127,7 @@ impl ProtocolDescriptor {
 }
 
 /// Static protocol contract.
-pub trait Protocol {
+pub trait ProtocolContract {
     /// Typed message payload carried by this protocol.
     type Message;
 

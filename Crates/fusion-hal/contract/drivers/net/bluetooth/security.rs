@@ -4,11 +4,11 @@ use super::BluetoothAddress;
 use super::BluetoothBondState;
 use super::BluetoothConnectionId;
 use super::BluetoothError;
-use super::BluetoothOwnedAdapter;
+use super::BluetoothOwnedAdapterContract;
 use super::BluetoothPairingParameters;
 
 /// Security/pairing/bonding control for one opened Bluetooth adapter.
-pub trait BluetoothSecurityControl: BluetoothOwnedAdapter {
+pub trait BluetoothSecurityControlContract: BluetoothOwnedAdapterContract {
     /// Initiates or confirms pairing on one active connection.
     ///
     /// # Errors

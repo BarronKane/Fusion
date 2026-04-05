@@ -135,7 +135,7 @@ pub struct EventRecord {
 }
 
 /// Capability trait for event-poller backends.
-pub trait EventBase {
+pub trait EventBaseContract {
     /// Opaque poller handle owned by the selected backend.
     type Poller;
 
@@ -144,7 +144,7 @@ pub trait EventBase {
 }
 
 /// Registration and polling contract for a backend event source.
-pub trait EventSource: EventBase {
+pub trait EventSourceContract: EventBaseContract {
     /// Creates a new poller instance.
     ///
     /// # Errors

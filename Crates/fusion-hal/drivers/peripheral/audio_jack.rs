@@ -7,7 +7,7 @@
 use crate::drivers::peripheral::interface::gpio::{
     GpioPeripheral,
     GpioPeripheralError as GpioError,
-    GpioPeripheralOutputPin as GpioOutputPin,
+    GpioPeripheralOutputPin as GpioOutputPinContract,
 };
 
 /// Conductor role in a TRRS 3.5mm audio jack.
@@ -38,10 +38,10 @@ pub struct AudioJack<Tip, Ring1, Ring2, Sleeve> {
 
 impl<Tip, Ring1, Ring2, Sleeve> AudioJack<Tip, Ring1, Ring2, Sleeve>
 where
-    Tip: GpioOutputPin,
-    Ring1: GpioOutputPin,
-    Ring2: GpioOutputPin,
-    Sleeve: GpioOutputPin,
+    Tip: GpioOutputPinContract,
+    Ring1: GpioOutputPinContract,
+    Ring2: GpioOutputPinContract,
+    Sleeve: GpioOutputPinContract,
 {
     /// Creates one TRRS audio jack peripheral by claiming all four conductor pins.
     ///
@@ -121,10 +121,10 @@ where
 
 impl<Tip, Ring1, Ring2, Sleeve> GpioPeripheral for AudioJack<Tip, Ring1, Ring2, Sleeve>
 where
-    Tip: GpioOutputPin,
-    Ring1: GpioOutputPin,
-    Ring2: GpioOutputPin,
-    Sleeve: GpioOutputPin,
+    Tip: GpioOutputPinContract,
+    Ring1: GpioOutputPinContract,
+    Ring2: GpioOutputPinContract,
+    Sleeve: GpioOutputPinContract,
 {
     type Error = GpioError;
 }
@@ -141,9 +141,9 @@ pub struct AudioJackStereo<Tip, Ring, Sleeve> {
 
 impl<Tip, Ring, Sleeve> AudioJackStereo<Tip, Ring, Sleeve>
 where
-    Tip: GpioOutputPin,
-    Ring: GpioOutputPin,
-    Sleeve: GpioOutputPin,
+    Tip: GpioOutputPinContract,
+    Ring: GpioOutputPinContract,
+    Sleeve: GpioOutputPinContract,
 {
     /// Creates one TRS audio jack peripheral by claiming the tip, ring, and sleeve pins.
     ///
@@ -199,9 +199,9 @@ where
 
 impl<Tip, Ring, Sleeve> GpioPeripheral for AudioJackStereo<Tip, Ring, Sleeve>
 where
-    Tip: GpioOutputPin,
-    Ring: GpioOutputPin,
-    Sleeve: GpioOutputPin,
+    Tip: GpioOutputPinContract,
+    Ring: GpioOutputPinContract,
+    Sleeve: GpioOutputPinContract,
 {
     type Error = GpioError;
 }
@@ -211,7 +211,7 @@ mod tests {
     use super::*;
     use crate::drivers::bus::gpio::{
         GpioCapabilities,
-        GpioOwnedPin,
+        GpioOwnedPinContract,
     };
 
     #[derive(Debug)]
@@ -221,7 +221,7 @@ mod tests {
         level: bool,
     }
 
-    impl GpioOwnedPin for FakeOutputPin {
+    impl GpioOwnedPinContract for FakeOutputPin {
         fn pin(&self) -> u8 {
             self.pin
         }
@@ -231,7 +231,7 @@ mod tests {
         }
     }
 
-    impl GpioOutputPin for FakeOutputPin {
+    impl GpioOutputPinContract for FakeOutputPin {
         fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {
             self.configured = true;
             self.level = initial_high;

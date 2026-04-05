@@ -1,4 +1,4 @@
-//! Driver-facing PCU invocation shape and typed binding vocabulary.
+//! DriverContract-facing PCU invocation shape and typed binding vocabulary.
 //!
 //! This stays intentionally below orchestration policy. Backend choice, fallback preference, and
 //! prepared-dispatch state belong to `fusion-sys`; the contract layer only describes what one PCU

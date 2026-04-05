@@ -7,7 +7,7 @@
 use crate::drivers::peripheral::interface::gpio::{
     GpioPeripheral,
     GpioPeripheralError as GpioError,
-    GpioPeripheralOutputPin as GpioOutputPin,
+    GpioPeripheralOutputPin as GpioOutputPinContract,
 };
 
 /// I2C wiring contract for one OLED display module.
@@ -23,8 +23,8 @@ pub struct OledDisplay<Scl, Sda> {
 
 impl<Scl, Sda> OledDisplay<Scl, Sda>
 where
-    Scl: GpioOutputPin,
-    Sda: GpioOutputPin,
+    Scl: GpioOutputPinContract,
+    Sda: GpioOutputPinContract,
 {
     /// Creates one OLED display peripheral by claiming the SCL and SDA pins.
     ///
@@ -71,8 +71,8 @@ where
 
 impl<Scl, Sda> GpioPeripheral for OledDisplay<Scl, Sda>
 where
-    Scl: GpioOutputPin,
-    Sda: GpioOutputPin,
+    Scl: GpioOutputPinContract,
+    Sda: GpioOutputPinContract,
 {
     type Error = GpioError;
 }
@@ -82,7 +82,7 @@ mod tests {
     use super::*;
     use crate::drivers::bus::gpio::{
         GpioCapabilities,
-        GpioOwnedPin,
+        GpioOwnedPinContract,
     };
 
     #[derive(Debug)]
@@ -92,7 +92,7 @@ mod tests {
         level: bool,
     }
 
-    impl GpioOwnedPin for FakeOutputPin {
+    impl GpioOwnedPinContract for FakeOutputPin {
         fn pin(&self) -> u8 {
             self.pin
         }
@@ -102,7 +102,7 @@ mod tests {
         }
     }
 
-    impl GpioOutputPin for FakeOutputPin {
+    impl GpioOutputPinContract for FakeOutputPin {
         fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {
             self.configured = true;
             self.level = initial_high;

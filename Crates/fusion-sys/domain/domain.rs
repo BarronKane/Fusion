@@ -13,7 +13,7 @@ use crate::claims::{
     PrincipalId,
 };
 use self::context::{
-    ContextBase,
+    ContextBaseContract,
     ContextCaps,
     ContextId,
     ContextImplementationKind,
@@ -25,7 +25,7 @@ use crate::courier::{
     ChildCourierLaunchRecord,
     ChildCourierRegistry,
     CourierAppMetadataStore,
-    CourierBase,
+    CourierBaseContract,
     CourierCaps,
     CourierChildLaunchRequest,
     CourierFiberClass,
@@ -51,7 +51,7 @@ use crate::courier::{
     CourierRuntimeSinkVTable,
     CourierSupport,
     CourierVisibility,
-    CourierVisibilityControl,
+    CourierVisibilityControlContract,
     FiberMetadataAttachment,
     FiberTerminalStatus,
 };
@@ -1375,7 +1375,7 @@ impl<
     const MAX_CHILDREN: usize,
     const MAX_FIBERS: usize,
     const MAX_METADATA: usize,
-> DomainBase
+> DomainBaseContract
     for DomainRegistry<
         'a,
         MAX_COURIERS,

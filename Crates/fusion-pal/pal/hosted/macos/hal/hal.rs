@@ -26,10 +26,10 @@ use crate::contract::pal::runtime::thread::{
 };
 use crate::contract::pal::{
     HardwareAuthoritySet,
-    HardwareBase,
+    HardwareBaseContract,
     HardwareCpuCaps,
     HardwareCpuDescription,
-    HardwareCpuQuery,
+    HardwareCpuQueryContract,
     HardwareCpuSupport,
     HardwareCpuVendor,
     HardwareError,
@@ -40,7 +40,7 @@ use crate::contract::pal::{
     HardwareSupport,
     HardwareTopologyCaps,
     HardwareTopologyNodeId,
-    HardwareTopologyQuery,
+    HardwareTopologyQueryContract,
     HardwareTopologySummary,
     HardwareTopologySupport,
     HardwareWriteSummary,
@@ -73,13 +73,13 @@ pub const fn system_hardware() -> PlatformHardware {
     PlatformHardware::new()
 }
 
-impl HardwareBase for MacOsHardware {
+impl HardwareBaseContract for MacOsHardware {
     fn support(&self) -> HardwareSupport {
         support()
     }
 }
 
-impl HardwareCpuQuery for MacOsHardware {
+impl HardwareCpuQueryContract for MacOsHardware {
     fn cpu_description(&self) -> Result<HardwareCpuDescription, HardwareError> {
         Ok(cpu_description())
     }
@@ -89,7 +89,7 @@ impl HardwareCpuQuery for MacOsHardware {
     }
 }
 
-impl HardwareTopologyQuery for MacOsHardware {
+impl HardwareTopologyQueryContract for MacOsHardware {
     fn topology_summary(&self) -> Result<HardwareTopologySummary, HardwareError> {
         topology_summary()
     }

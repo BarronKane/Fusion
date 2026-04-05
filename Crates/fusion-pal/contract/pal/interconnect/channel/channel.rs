@@ -6,11 +6,11 @@ mod unsupported;
 
 pub use caps::*;
 use crate::contract::pal::interconnect::protocol::{
-    Protocol,
+    ProtocolContract,
     ProtocolDescriptor,
 };
 use crate::contract::pal::interconnect::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportSupport,
 };
 pub use error::*;
@@ -53,16 +53,16 @@ pub struct ChannelSupport {
 ///
 /// Fusion channels are one-way only. Request/reply or duplex interactions are modeled as paired
 /// channels rather than one bidirectional object pretending to be simpler than it is.
-pub trait ChannelBase: TransportAttachmentControl {
-    /// Protocol carried by this channel.
-    type Protocol: Protocol;
+pub trait ChannelBaseContract: TransportAttachmentControlContract {
+    /// ProtocolContract carried by this channel.
+    type ProtocolContract: ProtocolContract;
 
     /// Returns the truthful support surface for this channel instance.
     fn channel_support(&self) -> ChannelSupport;
 }
 
 /// Write-side channel contract.
-pub trait ChannelSend: ChannelBase {
+pub trait ChannelSendContract: ChannelBaseContract {
     /// Sends one message through the channel.
     ///
     /// # Errors
@@ -72,12 +72,12 @@ pub trait ChannelSend: ChannelBase {
     fn try_send(
         &self,
         producer: Self::ProducerAttachment,
-        message: <Self::Protocol as Protocol>::Message,
+        message: <Self::ProtocolContract as ProtocolContract>::Message,
     ) -> Result<(), ChannelError>;
 }
 
 /// Read-side channel contract.
-pub trait ChannelReceive: ChannelBase {
+pub trait ChannelReceiveContract: ChannelBaseContract {
     /// Receives one message from the channel when available.
     ///
     /// # Errors
@@ -87,5 +87,5 @@ pub trait ChannelReceive: ChannelBase {
     fn try_receive(
         &self,
         consumer: Self::ConsumerAttachment,
-    ) -> Result<Option<<Self::Protocol as Protocol>::Message>, ChannelError>;
+    ) -> Result<Option<<Self::ProtocolContract as ProtocolContract>::Message>, ChannelError>;
 }

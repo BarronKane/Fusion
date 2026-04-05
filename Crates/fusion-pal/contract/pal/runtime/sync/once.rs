@@ -31,7 +31,7 @@ pub enum OnceBeginResult {
 ///
 /// This primitive intentionally does not expose poisoning semantics. A failed initializer
 /// should reset the once state so another caller can retry or report the failure upward.
-pub trait RawOnce: Send + Sync {
+pub trait RawOnceContract: Send + Sync {
     /// Reports the support surface of this once instance.
     fn support(&self) -> OnceSupport;
 

@@ -6,8 +6,8 @@ use fusion_sys::alloc::{
     AllocatorControlRequest,
 };
 use fusion_sys::channel::{
-    ChannelReceive,
-    ChannelSend,
+    ChannelReceiveContract,
+    ChannelSendContract,
 };
 use fusion_sys::fiber::{
     FiberMetadataMessage,
@@ -16,7 +16,7 @@ use fusion_sys::fiber::{
     ManagedFiber,
 };
 use fusion_sys::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentRequest,
 };
 

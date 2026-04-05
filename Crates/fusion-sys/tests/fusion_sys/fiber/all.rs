@@ -8,7 +8,7 @@ use core::sync::atomic::{
     Ordering,
 };
 
-use fusion_sys::channel::ChannelReceive;
+use fusion_sys::channel::ChannelReceiveContract;
 use fusion_sys::fiber::{
     ContextCaps,
     ContextErrorKind,
@@ -28,7 +28,7 @@ use fusion_sys::fiber::{
     yield_now,
 };
 use fusion_sys::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentRequest,
 };
 use std::thread;

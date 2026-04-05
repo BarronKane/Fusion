@@ -6,8 +6,8 @@ use core::pin::Pin;
 use crate::channel::{
     ChannelError,
     ChannelErrorKind,
-    ChannelReceive,
-    ChannelSend,
+    ChannelReceiveContract,
+    ChannelSendContract,
     LocalChannel,
 };
 use crate::fiber::{
@@ -20,7 +20,7 @@ use crate::fiber::{
     yield_now,
 };
 use crate::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentRequest,
     TransportError,
     TransportErrorKind,

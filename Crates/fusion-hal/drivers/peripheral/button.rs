@@ -4,7 +4,7 @@ use crate::contract::drivers::peripheral::ButtonContract;
 use crate::drivers::peripheral::interface::gpio::{
     GpioPeripheral,
     GpioPeripheralError as GpioError,
-    GpioPeripheralInputPin as GpioInputPin,
+    GpioPeripheralInputPin as GpioInputPinContract,
 };
 
 /// Simple binary button peripheral backed by one owned GPIO input.
@@ -16,7 +16,7 @@ pub struct Button<P> {
 
 impl<P> Button<P>
 where
-    P: GpioInputPin,
+    P: GpioInputPinContract,
 {
     /// Creates one active-high button backed by one owned GPIO input.
     ///
@@ -60,7 +60,7 @@ where
 
 impl<P> ButtonContract for Button<P>
 where
-    P: GpioInputPin,
+    P: GpioInputPinContract,
 {
     type Error = GpioError;
 
@@ -71,7 +71,7 @@ where
 
 impl<P> GpioPeripheral for Button<P>
 where
-    P: GpioInputPin,
+    P: GpioInputPinContract,
 {
     type Error = GpioError;
 }
@@ -81,7 +81,7 @@ mod tests {
     use super::*;
     use crate::drivers::bus::gpio::{
         GpioCapabilities,
-        GpioOwnedPin,
+        GpioOwnedPinContract,
     };
 
     #[derive(Debug)]
@@ -91,7 +91,7 @@ mod tests {
         configured: bool,
     }
 
-    impl GpioOwnedPin for FakeInputPin {
+    impl GpioOwnedPinContract for FakeInputPin {
         fn pin(&self) -> u8 {
             self.pin
         }
@@ -101,7 +101,7 @@ mod tests {
         }
     }
 
-    impl GpioInputPin for FakeInputPin {
+    impl GpioInputPinContract for FakeInputPin {
         fn configure_input(&mut self) -> Result<(), GpioError> {
             self.configured = true;
             Ok(())

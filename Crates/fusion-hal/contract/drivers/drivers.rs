@@ -1,4 +1,7 @@
-//! Driver-facing contracts layered on top of PAL substrate truth.
+//! DriverContract-facing contracts layered on top of PAL substrate truth.
+
+#[path = "driver/driver.rs"]
+pub mod driver;
 
 #[path = "bus/bus.rs"]
 pub mod bus;

@@ -7,7 +7,7 @@
 use crate::drivers::peripheral::interface::gpio::{
     GpioPeripheral,
     GpioPeripheralError as GpioError,
-    GpioPeripheralOutputPin as GpioOutputPin,
+    GpioPeripheralOutputPin as GpioOutputPinContract,
 };
 
 /// Passive enclosed speaker peripheral backed by one owned GPIO signal output.
@@ -25,7 +25,7 @@ pub struct Speaker<P> {
 
 impl<P> Speaker<P>
 where
-    P: GpioOutputPin,
+    P: GpioOutputPinContract,
 {
     /// Creates one passive speaker peripheral by claiming the signal pin.
     ///
@@ -113,7 +113,7 @@ where
 
 impl<P> GpioPeripheral for Speaker<P>
 where
-    P: GpioOutputPin,
+    P: GpioOutputPinContract,
 {
     type Error = GpioError;
 }
@@ -123,7 +123,7 @@ mod tests {
     use super::*;
     use crate::drivers::bus::gpio::{
         GpioCapabilities,
-        GpioOwnedPin,
+        GpioOwnedPinContract,
     };
 
     #[derive(Debug)]
@@ -133,7 +133,7 @@ mod tests {
         level: bool,
     }
 
-    impl GpioOwnedPin for FakeOutputPin {
+    impl GpioOwnedPinContract for FakeOutputPin {
         fn pin(&self) -> u8 {
             self.pin
         }
@@ -143,7 +143,7 @@ mod tests {
         }
     }
 
-    impl GpioOutputPin for FakeOutputPin {
+    impl GpioOutputPinContract for FakeOutputPin {
         fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {
             self.configured = true;
             self.level = initial_high;

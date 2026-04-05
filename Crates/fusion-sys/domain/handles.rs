@@ -324,7 +324,7 @@ impl<
     const MAX_CHILDREN: usize,
     const MAX_FIBERS: usize,
     const MAX_METADATA: usize,
-> CourierBase
+> CourierBaseContract
     for CourierHandle<
         'registry,
         'a,
@@ -358,7 +358,7 @@ impl<
     const MAX_CHILDREN: usize,
     const MAX_FIBERS: usize,
     const MAX_METADATA: usize,
-> CourierVisibilityControl
+> CourierVisibilityControlContract
     for CourierHandle<
         'registry,
         'a,
@@ -451,7 +451,7 @@ impl<
     const MAX_CHILDREN: usize,
     const MAX_FIBERS: usize,
     const MAX_METADATA: usize,
-> ContextBase
+> ContextBaseContract
     for ContextHandle<
         'registry,
         'a,

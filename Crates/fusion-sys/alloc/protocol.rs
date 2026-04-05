@@ -9,7 +9,7 @@
 //! ride protocol/transport/channel composition when the caller actually needs that boundary.
 
 use crate::transport::protocol::{
-    Protocol,
+    ProtocolContract,
     ProtocolBootstrapKind,
     ProtocolCaps,
     ProtocolDebugView,
@@ -86,7 +86,7 @@ pub enum AllocatorControlStatusMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AllocatorDomainMetadataProtocol;
 
-impl Protocol for AllocatorDomainMetadataProtocol {
+impl ProtocolContract for AllocatorDomainMetadataProtocol {
     type Message = AllocatorDomainMetadataMessage;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -111,7 +111,7 @@ impl Protocol for AllocatorDomainMetadataProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AllocatorControlWriteProtocol;
 
-impl Protocol for AllocatorControlWriteProtocol {
+impl ProtocolContract for AllocatorControlWriteProtocol {
     type Message = AllocatorControlRequest;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -136,7 +136,7 @@ impl Protocol for AllocatorControlWriteProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AllocatorControlStatusProtocol;
 
-impl Protocol for AllocatorControlStatusProtocol {
+impl ProtocolContract for AllocatorControlStatusProtocol {
     type Message = AllocatorControlStatusMessage;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {

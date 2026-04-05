@@ -1,6 +1,6 @@
 //! Base provider and adapter control contracts.
 
-use super::BluetoothAdapter;
+use super::BluetoothAdapterContract;
 use super::BluetoothAdapterDescriptor;
 use super::BluetoothAdapterId;
 use super::BluetoothAdapterSupport;
@@ -8,7 +8,7 @@ use super::BluetoothError;
 use super::BluetoothSupport;
 
 /// Capability trait for generic Bluetooth backends.
-pub trait BluetoothBase {
+pub trait BluetoothBaseContract {
     /// Reports the truthful Bluetooth surface for this backend.
     fn support(&self) -> BluetoothSupport;
 
@@ -26,9 +26,9 @@ pub trait BluetoothBase {
 }
 
 /// Control contract for generic Bluetooth backends.
-pub trait BluetoothControl: BluetoothBase {
+pub trait BluetoothControlContract: BluetoothBaseContract {
     /// Concrete opened-adapter handle returned by this backend.
-    type Adapter: BluetoothAdapter;
+    type Adapter: BluetoothAdapterContract;
 
     /// Opens one surfaced Bluetooth adapter/controller.
     ///
@@ -42,7 +42,7 @@ pub trait BluetoothControl: BluetoothBase {
 }
 
 /// Shared contract for one opened Bluetooth adapter/controller.
-pub trait BluetoothOwnedAdapter {
+pub trait BluetoothOwnedAdapterContract {
     /// Returns the static surfaced adapter descriptor.
     fn descriptor(&self) -> &'static BluetoothAdapterDescriptor;
 

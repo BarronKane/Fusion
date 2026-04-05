@@ -8,25 +8,25 @@ use core::time::Duration;
 
 use super::{
     RawThreadEntry,
-    ThreadBase,
+    ThreadBaseContract,
     ThreadConfig,
     ThreadError,
     ThreadId,
     ThreadLifecycle,
     ThreadObservation,
-    ThreadObservationControl,
-    ThreadPlacementControl,
+    ThreadObservationControlContract,
+    ThreadPlacementControlContract,
     ThreadPlacementOutcome,
     ThreadPlacementRequest,
     ThreadPriorityRange,
     ThreadSchedulerClass,
-    ThreadSchedulerControl,
+    ThreadSchedulerControlContract,
     ThreadSchedulerObservation,
     ThreadSchedulerRequest,
     ThreadStackObservation,
-    ThreadStackObservationControl,
+    ThreadStackObservationControlContract,
     ThreadSupport,
-    ThreadSuspendControl,
+    ThreadSuspendControlContract,
     ThreadTermination,
 };
 
@@ -46,7 +46,7 @@ impl UnsupportedThread {
     }
 }
 
-impl ThreadBase for UnsupportedThread {
+impl ThreadBaseContract for UnsupportedThread {
     type Handle = UnsupportedThreadHandle;
 
     fn support(&self) -> ThreadSupport {
@@ -79,7 +79,7 @@ unsafe impl ThreadLifecycle for UnsupportedThread {
     }
 }
 
-impl ThreadSuspendControl for UnsupportedThread {
+impl ThreadSuspendControlContract for UnsupportedThread {
     fn suspend(&self, _handle: &Self::Handle) -> Result<(), ThreadError> {
         Err(ThreadError::unsupported())
     }
@@ -89,7 +89,7 @@ impl ThreadSuspendControl for UnsupportedThread {
     }
 }
 
-impl ThreadSchedulerControl for UnsupportedThread {
+impl ThreadSchedulerControlContract for UnsupportedThread {
     fn priority_range(
         &self,
         _class: ThreadSchedulerClass,
@@ -122,7 +122,7 @@ impl ThreadSchedulerControl for UnsupportedThread {
     }
 }
 
-impl ThreadPlacementControl for UnsupportedThread {
+impl ThreadPlacementControlContract for UnsupportedThread {
     fn set_placement(
         &self,
         _handle: &Self::Handle,
@@ -136,7 +136,7 @@ impl ThreadPlacementControl for UnsupportedThread {
     }
 }
 
-impl ThreadObservationControl for UnsupportedThread {
+impl ThreadObservationControlContract for UnsupportedThread {
     fn observe_current(&self) -> Result<ThreadObservation, ThreadError> {
         Err(ThreadError::unsupported())
     }
@@ -146,7 +146,7 @@ impl ThreadObservationControl for UnsupportedThread {
     }
 }
 
-impl ThreadStackObservationControl for UnsupportedThread {
+impl ThreadStackObservationControlContract for UnsupportedThread {
     fn observe_current_stack(&self) -> Result<ThreadStackObservation, ThreadError> {
         Err(ThreadError::unsupported())
     }

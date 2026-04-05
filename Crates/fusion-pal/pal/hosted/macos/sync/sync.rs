@@ -28,7 +28,7 @@ use crate::contract::pal::runtime::sync::{
     RwLockFairnessSupport,
     RwLockSupport,
     SemaphoreSupport,
-    SyncBase,
+    SyncBaseContract,
     SyncError,
     SyncErrorKind,
     SyncFallbackKind,
@@ -41,8 +41,8 @@ use crate::contract::pal::runtime::sync::{
     OnceBeginResult,
     OnceCaps,
     OnceState,
-    RawOnce,
-    RawSemaphore,
+    RawOnceContract,
+    RawSemaphoreContract,
     SemaphoreCaps,
 };
 use crate::pal::hosted::macos::capability::{
@@ -174,7 +174,7 @@ impl MacOsSync {
     }
 }
 
-impl SyncBase for MacOsSync {
+impl SyncBaseContract for MacOsSync {
     fn support(&self) -> SyncSupport {
         SyncSupport {
             mutex: MACOS_MUTEX_SUPPORT,
@@ -326,7 +326,7 @@ impl Default for MacOsRawOnce {
 }
 
 #[cfg(not(feature = "critical-safe"))]
-impl RawOnce for MacOsRawOnce {
+impl RawOnceContract for MacOsRawOnce {
     fn support(&self) -> OnceSupport {
         MACOS_ONCE_SUPPORT
     }
@@ -412,7 +412,7 @@ impl MacOsSemaphore {
 }
 
 #[cfg(not(feature = "critical-safe"))]
-impl RawSemaphore for MacOsSemaphore {
+impl RawSemaphoreContract for MacOsSemaphore {
     fn support(&self) -> SemaphoreSupport {
         MACOS_SEMAPHORE_SUPPORT
     }

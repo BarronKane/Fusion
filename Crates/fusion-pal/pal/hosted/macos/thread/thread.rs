@@ -19,7 +19,7 @@ use libc::{
 use crate::contract::pal::runtime::thread::{
     RawThreadEntry,
     ThreadAuthoritySet,
-    ThreadBase,
+    ThreadBaseContract,
     ThreadConfig,
     ThreadEntryReturn,
     ThreadError,
@@ -33,8 +33,8 @@ use crate::contract::pal::runtime::thread::{
     ThreadLifecycleSupport,
     ThreadLocalitySupport,
     ThreadObservation,
-    ThreadObservationControl,
-    ThreadPlacementControl,
+    ThreadObservationControlContract,
+    ThreadPlacementControlContract,
     ThreadPlacementOutcome,
     ThreadPlacementRequest,
     ThreadPlacementSupport,
@@ -42,7 +42,7 @@ use crate::contract::pal::runtime::thread::{
     ThreadRunState,
     ThreadSchedulerCaps,
     ThreadSchedulerClass,
-    ThreadSchedulerControl,
+    ThreadSchedulerControlContract,
     ThreadSchedulerModel,
     ThreadSchedulerObservation,
     ThreadSchedulerRequest,
@@ -52,12 +52,12 @@ use crate::contract::pal::runtime::thread::{
     ThreadStackLocalityPolicy,
     ThreadStackLockPolicy,
     ThreadStackObservation,
-    ThreadStackObservationControl,
+    ThreadStackObservationControlContract,
     ThreadStackPrefaultPolicy,
     ThreadStackSupport,
     ThreadStartMode,
     ThreadSupport,
-    ThreadSuspendControl,
+    ThreadSuspendControlContract,
     ThreadTermination,
     ThreadTerminationKind,
 };
@@ -134,7 +134,7 @@ impl MacOsThread {
     }
 }
 
-impl ThreadBase for MacOsThread {
+impl ThreadBaseContract for MacOsThread {
     type Handle = MacOsThreadHandle;
 
     fn support(&self) -> ThreadSupport {
@@ -251,7 +251,7 @@ unsafe impl ThreadLifecycle for MacOsThread {
     }
 }
 
-impl ThreadSuspendControl for MacOsThread {
+impl ThreadSuspendControlContract for MacOsThread {
     fn suspend(&self, _handle: &Self::Handle) -> Result<(), ThreadError> {
         Err(ThreadError::unsupported())
     }
@@ -261,7 +261,7 @@ impl ThreadSuspendControl for MacOsThread {
     }
 }
 
-impl ThreadSchedulerControl for MacOsThread {
+impl ThreadSchedulerControlContract for MacOsThread {
     fn priority_range(
         &self,
         _class: ThreadSchedulerClass,
@@ -311,7 +311,7 @@ impl ThreadSchedulerControl for MacOsThread {
     }
 }
 
-impl ThreadPlacementControl for MacOsThread {
+impl ThreadPlacementControlContract for MacOsThread {
     fn set_placement(
         &self,
         _handle: &Self::Handle,
@@ -325,7 +325,7 @@ impl ThreadPlacementControl for MacOsThread {
     }
 }
 
-impl ThreadObservationControl for MacOsThread {
+impl ThreadObservationControlContract for MacOsThread {
     fn observe_current(&self) -> Result<ThreadObservation, ThreadError> {
         Ok(ThreadObservation {
             id: current_thread_id_macos()?,
@@ -341,7 +341,7 @@ impl ThreadObservationControl for MacOsThread {
     }
 }
 
-impl ThreadStackObservationControl for MacOsThread {
+impl ThreadStackObservationControlContract for MacOsThread {
     fn observe_current_stack(&self) -> Result<ThreadStackObservation, ThreadError> {
         Err(ThreadError::unsupported())
     }

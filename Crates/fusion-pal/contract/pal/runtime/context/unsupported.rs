@@ -1,7 +1,7 @@
 //! Backend-neutral unsupported context implementation.
 
 use super::{
-    ContextBase,
+    ContextBaseContract,
     ContextError,
     ContextStackLayout,
     ContextSupport,
@@ -25,7 +25,7 @@ impl UnsupportedContext {
     }
 }
 
-impl ContextBase for UnsupportedContext {
+impl ContextBaseContract for UnsupportedContext {
     type Context = UnsupportedSavedContext;
 
     fn support(&self) -> ContextSupport {

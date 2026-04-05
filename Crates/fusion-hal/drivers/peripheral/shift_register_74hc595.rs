@@ -7,7 +7,7 @@
 use crate::drivers::peripheral::interface::gpio::{
     GpioPeripheral,
     GpioPeripheralError as GpioError,
-    GpioPeripheralOutputPin as GpioOutputPin,
+    GpioPeripheralOutputPin as GpioOutputPinContract,
 };
 
 /// Marker for one 74HC595 chain without one software-controlled output-enable pin.
@@ -32,7 +32,7 @@ impl OutputEnableControl for NoOutputEnable {
 
 impl<P> OutputEnableControl for P
 where
-    P: GpioOutputPin,
+    P: GpioOutputPinContract,
 {
     fn configure_output_enable(&mut self) -> Result<(), GpioError> {
         // 74HC595 CE/OE is active-low; start disabled so one fresh register does not briefly
@@ -153,9 +153,9 @@ pub struct ShiftRegister74hc595<Data, ShiftClock, LatchClock, OutputEnable = NoO
 impl<Data, ShiftClock, LatchClock, OutputEnable> GpioPeripheral
     for ShiftRegister74hc595<Data, ShiftClock, LatchClock, OutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
     OutputEnable: OutputEnableControl,
 {
     type Error = GpioError;
@@ -164,9 +164,9 @@ where
 impl<Data, ShiftClock, LatchClock>
     ShiftRegister74hc595<Data, ShiftClock, LatchClock, NoOutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
 {
     /// Creates one 74HC595 chain with hardware-tied output enable.
     ///
@@ -185,9 +185,9 @@ where
 impl<Data, ShiftClock, LatchClock, OutputEnable>
     ShiftRegister74hc595<Data, ShiftClock, LatchClock, OutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
     OutputEnable: OutputEnableControl,
 {
     /// Creates one 74HC595 chain with one explicit software-controlled output-enable pin.
@@ -291,9 +291,9 @@ pub struct ComposedShiftRegister74hc595<
 impl<Data, ShiftClock, LatchClock, OutputEnable, const PACKAGES: usize> GpioPeripheral
     for ComposedShiftRegister74hc595<PACKAGES, Data, ShiftClock, LatchClock, OutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
     OutputEnable: OutputEnableControl,
 {
     type Error = GpioError;
@@ -302,9 +302,9 @@ where
 impl<const PACKAGES: usize, Data, ShiftClock, LatchClock>
     ComposedShiftRegister74hc595<PACKAGES, Data, ShiftClock, LatchClock, NoOutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
 {
     /// Creates one composed 74HC595 chain with hardware-tied output enable.
     ///
@@ -324,10 +324,10 @@ where
 impl<const PACKAGES: usize, Data, ShiftClock, LatchClock, OutputEnable>
     ComposedShiftRegister74hc595<PACKAGES, Data, ShiftClock, LatchClock, OutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
-    OutputEnable: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
+    OutputEnable: GpioOutputPinContract,
 {
     /// Creates one composed 74HC595 chain with one explicit software-controlled output-enable pin.
     ///
@@ -353,9 +353,9 @@ where
 impl<const PACKAGES: usize, Data, ShiftClock, LatchClock, OutputEnable>
     ComposedShiftRegister74hc595<PACKAGES, Data, ShiftClock, LatchClock, OutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
     OutputEnable: OutputEnableControl,
 {
     /// Creates one composed chain from one already-owned raw register chain.
@@ -500,7 +500,7 @@ mod tests {
     use super::*;
     use crate::drivers::bus::gpio::{
         GpioCapabilities,
-        GpioOwnedPin,
+        GpioOwnedPinContract,
     };
 
     #[derive(Debug)]
@@ -510,7 +510,7 @@ mod tests {
         level: bool,
     }
 
-    impl GpioOwnedPin for FakeOutputPin {
+    impl GpioOwnedPinContract for FakeOutputPin {
         fn pin(&self) -> u8 {
             self.pin
         }
@@ -520,7 +520,7 @@ mod tests {
         }
     }
 
-    impl GpioOutputPin for FakeOutputPin {
+    impl GpioOutputPinContract for FakeOutputPin {
         fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {
             self.configured = true;
             self.level = initial_high;

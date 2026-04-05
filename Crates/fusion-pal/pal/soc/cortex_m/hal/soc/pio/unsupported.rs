@@ -1,8 +1,8 @@
 //! Cortex-M unsupported programmable-IO implementation.
 
 use super::{
-    PcuBase,
-    PcuControl,
+    PcuBaseContract,
+    PcuControlContract,
     PcuEngineClaim,
     PcuEngineDescriptor,
     PcuEngineId,
@@ -27,7 +27,7 @@ impl UnsupportedPcu {
     }
 }
 
-impl PcuBase for UnsupportedPcu {
+impl PcuBaseContract for UnsupportedPcu {
     fn support(&self) -> PcuSupport {
         PcuSupport::unsupported()
     }
@@ -41,7 +41,7 @@ impl PcuBase for UnsupportedPcu {
     }
 }
 
-impl PcuControl for UnsupportedPcu {
+impl PcuControlContract for UnsupportedPcu {
     fn claim_engine(&self, _engine: PcuEngineId) -> Result<PcuEngineClaim, PcuError> {
         Err(PcuError::unsupported())
     }

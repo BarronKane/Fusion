@@ -6,9 +6,9 @@ use core::sync::atomic::{
 };
 
 use crate::contract::drivers::pcu::{
-    PcuBase,
+    PcuBaseContract,
     PcuCaps,
-    PcuControl,
+    PcuControlContract,
     PcuError,
     PcuExecutorClaim,
     PcuExecutorClass,
@@ -153,7 +153,7 @@ impl CortexMPcu {
     }
 }
 
-impl PcuBase for CortexMPcu {
+impl PcuBaseContract for CortexMPcu {
     fn support(&self) -> PcuSupport {
         let support = system_pio().support();
         PcuSupport {
@@ -178,7 +178,7 @@ impl PcuBase for CortexMPcu {
     }
 }
 
-impl PcuControl for CortexMPcu {
+impl PcuControlContract for CortexMPcu {
     fn claim_executor(&self, executor: PcuExecutorId) -> Result<PcuExecutorClaim, PcuError> {
         match executor {
             CORTEX_M_CPU_EXECUTOR_ID => {

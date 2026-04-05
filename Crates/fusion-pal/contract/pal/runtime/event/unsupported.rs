@@ -1,13 +1,13 @@
 //! Backend-neutral unsupported event implementation.
 
 use super::{
-    EventBase,
+    EventBaseContract,
     EventCompletionOp,
     EventError,
     EventInterest,
     EventKey,
     EventRecord,
-    EventSource,
+    EventSourceContract,
     EventSourceHandle,
     EventSupport,
 };
@@ -28,7 +28,7 @@ impl UnsupportedEvent {
     }
 }
 
-impl EventBase for UnsupportedEvent {
+impl EventBaseContract for UnsupportedEvent {
     type Poller = UnsupportedPoller;
 
     fn support(&self) -> EventSupport {
@@ -36,7 +36,7 @@ impl EventBase for UnsupportedEvent {
     }
 }
 
-impl EventSource for UnsupportedEvent {
+impl EventSourceContract for UnsupportedEvent {
     fn create(&self) -> Result<Self::Poller, EventError> {
         Err(EventError::unsupported())
     }

@@ -1787,7 +1787,7 @@ impl Default for PlannedFiberSpec {
 }
 
 /// Claim-facing helper surface for any courier implementation.
-pub trait CourierClaims: CourierBase {
+pub trait CourierClaims: CourierBaseContract {
     /// Returns whether this courier is currently claim-blind or black/claim-enabled.
     fn claim_awareness(&self) -> ClaimAwareness {
         self.courier_support().claim_awareness()
@@ -1835,7 +1835,7 @@ pub trait CourierClaims: CourierBase {
     }
 }
 
-impl<T: CourierBase> CourierClaims for T {}
+impl<T: CourierBaseContract> CourierClaims for T {}
 
 /// Readable metadata/introspection surface for one courier.
 pub trait CourierIntrospection: CourierClaims {
@@ -1879,7 +1879,7 @@ pub trait CourierIntrospection: CourierClaims {
     }
 }
 
-impl<T: CourierBase> CourierIntrospection for T {}
+impl<T: CourierBaseContract> CourierIntrospection for T {}
 
 /// Validates that one courier can mediate claims for the supplied claim context.
 ///

@@ -6,7 +6,7 @@ use super::{
 };
 
 /// Low-level counting semaphore contract implemented by selected platform backends.
-pub trait RawSemaphore: Send + Sync {
+pub trait RawSemaphoreContract: Send + Sync {
     /// Reports the support surface of this semaphore instance.
     fn support(&self) -> SemaphoreSupport;
 

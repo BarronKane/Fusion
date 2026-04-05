@@ -3,7 +3,7 @@
 use crate::drivers::peripheral::interface::gpio::{
     GpioPeripheral,
     GpioPeripheralError as GpioError,
-    GpioPeripheralOutputPin as GpioOutputPin,
+    GpioPeripheralOutputPin as GpioOutputPinContract,
 };
 use super::Led;
 
@@ -16,8 +16,8 @@ pub struct LedPair<P1, P2> {
 
 impl<P1, P2> LedPair<P1, P2>
 where
-    P1: GpioOutputPin,
-    P2: GpioOutputPin,
+    P1: GpioOutputPinContract,
+    P2: GpioOutputPinContract,
 {
     /// Creates one paired active-high LED indicator.
     ///
@@ -116,8 +116,8 @@ where
 
 impl<P1, P2> GpioPeripheral for LedPair<P1, P2>
 where
-    P1: GpioOutputPin,
-    P2: GpioOutputPin,
+    P1: GpioOutputPinContract,
+    P2: GpioOutputPinContract,
 {
     type Error = GpioError;
 }
@@ -127,7 +127,7 @@ mod tests {
     use super::*;
     use crate::drivers::bus::gpio::{
         GpioCapabilities,
-        GpioOwnedPin,
+        GpioOwnedPinContract,
     };
 
     #[derive(Debug)]
@@ -137,7 +137,7 @@ mod tests {
         level: bool,
     }
 
-    impl GpioOwnedPin for FakeOutputPin {
+    impl GpioOwnedPinContract for FakeOutputPin {
         fn pin(&self) -> u8 {
             self.pin
         }
@@ -147,7 +147,7 @@ mod tests {
         }
     }
 
-    impl GpioOutputPin for FakeOutputPin {
+    impl GpioOutputPinContract for FakeOutputPin {
         fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {
             self.configured = true;
             self.level = initial_high;

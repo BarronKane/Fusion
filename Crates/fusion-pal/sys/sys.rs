@@ -105,7 +105,7 @@ pub mod claims {
 /// Public native visible-context contract surface.
 pub mod context {
     pub use crate::contract::pal::domain::{
-        ContextBase,
+        ContextBaseContract,
         ContextCaps,
         ContextId,
         ContextImplementationKind,
@@ -313,13 +313,13 @@ pub mod dma {
 pub mod courier {
     pub use crate::contract::pal::domain::{
         ContextId,
-        CourierBase,
+        CourierBaseContract,
         CourierCaps,
         CourierId,
         CourierImplementationKind,
         CourierSupport,
         CourierVisibility,
-        CourierVisibilityControl,
+        CourierVisibilityControlContract,
         DomainError,
         DomainErrorKind,
         DomainId,
@@ -372,7 +372,7 @@ pub mod protocol {
 pub mod domain {
     pub use crate::contract::pal::domain::{
         CourierId,
-        DomainBase,
+        DomainBaseContract,
         DomainCaps,
         DomainError,
         DomainErrorKind,

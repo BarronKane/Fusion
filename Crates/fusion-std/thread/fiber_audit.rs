@@ -8,8 +8,8 @@ use core::pin::Pin;
 use fusion_sys::channel::{
     ChannelError,
     ChannelErrorKind,
-    ChannelReceive,
-    ChannelSend,
+    ChannelReceiveContract,
+    ChannelSendContract,
     LocalChannel,
 };
 use fusion_sys::fiber::{
@@ -22,7 +22,7 @@ use fusion_sys::fiber::{
     yield_now,
 };
 use fusion_sys::transport::protocol::{
-    Protocol,
+    ProtocolContract,
     ProtocolBootstrapKind,
     ProtocolCaps,
     ProtocolDebugView,
@@ -33,7 +33,7 @@ use fusion_sys::transport::protocol::{
     ProtocolVersion,
 };
 use fusion_sys::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentRequest,
     TransportDirection,
     TransportError,
@@ -85,7 +85,7 @@ pub enum CurrentFiberPoolControlStatusMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CurrentFiberPoolMetadataProtocol;
 
-impl Protocol for CurrentFiberPoolMetadataProtocol {
+impl ProtocolContract for CurrentFiberPoolMetadataProtocol {
     type Message = CurrentFiberPoolMetadataMessage;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -110,7 +110,7 @@ impl Protocol for CurrentFiberPoolMetadataProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CurrentFiberPoolControlWriteProtocol;
 
-impl Protocol for CurrentFiberPoolControlWriteProtocol {
+impl ProtocolContract for CurrentFiberPoolControlWriteProtocol {
     type Message = CurrentFiberPoolControlRequest;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -135,7 +135,7 @@ impl Protocol for CurrentFiberPoolControlWriteProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CurrentFiberPoolControlStatusProtocol;
 
-impl Protocol for CurrentFiberPoolControlStatusProtocol {
+impl ProtocolContract for CurrentFiberPoolControlStatusProtocol {
     type Message = CurrentFiberPoolControlStatusMessage;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {

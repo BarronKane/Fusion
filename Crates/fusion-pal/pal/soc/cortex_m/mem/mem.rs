@@ -13,31 +13,31 @@ use crate::contract::pal::mem::{
     MapReplaceRequest,
     MapRequest,
     MemAdviceCaps,
-    MemAdvise,
+    MemAdviseContract,
     MemAllocatorLayoutPolicy,
     MemAllocatorLayoutRealization,
     MemBackingCaps,
-    MemBase,
+    MemBaseContract,
     MemCaps,
-    MemCatalog,
+    MemCatalogContract,
     MemCatalogCaps,
     MemCatalogResource,
     MemCatalogResourceId,
     MemCatalogResourceOrigin,
     MemCatalogSupport,
-    MemCommit,
+    MemCommitContract,
     MemDomain,
     MemDomainSet,
     MemError,
     MemGeometry,
-    MemLock,
-    MemMap,
+    MemLockContract,
+    MemMapContract,
     MemMapReplace,
     MemOvercommitPolicy,
     MemPlacementCaps,
     MemPoolResourceReadiness,
-    MemProtect,
-    MemQuery,
+    MemProtectContract,
+    MemQueryContract,
     MemResourceAttrs,
     MemResourceContract,
     MemResourceEnvelope,
@@ -86,7 +86,7 @@ impl CortexMMem {
     }
 }
 
-impl MemBase for CortexMMem {
+impl MemBaseContract for CortexMMem {
     fn caps(&self) -> MemCaps {
         MemCaps::QUERY
     }
@@ -111,7 +111,7 @@ impl MemBase for CortexMMem {
     }
 }
 
-impl MemMap for CortexMMem {
+impl MemMapContract for CortexMMem {
     unsafe fn map(&self, _req: &MapRequest<'_>) -> Result<Region, MemError> {
         Err(MemError::unsupported())
     }
@@ -127,15 +127,15 @@ unsafe impl MemMapReplace for CortexMMem {
     }
 }
 
-impl MemProtect for CortexMMem {
+impl MemProtectContract for CortexMMem {
     unsafe fn protect(&self, _region: Region, _protect: Protect) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
 }
 
-impl MemCommit for CortexMMem {}
+impl MemCommitContract for CortexMMem {}
 
-impl MemQuery for CortexMMem {
+impl MemQueryContract for CortexMMem {
     fn query(&self, addr: Address) -> Result<RegionInfo, MemError> {
         let address = addr.get();
         let descriptor = selected_owned_memory_region_containing(address)
@@ -160,13 +160,13 @@ impl MemQuery for CortexMMem {
     }
 }
 
-impl MemAdvise for CortexMMem {
+impl MemAdviseContract for CortexMMem {
     unsafe fn advise(&self, _region: Region, _advice: Advise) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
 }
 
-impl MemLock for CortexMMem {
+impl MemLockContract for CortexMMem {
     unsafe fn lock(&self, _region: Region) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
@@ -176,7 +176,7 @@ impl MemLock for CortexMMem {
     }
 }
 
-impl MemCatalog for CortexMMem {
+impl MemCatalogContract for CortexMMem {
     fn catalog_support(&self) -> MemCatalogSupport {
         let mut discovered_domains = MemDomainSet::empty();
 

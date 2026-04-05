@@ -16,19 +16,19 @@ use crate::contract::pal::mem::{
     MapReplaceRequest,
     MapRequest,
     MemAdviceCaps,
-    MemAdvise,
+    MemAdviseContract,
     MemBackingCaps,
-    MemBase,
+    MemBaseContract,
     MemCaps,
-    MemCommit,
+    MemCommitContract,
     MemError,
     MemErrorKind,
-    MemLock,
-    MemMap,
+    MemLockContract,
+    MemMapContract,
     MemMapReplace,
     MemPlacementCaps,
-    MemProtect,
-    MemQuery,
+    MemProtectContract,
+    MemQueryContract,
     MemSupport,
     PageInfo,
     Placement,
@@ -253,7 +253,7 @@ impl MacOsMem {
     }
 }
 
-impl MemBase for MacOsMem {
+impl MemBaseContract for MacOsMem {
     fn caps(&self) -> MemCaps {
         MemCaps::MAP_ANON
             | MemCaps::MAP_FILE
@@ -300,7 +300,7 @@ impl MemBase for MacOsMem {
     }
 }
 
-impl MemMap for MacOsMem {
+impl MemMapContract for MacOsMem {
     unsafe fn map(&self, req: &MapRequest<'_>) -> Result<Region, MemError> {
         Self::validate_common(req)?;
         Self::validate_safe_placement(req.placement)?;
@@ -365,7 +365,7 @@ unsafe impl MemMapReplace for MacOsMem {
     }
 }
 
-impl MemProtect for MacOsMem {
+impl MemProtectContract for MacOsMem {
     unsafe fn protect(&self, region: Region, protect: Protect) -> Result<(), MemError> {
         let prot = Self::to_mmap_prot(protect)?;
 
@@ -377,15 +377,15 @@ impl MemProtect for MacOsMem {
     }
 }
 
-impl MemCommit for MacOsMem {}
+impl MemCommitContract for MacOsMem {}
 
-impl MemQuery for MacOsMem {
+impl MemQueryContract for MacOsMem {
     fn query(&self, _addr: Address) -> Result<RegionInfo, MemError> {
         Err(MemError::unsupported())
     }
 }
 
-impl MemAdvise for MacOsMem {
+impl MemAdviseContract for MacOsMem {
     unsafe fn advise(&self, region: Region, advice: Advise) -> Result<(), MemError> {
         let runtime = runtime_capabilities();
         let adv = match advice {
@@ -410,7 +410,7 @@ impl MemAdvise for MacOsMem {
     }
 }
 
-impl MemLock for MacOsMem {
+impl MemLockContract for MacOsMem {
     unsafe fn lock(&self, region: Region) -> Result<(), MemError> {
         if unsafe { libc::mlock(region.base.as_ptr().cast::<c_void>(), region.len) } == 0 {
             Ok(())
@@ -428,4 +428,4 @@ impl MemLock for MacOsMem {
     }
 }
 
-impl crate::contract::pal::mem::MemCatalog for MacOsMem {}
+impl crate::contract::pal::mem::MemCatalogContract for MacOsMem {}

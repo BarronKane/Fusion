@@ -6,7 +6,7 @@ use bitflags::bitflags;
 pub use crate::contract::pal::caps::ImplementationKind as ProtocolImplementationKind;
 
 bitflags! {
-    /// Protocol features honestly surfaced by a protocol contract.
+    /// ProtocolContract features honestly surfaced by a protocol contract.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct ProtocolCaps: u32 {
         /// The protocol defines a stable version surface.

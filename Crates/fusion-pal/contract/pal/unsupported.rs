@@ -7,14 +7,14 @@ use crate::contract::pal::runtime::thread::{
     ThreadLogicalCpuId,
 };
 use super::{
-    HardwareBase,
+    HardwareBaseContract,
     HardwareCpuDescription,
-    HardwareCpuQuery,
+    HardwareCpuQueryContract,
     HardwareError,
     HardwareStackAbi,
     HardwareSupport,
     HardwareTopologyNodeId,
-    HardwareTopologyQuery,
+    HardwareTopologyQueryContract,
     HardwareTopologySummary,
     HardwareWriteSummary,
 };
@@ -31,13 +31,13 @@ impl UnsupportedHardware {
     }
 }
 
-impl HardwareBase for UnsupportedHardware {
+impl HardwareBaseContract for UnsupportedHardware {
     fn support(&self) -> HardwareSupport {
         HardwareSupport::unsupported()
     }
 }
 
-impl HardwareCpuQuery for UnsupportedHardware {
+impl HardwareCpuQueryContract for UnsupportedHardware {
     fn cpu_description(&self) -> Result<HardwareCpuDescription, HardwareError> {
         Err(HardwareError::unsupported())
     }
@@ -47,7 +47,7 @@ impl HardwareCpuQuery for UnsupportedHardware {
     }
 }
 
-impl HardwareTopologyQuery for UnsupportedHardware {
+impl HardwareTopologyQueryContract for UnsupportedHardware {
     fn topology_summary(&self) -> Result<HardwareTopologySummary, HardwareError> {
         Err(HardwareError::unsupported())
     }

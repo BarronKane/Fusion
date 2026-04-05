@@ -1,4 +1,4 @@
-//! CYW43439 driver interaction seams.
+//! CYW43439 combo-chip driver interaction seams.
 
 #[path = "contract/contract.rs"]
 pub mod contract;

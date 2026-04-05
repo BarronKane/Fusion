@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use fusion_pal::sys::mem::{
     MemAdviceCaps,
-    MemBase,
+    MemBaseContract,
     system_mem,
 };
 use fusion_std::sync::Mutex as FusionMutex;

@@ -9,10 +9,10 @@ use super::BluetoothGattDescriptorRange;
 use super::BluetoothGattServiceDefinition;
 use super::BluetoothGattServiceHandle;
 use super::BluetoothGattServiceRange;
-use super::BluetoothOwnedAdapter;
+use super::BluetoothOwnedAdapterContract;
 
 /// GATT client control for one opened Bluetooth adapter.
-pub trait BluetoothGattClient: BluetoothOwnedAdapter {
+pub trait BluetoothGattClientContract: BluetoothOwnedAdapterContract {
     /// Discovers primary services into caller-owned storage.
     ///
     /// # Errors
@@ -88,7 +88,7 @@ pub trait BluetoothGattClient: BluetoothOwnedAdapter {
 }
 
 /// GATT server control for one opened Bluetooth adapter.
-pub trait BluetoothGattServer: BluetoothOwnedAdapter {
+pub trait BluetoothGattServerContract: BluetoothOwnedAdapterContract {
     /// Publishes one local GATT database definition.
     ///
     /// # Errors

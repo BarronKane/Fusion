@@ -23,7 +23,7 @@ pub use semaphore::*;
 pub use unsupported::*;
 
 /// Backend-selected synchronization support surface.
-pub trait SyncBase {
+pub trait SyncBaseContract {
     /// Reports the synchronization primitives and semantics this backend can support.
     fn support(&self) -> SyncSupport;
 }

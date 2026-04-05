@@ -23,8 +23,8 @@ use core::pin::Pin;
 use crate::channel::{
     ChannelError,
     ChannelErrorKind,
-    ChannelReceive,
-    ChannelSend,
+    ChannelReceiveContract,
+    ChannelSendContract,
     LocalChannel,
 };
 use crate::fiber::{
@@ -39,7 +39,7 @@ use crate::fiber::{
     yield_now,
 };
 use crate::transport::protocol::{
-    Protocol,
+    ProtocolContract,
     ProtocolBootstrapKind,
     ProtocolCaps,
     ProtocolDebugView,
@@ -50,7 +50,7 @@ use crate::transport::protocol::{
     ProtocolVersion,
 };
 use crate::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentRequest,
     TransportDirection,
     TransportFraming,
@@ -191,7 +191,7 @@ pub enum PcuLocalSubmissionStatusMessage<'data> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PcuLocalSubmissionProtocol<'data, const MAX_PARAMETERS: usize>(PhantomData<&'data ()>);
 
-impl<'data, const MAX_PARAMETERS: usize> Protocol
+impl<'data, const MAX_PARAMETERS: usize> ProtocolContract
     for PcuLocalSubmissionProtocol<'data, MAX_PARAMETERS>
 {
     type Message = PcuLocalSubmissionRequest<'data, MAX_PARAMETERS>;
@@ -218,7 +218,7 @@ impl<'data, const MAX_PARAMETERS: usize> Protocol
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PcuLocalSubmissionStatusProtocol<'data>(PhantomData<&'data ()>);
 
-impl<'data> Protocol for PcuLocalSubmissionStatusProtocol<'data> {
+impl<'data> ProtocolContract for PcuLocalSubmissionStatusProtocol<'data> {
     type Message = PcuLocalSubmissionStatusMessage<'data>;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -424,12 +424,12 @@ impl<
     /// Returns `StateConflict` when the id is already present and `ResourceExhausted` when the
     /// fixed local registry is full.
     pub fn register_kernel(&mut self, kernel: PcuKernel<'kernel>) -> Result<PcuKernelId, PcuError> {
-        let kernel_id = fusion_pal::sys::pcu::PcuKernelIr::id(&kernel);
+        let kernel_id = fusion_pal::sys::pcu::PcuKernelIrContract::id(&kernel);
         if self
             .kernels
             .iter()
             .flatten()
-            .any(|existing| fusion_pal::sys::pcu::PcuKernelIr::id(existing) == kernel_id)
+            .any(|existing| fusion_pal::sys::pcu::PcuKernelIrContract::id(existing) == kernel_id)
         {
             return Err(PcuError::state_conflict());
         }
@@ -447,7 +447,7 @@ impl<
             .iter()
             .flatten()
             .copied()
-            .find(|kernel| fusion_pal::sys::pcu::PcuKernelIr::id(kernel) == kernel_id)
+            .find(|kernel| fusion_pal::sys::pcu::PcuKernelIrContract::id(kernel) == kernel_id)
     }
 
     fn publish_metadata_if_needed(&mut self) -> bool {
@@ -866,7 +866,7 @@ mod tests {
         PcuStreamPattern,
         PcuStreamValueType,
     };
-    use crate::transport::TransportAttachmentControl;
+    use crate::transport::TransportAttachmentControlContract;
 
     #[test]
     fn fiber_ingestor_executes_one_stream_submission() {

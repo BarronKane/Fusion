@@ -2,6 +2,7 @@
 
 use bitflags::bitflags;
 
+use super::super::NetVendorIdentity;
 use super::caps::BluetoothAdvertisingCaps;
 use super::caps::BluetoothAttCaps;
 use super::caps::BluetoothConnectionCaps;
@@ -201,6 +202,7 @@ pub struct BluetoothAdapterSupport {
 pub struct BluetoothAdapterDescriptor {
     pub id: BluetoothAdapterId,
     pub name: &'static str,
+    pub vendor_identity: Option<NetVendorIdentity>,
     pub address: Option<BluetoothAddress>,
     pub version: BluetoothVersionRange,
     pub support: BluetoothAdapterSupport,

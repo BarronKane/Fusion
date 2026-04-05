@@ -54,7 +54,7 @@ where
     ///
     /// Returns one honest backend error when the pin does not exist.
     pub fn capabilities(pin: u8) -> Result<GpioCapabilities, GpioError> {
-        GpioBase::capabilities(&Self::new(), pin)
+        GpioBaseContract::capabilities(&Self::new(), pin)
     }
 
     /// Returns the statically or dynamically surfaced GPIO pin catalog.
@@ -156,7 +156,7 @@ where
     }
 }
 
-impl<H> GpioBase for Gpio<H>
+impl<H> GpioBaseContract for Gpio<H>
 where
     H: GpioHardware,
 {
@@ -169,7 +169,7 @@ where
     }
 }
 
-impl<H> GpioControl for Gpio<H>
+impl<H> GpioControlContract for Gpio<H>
 where
     H: GpioHardware,
 {
@@ -180,7 +180,7 @@ where
     }
 }
 
-impl<P> GpioOwnedPin for GpioPin<P>
+impl<P> GpioOwnedPinContract for GpioPin<P>
 where
     P: GpioHardwarePin,
 {
@@ -193,7 +193,7 @@ where
     }
 }
 
-impl<P> GpioFunctionPin for GpioPin<P>
+impl<P> GpioFunctionPinContract for GpioPin<P>
 where
     P: GpioHardwarePin,
 {
@@ -202,7 +202,7 @@ where
     }
 }
 
-impl<P> GpioPullPin for GpioPin<P>
+impl<P> GpioPullPinContract for GpioPin<P>
 where
     P: GpioHardwarePin,
 {
@@ -211,7 +211,7 @@ where
     }
 }
 
-impl<P> GpioDriveStrengthPin for GpioPin<P>
+impl<P> GpioDriveStrengthPinContract for GpioPin<P>
 where
     P: GpioHardwarePin,
 {
@@ -220,7 +220,7 @@ where
     }
 }
 
-impl<P> GpioOutputPin for GpioPin<P>
+impl<P> GpioOutputPinContract for GpioPin<P>
 where
     P: GpioHardwarePin,
 {
@@ -233,7 +233,7 @@ where
     }
 }
 
-impl<P> GpioInputPin for GpioPin<P>
+impl<P> GpioInputPinContract for GpioPin<P>
 where
     P: GpioHardwarePin,
 {

@@ -37,7 +37,7 @@ use core::time::Duration;
 
 #[cfg(feature = "std")]
 use fusion_pal::contract::pal::{
-    HardwareTopologyQuery as _,
+    HardwareTopologyQueryContract as _,
     HardwareTopologySummary,
 };
 use fusion_pal::sys::cpu::CachePadded;
@@ -58,10 +58,10 @@ use fusion_pal::sys::mem::{
     MapFlags,
     MapRequest,
     MemAdviceCaps,
-    MemAdvise,
-    MemBase,
-    MemMap,
-    MemProtect,
+    MemAdviseContract,
+    MemBaseContract,
+    MemMapContract,
+    MemProtectContract,
     Placement,
     Protect,
     Region,

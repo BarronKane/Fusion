@@ -1,10 +1,10 @@
 //! Radio and adapter power control contracts.
 
 use super::BluetoothError;
-use super::BluetoothOwnedAdapter;
+use super::BluetoothOwnedAdapterContract;
 
 /// Radio/base control for one opened Bluetooth adapter.
-pub trait BluetoothRadioControl: BluetoothOwnedAdapter {
+pub trait BluetoothRadioControlContract: BluetoothOwnedAdapterContract {
     /// Powers the adapter on or off.
     ///
     /// # Errors

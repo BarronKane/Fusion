@@ -1,9 +1,9 @@
 //! Cortex-M bare-metal power backend.
 
 use crate::contract::pal::power::{
-    PowerBase,
+    PowerBaseContract,
     PowerCaps,
-    PowerControl,
+    PowerControlContract,
     PowerError,
     PowerImplementationKind,
     PowerModeDescriptor,
@@ -36,13 +36,13 @@ impl Power {
     }
 }
 
-impl PowerBase for Power {
+impl PowerBaseContract for Power {
     fn support(&self) -> PowerSupport {
         CORTEX_M_POWER_SUPPORT
     }
 }
 
-impl PowerControl for Power {
+impl PowerControlContract for Power {
     fn modes(&self) -> &'static [PowerModeDescriptor] {
         crate::pal::soc::cortex_m::hal::soc::board::pal_power_modes()
     }

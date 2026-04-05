@@ -10,7 +10,7 @@ use core::time::Duration;
 use crate::contract::pal::runtime::thread::{
     RawThreadEntry,
     ThreadAuthoritySet,
-    ThreadBase,
+    ThreadBaseContract,
     ThreadConfig,
     ThreadError,
     ThreadGuarantee,
@@ -21,9 +21,9 @@ use crate::contract::pal::runtime::thread::{
     ThreadLifecycleSupport,
     ThreadLocalitySupport,
     ThreadObservation,
-    ThreadObservationControl,
+    ThreadObservationControlContract,
     ThreadPlacementCaps,
-    ThreadPlacementControl,
+    ThreadPlacementControlContract,
     ThreadPlacementOutcome,
     ThreadPlacementRequest,
     ThreadPlacementSupport,
@@ -31,15 +31,15 @@ use crate::contract::pal::runtime::thread::{
     ThreadRunState,
     ThreadSchedulerCaps,
     ThreadSchedulerClass,
-    ThreadSchedulerControl,
+    ThreadSchedulerControlContract,
     ThreadSchedulerModel,
     ThreadSchedulerObservation,
     ThreadSchedulerRequest,
     ThreadSchedulerSupport,
     ThreadStackObservation,
-    ThreadStackObservationControl,
+    ThreadStackObservationControlContract,
     ThreadSupport,
-    ThreadSuspendControl,
+    ThreadSuspendControlContract,
     ThreadTermination,
 };
 
@@ -71,7 +71,7 @@ impl CortexMThread {
     }
 }
 
-impl ThreadBase for CortexMThread {
+impl ThreadBaseContract for CortexMThread {
     type Handle = CortexMThreadHandle;
 
     fn support(&self) -> ThreadSupport {
@@ -139,7 +139,7 @@ unsafe impl ThreadLifecycle for CortexMThread {
     }
 }
 
-impl ThreadSuspendControl for CortexMThread {
+impl ThreadSuspendControlContract for CortexMThread {
     fn suspend(&self, _handle: &Self::Handle) -> Result<(), ThreadError> {
         Err(ThreadError::unsupported())
     }
@@ -149,7 +149,7 @@ impl ThreadSuspendControl for CortexMThread {
     }
 }
 
-impl ThreadSchedulerControl for CortexMThread {
+impl ThreadSchedulerControlContract for CortexMThread {
     fn priority_range(
         &self,
         _class: ThreadSchedulerClass,
@@ -213,7 +213,7 @@ impl ThreadSchedulerControl for CortexMThread {
     }
 }
 
-impl ThreadPlacementControl for CortexMThread {
+impl ThreadPlacementControlContract for CortexMThread {
     fn set_placement(
         &self,
         _handle: &Self::Handle,
@@ -227,7 +227,7 @@ impl ThreadPlacementControl for CortexMThread {
     }
 }
 
-impl ThreadObservationControl for CortexMThread {
+impl ThreadObservationControlContract for CortexMThread {
     fn observe_current(&self) -> Result<ThreadObservation, ThreadError> {
         let id = crate::pal::soc::cortex_m::hal::soc::board::current_thread_id()?;
         let observation = crate::pal::soc::cortex_m::hal::soc::board::current_execution_location()?;
@@ -250,7 +250,7 @@ impl ThreadObservationControl for CortexMThread {
     }
 }
 
-impl ThreadStackObservationControl for CortexMThread {
+impl ThreadStackObservationControlContract for CortexMThread {
     fn observe_current_stack(&self) -> Result<ThreadStackObservation, ThreadError> {
         Err(ThreadError::unsupported())
     }

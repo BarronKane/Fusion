@@ -12,18 +12,18 @@ use crate::contract::pal::mem::{
     MapReplaceRequest,
     MapRequest,
     MemAdviceCaps,
-    MemAdvise,
+    MemAdviseContract,
     MemBackingCaps,
-    MemBase,
+    MemBaseContract,
     MemCaps,
-    MemCommit,
+    MemCommitContract,
     MemError,
-    MemLock,
-    MemMap,
+    MemLockContract,
+    MemMapContract,
     MemMapReplace,
     MemPlacementCaps,
-    MemProtect,
-    MemQuery,
+    MemProtectContract,
+    MemQueryContract,
     MemSupport,
     PageInfo,
     Protect,
@@ -54,7 +54,7 @@ impl IosMem {
     }
 }
 
-impl MemBase for IosMem {
+impl MemBaseContract for IosMem {
     fn caps(&self) -> MemCaps {
         MemCaps::empty()
     }
@@ -79,7 +79,7 @@ impl MemBase for IosMem {
     }
 }
 
-impl MemMap for IosMem {
+impl MemMapContract for IosMem {
     unsafe fn map(&self, _req: &MapRequest<'_>) -> Result<Region, MemError> {
         Err(MemError::unsupported())
     }
@@ -95,27 +95,27 @@ unsafe impl MemMapReplace for IosMem {
     }
 }
 
-impl MemProtect for IosMem {
+impl MemProtectContract for IosMem {
     unsafe fn protect(&self, _region: Region, _protect: Protect) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
 }
 
-impl MemCommit for IosMem {}
+impl MemCommitContract for IosMem {}
 
-impl MemQuery for IosMem {
+impl MemQueryContract for IosMem {
     fn query(&self, _addr: Address) -> Result<RegionInfo, MemError> {
         Err(MemError::unsupported())
     }
 }
 
-impl MemAdvise for IosMem {
+impl MemAdviseContract for IosMem {
     unsafe fn advise(&self, _region: Region, _advice: Advise) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
 }
 
-impl MemLock for IosMem {
+impl MemLockContract for IosMem {
     unsafe fn lock(&self, _region: Region) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
@@ -125,4 +125,4 @@ impl MemLock for IosMem {
     }
 }
 
-impl crate::contract::pal::mem::MemCatalog for IosMem {}
+impl crate::contract::pal::mem::MemCatalogContract for IosMem {}

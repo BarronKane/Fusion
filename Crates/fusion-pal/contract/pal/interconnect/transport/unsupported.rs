@@ -1,9 +1,9 @@
 //! Unsupported transport placeholder.
 
 use super::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentRequest,
-    TransportBase,
+    TransportBaseContract,
     TransportError,
     TransportSupport,
     TransportTopology,
@@ -20,7 +20,7 @@ impl UnsupportedTransport {
     }
 }
 
-impl TransportBase for UnsupportedTransport {
+impl TransportBaseContract for UnsupportedTransport {
     fn support(&self) -> TransportSupport {
         TransportSupport::unsupported()
     }
@@ -38,7 +38,7 @@ impl TransportBase for UnsupportedTransport {
     }
 }
 
-impl TransportAttachmentControl for UnsupportedTransport {
+impl TransportAttachmentControlContract for UnsupportedTransport {
     type ProducerAttachment = ();
     type ConsumerAttachment = ();
 

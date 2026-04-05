@@ -5,7 +5,7 @@
 //! without pretending it invented them.
 
 pub use fusion_pal::sys::atomic::{
-    AtomicBase,
+    AtomicBaseContract,
     AtomicCompareExchangeOutcome32,
     AtomicError,
     AtomicErrorKind,
@@ -17,7 +17,7 @@ pub use fusion_pal::sys::atomic::{
     AtomicWaitOutcome,
     AtomicWaitWord32Caps,
     AtomicWaitWord32Support,
-    AtomicWord32,
+    AtomicWord32Contract,
     AtomicWord32Caps,
     AtomicWord32Support,
     PLATFORM_ATOMIC_WAIT_WORD32_IMPLEMENTATION,

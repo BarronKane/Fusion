@@ -1,13 +1,13 @@
 #![cfg(all(feature = "std", not(target_os = "none")))]
 
-use fusion_pal::sys::dma::DmaBase;
+use fusion_pal::sys::dma::DmaBaseContract;
 use fusion_pal::sys::dma::DmaCaps;
-use fusion_pal::sys::dma::DmaCatalog;
+use fusion_pal::sys::dma::DmaCatalogContract;
 use fusion_pal::sys::dma::DmaImplementationKind;
 use fusion_pal::sys::dma::system_dma;
-use fusion_pal::sys::power::PowerBase;
+use fusion_pal::sys::power::PowerBaseContract;
 use fusion_pal::sys::power::PowerCaps;
-use fusion_pal::sys::power::PowerControl;
+use fusion_pal::sys::power::PowerControlContract;
 use fusion_pal::sys::power::PowerErrorKind;
 use fusion_pal::sys::power::PowerImplementationKind;
 use fusion_pal::sys::power::PowerModeDepth;
@@ -16,23 +16,23 @@ use fusion_pal::sys::power::system_power;
 #[test]
 fn dma_support_surface_is_exposed() {
     let dma = system_dma();
-    let support = DmaBase::support(&dma);
+    let support = DmaBaseContract::support(&dma);
 
     match support.implementation {
         DmaImplementationKind::Unsupported => {
             assert!(support.caps.is_empty());
-            assert!(DmaCatalog::controllers(&dma).is_empty());
-            assert!(DmaCatalog::requests(&dma).is_empty());
+            assert!(DmaCatalogContract::controllers(&dma).is_empty());
+            assert!(DmaCatalogContract::requests(&dma).is_empty());
         }
         DmaImplementationKind::Native | DmaImplementationKind::Emulated => {
             assert!(!support.caps.is_empty());
 
             if support.caps.contains(DmaCaps::ENUMERATE_CONTROLLERS) {
-                assert!(!DmaCatalog::controllers(&dma).is_empty());
+                assert!(!DmaCatalogContract::controllers(&dma).is_empty());
             }
 
             if support.caps.contains(DmaCaps::ENUMERATE_REQUESTS) {
-                assert!(!DmaCatalog::requests(&dma).is_empty());
+                assert!(!DmaCatalogContract::requests(&dma).is_empty());
             }
         }
     }
@@ -41,12 +41,12 @@ fn dma_support_surface_is_exposed() {
 #[test]
 fn power_support_surface_is_exposed() {
     let power = system_power();
-    let support = PowerBase::support(&power);
+    let support = PowerBaseContract::support(&power);
 
     match support.implementation {
         PowerImplementationKind::Unsupported => {
             assert!(support.caps.is_empty());
-            assert!(PowerControl::modes(&power).is_empty());
+            assert!(PowerControlContract::modes(&power).is_empty());
         }
         PowerImplementationKind::Native | PowerImplementationKind::Emulated => {
             assert!(support.caps.contains(PowerCaps::ENUMERATE));
@@ -58,11 +58,11 @@ fn power_support_surface_is_exposed() {
 #[test]
 fn power_enter_mode_follows_backend_truth() {
     let power = system_power();
-    let support = PowerBase::support(&power);
+    let support = PowerBaseContract::support(&power);
 
     if support.implementation == PowerImplementationKind::Unsupported {
         assert_eq!(
-            PowerControl::enter_mode(&power, "anything")
+            PowerControlContract::enter_mode(&power, "anything")
                 .expect_err("unsupported backend should reject power entry")
                 .kind(),
             PowerErrorKind::Unsupported
@@ -70,7 +70,7 @@ fn power_enter_mode_follows_backend_truth() {
         return;
     }
 
-    let modes = PowerControl::modes(&power);
+    let modes = PowerControlContract::modes(&power);
     assert!(
         !modes.is_empty(),
         "supported backend should expose at least one power mode"

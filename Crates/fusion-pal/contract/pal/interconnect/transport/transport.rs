@@ -217,7 +217,7 @@ impl TransportSupport {
 }
 
 /// Base capability surface for a transport implementation.
-pub trait TransportBase {
+pub trait TransportBaseContract {
     /// Reports the truthful transport support surface.
     fn support(&self) -> TransportSupport;
 
@@ -232,7 +232,7 @@ pub trait TransportBase {
 }
 
 /// Dynamic attachment contract for one transport implementation.
-pub trait TransportAttachmentControl: TransportBase {
+pub trait TransportAttachmentControlContract: TransportBaseContract {
     /// Producer attachment token or handle identifier.
     type ProducerAttachment: Copy + Eq;
     /// Consumer attachment token or handle identifier.

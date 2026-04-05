@@ -1,23 +1,23 @@
 //! Unsupported channel placeholder.
 
 use crate::contract::pal::interconnect::protocol::{
-    Protocol,
+    ProtocolContract,
     UnsupportedProtocol,
 };
 use crate::contract::pal::interconnect::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentRequest,
-    TransportBase,
+    TransportBaseContract,
     TransportError,
     TransportSupport,
     TransportTopology,
     UnsupportedTransport,
 };
 use super::{
-    ChannelBase,
+    ChannelBaseContract,
     ChannelError,
-    ChannelReceive,
-    ChannelSend,
+    ChannelReceiveContract,
+    ChannelSendContract,
     ChannelSupport,
 };
 
@@ -32,7 +32,7 @@ impl UnsupportedChannel {
     }
 }
 
-impl TransportBase for UnsupportedChannel {
+impl TransportBaseContract for UnsupportedChannel {
     fn support(&self) -> TransportSupport {
         UnsupportedTransport::new().support()
     }
@@ -50,7 +50,7 @@ impl TransportBase for UnsupportedChannel {
     }
 }
 
-impl TransportAttachmentControl for UnsupportedChannel {
+impl TransportAttachmentControlContract for UnsupportedChannel {
     type ProducerAttachment = ();
     type ConsumerAttachment = ();
 
@@ -77,8 +77,8 @@ impl TransportAttachmentControl for UnsupportedChannel {
     }
 }
 
-impl ChannelBase for UnsupportedChannel {
-    type Protocol = UnsupportedProtocol;
+impl ChannelBaseContract for UnsupportedChannel {
+    type ProtocolContract = UnsupportedProtocol;
 
     fn channel_support(&self) -> ChannelSupport {
         ChannelSupport {
@@ -88,26 +88,26 @@ impl ChannelBase for UnsupportedChannel {
             producer_count: 0,
             consumer_count: 0,
             transport: TransportSupport::unsupported(),
-            protocol: <Self::Protocol as Protocol>::DESCRIPTOR,
+            protocol: <Self::ProtocolContract as ProtocolContract>::DESCRIPTOR,
         }
     }
 }
 
-impl ChannelSend for UnsupportedChannel {
+impl ChannelSendContract for UnsupportedChannel {
     fn try_send(
         &self,
         _producer: Self::ProducerAttachment,
-        _message: <Self::Protocol as Protocol>::Message,
+        _message: <Self::ProtocolContract as ProtocolContract>::Message,
     ) -> Result<(), ChannelError> {
         Err(ChannelError::unsupported())
     }
 }
 
-impl ChannelReceive for UnsupportedChannel {
+impl ChannelReceiveContract for UnsupportedChannel {
     fn try_receive(
         &self,
         _consumer: Self::ConsumerAttachment,
-    ) -> Result<Option<<Self::Protocol as Protocol>::Message>, ChannelError> {
+    ) -> Result<Option<<Self::ProtocolContract as ProtocolContract>::Message>, ChannelError> {
         Err(ChannelError::unsupported())
     }
 }

@@ -1,4 +1,4 @@
-//! Driver-facing Bluetooth contract vocabulary.
+//! DriverContract-facing Bluetooth contract vocabulary.
 
 mod advertising;
 mod att;
@@ -29,30 +29,30 @@ pub use types::*;
 pub use unsupported::*;
 
 /// Full control surface for one opened Bluetooth adapter.
-pub trait BluetoothAdapter:
-    BluetoothOwnedAdapter
-    + BluetoothRadioControl
-    + BluetoothScanningControl
-    + BluetoothAdvertisingControl
-    + BluetoothConnectionControl
-    + BluetoothL2capControl
-    + BluetoothSecurityControl
-    + BluetoothAttClient
-    + BluetoothGattClient
-    + BluetoothGattServer
+pub trait BluetoothAdapterContract:
+    BluetoothOwnedAdapterContract
+    + BluetoothRadioControlContract
+    + BluetoothScanningControlContract
+    + BluetoothAdvertisingControlContract
+    + BluetoothConnectionControlContract
+    + BluetoothL2capControlContract
+    + BluetoothSecurityControlContract
+    + BluetoothAttClientContract
+    + BluetoothGattClientContract
+    + BluetoothGattServerContract
 {
 }
 
-impl<T> BluetoothAdapter for T where
-    T: BluetoothOwnedAdapter
-        + BluetoothRadioControl
-        + BluetoothScanningControl
-        + BluetoothAdvertisingControl
-        + BluetoothConnectionControl
-        + BluetoothL2capControl
-        + BluetoothSecurityControl
-        + BluetoothAttClient
-        + BluetoothGattClient
-        + BluetoothGattServer
+impl<T> BluetoothAdapterContract for T where
+    T: BluetoothOwnedAdapterContract
+        + BluetoothRadioControlContract
+        + BluetoothScanningControlContract
+        + BluetoothAdvertisingControlContract
+        + BluetoothConnectionControlContract
+        + BluetoothL2capControlContract
+        + BluetoothSecurityControlContract
+        + BluetoothAttClientContract
+        + BluetoothGattClientContract
+        + BluetoothGattServerContract
 {
 }

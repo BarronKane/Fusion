@@ -74,7 +74,7 @@ pub use unsupported::UnsupportedPcu as UnsupportedPio;
 
 /// Capability trait for Cortex-M programmable-IO backends.
 #[doc(hidden)]
-pub trait PcuBase {
+pub trait PcuBaseContract {
     /// Reports the truthful programmable-IO surface for this backend.
     fn support(&self) -> PioSupport;
 
@@ -90,7 +90,7 @@ pub trait PcuBase {
 
 /// Control contract for Cortex-M programmable-IO backends.
 #[doc(hidden)]
-pub trait PcuControl: PcuBase {
+pub trait PcuControlContract: PcuBaseContract {
     /// Claims one engine exclusively.
     ///
     /// # Errors
@@ -189,8 +189,8 @@ pub trait PcuControl: PcuBase {
     fn read_rx_fifo(&self, claim: &PioLaneClaim, lane: PioLaneId) -> Result<u32, PcuError>;
 }
 
-pub use PcuBase as PioBase;
-pub use PcuControl as PioControl;
+pub use PcuBaseContract as PioBase;
+pub use PcuControlContract as PioControl;
 
 /// Cortex-M SoC-local programmable-IO provider type.
 #[derive(Debug, Clone, Copy, Default)]

@@ -6,10 +6,10 @@ use super::BluetoothL2capChannelDescriptor;
 use super::BluetoothL2capChannelId;
 use super::BluetoothL2capChannelParameters;
 use super::BluetoothL2capSdu;
-use super::BluetoothOwnedAdapter;
+use super::BluetoothOwnedAdapterContract;
 
 /// L2CAP channel control for one opened Bluetooth adapter.
-pub trait BluetoothL2capControl: BluetoothOwnedAdapter {
+pub trait BluetoothL2capControlContract: BluetoothOwnedAdapterContract {
     /// Opens one L2CAP channel on one active connection.
     ///
     /// # Errors

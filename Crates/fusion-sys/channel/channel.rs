@@ -15,15 +15,15 @@ use crate::sync::{
     SyncErrorKind,
 };
 use crate::transport::{
-    protocol::Protocol,
+    protocol::ProtocolContract,
     TransportAccessRequirement,
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentLaw,
     TransportAttachmentModel,
     TransportAttachmentRequest,
     TransportAttachmentScope,
     TransportBackpressure,
-    TransportBase,
+    TransportBaseContract,
     TransportCaps,
     TransportDirection,
     TransportError,
@@ -46,7 +46,8 @@ use crate::transport::{
 /// - SPSC by default
 /// - promotes to SPMC when a second consumer attaches
 /// - destructive queue semantics in SPMC mode
-pub struct LocalChannel<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize = 8> {
+pub struct LocalChannel<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize = 8>
+{
     state: Mutex<LocalChannelState<P::Message, CAPACITY, MAX_CONSUMERS>>,
     _protocol: PhantomData<P>,
 }
@@ -98,7 +99,7 @@ impl<T, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     }
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     LocalChannel<P, CAPACITY, MAX_CONSUMERS>
 {
     /// Creates a new local channel when the protocol is compatible with the local channel
@@ -202,7 +203,7 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     }
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportBase
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportBaseContract
     for LocalChannel<P, CAPACITY, MAX_CONSUMERS>
 {
     fn support(&self) -> TransportSupport {
@@ -235,8 +236,8 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportBa
     }
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAttachmentControl
-    for LocalChannel<P, CAPACITY, MAX_CONSUMERS>
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
+    TransportAttachmentControlContract for LocalChannel<P, CAPACITY, MAX_CONSUMERS>
 {
     type ProducerAttachment = usize;
     type ConsumerAttachment = usize;
@@ -327,10 +328,10 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> TransportAt
     }
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelBase
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelBaseContract
     for LocalChannel<P, CAPACITY, MAX_CONSUMERS>
 {
-    type Protocol = P;
+    type ProtocolContract = P;
 
     fn channel_support(&self) -> ChannelSupport {
         let state = self
@@ -359,13 +360,13 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelBase
     }
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelSend
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelSendContract
     for LocalChannel<P, CAPACITY, MAX_CONSUMERS>
 {
     fn try_send(
         &self,
         producer: Self::ProducerAttachment,
-        message: <Self::Protocol as Protocol>::Message,
+        message: <Self::ProtocolContract as ProtocolContract>::Message,
     ) -> Result<(), ChannelError> {
         let mut state = self
             .state
@@ -386,13 +387,13 @@ impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelSend
     }
 }
 
-impl<P: Protocol, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelReceive
+impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize> ChannelReceiveContract
     for LocalChannel<P, CAPACITY, MAX_CONSUMERS>
 {
     fn try_receive(
         &self,
         consumer: Self::ConsumerAttachment,
-    ) -> Result<Option<<Self::Protocol as Protocol>::Message>, ChannelError> {
+    ) -> Result<Option<<Self::ProtocolContract as ProtocolContract>::Message>, ChannelError> {
         let mut state = self
             .state
             .try_lock()
@@ -440,7 +441,7 @@ const fn transport_error_from_sync(error: SyncError) -> TransportError {
 mod tests {
     use super::*;
     use crate::transport::protocol::{
-        Protocol,
+        ProtocolContract,
         ProtocolBootstrapKind,
         ProtocolCaps,
         ProtocolDebugView,
@@ -456,7 +457,7 @@ mod tests {
 
     struct LocalWordProtocol;
 
-    impl Protocol for LocalWordProtocol {
+    impl ProtocolContract for LocalWordProtocol {
         type Message = u32;
 
         const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -479,7 +480,7 @@ mod tests {
 
     struct StreamOnlyProtocol;
 
-    impl Protocol for StreamOnlyProtocol {
+    impl ProtocolContract for StreamOnlyProtocol {
         type Message = u8;
 
         const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {

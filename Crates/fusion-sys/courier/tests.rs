@@ -11,7 +11,7 @@ struct DemoCourier {
     support: CourierSupport,
 }
 
-impl CourierBase for DemoCourier {
+impl CourierBaseContract for DemoCourier {
     fn courier_id(&self) -> CourierId {
         self.id
     }

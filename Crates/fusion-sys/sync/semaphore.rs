@@ -4,7 +4,7 @@ use core::time::Duration;
 
 use fusion_pal::sys::sync::{
     PlatformSemaphore,
-    RawSemaphore,
+    RawSemaphoreContract,
     SemaphoreSupport,
 };
 

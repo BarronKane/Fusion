@@ -38,13 +38,13 @@ pub use unsupported::*;
 pub use vector::*;
 
 /// Common platform-truth surface for a selected PAL provider.
-pub trait HardwareBase {
+pub trait HardwareBaseContract {
     /// Reports the truthful platform hardware surface available to the provider.
     fn support(&self) -> HardwareSupport;
 }
 
 /// CPU- and ABI-oriented platform queries.
-pub trait HardwareCpuQuery: HardwareBase {
+pub trait HardwareCpuQueryContract: HardwareBaseContract {
     /// Returns a stable description of the selected target's CPU-facing execution model.
     ///
     /// # Errors
@@ -61,7 +61,7 @@ pub trait HardwareCpuQuery: HardwareBase {
 }
 
 /// Topology-oriented platform queries.
-pub trait HardwareTopologyQuery: HardwareBase {
+pub trait HardwareTopologyQueryContract: HardwareBaseContract {
     /// Returns a coarse topology summary for the current machine when one can be surfaced
     /// honestly without allocation.
     ///

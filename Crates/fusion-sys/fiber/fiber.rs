@@ -17,7 +17,7 @@ use core::sync::atomic::{
 
 pub use fusion_pal::sys::execution_context::{
     ContextAuthoritySet,
-    ContextBase,
+    ContextBaseContract,
     ContextCaps,
     ContextError,
     ContextErrorKind,
@@ -38,7 +38,7 @@ pub use fusion_pal::sys::execution_context::{
 
 use crate::channel::{
     ChannelError,
-    ChannelSend,
+    ChannelSendContract,
     LocalChannel,
 };
 use crate::claims::{
@@ -48,7 +48,7 @@ use crate::claims::{
 use crate::domain::context::ContextId;
 use crate::courier::CourierId;
 use crate::transport::protocol::{
-    Protocol,
+    ProtocolContract,
     ProtocolBootstrapKind,
     ProtocolCaps,
     ProtocolDebugView,
@@ -70,7 +70,7 @@ use crate::thread::{
     ThreadSystem,
 };
 use crate::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentLaw,
     TransportAttachmentRequest,
     TransportError,
@@ -277,7 +277,7 @@ pub enum FiberMetadataMessage {
 /// Managed-fiber metadata protocol carried over one transitional per-fiber publication channel.
 pub struct FiberMetadataProtocol;
 
-impl Protocol for FiberMetadataProtocol {
+impl ProtocolContract for FiberMetadataProtocol {
     type Message = FiberMetadataMessage;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -565,7 +565,7 @@ impl FiberSystem {
     #[must_use]
     pub fn support(&self) -> FiberSupport {
         FiberSupport {
-            context: ContextBase::support(&self.inner),
+            context: ContextBaseContract::support(&self.inner),
         }
     }
 }

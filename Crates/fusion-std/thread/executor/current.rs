@@ -67,11 +67,11 @@ pub enum AsyncTaskLifecycleRecord {
     },
 }
 
-/// Protocol for async task lifecycle insight records.
+/// ProtocolContract for async task lifecycle insight records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AsyncTaskLifecycleProtocol;
 
-impl fusion_sys::transport::protocol::Protocol for AsyncTaskLifecycleProtocol {
+impl fusion_sys::transport::protocol::ProtocolContract for AsyncTaskLifecycleProtocol {
     type Message = AsyncTaskLifecycleRecord;
 
     const DESCRIPTOR: fusion_sys::transport::protocol::ProtocolDescriptor =

@@ -5,7 +5,7 @@ use super::super::{
     PcuInvocationModel,
     PcuIrKind,
     PcuKernelId,
-    PcuKernelIr,
+    PcuKernelIrContract,
     PcuKernelSignature,
     PcuParameter,
     PcuParameterSlot,
@@ -224,7 +224,7 @@ impl PcuStreamKernelIr<'_> {
     }
 }
 
-impl PcuKernelIr for PcuStreamKernelIr<'_> {
+impl PcuKernelIrContract for PcuStreamKernelIr<'_> {
     fn id(&self) -> PcuKernelId {
         self.id
     }

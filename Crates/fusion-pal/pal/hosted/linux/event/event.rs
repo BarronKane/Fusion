@@ -8,7 +8,7 @@ use core::mem::MaybeUninit;
 use core::time::Duration;
 
 use crate::contract::pal::runtime::event::{
-    EventBase,
+    EventBaseContract,
     EventCaps,
     EventCompletionOp,
     EventError,
@@ -18,7 +18,7 @@ use crate::contract::pal::runtime::event::{
     EventNotification,
     EventReadiness,
     EventRecord,
-    EventSource,
+    EventSourceContract,
     EventSourceHandle,
     EventSupport,
 };
@@ -63,7 +63,7 @@ impl LinuxEvent {
     }
 }
 
-impl EventBase for LinuxEvent {
+impl EventBaseContract for LinuxEvent {
     type Poller = LinuxPoller;
 
     fn support(&self) -> EventSupport {
@@ -71,7 +71,7 @@ impl EventBase for LinuxEvent {
     }
 }
 
-impl EventSource for LinuxEvent {
+impl EventSourceContract for LinuxEvent {
     fn create(&self) -> Result<Self::Poller, EventError> {
         let epoll_fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
         if epoll_fd < 0 {

@@ -1,8 +1,8 @@
 //! Backend-neutral unsupported power implementation.
 
 use super::{
-    PowerBase,
-    PowerControl,
+    PowerBaseContract,
+    PowerControlContract,
     PowerError,
     PowerModeDescriptor,
     PowerSupport,
@@ -20,13 +20,13 @@ impl UnsupportedPower {
     }
 }
 
-impl PowerBase for UnsupportedPower {
+impl PowerBaseContract for UnsupportedPower {
     fn support(&self) -> PowerSupport {
         PowerSupport::unsupported()
     }
 }
 
-impl PowerControl for UnsupportedPower {
+impl PowerControlContract for UnsupportedPower {
     fn modes(&self) -> &'static [PowerModeDescriptor] {
         &[]
     }

@@ -12,7 +12,7 @@ use core::ptr::{
 };
 use core::slice;
 
-use fusion_pal::sys::mem::MemBase;
+use fusion_pal::sys::mem::MemBaseContract;
 
 use crate::mem::resource::AllocatorLayoutPolicy;
 use crate::sync::{

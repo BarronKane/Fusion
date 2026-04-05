@@ -9,7 +9,7 @@ use core::mem;
 
 use crate::contract::pal::runtime::context::{
     ContextAuthoritySet,
-    ContextBase,
+    ContextBaseContract,
     ContextCaps,
     ContextError,
     ContextGuarantee,
@@ -126,7 +126,7 @@ impl CortexMContext {
     }
 }
 
-impl ContextBase for CortexMContext {
+impl ContextBaseContract for CortexMContext {
     type Context = CortexMSavedContext;
 
     fn support(&self) -> ContextSupport {

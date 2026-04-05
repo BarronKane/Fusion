@@ -9,8 +9,8 @@ use core::pin::Pin;
 use fusion_sys::channel::{
     ChannelError,
     ChannelErrorKind,
-    ChannelReceive,
-    ChannelSend,
+    ChannelReceiveContract,
+    ChannelSendContract,
     LocalChannel,
 };
 use fusion_sys::fiber::{
@@ -29,7 +29,7 @@ use fusion_sys::channel::insight::{
     LocalInsightChannel,
 };
 use fusion_sys::transport::protocol::{
-    Protocol,
+    ProtocolContract,
     ProtocolBootstrapKind,
     ProtocolCaps,
     ProtocolDebugView,
@@ -40,7 +40,7 @@ use fusion_sys::transport::protocol::{
     ProtocolVersion,
 };
 use fusion_sys::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentRequest,
     TransportDirection,
     TransportError,
@@ -105,7 +105,7 @@ pub enum CurrentFiberAsyncRuntimeControlStatusMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CurrentFiberAsyncRuntimeMetadataProtocol;
 
-impl Protocol for CurrentFiberAsyncRuntimeMetadataProtocol {
+impl ProtocolContract for CurrentFiberAsyncRuntimeMetadataProtocol {
     type Message = CurrentFiberAsyncRuntimeMetadataMessage;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -130,7 +130,7 @@ impl Protocol for CurrentFiberAsyncRuntimeMetadataProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CurrentFiberAsyncRuntimeControlWriteProtocol;
 
-impl Protocol for CurrentFiberAsyncRuntimeControlWriteProtocol {
+impl ProtocolContract for CurrentFiberAsyncRuntimeControlWriteProtocol {
     type Message = CurrentFiberAsyncRuntimeControlRequest;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -155,7 +155,7 @@ impl Protocol for CurrentFiberAsyncRuntimeControlWriteProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CurrentFiberAsyncRuntimeControlStatusProtocol;
 
-impl Protocol for CurrentFiberAsyncRuntimeControlStatusProtocol {
+impl ProtocolContract for CurrentFiberAsyncRuntimeControlStatusProtocol {
     type Message = CurrentFiberAsyncRuntimeControlStatusMessage;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -180,7 +180,7 @@ impl Protocol for CurrentFiberAsyncRuntimeControlStatusProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CurrentFiberAsyncRuntimeStateInsightProtocol;
 
-impl Protocol for CurrentFiberAsyncRuntimeStateInsightProtocol {
+impl ProtocolContract for CurrentFiberAsyncRuntimeStateInsightProtocol {
     type Message = CurrentFiberAsyncRuntimeStateRecord;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -198,7 +198,7 @@ impl Protocol for CurrentFiberAsyncRuntimeStateInsightProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CurrentFiberAsyncRuntimeSnapshotInsightProtocol;
 
-impl Protocol for CurrentFiberAsyncRuntimeSnapshotInsightProtocol {
+impl ProtocolContract for CurrentFiberAsyncRuntimeSnapshotInsightProtocol {
     type Message = CurrentFiberAsyncRuntimeSnapshotRecord;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -622,8 +622,8 @@ mod tests {
     use core::num::NonZeroUsize;
     use core::pin::pin;
     use fusion_sys::channel::{
-        ChannelReceive,
-        ChannelSend,
+        ChannelReceiveContract,
+        ChannelSendContract,
     };
     use fusion_sys::fiber::{
         FiberMetadataMessage,
@@ -631,7 +631,7 @@ mod tests {
         FiberYield,
     };
     use fusion_sys::transport::{
-        TransportAttachmentControl,
+        TransportAttachmentControlContract,
         TransportAttachmentRequest,
     };
     use std::vec;

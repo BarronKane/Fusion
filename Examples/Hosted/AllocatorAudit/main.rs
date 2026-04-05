@@ -17,8 +17,8 @@ use fusion_sys::alloc::{
     MemoryPoolMemberInfo,
 };
 use fusion_sys::channel::{
-    ChannelReceive,
-    ChannelSend,
+    ChannelReceiveContract,
+    ChannelSendContract,
 };
 use fusion_sys::fiber::{
     ContextCaps,
@@ -43,7 +43,7 @@ use fusion_sys::mem::resource::{
     VirtualMemoryResource,
 };
 use fusion_sys::transport::protocol::{
-    Protocol,
+    ProtocolContract,
     ProtocolBootstrapKind,
     ProtocolCaps,
     ProtocolDebugView,
@@ -54,7 +54,7 @@ use fusion_sys::transport::protocol::{
     ProtocolVersion,
 };
 use fusion_sys::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentRequest,
 };
 
@@ -72,7 +72,7 @@ enum DemoTimelineEvent {
 
 struct DemoTimelineProtocol;
 
-impl Protocol for DemoTimelineProtocol {
+impl ProtocolContract for DemoTimelineProtocol {
     type Message = DemoTimelineEvent;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -88,7 +88,7 @@ impl Protocol for DemoTimelineProtocol {
 
 struct DemoAuditInsightProtocol;
 
-impl Protocol for DemoAuditInsightProtocol {
+impl ProtocolContract for DemoAuditInsightProtocol {
     type Message = AllocatorDomainAudit;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {

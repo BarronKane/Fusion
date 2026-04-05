@@ -38,7 +38,7 @@ use rustix::thread::{
 use crate::contract::pal::runtime::thread::{
     RawThreadEntry,
     ThreadAuthoritySet,
-    ThreadBase,
+    ThreadBaseContract,
     ThreadConfig,
     ThreadConstraintMode,
     ThreadEntryReturn,
@@ -54,9 +54,9 @@ use crate::contract::pal::runtime::thread::{
     ThreadLocalitySupport,
     ThreadMigrationPolicy,
     ThreadObservation,
-    ThreadObservationControl,
+    ThreadObservationControlContract,
     ThreadPlacementCaps,
-    ThreadPlacementControl,
+    ThreadPlacementControlContract,
     ThreadPlacementOutcome,
     ThreadPlacementPhase,
     ThreadPlacementRequest,
@@ -68,7 +68,7 @@ use crate::contract::pal::runtime::thread::{
     ThreadRunState,
     ThreadSchedulerCaps,
     ThreadSchedulerClass,
-    ThreadSchedulerControl,
+    ThreadSchedulerControlContract,
     ThreadSchedulerModel,
     ThreadSchedulerObservation,
     ThreadSchedulerRequest,
@@ -78,13 +78,13 @@ use crate::contract::pal::runtime::thread::{
     ThreadStackLocalityPolicy,
     ThreadStackLockPolicy,
     ThreadStackObservation,
-    ThreadStackObservationControl,
+    ThreadStackObservationControlContract,
     ThreadStackPrefaultPolicy,
     ThreadStackRequest,
     ThreadStackSupport,
     ThreadStartMode,
     ThreadSupport,
-    ThreadSuspendControl,
+    ThreadSuspendControlContract,
     ThreadTermination,
     ThreadTerminationKind,
 };
@@ -201,7 +201,7 @@ impl LinuxThread {
     }
 }
 
-impl ThreadBase for LinuxThread {
+impl ThreadBaseContract for LinuxThread {
     type Handle = LinuxThreadHandle;
 
     fn support(&self) -> ThreadSupport {
@@ -296,7 +296,7 @@ unsafe impl ThreadLifecycle for LinuxThread {
     }
 }
 
-impl ThreadSuspendControl for LinuxThread {
+impl ThreadSuspendControlContract for LinuxThread {
     fn suspend(&self, _handle: &Self::Handle) -> Result<(), ThreadError> {
         Err(ThreadError::unsupported())
     }
@@ -306,7 +306,7 @@ impl ThreadSuspendControl for LinuxThread {
     }
 }
 
-impl ThreadSchedulerControl for LinuxThread {
+impl ThreadSchedulerControlContract for LinuxThread {
     fn priority_range(
         &self,
         class: ThreadSchedulerClass,
@@ -352,7 +352,7 @@ impl ThreadSchedulerControl for LinuxThread {
     }
 }
 
-impl ThreadPlacementControl for LinuxThread {
+impl ThreadPlacementControlContract for LinuxThread {
     fn set_placement(
         &self,
         handle: &Self::Handle,
@@ -366,7 +366,7 @@ impl ThreadPlacementControl for LinuxThread {
     }
 }
 
-impl ThreadObservationControl for LinuxThread {
+impl ThreadObservationControlContract for LinuxThread {
     fn observe_current(&self) -> Result<ThreadObservation, ThreadError> {
         let location = current_execution_location();
         Ok(ThreadObservation {
@@ -394,7 +394,7 @@ impl ThreadObservationControl for LinuxThread {
     }
 }
 
-impl ThreadStackObservationControl for LinuxThread {
+impl ThreadStackObservationControlContract for LinuxThread {
     fn observe_current_stack(&self) -> Result<ThreadStackObservation, ThreadError> {
         stack_observation_for_pthread(unsafe { libc::pthread_self() })
     }

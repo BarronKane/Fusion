@@ -43,9 +43,9 @@ use crate::contract::pal::runtime::sync::{
     PriorityInheritanceSupport,
     ProcessScopeSupport,
     RawMutex,
-    RawOnce,
+    RawOnceContract,
     RawRwLock,
-    RawSemaphore,
+    RawSemaphoreContract,
     RecursionSupport,
     RobustnessSupport,
     RwLockCaps,
@@ -53,7 +53,7 @@ use crate::contract::pal::runtime::sync::{
     RwLockSupport,
     SemaphoreCaps,
     SemaphoreSupport,
-    SyncBase,
+    SyncBaseContract,
     SyncError,
     SyncFallbackKind,
     SyncImplementationKind,
@@ -397,7 +397,7 @@ impl CortexMSync {
     }
 }
 
-impl SyncBase for CortexMSync {
+impl SyncBaseContract for CortexMSync {
     fn support(&self) -> SyncSupport {
         SyncSupport {
             mutex: mutex_support_surface(),
@@ -525,7 +525,7 @@ impl CortexMRawOnce {
     }
 }
 
-impl RawOnce for CortexMRawOnce {
+impl RawOnceContract for CortexMRawOnce {
     fn support(&self) -> OnceSupport {
         once_support_surface()
     }
@@ -767,7 +767,7 @@ impl CortexMSemaphore {
     }
 }
 
-impl RawSemaphore for CortexMSemaphore {
+impl RawSemaphoreContract for CortexMSemaphore {
     fn support(&self) -> SemaphoreSupport {
         semaphore_support_surface()
     }

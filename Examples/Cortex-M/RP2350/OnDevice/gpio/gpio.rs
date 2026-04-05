@@ -12,8 +12,8 @@ use fusion_hal::contract::drivers::bus::gpio::{
     GpioDriveStrength,
     GpioError,
     GpioErrorKind,
-    GpioOwnedPin,
-    GpioOutputPin,
+    GpioOwnedPinContract,
+    GpioOutputPinContract,
 };
 use fusion_hal::drivers::bus::gpio::{
     Gpio,
@@ -27,8 +27,8 @@ use fusion_std::thread::yield_now;
 use fusion_sys::channel::{
     ChannelError,
     ChannelErrorKind,
-    ChannelReceive,
-    ChannelSend,
+    ChannelReceiveContract,
+    ChannelSendContract,
     LocalChannel,
 };
 use fusion_sys::fiber::{
@@ -36,7 +36,7 @@ use fusion_sys::fiber::{
     FiberErrorKind,
 };
 use fusion_sys::transport::protocol::{
-    Protocol,
+    ProtocolContract,
     ProtocolBootstrapKind,
     ProtocolCaps,
     ProtocolDebugView,
@@ -47,7 +47,7 @@ use fusion_sys::transport::protocol::{
     ProtocolVersion,
 };
 use fusion_sys::transport::{
-    TransportAttachmentControl,
+    TransportAttachmentControlContract,
     TransportAttachmentLaw,
     TransportAttachmentRequest,
     TransportError,
@@ -94,7 +94,7 @@ enum Rp2350GpioStatus {
 
 struct Rp2350GpioCommandProtocol;
 
-impl Protocol for Rp2350GpioCommandProtocol {
+impl ProtocolContract for Rp2350GpioCommandProtocol {
     type Message = Rp2350GpioCommand;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -110,7 +110,7 @@ impl Protocol for Rp2350GpioCommandProtocol {
 
 struct Rp2350GpioStatusProtocol;
 
-impl Protocol for Rp2350GpioStatusProtocol {
+impl ProtocolContract for Rp2350GpioStatusProtocol {
     type Message = Rp2350GpioStatus;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -369,7 +369,7 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
     }
 }
 
-impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize> GpioOwnedPin
+impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize> GpioOwnedPinContract
     for Rp2350FiberGpioOutputPin<COMMAND_CAPACITY, STATUS_CAPACITY>
 {
     fn pin(&self) -> u8 {
@@ -381,7 +381,7 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize> GpioOwnedPin
     }
 }
 
-impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize> GpioOutputPin
+impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize> GpioOutputPinContract
     for Rp2350FiberGpioOutputPin<COMMAND_CAPACITY, STATUS_CAPACITY>
 {
     fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {

@@ -13,7 +13,7 @@ use crate::contract::drivers::peripheral::{
 use crate::drivers::peripheral::interface::gpio::{
     GpioPeripheral,
     GpioPeripheralError as GpioError,
-    GpioPeripheralOutputPin as GpioOutputPin,
+    GpioPeripheralOutputPin as GpioOutputPinContract,
 };
 use super::shift_register_74hc595::OutputEnableControl;
 use super::{
@@ -184,16 +184,16 @@ pub struct FourDigitSevenSegmentDisplay<Seg, Dig> {
 
 impl<Seg, Dig> GpioPeripheral for FourDigitSevenSegmentDisplay<Seg, Dig>
 where
-    Seg: GpioOutputPin,
-    Dig: GpioOutputPin,
+    Seg: GpioOutputPinContract,
+    Dig: GpioOutputPinContract,
 {
     type Error = GpioError;
 }
 
 impl<Seg, Dig> FourDigitSevenSegmentDisplay<Seg, Dig>
 where
-    Seg: GpioOutputPin,
-    Dig: GpioOutputPin,
+    Seg: GpioOutputPinContract,
+    Dig: GpioOutputPinContract,
 {
     /// Creates one display with one explicit electrical polarity contract.
     ///
@@ -392,9 +392,9 @@ pub struct ShiftedFourDigitSevenSegmentDisplay<
 impl<Data, ShiftClock, LatchClock, OutputEnable> GpioPeripheral
     for ShiftedFourDigitSevenSegmentDisplay<Data, ShiftClock, LatchClock, OutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
     OutputEnable: OutputEnableControl,
 {
     type Error = GpioError;
@@ -403,9 +403,9 @@ where
 impl<Data, ShiftClock, LatchClock>
     ShiftedFourDigitSevenSegmentDisplay<Data, ShiftClock, LatchClock, NoOutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
 {
     /// Creates one shifted display with hardware-tied output enable.
     ///
@@ -462,10 +462,10 @@ where
 impl<Data, ShiftClock, LatchClock, OutputEnable>
     ShiftedFourDigitSevenSegmentDisplay<Data, ShiftClock, LatchClock, OutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
-    OutputEnable: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
+    OutputEnable: GpioOutputPinContract,
 {
     /// Creates one shifted display with one software-controlled output-enable pin wired to CE/OE.
     ///
@@ -492,9 +492,9 @@ where
 impl<Data, ShiftClock, LatchClock, OutputEnable>
     ShiftedFourDigitSevenSegmentDisplay<Data, ShiftClock, LatchClock, OutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
     OutputEnable: OutputEnableControl,
 {
     fn from_register(
@@ -657,8 +657,8 @@ const fn native_polarity_to_peripheral(
 
 impl<Seg, Dig> SevenSegmentDisplayContract<4> for FourDigitSevenSegmentDisplay<Seg, Dig>
 where
-    Seg: GpioOutputPin,
-    Dig: GpioOutputPin,
+    Seg: GpioOutputPinContract,
+    Dig: GpioOutputPinContract,
 {
     type Error = GpioError;
 
@@ -702,9 +702,9 @@ where
 impl<Data, ShiftClock, LatchClock, OutputEnable> SevenSegmentDisplayContract<4>
     for ShiftedFourDigitSevenSegmentDisplay<Data, ShiftClock, LatchClock, OutputEnable>
 where
-    Data: GpioOutputPin,
-    ShiftClock: GpioOutputPin,
-    LatchClock: GpioOutputPin,
+    Data: GpioOutputPinContract,
+    ShiftClock: GpioOutputPinContract,
+    LatchClock: GpioOutputPinContract,
     OutputEnable: OutputEnableControl,
 {
     type Error = GpioError;
@@ -751,7 +751,7 @@ mod tests {
     use super::*;
     use crate::drivers::bus::gpio::{
         GpioCapabilities,
-        GpioOwnedPin,
+        GpioOwnedPinContract,
     };
 
     #[derive(Debug)]
@@ -761,7 +761,7 @@ mod tests {
         level: bool,
     }
 
-    impl GpioOwnedPin for FakeOutputPin {
+    impl GpioOwnedPinContract for FakeOutputPin {
         fn pin(&self) -> u8 {
             self.pin
         }
@@ -771,7 +771,7 @@ mod tests {
         }
     }
 
-    impl GpioOutputPin for FakeOutputPin {
+    impl GpioOutputPinContract for FakeOutputPin {
         fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {
             self.configured = true;
             self.level = initial_high;

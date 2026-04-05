@@ -13,18 +13,18 @@ use crate::contract::pal::mem::{
     MapReplaceRequest,
     MapRequest,
     MemAdviceCaps,
-    MemAdvise,
+    MemAdviseContract,
     MemBackingCaps,
-    MemBase,
+    MemBaseContract,
     MemCaps,
-    MemCommit,
+    MemCommitContract,
     MemError,
-    MemLock,
-    MemMap,
+    MemLockContract,
+    MemMapContract,
     MemMapReplace,
     MemPlacementCaps,
-    MemProtect,
-    MemQuery,
+    MemProtectContract,
+    MemQueryContract,
     MemSupport,
     PageInfo,
     Protect,
@@ -55,7 +55,7 @@ impl WindowsMem {
     }
 }
 
-impl MemBase for WindowsMem {
+impl MemBaseContract for WindowsMem {
     fn caps(&self) -> MemCaps {
         MemCaps::empty()
     }
@@ -80,7 +80,7 @@ impl MemBase for WindowsMem {
     }
 }
 
-impl MemMap for WindowsMem {
+impl MemMapContract for WindowsMem {
     unsafe fn map(&self, _req: &MapRequest<'_>) -> Result<Region, MemError> {
         Err(MemError::unsupported())
     }
@@ -96,27 +96,27 @@ unsafe impl MemMapReplace for WindowsMem {
     }
 }
 
-impl MemProtect for WindowsMem {
+impl MemProtectContract for WindowsMem {
     unsafe fn protect(&self, _region: Region, _protect: Protect) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
 }
 
-impl MemCommit for WindowsMem {}
+impl MemCommitContract for WindowsMem {}
 
-impl MemQuery for WindowsMem {
+impl MemQueryContract for WindowsMem {
     fn query(&self, _addr: Address) -> Result<RegionInfo, MemError> {
         Err(MemError::unsupported())
     }
 }
 
-impl MemAdvise for WindowsMem {
+impl MemAdviseContract for WindowsMem {
     unsafe fn advise(&self, _region: Region, _advice: Advise) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
 }
 
-impl MemLock for WindowsMem {
+impl MemLockContract for WindowsMem {
     unsafe fn lock(&self, _region: Region) -> Result<(), MemError> {
         Err(MemError::unsupported())
     }
@@ -126,4 +126,4 @@ impl MemLock for WindowsMem {
     }
 }
 
-impl crate::contract::pal::mem::MemCatalog for WindowsMem {}
+impl crate::contract::pal::mem::MemCatalogContract for WindowsMem {}

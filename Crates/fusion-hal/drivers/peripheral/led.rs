@@ -4,7 +4,7 @@ use crate::contract::drivers::peripheral::LedContract;
 use crate::drivers::peripheral::interface::gpio::{
     GpioPeripheral,
     GpioPeripheralError as GpioError,
-    GpioPeripheralOutputPin as GpioOutputPin,
+    GpioPeripheralOutputPin as GpioOutputPinContract,
 };
 
 /// Simple binary LED peripheral backed by one owned GPIO output.
@@ -17,7 +17,7 @@ pub struct Led<P> {
 
 impl<P> Led<P>
 where
-    P: GpioOutputPin,
+    P: GpioOutputPinContract,
 {
     /// Creates one active-high LED backed by one owned GPIO output.
     ///
@@ -101,7 +101,7 @@ where
 
 impl<P> LedContract for Led<P>
 where
-    P: GpioOutputPin,
+    P: GpioOutputPinContract,
 {
     type Error = GpioError;
 
@@ -120,7 +120,7 @@ where
 
 impl<P> GpioPeripheral for Led<P>
 where
-    P: GpioOutputPin,
+    P: GpioOutputPinContract,
 {
     type Error = GpioError;
 }

@@ -146,9 +146,9 @@ pub enum FusionKnWireError {
 /// Common protocol header for every mediated message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FusionKnMessageHeader {
-    /// Protocol version used by this message.
+    /// ProtocolContract version used by this message.
     pub version_major: u16,
-    /// Protocol minor version used by this message.
+    /// ProtocolContract minor version used by this message.
     pub version_minor: u16,
     /// Transport carrying the protocol exchange.
     pub transport: FusionKnTransportKind,
@@ -347,9 +347,9 @@ impl FusionKnNegotiationRequest {
 /// Version/capability negotiation response payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FusionKnNegotiationResponse {
-    /// Protocol major version selected by the kernel side.
+    /// ProtocolContract major version selected by the kernel side.
     pub selected_version_major: u16,
-    /// Protocol minor version selected by the kernel side.
+    /// ProtocolContract minor version selected by the kernel side.
     pub selected_version_minor: u16,
     /// Transport kind confirmed by the kernel side.
     pub transport: FusionKnTransportKind,

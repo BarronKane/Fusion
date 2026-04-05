@@ -20,10 +20,10 @@ use crate::contract::pal::runtime::thread::{
 };
 use crate::contract::pal::{
     HardwareAuthoritySet,
-    HardwareBase,
+    HardwareBaseContract,
     HardwareCpuCaps,
     HardwareCpuDescription,
-    HardwareCpuQuery,
+    HardwareCpuQueryContract,
     HardwareCpuSupport,
     HardwareCpuVendor,
     HardwareError,
@@ -33,7 +33,7 @@ use crate::contract::pal::{
     HardwareStackAbi,
     HardwareSupport,
     HardwareTopologyNodeId,
-    HardwareTopologyQuery,
+    HardwareTopologyQueryContract,
     HardwareTopologySummary,
     HardwareWriteSummary,
 };
@@ -98,7 +98,7 @@ pub const fn system_hardware() -> PlatformHardware {
     PlatformHardware::new()
 }
 
-impl HardwareBase for CortexMHardware {
+impl HardwareBaseContract for CortexMHardware {
     fn support(&self) -> HardwareSupport {
         let cpuid = read_cpuid();
         let vendor = cpu_vendor_guarantee(cpuid.vendor());
@@ -125,7 +125,7 @@ impl HardwareBase for CortexMHardware {
     }
 }
 
-impl HardwareCpuQuery for CortexMHardware {
+impl HardwareCpuQueryContract for CortexMHardware {
     fn cpu_description(&self) -> Result<HardwareCpuDescription, HardwareError> {
         let cpuid = read_cpuid();
 
@@ -146,7 +146,7 @@ impl HardwareCpuQuery for CortexMHardware {
     }
 }
 
-impl HardwareTopologyQuery for CortexMHardware {
+impl HardwareTopologyQueryContract for CortexMHardware {
     fn topology_summary(&self) -> Result<HardwareTopologySummary, HardwareError> {
         soc::board::topology_summary()
     }

@@ -34,10 +34,10 @@ use crate::contract::pal::runtime::thread::{
 };
 use crate::contract::pal::{
     HardwareAuthoritySet,
-    HardwareBase,
+    HardwareBaseContract,
     HardwareCpuCaps,
     HardwareCpuDescription,
-    HardwareCpuQuery,
+    HardwareCpuQueryContract,
     HardwareCpuSupport,
     HardwareCpuVendor,
     HardwareError,
@@ -49,7 +49,7 @@ use crate::contract::pal::{
     HardwareSupport,
     HardwareTopologyCaps,
     HardwareTopologyNodeId,
-    HardwareTopologyQuery,
+    HardwareTopologyQueryContract,
     HardwareTopologySummary,
     HardwareTopologySupport,
     HardwareWriteSummary,
@@ -96,13 +96,13 @@ struct VisibleCoreKey {
     core_id: u32,
 }
 
-impl HardwareBase for LinuxHardware {
+impl HardwareBaseContract for LinuxHardware {
     fn support(&self) -> HardwareSupport {
         support()
     }
 }
 
-impl HardwareCpuQuery for LinuxHardware {
+impl HardwareCpuQueryContract for LinuxHardware {
     fn cpu_description(&self) -> Result<HardwareCpuDescription, HardwareError> {
         Ok(cpu_description())
     }
@@ -112,7 +112,7 @@ impl HardwareCpuQuery for LinuxHardware {
     }
 }
 
-impl HardwareTopologyQuery for LinuxHardware {
+impl HardwareTopologyQueryContract for LinuxHardware {
     fn topology_summary(&self) -> Result<HardwareTopologySummary, HardwareError> {
         topology_summary()
     }

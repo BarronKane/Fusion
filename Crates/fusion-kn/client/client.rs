@@ -39,9 +39,9 @@ pub trait FusionKnTransport {
 /// Negotiated session parameters returned by the kernel boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FusionKnNegotiatedSession {
-    /// Protocol major version selected by the peer.
+    /// ProtocolContract major version selected by the peer.
     pub version_major: u16,
-    /// Protocol minor version selected by the peer.
+    /// ProtocolContract minor version selected by the peer.
     pub version_minor: u16,
     /// Transport kind confirmed by the peer.
     pub transport: FusionKnTransportKind,

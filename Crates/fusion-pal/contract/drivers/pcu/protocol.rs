@@ -9,7 +9,7 @@
 //! envelopes; the real data plane remains in binding-backed resources and port-backed edges.
 
 use crate::contract::pal::interconnect::protocol::{
-    Protocol,
+    ProtocolContract,
     ProtocolBootstrapKind,
     ProtocolCaps,
     ProtocolDebugView,
@@ -100,7 +100,7 @@ pub enum PcuSubmissionStatusMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PcuExecutorMetadataProtocol;
 
-impl Protocol for PcuExecutorMetadataProtocol {
+impl ProtocolContract for PcuExecutorMetadataProtocol {
     type Message = PcuExecutorMetadataMessage;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -125,7 +125,7 @@ impl Protocol for PcuExecutorMetadataProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PcuSubmissionWriteProtocol;
 
-impl Protocol for PcuSubmissionWriteProtocol {
+impl ProtocolContract for PcuSubmissionWriteProtocol {
     type Message = PcuSubmissionRequest;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
@@ -150,7 +150,7 @@ impl Protocol for PcuSubmissionWriteProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PcuSubmissionStatusProtocol;
 
-impl Protocol for PcuSubmissionStatusProtocol {
+impl ProtocolContract for PcuSubmissionStatusProtocol {
     type Message = PcuSubmissionStatusMessage;
 
     const DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {

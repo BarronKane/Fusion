@@ -488,7 +488,7 @@ pub struct MemCatalogStrategy {
 /// `procfs`, syscalls, or nothing at all. A firmware or RTOS backend may populate it from a
 /// BSP, linker script, device tree, or board table. None of that translation belongs above
 /// this trait boundary.
-pub trait MemCatalog: super::MemBase {
+pub trait MemCatalogContract: super::MemBaseContract {
     /// Returns the catalog's coarse support surface.
     fn catalog_support(&self) -> MemCatalogSupport {
         MemCatalogSupport {

@@ -28,7 +28,7 @@ pub struct PcuKernelSignature<'a> {
 }
 
 /// Minimal trait implemented by generic coprocessor IR payloads.
-pub trait PcuKernelIr {
+pub trait PcuKernelIrContract {
     /// Returns the stable caller-supplied kernel identifier.
     fn id(&self) -> PcuKernelId;
 

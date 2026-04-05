@@ -4,18 +4,18 @@ use super::{
     IrqSlot,
     SlotState,
     ThreadCoreId,
-    VectorBase,
+    VectorBaseContract,
     VectorDispatchCookie,
     VectorDispatchLane,
     VectorError,
     VectorInlineHandler,
-    VectorOwnershipControl,
+    VectorOwnershipControlContract,
     VectorPriority,
-    VectorSealedQuery,
+    VectorSealedQueryContract,
     VectorSlotBinding,
     VectorSupport,
     VectorSystemBinding,
-    VectorTableBuilderControl,
+    VectorTableBuilderControlContract,
     VectorTableMode,
 };
 
@@ -39,7 +39,7 @@ impl UnsupportedVector {
     }
 }
 
-impl VectorBase for UnsupportedVector {
+impl VectorBaseContract for UnsupportedVector {
     fn support(&self) -> VectorSupport {
         VectorSupport::unsupported()
     }
@@ -61,7 +61,7 @@ impl VectorBase for UnsupportedVector {
     }
 }
 
-impl VectorOwnershipControl for UnsupportedVector {
+impl VectorOwnershipControlContract for UnsupportedVector {
     type Builder = UnsupportedVectorBuilder;
 
     fn adopt_and_clone(&self, _mode: VectorTableMode) -> Result<Self::Builder, VectorError> {
@@ -73,7 +73,7 @@ impl VectorOwnershipControl for UnsupportedVector {
     }
 }
 
-impl VectorTableBuilderControl for UnsupportedVectorBuilder {
+impl VectorTableBuilderControlContract for UnsupportedVectorBuilder {
     type Sealed = UnsupportedSealedVectorTable;
 
     fn support(&self) -> VectorSupport {
@@ -101,7 +101,7 @@ impl VectorTableBuilderControl for UnsupportedVectorBuilder {
     }
 }
 
-impl VectorSealedQuery for UnsupportedSealedVectorTable {
+impl VectorSealedQueryContract for UnsupportedSealedVectorTable {
     fn slot_state(&self, _slot: IrqSlot) -> Result<SlotState, VectorError> {
         Err(VectorError::unsupported())
     }

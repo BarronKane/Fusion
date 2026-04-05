@@ -34,6 +34,7 @@ use super::{
     rp2350_public_device_id_from_words,
     rp2350_spi_base,
 };
+use crate::pal::soc::cortex_m::rp2350::drivers::bus::gpio::claim_board_owned_pin;
 
 #[test]
 fn decodes_sysinfo_chip_id_fields() {
@@ -125,6 +126,37 @@ fn bluetooth_binding_tracks_pico2w_wiring_truth() {
             data_irq_gpio: 24,
         }
     ));
+}
+
+#[test]
+fn wifi_binding_tracks_pico2w_wiring_truth() {
+    assert_eq!(WIFI_CONTROLLERS.len(), 1);
+    let controller = WIFI_CONTROLLERS[0];
+    assert_eq!(controller.vendor, "infineon");
+    assert_eq!(controller.chip, "CYW43439");
+    assert_eq!(controller.power_gpio, Some(23));
+    assert_eq!(controller.reset_gpio, None);
+    assert_eq!(controller.wake_gpio, None);
+    assert_eq!(RP2350_PICO2W_RESERVED_GPIO_PINS, [23, 24, 25, 29]);
+
+    assert!(matches!(
+        controller.transport,
+        CortexMWifiTransportBinding::Spi3WireSharedDataIrq {
+            clock_gpio: 29,
+            chip_select_gpio: 25,
+            data_irq_gpio: 24,
+        }
+    ));
+}
+
+#[test]
+fn board_owned_gpio_claims_release_on_drop() {
+    let first = claim_board_owned_pin(23).expect("board-owned radio power pin should claim");
+    drop(first);
+
+    let second =
+        claim_board_owned_pin(23).expect("board-owned radio power pin should be reclaimable");
+    drop(second);
 }
 
 #[test]
