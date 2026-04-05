@@ -1,6 +1,6 @@
 //! GPIO-composed CYW43439 backend.
 
-use crate::contract::drivers::net::bluetooth::{
+use fusion_hal::contract::drivers::net::bluetooth::{
     BluetoothAdapterDescriptor,
     BluetoothAdapterId,
     BluetoothAdapterSupport,
@@ -10,7 +10,7 @@ use crate::contract::drivers::net::bluetooth::{
     BluetoothVersion,
     BluetoothVersionRange,
 };
-use crate::contract::drivers::net::wifi::{
+use fusion_hal::contract::drivers::net::wifi::{
     WifiAccessPointCaps,
     WifiAdapterDescriptor,
     WifiAdapterId,
@@ -32,27 +32,27 @@ use crate::contract::drivers::net::wifi::{
     WifiStationCaps,
     WifiSupport,
 };
-use crate::drivers::bus::gpio::{
+use fusion_hal::drivers::bus::gpio::{
     GpioFunction,
     GpioPin,
 };
-use crate::drivers::bus::gpio::interface::contract::GpioHardwarePin;
-use crate::drivers::net::chipset::infineon::cyw43439::firmware::Cyw43439FirmwareAssets;
-use crate::drivers::net::chipset::infineon::cyw43439::bluetooth::CYW43439_BLUETOOTH_VENDOR_IDENTITY;
-use crate::drivers::net::chipset::infineon::cyw43439::interface::contract::{
+use fusion_hal::drivers::bus::gpio::interface::contract::GpioHardwarePin;
+use crate::firmware::Cyw43439FirmwareAssets;
+use crate::bluetooth::CYW43439_BLUETOOTH_VENDOR_IDENTITY;
+use crate::interface::contract::{
     Cyw43439ControllerCaps,
     Cyw43439Error,
     Cyw43439HardwareContract,
     Cyw43439Radio,
 };
-use crate::drivers::net::chipset::infineon::cyw43439::transport::{
+use crate::transport::{
     Cyw43439BluetoothTransport,
     Cyw43439BluetoothTransportClockProfile,
     Cyw43439TransportTopology,
     Cyw43439WlanTransport,
     Cyw43439WlanTransportClockProfile,
 };
-use crate::drivers::net::chipset::infineon::cyw43439::wifi::CYW43439_WIFI_VENDOR_IDENTITY;
+use crate::wifi::CYW43439_WIFI_VENDOR_IDENTITY;
 
 const CYW43439_BLUETOOTH_ADAPTER_ID: BluetoothAdapterId = BluetoothAdapterId(0);
 const CYW43439_WIFI_ADAPTER_ID: WifiAdapterId = WifiAdapterId(0);
@@ -72,17 +72,18 @@ const CYW43439_BLUETOOTH_ADAPTERS: [BluetoothAdapterDescriptor; 1] = [BluetoothA
         maximum: BluetoothVersion::new(5, 2),
     },
     support: BluetoothAdapterSupport {
-        transports: crate::contract::drivers::net::bluetooth::BluetoothTransportCaps::empty(),
-        roles: crate::contract::drivers::net::bluetooth::BluetoothRoleCaps::empty(),
-        le_phys: crate::contract::drivers::net::bluetooth::BluetoothLePhyCaps::empty(),
-        advertising: crate::contract::drivers::net::bluetooth::BluetoothAdvertisingCaps::empty(),
-        scanning: crate::contract::drivers::net::bluetooth::BluetoothScanningCaps::empty(),
-        connection: crate::contract::drivers::net::bluetooth::BluetoothConnectionCaps::empty(),
-        security: crate::contract::drivers::net::bluetooth::BluetoothSecurityCaps::empty(),
-        l2cap: crate::contract::drivers::net::bluetooth::BluetoothL2capCaps::empty(),
-        att: crate::contract::drivers::net::bluetooth::BluetoothAttCaps::empty(),
-        gatt: crate::contract::drivers::net::bluetooth::BluetoothGattCaps::empty(),
-        iso: crate::contract::drivers::net::bluetooth::BluetoothIsoCaps::empty(),
+        transports: fusion_hal::contract::drivers::net::bluetooth::BluetoothTransportCaps::empty(),
+        roles: fusion_hal::contract::drivers::net::bluetooth::BluetoothRoleCaps::empty(),
+        le_phys: fusion_hal::contract::drivers::net::bluetooth::BluetoothLePhyCaps::empty(),
+        advertising: fusion_hal::contract::drivers::net::bluetooth::BluetoothAdvertisingCaps::empty(
+        ),
+        scanning: fusion_hal::contract::drivers::net::bluetooth::BluetoothScanningCaps::empty(),
+        connection: fusion_hal::contract::drivers::net::bluetooth::BluetoothConnectionCaps::empty(),
+        security: fusion_hal::contract::drivers::net::bluetooth::BluetoothSecurityCaps::empty(),
+        l2cap: fusion_hal::contract::drivers::net::bluetooth::BluetoothL2capCaps::empty(),
+        att: fusion_hal::contract::drivers::net::bluetooth::BluetoothAttCaps::empty(),
+        gatt: fusion_hal::contract::drivers::net::bluetooth::BluetoothGattCaps::empty(),
+        iso: fusion_hal::contract::drivers::net::bluetooth::BluetoothIsoCaps::empty(),
         max_connections: 0,
         max_advertising_sets: 0,
         max_periodic_advertising_sets: 0,
@@ -710,20 +711,22 @@ impl<
     }
 }
 
-fn map_gpio_error(error: crate::contract::drivers::bus::gpio::GpioError) -> Cyw43439Error {
+fn map_gpio_error(error: fusion_hal::contract::drivers::bus::gpio::GpioError) -> Cyw43439Error {
     match error.kind() {
-        crate::contract::drivers::bus::gpio::GpioErrorKind::Unsupported => {
+        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Unsupported => {
             Cyw43439Error::unsupported()
         }
-        crate::contract::drivers::bus::gpio::GpioErrorKind::Invalid => Cyw43439Error::invalid(),
-        crate::contract::drivers::bus::gpio::GpioErrorKind::Busy => Cyw43439Error::busy(),
-        crate::contract::drivers::bus::gpio::GpioErrorKind::ResourceExhausted => {
+        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Invalid => {
+            Cyw43439Error::invalid()
+        }
+        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Busy => Cyw43439Error::busy(),
+        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::ResourceExhausted => {
             Cyw43439Error::resource_exhausted()
         }
-        crate::contract::drivers::bus::gpio::GpioErrorKind::StateConflict => {
+        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::StateConflict => {
             Cyw43439Error::state_conflict()
         }
-        crate::contract::drivers::bus::gpio::GpioErrorKind::Platform(code) => {
+        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Platform(code) => {
             Cyw43439Error::platform(code)
         }
     }
@@ -736,18 +739,18 @@ mod tests {
         Cyw43439Radio,
         GpioBackend,
     };
-    use crate::contract::drivers::bus::gpio::{
+    use fusion_hal::contract::drivers::bus::gpio::{
         GpioCapabilities,
         GpioDriveStrength,
         GpioError,
         GpioFunction,
         GpioPull,
     };
-    use crate::drivers::bus::gpio::GpioPin;
-    use crate::drivers::bus::gpio::interface::contract::GpioHardwarePin;
-    use crate::drivers::net::chipset::infineon::cyw43439::firmware::Cyw43439FirmwareAssets;
-    use crate::drivers::net::chipset::infineon::cyw43439::interface::contract::Cyw43439ErrorKind;
-    use crate::drivers::net::chipset::infineon::cyw43439::transport::{
+    use fusion_hal::drivers::bus::gpio::GpioPin;
+    use fusion_hal::drivers::bus::gpio::interface::contract::GpioHardwarePin;
+    use crate::firmware::Cyw43439FirmwareAssets;
+    use crate::interface::contract::Cyw43439ErrorKind;
+    use crate::transport::{
         Cyw43439BluetoothTransport,
         Cyw43439TransportTopology,
         Cyw43439WlanTransport,

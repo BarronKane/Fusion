@@ -15,3 +15,6 @@ pub mod contract;
 
 #[path = "drivers/drivers.rs"]
 pub mod drivers;
+
+#[path = "fdxe/fdxe.rs"]
+pub mod fdxe;

@@ -2,7 +2,7 @@
 
 use bitflags::bitflags;
 
-use crate::drivers::net::chipset::infineon::cyw43439::interface::contract::{
+use crate::interface::contract::{
     Cyw43439Error,
     Cyw43439HardwareContract,
     Cyw43439Radio,
@@ -428,21 +428,21 @@ mod tests {
     use std::collections::VecDeque;
     use std::vec::Vec;
 
-    use crate::contract::drivers::net::bluetooth::{
+    use fusion_hal::contract::drivers::net::bluetooth::{
         BluetoothAdapterDescriptor,
         BluetoothSupport,
     };
-    use crate::contract::drivers::net::wifi::{
+    use fusion_hal::contract::drivers::net::wifi::{
         WifiAdapterDescriptor,
         WifiSupport,
     };
-    use crate::drivers::net::chipset::infineon::cyw43439::interface::contract::{
+    use crate::interface::contract::{
         Cyw43439ControllerCaps,
         Cyw43439Error,
         Cyw43439HardwareContract,
         Cyw43439Radio,
     };
-    use crate::drivers::net::chipset::infineon::cyw43439::transport::{
+    use crate::transport::{
         Cyw43439BluetoothTransport,
         Cyw43439BluetoothTransportClockProfile,
         Cyw43439TransportTopology,

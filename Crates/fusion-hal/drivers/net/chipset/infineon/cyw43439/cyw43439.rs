@@ -1,5 +1,7 @@
 //! Infineon CYW43439 combo-chip driver family.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
 mod core;
 
 #[path = "bluetooth/bluetooth.rs"]
@@ -16,3 +18,5 @@ pub mod interface;
 
 #[path = "transport/transport.rs"]
 pub mod transport;
+
+mod fdxe;

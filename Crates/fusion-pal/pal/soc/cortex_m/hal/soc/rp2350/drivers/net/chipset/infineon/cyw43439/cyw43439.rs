@@ -1,5 +1,39 @@
 //! RP2350-selected CYW43439 combo-chip driver exports.
 //!
+//! # Licensed External Asset Readme
+//!
+//! This is the only RP2350 / Pico 2 W Rust module in Fusion that directly embeds third-party
+//! CYW43439 firmware/configuration blobs.
+//!
+//! Embedded assets:
+//! - `assets/w43439A0_7_95_49_00_combined.bin`
+//! - `assets/wb43439A0_7_95_49_00_combined.bin`
+//! - `assets/wifi_nvram_43439.bin`
+//! - `assets/cyw43_btfw_43439.bin`
+//!
+//! Provenance:
+//! - derived from `georgerobotics/cyw43-driver` commit
+//!   `dd7568229f3bf7a37737b9e1ef250c26efe75b23`
+//! - the Wi-Fi combined images and Bluetooth patch payload come from the Raspberry Pi CYW43
+//!   support stack for Pico wireless boards
+//! - the NVRAM payload retains upstream Broadcom-origin board configuration content
+//!
+//! Licensing and obligations:
+//! - these embedded resources are not owned or relicensed by Fusion
+//! - the upstream `cyw43-driver` project ships the relevant Pico redistribution terms in
+//!   `LICENSE.RP`; a local copy is vendored adjacent to this file
+//! - use/redistribution is constrained to Raspberry Pi semiconductor devices under those terms
+//! - source redistribution must retain the upstream copyright/license notice
+//! - binary redistribution must reproduce that notice in accompanying documentation/materials
+//! - if these assets are updated, the provenance and obligation text in this file must be updated
+//!   at the same time
+//!
+//! Boundary rule:
+//! - CYW43439-specific packed-firmware layout logic belongs in the CYW43439 driver crate
+//! - Pico 2 W-specific asset selection and embedding belongs here
+//! - no other RP2350 or CYW43439 Rust file should directly embed or include these licensed blobs
+//!   unless this boundary is deliberately reworked
+//!
 //! The selected RP2350 board contract currently follows Pico 2 W wiring truth. This module owns
 //! the shared CYW43439 GPIO transport once and vends both Bluetooth and Wi-Fi driver families
 //! over that one shared chip substrate.
@@ -35,7 +69,7 @@ use fusion_hal::contract::drivers::net::wifi::{
     WifiSupport,
 };
 use fusion_hal::drivers::bus::gpio::GpioPin as HalGpioPin;
-use fusion_hal::drivers::net::chipset::infineon::cyw43439::{
+use fd_net_chipset_infineon_cyw43439::{
     bluetooth::{
         CYW43439 as UniversalBluetoothCYW43439,
         Cyw43439Binding as Cyw43439BluetoothBinding,
@@ -56,7 +90,10 @@ use fusion_hal::drivers::net::chipset::infineon::cyw43439::{
             Cyw43439Radio,
         },
     },
-    firmware::Cyw43439FirmwareAssets,
+    firmware::{
+        Cyw43439FirmwareAssets,
+        Cyw43439PackedWlanFirmwareImage,
+    },
     transport::{
         Cyw43439BluetoothTransport,
         Cyw43439BluetoothTransportClockProfile,
@@ -100,6 +137,16 @@ type SharedBackend = Cyw43439GpioBackend<
 const INIT_UNINITIALIZED: u8 = 0;
 const INIT_RUNNING: u8 = 1;
 const INIT_READY: u8 = 2;
+const PICO2W_CYW43439_WIFI_ONLY_COMBINED_FW: &[u8] =
+    include_bytes!("assets/w43439A0_7_95_49_00_combined.bin");
+const PICO2W_CYW43439_WIFI_BT_COMBINED_FW: &[u8] =
+    include_bytes!("assets/wb43439A0_7_95_49_00_combined.bin");
+const PICO2W_CYW43439_BT_PATCH: &[u8] = include_bytes!("assets/cyw43_btfw_43439.bin");
+const PICO2W_CYW43439_WIFI_NVRAM: &[u8] = include_bytes!("assets/wifi_nvram_43439.bin");
+const PICO2W_CYW43439_WIFI_ONLY_FW_LEN: usize = 224_190;
+const PICO2W_CYW43439_WIFI_ONLY_CLM_LEN: usize = 984;
+const PICO2W_CYW43439_WIFI_BT_FW_LEN: usize = 231_077;
+const PICO2W_CYW43439_WIFI_BT_CLM_LEN: usize = 984;
 
 /// Selected universal Bluetooth driver composed over the RP2350 Pico 2 W CYW43439 wiring.
 pub type Bluetooth = UniversalBluetoothCYW43439<SelectedCyw43439Hardware>;
@@ -651,16 +698,7 @@ fn cyw43439_binding() -> Result<Rp2350Cyw43439Binding, Cyw43439Error> {
         transport_topology,
         reference_clock_hz,
         sleep_clock_hz,
-        firmware: Cyw43439FirmwareAssets {
-            bluetooth: fusion_hal::drivers::net::chipset::infineon::cyw43439::firmware::Cyw43439BluetoothFirmwareAssets {
-                patch_image: bluetooth.and_then(|binding| binding.assets.patch.embedded_image()),
-            },
-            wifi: fusion_hal::drivers::net::chipset::infineon::cyw43439::firmware::Cyw43439WlanFirmwareAssets {
-                firmware_image: wifi.and_then(|binding| binding.assets.firmware.embedded_image()),
-                nvram_image: wifi.and_then(|binding| binding.assets.nvram.embedded_image()),
-                clm_image: wifi.and_then(|binding| binding.assets.clm.embedded_image()),
-            },
-        },
+        firmware: rp2350_pico2w_firmware_assets(bluetooth_available, wifi_available),
         clock_gpio: transport.0,
         chip_select_gpio: transport.1,
         data_irq_gpio: transport.2,
@@ -668,6 +706,40 @@ fn cyw43439_binding() -> Result<Rp2350Cyw43439Binding, Cyw43439Error> {
         reset_gpio,
         wake_gpio,
     })
+}
+
+fn rp2350_pico2w_firmware_assets(
+    bluetooth_available: bool,
+    wifi_available: bool,
+) -> Cyw43439FirmwareAssets {
+    let packed_wifi = if wifi_available {
+        Some(if bluetooth_available {
+            Cyw43439PackedWlanFirmwareImage {
+                image: PICO2W_CYW43439_WIFI_BT_COMBINED_FW,
+                firmware_len: PICO2W_CYW43439_WIFI_BT_FW_LEN,
+                clm_len: PICO2W_CYW43439_WIFI_BT_CLM_LEN,
+            }
+        } else {
+            Cyw43439PackedWlanFirmwareImage {
+                image: PICO2W_CYW43439_WIFI_ONLY_COMBINED_FW,
+                firmware_len: PICO2W_CYW43439_WIFI_ONLY_FW_LEN,
+                clm_len: PICO2W_CYW43439_WIFI_ONLY_CLM_LEN,
+            }
+        })
+    } else {
+        None
+    };
+
+    Cyw43439FirmwareAssets {
+        bluetooth: fd_net_chipset_infineon_cyw43439::firmware::Cyw43439BluetoothFirmwareAssets {
+            patch_image: bluetooth_available.then_some(PICO2W_CYW43439_BT_PATCH),
+        },
+        wifi: fd_net_chipset_infineon_cyw43439::firmware::Cyw43439WlanFirmwareAssets {
+            firmware_image: packed_wifi.and_then(Cyw43439PackedWlanFirmwareImage::firmware_image),
+            nvram_image: wifi_available.then_some(PICO2W_CYW43439_WIFI_NVRAM),
+            clm_image: packed_wifi.and_then(Cyw43439PackedWlanFirmwareImage::clm_image),
+        },
+    }
 }
 
 fn bluetooth_transport_pins(binding: CortexMBluetoothControllerBinding) -> Option<(u8, u8, u8)> {

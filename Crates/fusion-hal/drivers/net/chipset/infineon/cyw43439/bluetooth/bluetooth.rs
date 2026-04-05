@@ -2,7 +2,7 @@
 
 use core::marker::PhantomData;
 
-use crate::contract::drivers::driver::{
+use fusion_hal::contract::drivers::driver::{
     ActiveDriver,
     DriverActivation,
     DriverActivationContext,
@@ -16,8 +16,8 @@ use crate::contract::drivers::driver::{
     DriverRegistration,
     RegisteredDriver,
 };
-use crate::contract::drivers::net::NetVendorIdentity;
-use crate::contract::drivers::net::bluetooth::{
+use fusion_hal::contract::drivers::net::NetVendorIdentity;
+use fusion_hal::contract::drivers::net::bluetooth::{
     BluetoothAdapterDescriptor,
     BluetoothAdapterId,
     BluetoothAdvertisingControlContract,
@@ -57,7 +57,7 @@ use crate::contract::drivers::net::bluetooth::{
     BluetoothSecurityControlContract,
     BluetoothSupport,
 };
-use crate::drivers::net::chipset::infineon::cyw43439::{
+use crate::{
     core::{
         Cyw43439Chipset,
     },
@@ -69,9 +69,9 @@ use crate::drivers::net::chipset::infineon::cyw43439::{
     },
 };
 
-pub use crate::drivers::net::chipset::infineon::cyw43439::core::Cyw43439DriverContext;
+pub use crate::core::Cyw43439DriverContext;
 
-pub(crate) const CYW43439_BLUETOOTH_VENDOR_IDENTITY: NetVendorIdentity = NetVendorIdentity {
+pub const CYW43439_BLUETOOTH_VENDOR_IDENTITY: NetVendorIdentity = NetVendorIdentity {
     vendor: "Infineon",
     family: Some("AIROC"),
     package: Some("CYW43439"),
@@ -108,7 +108,7 @@ pub struct Cyw43439Driver<H: Cyw43439HardwareContract = UnsupportedBackend> {
     marker: PhantomData<fn() -> H>,
 }
 
-fn cyw43439_bluetooth_driver_metadata() -> &'static DriverMetadata {
+pub fn driver_metadata() -> &'static DriverMetadata {
     &CYW43439_BLUETOOTH_DRIVER_METADATA
 }
 
@@ -217,7 +217,7 @@ where
 
     fn registration() -> DriverRegistration<Self> {
         DriverRegistration::new(
-            cyw43439_bluetooth_driver_metadata,
+            driver_metadata,
             DriverActivation::new(
                 enumerate_cyw43439_bluetooth_bindings::<H>,
                 activate_cyw43439_bluetooth_binding::<H>,
@@ -369,7 +369,7 @@ where
 {
     fn connect(
         &mut self,
-        _peer: crate::contract::drivers::net::bluetooth::BluetoothAddress,
+        _peer: fusion_hal::contract::drivers::net::bluetooth::BluetoothAddress,
         _parameters: BluetoothConnectionParameters,
     ) -> Result<BluetoothConnectionId, BluetoothError> {
         Self::unsupported()
@@ -401,14 +401,14 @@ where
 
     fn delete_bond(
         &mut self,
-        _peer: crate::contract::drivers::net::bluetooth::BluetoothAddress,
+        _peer: fusion_hal::contract::drivers::net::bluetooth::BluetoothAddress,
     ) -> Result<(), BluetoothError> {
         Self::unsupported()
     }
 
     fn bond_state(
         &self,
-        _peer: crate::contract::drivers::net::bluetooth::BluetoothAddress,
+        _peer: fusion_hal::contract::drivers::net::bluetooth::BluetoothAddress,
     ) -> Result<BluetoothBondState, BluetoothError> {
         Self::unsupported()
     }
@@ -522,7 +522,7 @@ where
     fn discover_characteristics(
         &mut self,
         _connection: BluetoothConnectionId,
-        _service: crate::contract::drivers::net::bluetooth::BluetoothGattServiceHandle,
+        _service: fusion_hal::contract::drivers::net::bluetooth::BluetoothGattServiceHandle,
         _out: &mut [BluetoothGattCharacteristicRange],
     ) -> Result<usize, BluetoothError> {
         Self::unsupported()

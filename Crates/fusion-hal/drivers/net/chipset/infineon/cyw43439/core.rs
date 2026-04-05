@@ -1,20 +1,20 @@
 //! Internal shared CYW43439 chipset runtime helpers.
 
-use crate::contract::drivers::net::bluetooth::{
+use fusion_hal::contract::drivers::net::bluetooth::{
     BluetoothAdapterDescriptor,
     BluetoothError,
     BluetoothSupport,
 };
-use crate::contract::drivers::net::wifi::{
+use fusion_hal::contract::drivers::net::wifi::{
     WifiAdapterDescriptor,
     WifiError,
     WifiSupport,
 };
-use crate::drivers::net::chipset::infineon::cyw43439::firmware::{
+use crate::firmware::{
     Cyw43439BluetoothFirmwareAssets,
     Cyw43439WlanFirmwareAssets,
 };
-use crate::drivers::net::chipset::infineon::cyw43439::interface::{
+use crate::interface::{
     backend::UnsupportedBackend,
     contract::{
         Cyw43439Error,
@@ -23,7 +23,7 @@ use crate::drivers::net::chipset::infineon::cyw43439::interface::{
         Cyw43439Radio,
     },
 };
-use crate::drivers::net::chipset::infineon::cyw43439::transport::{
+use crate::transport::{
     Cyw43439BluetoothTransport,
     Cyw43439BluetoothTransportClockProfile,
     Cyw43439TransportTopology,
@@ -335,21 +335,21 @@ mod tests {
         Cyw43439Chipset,
         Cyw43439ClockProfile,
     };
-    use crate::contract::drivers::net::bluetooth::{
+    use fusion_hal::contract::drivers::net::bluetooth::{
         BluetoothAdapterDescriptor,
         BluetoothSupport,
     };
-    use crate::contract::drivers::net::wifi::{
+    use fusion_hal::contract::drivers::net::wifi::{
         WifiAdapterDescriptor,
         WifiSupport,
     };
-    use crate::drivers::net::chipset::infineon::cyw43439::interface::contract::{
+    use crate::interface::contract::{
         Cyw43439ControllerCaps,
         Cyw43439Error,
         Cyw43439HardwareContract,
         Cyw43439Radio,
     };
-    use crate::drivers::net::chipset::infineon::cyw43439::transport::{
+    use crate::transport::{
         Cyw43439BluetoothTransport,
         Cyw43439BluetoothTransportClockProfile,
         Cyw43439TransportTopology,

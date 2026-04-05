@@ -2,7 +2,7 @@
 
 use core::marker::PhantomData;
 
-use crate::contract::drivers::driver::{
+use fusion_hal::contract::drivers::driver::{
     ActiveDriver,
     DriverActivation,
     DriverActivationContext,
@@ -16,8 +16,8 @@ use crate::contract::drivers::driver::{
     DriverRegistration,
     RegisteredDriver,
 };
-use crate::contract::drivers::net::NetVendorIdentity;
-use crate::contract::drivers::net::wifi::{
+use fusion_hal::contract::drivers::net::NetVendorIdentity;
+use fusion_hal::contract::drivers::net::wifi::{
     WifiAccessPointControlContract,
     WifiAccessPointId,
     WifiAdapterDescriptor,
@@ -50,7 +50,7 @@ use crate::contract::drivers::net::wifi::{
     WifiSupport,
     WifiTransmitFrame,
 };
-use crate::drivers::net::chipset::infineon::cyw43439::{
+use crate::{
     core::{
         Cyw43439Chipset,
     },
@@ -62,9 +62,9 @@ use crate::drivers::net::chipset::infineon::cyw43439::{
     },
 };
 
-pub use crate::drivers::net::chipset::infineon::cyw43439::core::Cyw43439DriverContext;
+pub use crate::core::Cyw43439DriverContext;
 
-pub(crate) const CYW43439_WIFI_VENDOR_IDENTITY: NetVendorIdentity = NetVendorIdentity {
+pub const CYW43439_WIFI_VENDOR_IDENTITY: NetVendorIdentity = NetVendorIdentity {
     vendor: "Infineon",
     family: Some("AIROC"),
     package: Some("CYW43439"),
@@ -100,7 +100,7 @@ pub struct Cyw43439Driver<H: Cyw43439HardwareContract = UnsupportedBackend> {
     marker: PhantomData<fn() -> H>,
 }
 
-fn cyw43439_wifi_driver_metadata() -> &'static DriverMetadata {
+pub fn driver_metadata() -> &'static DriverMetadata {
     &CYW43439_WIFI_DRIVER_METADATA
 }
 
@@ -209,7 +209,7 @@ where
 
     fn registration() -> DriverRegistration<Self> {
         DriverRegistration::new(
-            cyw43439_wifi_driver_metadata,
+            driver_metadata,
             DriverActivation::new(
                 enumerate_cyw43439_wifi_bindings::<H>,
                 activate_cyw43439_wifi_binding::<H>,
@@ -302,13 +302,14 @@ where
 
     fn current_channel(
         &self,
-    ) -> Result<Option<crate::contract::drivers::net::wifi::WifiChannelDescriptor>, WifiError> {
+    ) -> Result<Option<fusion_hal::contract::drivers::net::wifi::WifiChannelDescriptor>, WifiError>
+    {
         Self::unsupported()
     }
 
     fn set_channel(
         &mut self,
-        _channel: crate::contract::drivers::net::wifi::WifiChannelDescriptor,
+        _channel: fusion_hal::contract::drivers::net::wifi::WifiChannelDescriptor,
     ) -> Result<(), WifiError> {
         Self::unsupported()
     }

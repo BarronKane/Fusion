@@ -1701,13 +1701,21 @@ pub(crate) const RP2350_PICO2W_CYW43439_CLOCK: CortexMControllerClockProfile =
     };
 pub(crate) const RP2350_PICO2W_CYW43439_BLUETOOTH_ASSETS: CortexMBluetoothControllerAssets =
     CortexMBluetoothControllerAssets {
-        patch: CortexMControllerAssetSource::Missing,
+        patch: CortexMControllerAssetSource::EmbeddedByImplementation {
+            name: "cyw43_btfw_43439.bin",
+        },
     };
 pub(crate) const RP2350_PICO2W_CYW43439_WIFI_ASSETS: CortexMWifiControllerAssets =
     CortexMWifiControllerAssets {
-        firmware: CortexMControllerAssetSource::Missing,
-        nvram: CortexMControllerAssetSource::Missing,
-        clm: CortexMControllerAssetSource::Missing,
+        firmware: CortexMControllerAssetSource::EmbeddedByImplementation {
+            name: "w43439A0_7_95_49_00_combined.bin | wb43439A0_7_95_49_00_combined.bin",
+        },
+        nvram: CortexMControllerAssetSource::EmbeddedByImplementation {
+            name: "wifi_nvram_43439.bin",
+        },
+        clm: CortexMControllerAssetSource::EmbeddedByImplementation {
+            name: "combined CYW43439 Wi-Fi image tail",
+        },
     };
 
 /// Board-visible Bluetooth controller bindings for the current RP2350 / Pico 2 W contract.

@@ -289,6 +289,12 @@ pub struct CortexMControllerClockProfile {
 pub enum CortexMControllerAssetSource {
     /// No truthful asset source is currently surfaced by the board.
     Missing,
+    /// The asset is compiled into the selected board implementation, but not surfaced inline in
+    /// the descriptor table.
+    EmbeddedByImplementation {
+        /// Human-readable asset name.
+        name: &'static str,
+    },
     /// The asset is compiled into the image as a static byte slice.
     EmbeddedStatic {
         /// Human-readable asset name.
@@ -314,7 +320,10 @@ impl CortexMControllerAssetSource {
     pub const fn embedded_image(self) -> Option<&'static [u8]> {
         match self {
             Self::EmbeddedStatic { image, .. } => Some(image),
-            Self::Missing | Self::BoardStorage { .. } | Self::FirmwareService { .. } => None,
+            Self::Missing
+            | Self::EmbeddedByImplementation { .. }
+            | Self::BoardStorage { .. }
+            | Self::FirmwareService { .. } => None,
         }
     }
 }

@@ -4,15 +4,15 @@ use core::fmt;
 
 use bitflags::bitflags;
 
-use crate::contract::drivers::net::bluetooth::{
+use fusion_hal::contract::drivers::net::bluetooth::{
     BluetoothAdapterDescriptor,
     BluetoothSupport,
 };
-use crate::contract::drivers::net::wifi::{
+use fusion_hal::contract::drivers::net::wifi::{
     WifiAdapterDescriptor,
     WifiSupport,
 };
-use crate::drivers::net::chipset::infineon::cyw43439::transport::{
+use crate::transport::{
     Cyw43439BluetoothTransport,
     Cyw43439BluetoothTransportClockProfile,
     Cyw43439TransportTopology,

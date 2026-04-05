@@ -121,7 +121,7 @@ fn bluetooth_binding_tracks_pico2w_wiring_truth() {
     assert_eq!(controller.clock.sleep_clock_hz, None);
     assert!(matches!(
         controller.assets.patch,
-        CortexMControllerAssetSource::Missing
+        CortexMControllerAssetSource::EmbeddedByImplementation { .. }
     ));
     assert_eq!(RP2350_PICO2W_RESERVED_GPIO_PINS, [23, 24, 25, 29]);
 
@@ -149,15 +149,15 @@ fn wifi_binding_tracks_pico2w_wiring_truth() {
     assert_eq!(controller.clock.sleep_clock_hz, None);
     assert!(matches!(
         controller.assets.firmware,
-        CortexMControllerAssetSource::Missing
+        CortexMControllerAssetSource::EmbeddedByImplementation { .. }
     ));
     assert!(matches!(
         controller.assets.nvram,
-        CortexMControllerAssetSource::Missing
+        CortexMControllerAssetSource::EmbeddedByImplementation { .. }
     ));
     assert!(matches!(
         controller.assets.clm,
-        CortexMControllerAssetSource::Missing
+        CortexMControllerAssetSource::EmbeddedByImplementation { .. }
     ));
     assert_eq!(RP2350_PICO2W_RESERVED_GPIO_PINS, [23, 24, 25, 29]);
 

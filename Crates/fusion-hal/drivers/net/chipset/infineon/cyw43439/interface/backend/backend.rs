@@ -1,14 +1,14 @@
 //! CYW43439 backend implementation families.
 
-use crate::contract::drivers::net::bluetooth::BluetoothSupport;
-use crate::contract::drivers::net::wifi::WifiSupport;
-use crate::drivers::net::chipset::infineon::cyw43439::interface::contract::{
+use fusion_hal::contract::drivers::net::bluetooth::BluetoothSupport;
+use fusion_hal::contract::drivers::net::wifi::WifiSupport;
+use crate::interface::contract::{
     Cyw43439ControllerCaps,
     Cyw43439Error,
     Cyw43439HardwareContract,
     Cyw43439Radio,
 };
-use crate::drivers::net::chipset::infineon::cyw43439::transport::{
+use crate::transport::{
     Cyw43439BluetoothTransport,
     Cyw43439BluetoothTransportClockProfile,
     Cyw43439TransportTopology,
@@ -30,7 +30,7 @@ impl Cyw43439HardwareContract for UnsupportedBackend {
 
     fn bluetooth_adapters(
         &self,
-    ) -> &'static [crate::contract::drivers::net::bluetooth::BluetoothAdapterDescriptor] {
+    ) -> &'static [fusion_hal::contract::drivers::net::bluetooth::BluetoothAdapterDescriptor] {
         &[]
     }
 
@@ -50,7 +50,7 @@ impl Cyw43439HardwareContract for UnsupportedBackend {
 
     fn wifi_adapters(
         &self,
-    ) -> &'static [crate::contract::drivers::net::wifi::WifiAdapterDescriptor] {
+    ) -> &'static [fusion_hal::contract::drivers::net::wifi::WifiAdapterDescriptor] {
         &[]
     }
 
