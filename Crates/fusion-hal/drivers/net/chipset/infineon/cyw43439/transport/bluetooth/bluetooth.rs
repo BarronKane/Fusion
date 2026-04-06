@@ -12,6 +12,181 @@ use crate::interface::contract::{
     Cyw43439Radio,
 };
 
+pub const CYW43439_BTSDIO_FWBUF_SIZE: u32 = 0x1000;
+pub const CYW43439_BTFW_MEM_OFFSET: u32 = 0x1900_0000;
+pub const CYW43439_BT2WLAN_PWRUP_ADDR: u32 = 0x0064_0894;
+pub const CYW43439_BT2WLAN_PWRUP_WAKE: u32 = 0x03;
+pub const CYW43439_BT_CTRL_REG_ADDR: u32 = 0x1800_0c7c;
+pub const CYW43439_BT_HOST_CTRL_REG_ADDR: u32 = 0x1800_0d6c;
+pub const CYW43439_BT_WLAN_RAM_BASE_REG_ADDR: u32 = 0x1800_0d68;
+pub const CYW43439_BTSDIO_OFFSET_HOST_WRITE_BUF: u32 = 0x0000;
+pub const CYW43439_BTSDIO_OFFSET_HOST_READ_BUF: u32 = CYW43439_BTSDIO_FWBUF_SIZE;
+pub const CYW43439_BTSDIO_OFFSET_HOST2BT_IN: u32 = 0x2000;
+pub const CYW43439_BTSDIO_OFFSET_HOST2BT_OUT: u32 = 0x2004;
+pub const CYW43439_BTSDIO_OFFSET_BT2HOST_IN: u32 = 0x2008;
+pub const CYW43439_BTSDIO_OFFSET_BT2HOST_OUT: u32 = 0x200c;
+pub const CYW43439_BTSDIO_REG_DATA_VALID_BITMASK: u32 = 1 << 1;
+pub const CYW43439_BTSDIO_REG_WAKE_BT_BITMASK: u32 = 1 << 17;
+pub const CYW43439_BTSDIO_REG_SW_RDY_BITMASK: u32 = 1 << 24;
+pub const CYW43439_BTSDIO_REG_BT_AWAKE_BITMASK: u32 = 1 << 8;
+pub const CYW43439_BTSDIO_REG_FW_RDY_BITMASK: u32 = 1 << 24;
+pub const CYW43439_BTSDIO_FW_READY_POLLING_INTERVAL_MS: u32 = 1;
+pub const CYW43439_BTSDIO_FW_AWAKE_POLLING_INTERVAL_MS: u32 = 1;
+pub const CYW43439_BTSDIO_FW_READY_POLLING_RETRY_COUNT: u32 = 300;
+pub const CYW43439_BTSDIO_FW_AWAKE_POLLING_RETRY_COUNT: u32 = 300;
+pub const CYW43439_BTFW_WAIT_TIME_MS: u32 = 150;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Cyw43439BluetoothSharedBufferLayout {
+    pub wlan_ram_base_addr: u32,
+    pub host2bt_buf_addr: u32,
+    pub host2bt_in_addr: u32,
+    pub host2bt_out_addr: u32,
+    pub bt2host_buf_addr: u32,
+    pub bt2host_in_addr: u32,
+    pub bt2host_out_addr: u32,
+}
+
+impl Cyw43439BluetoothSharedBufferLayout {
+    #[must_use]
+    pub const fn from_wlan_ram_base(wlan_ram_base_addr: u32) -> Self {
+        Self {
+            wlan_ram_base_addr,
+            host2bt_buf_addr: wlan_ram_base_addr + CYW43439_BTSDIO_OFFSET_HOST_WRITE_BUF,
+            host2bt_in_addr: wlan_ram_base_addr + CYW43439_BTSDIO_OFFSET_HOST2BT_IN,
+            host2bt_out_addr: wlan_ram_base_addr + CYW43439_BTSDIO_OFFSET_HOST2BT_OUT,
+            bt2host_buf_addr: wlan_ram_base_addr + CYW43439_BTSDIO_OFFSET_HOST_READ_BUF,
+            bt2host_in_addr: wlan_ram_base_addr + CYW43439_BTSDIO_OFFSET_BT2HOST_IN,
+            bt2host_out_addr: wlan_ram_base_addr + CYW43439_BTSDIO_OFFSET_BT2HOST_OUT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Cyw43439BluetoothSharedBufferIndex {
+    pub host2bt_in_val: u32,
+    pub host2bt_out_val: u32,
+    pub bt2host_in_val: u32,
+    pub bt2host_out_val: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Cyw43439BluetoothPatchAddrMode {
+    Unknown,
+    Extended,
+    Segment,
+    Linear32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Cyw43439BluetoothPatchState {
+    addr_mode: Cyw43439BluetoothPatchAddrMode,
+    hi_addr: u16,
+    abs_base_addr32: u32,
+}
+
+impl Cyw43439BluetoothPatchState {
+    #[must_use]
+    const fn new() -> Self {
+        Self {
+            addr_mode: Cyw43439BluetoothPatchAddrMode::Unknown,
+            hi_addr: 0,
+            abs_base_addr32: 0,
+        }
+    }
+}
+
+fn round_up_4(value: usize) -> usize {
+    (value + 3) & !3
+}
+
+#[must_use]
+pub fn bt_shared_round_up_4(value: usize) -> usize {
+    round_up_4(value)
+}
+
+pub fn for_each_patch_data_record(
+    patch: &[u8],
+    mut f: impl FnMut(u32, &[u8]) -> Result<(), Cyw43439Error>,
+) -> Result<(), Cyw43439Error> {
+    if patch.is_empty() {
+        return Err(Cyw43439Error::invalid());
+    }
+
+    let version_len = usize::from(patch[0]);
+    let Some(version_end) = version_len.checked_add(1) else {
+        return Err(Cyw43439Error::invalid());
+    };
+    let Some(records_start) = version_end.checked_add(1) else {
+        return Err(Cyw43439Error::invalid());
+    };
+    if records_start > patch.len() || version_end >= patch.len() {
+        return Err(Cyw43439Error::invalid());
+    }
+
+    let mut cursor = records_start;
+    let mut state = Cyw43439BluetoothPatchState::new();
+    while cursor < patch.len() {
+        let record_len = usize::from(patch[cursor]);
+        cursor += 1;
+        if record_len == 0 {
+            break;
+        }
+        if cursor + 3 + record_len > patch.len() {
+            return Err(Cyw43439Error::invalid());
+        }
+        let addr = u16::from_be_bytes([patch[cursor], patch[cursor + 1]]);
+        let record_type = patch[cursor + 2];
+        cursor += 3;
+        let data = &patch[cursor..cursor + record_len];
+        cursor += record_len;
+
+        match record_type {
+            0x00 => {
+                let mut dest_addr = u32::from(addr);
+                match state.addr_mode {
+                    Cyw43439BluetoothPatchAddrMode::Extended => {
+                        dest_addr = dest_addr.saturating_add(u32::from(state.hi_addr) << 16);
+                    }
+                    Cyw43439BluetoothPatchAddrMode::Segment => {
+                        dest_addr = dest_addr.saturating_add(u32::from(state.hi_addr) << 4);
+                    }
+                    Cyw43439BluetoothPatchAddrMode::Linear32 => {
+                        dest_addr = dest_addr.saturating_add(state.abs_base_addr32);
+                    }
+                    Cyw43439BluetoothPatchAddrMode::Unknown => {}
+                }
+                f(dest_addr, data)?;
+            }
+            0x02 => {
+                if data.len() < 2 {
+                    return Err(Cyw43439Error::invalid());
+                }
+                state.hi_addr = u16::from_be_bytes([data[0], data[1]]);
+                state.addr_mode = Cyw43439BluetoothPatchAddrMode::Segment;
+            }
+            0x04 => {
+                if data.len() < 2 {
+                    return Err(Cyw43439Error::invalid());
+                }
+                state.hi_addr = u16::from_be_bytes([data[0], data[1]]);
+                state.addr_mode = Cyw43439BluetoothPatchAddrMode::Extended;
+            }
+            0x05 => {
+                if data.len() < 4 {
+                    return Err(Cyw43439Error::invalid());
+                }
+                state.abs_base_addr32 = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                state.addr_mode = Cyw43439BluetoothPatchAddrMode::Linear32;
+            }
+            0x01 => break,
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 /// Documented Bluetooth-facing host transport for CYW43439.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Cyw43439BluetoothTransport {
@@ -116,6 +291,33 @@ where
         out[1..1 + header_bytes.len()].copy_from_slice(&header_bytes);
         out[1 + header_bytes.len()..1 + body_len].copy_from_slice(parameters);
         out[0] = Cyw43439BluetoothPacketType::Command.as_u8();
+        self.hardware
+            .write_controller_transport(Cyw43439Radio::Bluetooth, &out[..1 + body_len])?;
+        Ok(1 + body_len)
+    }
+
+    /// Encodes and writes one HCI ACL packet with caller-owned scratch storage.
+    pub fn write_acl(
+        &mut self,
+        header: Cyw43439BluetoothAclHeader,
+        payload: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, Cyw43439Error> {
+        if usize::from(header.payload_length) != payload.len() {
+            return Err(Cyw43439Error::invalid());
+        }
+
+        let header_bytes = header.encode();
+        let Some(body_len) = header_bytes.len().checked_add(payload.len()) else {
+            return Err(Cyw43439Error::resource_exhausted());
+        };
+        if out.len() < body_len + 1 {
+            return Err(Cyw43439Error::resource_exhausted());
+        }
+
+        out[0] = Cyw43439BluetoothPacketType::AclData.as_u8();
+        out[1..1 + header_bytes.len()].copy_from_slice(&header_bytes);
+        out[1 + header_bytes.len()..1 + body_len].copy_from_slice(payload);
         self.hardware
             .write_controller_transport(Cyw43439Radio::Bluetooth, &out[..1 + body_len])?;
         Ok(1 + body_len)

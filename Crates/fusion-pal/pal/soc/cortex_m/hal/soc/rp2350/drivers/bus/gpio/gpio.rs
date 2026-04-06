@@ -140,11 +140,11 @@ impl GpioHardwarePinContract for GpioPinHardware {
     }
 
     fn set_function(&mut self, function: GpioFunction) -> Result<(), GpioError> {
-        set_function(self.pin, function)
+        set_function_claimed(self.pin, function)
     }
 
     fn configure_input(&mut self) -> Result<(), GpioError> {
-        configure_input(self.pin)
+        configure_input_claimed(self.pin)
     }
 
     fn read_level(&self) -> Result<bool, GpioError> {
@@ -160,11 +160,11 @@ impl GpioHardwarePinContract for GpioPinHardware {
     }
 
     fn set_pull(&mut self, pull: GpioPull) -> Result<(), GpioError> {
-        set_pull(self.pin, pull)
+        set_pull_claimed(self.pin, pull)
     }
 
     fn set_drive_strength(&mut self, strength: GpioDriveStrength) -> Result<(), GpioError> {
-        set_drive_strength(self.pin, strength)
+        set_drive_strength_claimed(self.pin, strength)
     }
 }
 
@@ -330,6 +330,10 @@ fn set_function_claimed(pin: u8, function: GpioFunction) -> Result<(), GpioError
 
 fn configure_input(pin: u8) -> Result<(), GpioError> {
     validate_pin(pin)?;
+    configure_input_claimed(pin)
+}
+
+fn configure_input_claimed(pin: u8) -> Result<(), GpioError> {
     ensure_bank0_ready()?;
     let pad = pad_register(pin)?;
     let sio_oe_clear = sio_register_mut(RP2350_SIO_GPIO_OE_CLR_OFFSET);
@@ -385,6 +389,10 @@ fn read_claimed(pin: u8) -> Result<bool, GpioError> {
 
 fn set_pull(pin: u8, pull: GpioPull) -> Result<(), GpioError> {
     validate_pin(pin)?;
+    set_pull_claimed(pin, pull)
+}
+
+fn set_pull_claimed(pin: u8, pull: GpioPull) -> Result<(), GpioError> {
     ensure_bank0_ready()?;
     let pad = pad_register(pin)?;
     // SAFETY: this reads and writes one selected-SoC pad-control register.
@@ -403,6 +411,10 @@ fn set_pull(pin: u8, pull: GpioPull) -> Result<(), GpioError> {
 
 fn set_drive_strength(pin: u8, strength: GpioDriveStrength) -> Result<(), GpioError> {
     validate_pin(pin)?;
+    set_drive_strength_claimed(pin, strength)
+}
+
+fn set_drive_strength_claimed(pin: u8, strength: GpioDriveStrength) -> Result<(), GpioError> {
     ensure_bank0_ready()?;
     let pad = pad_register(pin)?;
     let drive_bits = match strength {

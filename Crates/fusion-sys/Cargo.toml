@@ -27,6 +27,7 @@ cortex-m-vector-secure-world = ["fusion-pal/cortex-m-vector-secure-world", "fusi
 cortex-m-vector-nonsecure-world = ["fusion-pal/cortex-m-vector-nonsecure-world", "fusion-pcu/cortex-m-vector-nonsecure-world"]
 
 [dependencies]
+fusion-hal = { workspace = true }
 fusion-pal = { workspace = true }
 fusion-pcu = { workspace = true }
 bitflags.workspace = true

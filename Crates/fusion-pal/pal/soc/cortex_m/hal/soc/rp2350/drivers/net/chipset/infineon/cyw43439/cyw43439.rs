@@ -73,6 +73,7 @@ use fd_net_chipset_infineon_cyw43439::{
         Cyw43439PackedWlanFirmwareImage,
     },
     transport::{
+        wlan::Cyw43439GspiF0Register,
         Cyw43439BluetoothTransport,
         Cyw43439BluetoothTransportClockProfile,
         Cyw43439TransportTopology,
@@ -120,6 +121,13 @@ const PICO2W_CYW43439_WIFI_ONLY_CLM_LEN: usize = 984;
 const PICO2W_CYW43439_WIFI_BT_FW_LEN: usize = 231_077;
 const PICO2W_CYW43439_WIFI_BT_CLM_LEN: usize = 984;
 
+fn force_wifi_only_mode() -> bool {
+    matches!(
+        option_env!("FUSION_CYW43439_WIFI_ONLY"),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Rp2350Cyw43439Binding {
     bluetooth_available: bool,
@@ -138,6 +146,7 @@ struct Rp2350Cyw43439Binding {
     power_gpio: Option<u8>,
     reset_gpio: Option<u8>,
     wake_gpio: Option<u8>,
+    activity_gpio: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -454,6 +463,38 @@ impl Cyw43439HardwareContract for SelectedCyw43439Hardware {
             .with_backend_mut_result(|backend| backend.read_controller_transport(radio, out))
     }
 
+    fn set_driver_activity_indicator(&mut self, active: bool) -> Result<(), Cyw43439Error> {
+        CYW43439_SLOT
+            .with_backend_mut_result(|backend| backend.set_driver_activity_indicator(active))
+    }
+
+    fn progress_host_runtime(&self) {
+        crate::sys::runtime_progress::run_runtime_progress_hook();
+    }
+
+    fn bootstrap_read_wlan_register_swapped_u32(
+        &mut self,
+        register: Cyw43439GspiF0Register,
+    ) -> Result<u32, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_mut_result(|backend| {
+            backend.bootstrap_read_wlan_register_swapped_u32(register)
+        })
+    }
+
+    fn bootstrap_write_wlan_register_swapped_u32(
+        &mut self,
+        register: Cyw43439GspiF0Register,
+        value: u32,
+    ) -> Result<(), Cyw43439Error> {
+        CYW43439_SLOT.with_backend_mut_result(|backend| {
+            backend.bootstrap_write_wlan_register_swapped_u32(register, value)
+        })
+    }
+
+    fn bootstrap_write_raw_bytes(&mut self, payload: &[u8]) -> Result<(), Cyw43439Error> {
+        CYW43439_SLOT.with_backend_mut_result(|backend| backend.bootstrap_write_raw_bytes(payload))
+    }
+
     fn firmware_image(&self, radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error> {
         CYW43439_SLOT.with_backend_result(|backend| backend.firmware_image(radio))
     }
@@ -512,6 +553,7 @@ fn build_shared_backend() -> Result<SharedBackend, Cyw43439Error> {
         binding.firmware,
         binding.bluetooth_available,
         binding.wifi_available,
+        binding.activity_gpio,
     ))
 }
 
@@ -524,10 +566,16 @@ fn claim_optional_pin(
 }
 
 fn cyw43439_binding() -> Result<Rp2350Cyw43439Binding, Cyw43439Error> {
-    let bluetooth = bluetooth_controllers()
-        .iter()
-        .copied()
-        .find(|binding| binding.chip == "CYW43439");
+    // This keeps the differential test local to the RP2350 binding instead of
+    // smearing "pretend Bluetooth does not exist" across higher layers.
+    let bluetooth = if force_wifi_only_mode() {
+        None
+    } else {
+        bluetooth_controllers()
+            .iter()
+            .copied()
+            .find(|binding| binding.chip == "CYW43439")
+    };
     let wifi = wifi_controllers()
         .iter()
         .copied()
@@ -572,6 +620,10 @@ fn cyw43439_binding() -> Result<Rp2350Cyw43439Binding, Cyw43439Error> {
         bluetooth.and_then(|binding| binding.wake_gpio),
         wifi.and_then(|binding| binding.wake_gpio),
     )?;
+    let activity_gpio = merge_optional_u8(
+        bluetooth.and_then(|binding| binding.activity_gpio),
+        wifi.and_then(|binding| binding.activity_gpio),
+    )?;
     let reference_clock_hz = merge_optional_u32(
         bluetooth.and_then(|binding| binding.clock.reference_clock_hz),
         wifi.and_then(|binding| binding.clock.reference_clock_hz),
@@ -604,6 +656,7 @@ fn cyw43439_binding() -> Result<Rp2350Cyw43439Binding, Cyw43439Error> {
         power_gpio,
         reset_gpio,
         wake_gpio,
+        activity_gpio,
     })
 }
 
@@ -732,6 +785,14 @@ fn merge_optional_pin(left: Option<u8>, right: Option<u8>) -> Result<Option<u8>,
 }
 
 fn merge_optional_u32(left: Option<u32>, right: Option<u32>) -> Result<Option<u32>, Cyw43439Error> {
+    match (left, right) {
+        (Some(left), Some(right)) if left != right => Err(Cyw43439Error::unsupported()),
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn merge_optional_u8(left: Option<u8>, right: Option<u8>) -> Result<Option<u8>, Cyw43439Error> {
     match (left, right) {
         (Some(left), Some(right)) if left != right => Err(Cyw43439Error::unsupported()),
         (Some(value), _) | (_, Some(value)) => Ok(Some(value)),

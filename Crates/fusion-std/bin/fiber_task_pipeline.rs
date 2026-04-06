@@ -771,19 +771,23 @@ fn find_library_object(
     let deps_dir = artifact_deps_dir(target_dir, profile, target);
     let entries = fs::read_dir(&deps_dir)
         .map_err(|error| format!("failed to read {}: {error}", deps_dir.display()))?;
-    let mut newest = None::<(SystemTime, PathBuf)>;
+    let mut newest_object = None::<(SystemTime, PathBuf)>;
+    let mut newest_fallback = None::<(SystemTime, PathBuf)>;
     let object_prefix = format!("{crate_name}-");
 
     for entry in entries {
         let entry =
             entry.map_err(|error| format!("failed to scan {}: {error}", deps_dir.display()))?;
         let path = entry.path();
-        let is_fusion_std_object = path.extension().is_some_and(|ext| ext == "o")
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(&object_prefix));
-        if !is_fusion_std_object {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !file_name.starts_with(&object_prefix) {
+            continue;
+        }
+        let is_object = path.extension().is_some_and(|ext| ext == "o");
+        let is_fallback_elf = path.extension().is_none();
+        if !is_object && !is_fallback_elf {
             continue;
         }
 
@@ -791,18 +795,26 @@ fn find_library_object(
             .metadata()
             .and_then(|metadata| metadata.modified())
             .map_err(|error| format!("failed to read metadata for {}: {error}", path.display()))?;
-        match newest {
-            Some((best_modified, _)) if modified <= best_modified => {}
-            _ => newest = Some((modified, path)),
+        let slot = if is_object {
+            &mut newest_object
+        } else {
+            &mut newest_fallback
+        };
+        match slot {
+            Some((best_modified, _)) if modified <= *best_modified => {}
+            _ => *slot = Some((modified, path)),
         }
     }
 
-    newest.map(|(_, path)| path).ok_or_else(|| {
-        format!(
-            "failed to locate `{crate_name}` object artifact under {}",
-            deps_dir.display(),
-        )
-    })
+    newest_object
+        .or(newest_fallback)
+        .map(|(_, path)| path)
+        .ok_or_else(|| {
+            format!(
+                "failed to locate `{crate_name}` object artifact under {}",
+                deps_dir.display(),
+            )
+        })
 }
 
 fn collect_generated_closure_roots(artifact: &Path, crate_name: &str) -> Result<String, String> {

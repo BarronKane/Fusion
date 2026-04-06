@@ -80,6 +80,9 @@ use crate::pal::hosted::windows as platform;
 #[path = "vector_runtime.rs"]
 mod vector_runtime;
 
+#[path = "runtime_progress.rs"]
+pub mod runtime_progress;
+
 /// Public execution-context module re-exported from the selected platform backend.
 pub mod execution_context {
     pub use super::platform::context::{

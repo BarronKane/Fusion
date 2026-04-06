@@ -117,6 +117,7 @@ fn bluetooth_binding_tracks_pico2w_wiring_truth() {
     assert_eq!(controller.power_gpio, Some(23));
     assert_eq!(controller.reset_gpio, None);
     assert_eq!(controller.wake_gpio, None);
+    assert_eq!(controller.activity_gpio, Some(0));
     assert_eq!(controller.clock.reference_clock_hz, Some(37_400_000));
     assert_eq!(controller.clock.sleep_clock_hz, None);
     assert!(matches!(
@@ -145,6 +146,7 @@ fn wifi_binding_tracks_pico2w_wiring_truth() {
     assert_eq!(controller.power_gpio, Some(23));
     assert_eq!(controller.reset_gpio, None);
     assert_eq!(controller.wake_gpio, None);
+    assert_eq!(controller.activity_gpio, Some(0));
     assert_eq!(controller.clock.reference_clock_hz, Some(37_400_000));
     assert_eq!(controller.clock.sleep_clock_hz, None);
     assert!(matches!(

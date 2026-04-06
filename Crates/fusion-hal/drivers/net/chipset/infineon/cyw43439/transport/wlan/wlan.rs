@@ -51,7 +51,9 @@ pub enum Cyw43439WlanTransportClockProfile {
 #[repr(u32)]
 pub enum Cyw43439GspiF0Register {
     BusControl = 0x0000,
+    BusResponseDelay = 0x0001,
     BusStatusControl = 0x0002,
+    BackplaneReset = 0x0003,
     InterruptStatus = 0x0004,
     InterruptEnable = 0x0006,
     Status = 0x0008,
@@ -59,7 +61,10 @@ pub enum Cyw43439GspiF0Register {
     F2Info = 0x000E,
     TestRead = 0x0014,
     TestReadWrite = 0x0018,
-    ResponseDelay = 0x001C,
+    ResponseDelayF0 = 0x001C,
+    ResponseDelayF1 = 0x001D,
+    ResponseDelayF2 = 0x001E,
+    ResponseDelayF3 = 0x001F,
 }
 
 impl Cyw43439GspiF0Register {
@@ -93,13 +98,23 @@ bitflags! {
 bitflags! {
     /// Interrupt/status bits surfaced through F0 `0x0004`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct Cyw43439GspiInterruptStatusFlags: u16 {
+pub struct Cyw43439GspiInterruptStatusFlags: u16 {
         const DATA_NOT_AVAILABLE         = 1 << 0;
         const F2_F3_UNDERFLOW            = 1 << 1;
         const F2_F3_OVERFLOW             = 1 << 2;
+        const COMMAND_ERROR              = 1 << 3;
+        const DATA_ERROR                 = 1 << 4;
         const F2_PACKET_AVAILABLE        = 1 << 5;
         const F3_PACKET_AVAILABLE        = 1 << 6;
         const F1_OVERFLOW                = 1 << 7;
+        const GSPI_PACKET_AVAILABLE      = 1 << 8;
+        const MISC_INTERRUPT1            = 1 << 9;
+        const MISC_INTERRUPT2            = 1 << 10;
+        const MISC_INTERRUPT3            = 1 << 11;
+        const MISC_INTERRUPT4            = 1 << 12;
+        const F1_INTERRUPT               = 1 << 13;
+        const F2_INTERRUPT               = 1 << 14;
+        const F3_INTERRUPT               = 1 << 15;
     }
 }
 
@@ -155,7 +170,7 @@ impl Cyw43439GspiCommand {
     pub const fn read_f0(register: Cyw43439GspiF0Register) -> Self {
         Self {
             write: false,
-            incrementing: false,
+            incrementing: true,
             function: Cyw43439GspiFunction::F0,
             address: register.address(),
             packet_length: 4,
@@ -167,7 +182,7 @@ impl Cyw43439GspiCommand {
     pub const fn write_f0(register: Cyw43439GspiF0Register, payload_length: u16) -> Self {
         Self {
             write: true,
-            incrementing: false,
+            incrementing: true,
             function: Cyw43439GspiFunction::F0,
             address: register.address(),
             packet_length: payload_length,
@@ -281,46 +296,239 @@ pub const CYW43439_GSPI_TEST_PATTERN: u32 = 0xFEED_BEAD;
 pub const CYW43439_GSPI_POST_POWER_ON_POLL_WINDOW_MS: u32 = 50;
 /// Maximum documented wait window after asserting the WLAN wake bit.
 pub const CYW43439_GSPI_WAKE_WAIT_MS: u32 = 15;
+/// Upstream Pico/CYW43 SPI path uses 64-byte backplane write blocks.
+pub const CYW43439_GSPI_BUS_MAX_BLOCK_SIZE: usize = 64;
+/// Upstream Pico/CYW43 SPI path uses a 16-byte response-delay pad for backplane (F1) reads.
+pub const CYW43439_GSPI_BACKPLANE_READ_PAD_LEN_BYTES: usize = 16;
+pub const CYW43439_GSPI_BACKPLANE_ADDRESS_LOW: u32 = 0x1000A;
+pub const CYW43439_GSPI_BACKPLANE_ADDRESS_MID: u32 = 0x1000B;
+pub const CYW43439_GSPI_BACKPLANE_ADDRESS_HIGH: u32 = 0x1000C;
+pub const CYW43439_GSPI_SDIO_CHIP_CLOCK_CSR: u32 = 0x1000E;
+pub const CYW43439_GSPI_SDIO_PULL_UP: u32 = 0x1000F;
+pub const CYW43439_GSPI_CHIPCOMMON_BASE_ADDRESS: u32 = 0x1800_0000;
+pub const CYW43439_GSPI_CHIPCOMMON_GPIOOUT_OFFSET: u32 = 0x64;
+pub const CYW43439_GSPI_CHIPCOMMON_GPIOOUTEN_OFFSET: u32 = 0x68;
+pub const CYW43439_GSPI_CHIPCOMMON_GPIOCONTROL_OFFSET: u32 = 0x6c;
+pub const CYW43439_GSPI_BACKPLANE_ADDR_MASK: u32 = 0x7FFF;
+pub const CYW43439_GSPI_BACKPLANE_ACCESS_2_4B_FLAG: u32 = 0x08000;
+pub const CYW43439_GSPI_SDIO_FUNCTION2_WATERMARK: u32 = 0x10008;
+pub const CYW43439_GSPI_SDIO_INT_HOST_MASK: u32 = 0x1800_2024;
+pub const CYW43439_GSPI_SDIO_WAKEUP_CTRL: u32 = 0x1001e;
+pub const CYW43439_GSPI_SDIO_SLEEP_CSR: u32 = 0x1001f;
+pub const CYW43439_GSPI_SDIOD_CCCR_BRCM_CARDCAP: u32 = 0x00F0;
+pub const CYW43439_GSPI_WLAN_ARMCM3_BASE_ADDRESS: u32 = 0x1800_3000;
+pub const CYW43439_GSPI_SOCSRAM_BASE_ADDRESS: u32 = 0x1800_4000;
+pub const CYW43439_GSPI_WRAPPER_REGISTER_OFFSET: u32 = 0x100000;
+pub const CYW43439_GSPI_SOCSRAM_BANKX_INDEX: u32 = CYW43439_GSPI_SOCSRAM_BASE_ADDRESS + 0x10;
+pub const CYW43439_GSPI_SOCSRAM_BANKX_PDA: u32 = CYW43439_GSPI_SOCSRAM_BASE_ADDRESS + 0x44;
+pub const CYW43439_GSPI_AI_IOCTRL_OFFSET: u32 = 0x408;
+pub const CYW43439_GSPI_AI_RESETCTRL_OFFSET: u32 = 0x800;
+pub const CYW43439_GSPI_SICF_CLOCK_EN: u8 = 0x01;
+pub const CYW43439_GSPI_SICF_FGC: u8 = 0x02;
+pub const CYW43439_GSPI_SICF_CPUHALT: u8 = 0x20;
+pub const CYW43439_GSPI_AIRC_RESET: u8 = 0x01;
+pub const CYW43439_GSPI_SBSDIO_ALP_AVAIL_REQ: u8 = 0x08;
+pub const CYW43439_GSPI_SBSDIO_FORCE_HT: u8 = 0x02;
+pub const CYW43439_GSPI_SBSDIO_HT_AVAIL_REQ: u8 = 0x10;
+pub const CYW43439_GSPI_SBSDIO_ALP_AVAIL: u8 = 0x40;
+pub const CYW43439_GSPI_SBSDIO_HT_AVAIL: u8 = 0x80;
+pub const CYW43439_GSPI_SBSDIO_WCTRL_WAKE_TILL_HT_AVAIL: u8 = 1 << 1;
+pub const CYW43439_GSPI_SBSDIO_SLPCSR_KEEP_SDIO_ON: u8 = 1 << 0;
+pub const CYW43439_GSPI_SBSDIO_SLPCSR_DEVICE_ON: u8 = 1 << 1;
+pub const CYW43439_GSPI_SDIOD_CCCR_BRCM_CARDCAP_CMD_NODEC: u8 = 0x08;
+pub const CYW43439_GSPI_I_HMB_SW_MASK: u32 = 0x0000_00f0;
+pub const CYW43439_GSPI_I_HMB_FC_CHANGE: u32 = 1 << 5;
+pub const CYW43439_GSPI_SPI_F2_WATERMARK: u8 = 32;
+pub const CYW43439_RAM_SIZE_BYTES: u32 = 512 * 1024;
 
 /// One acquired WLAN transport lease over a CYW43439 hardware substrate.
 #[derive(Debug)]
 pub struct Cyw43439WlanTransportLease<'a, H: Cyw43439HardwareContract> {
     hardware: &'a mut H,
+    // Firmware download advances linearly through RAM, so reprogramming the
+    // 32 KiB backplane window on every 64-byte chunk is pure transport tax.
+    current_backplane_window: Option<u32>,
 }
 
 impl<'a, H> Cyw43439WlanTransportLease<'a, H>
 where
     H: Cyw43439HardwareContract,
 {
+    fn write_function_bytes(
+        &mut self,
+        function: Cyw43439GspiFunction,
+        address: u32,
+        payload: &[u8],
+    ) -> Result<(), Cyw43439Error> {
+        if payload.is_empty() || payload.len() > CYW43439_GSPI_BUS_MAX_BLOCK_SIZE {
+            return Err(Cyw43439Error::invalid());
+        }
+        let packet_length = u16::try_from(payload.len()).map_err(|_| Cyw43439Error::invalid())?;
+        let command = Cyw43439GspiCommand {
+            write: true,
+            incrementing: true,
+            function,
+            address,
+            packet_length,
+        }
+        .encode()
+        .ok_or_else(Cyw43439Error::invalid)?;
+        let aligned_len = (payload.len() + 3) & !3;
+        let mut scratch = [0_u8; 4 + CYW43439_GSPI_BUS_MAX_BLOCK_SIZE];
+        scratch[..4].copy_from_slice(&command.to_le_bytes());
+        scratch[4..4 + payload.len()].copy_from_slice(payload);
+        self.hardware
+            .write_controller_transport(Cyw43439Radio::Wifi, &scratch[..4 + aligned_len])
+    }
+
+    fn set_backplane_window(&mut self, address: u32) -> Result<(), Cyw43439Error> {
+        let window = address & !CYW43439_GSPI_BACKPLANE_ADDR_MASK;
+        if self.current_backplane_window == Some(window) {
+            return Ok(());
+        }
+        self.write_register_word(
+            Cyw43439GspiFunction::F1,
+            CYW43439_GSPI_BACKPLANE_ADDRESS_HIGH,
+            1,
+            (window >> 24) & 0xff,
+        )?;
+        self.write_register_word(
+            Cyw43439GspiFunction::F1,
+            CYW43439_GSPI_BACKPLANE_ADDRESS_MID,
+            1,
+            (window >> 16) & 0xff,
+        )?;
+        self.write_register_word(
+            Cyw43439GspiFunction::F1,
+            CYW43439_GSPI_BACKPLANE_ADDRESS_LOW,
+            1,
+            (window >> 8) & 0xff,
+        )?;
+        self.current_backplane_window = Some(window);
+        Ok(())
+    }
+
+    fn read_register_bytes(
+        &mut self,
+        function: Cyw43439GspiFunction,
+        address: u32,
+        len: usize,
+        out: &mut [u8],
+    ) -> Result<(), Cyw43439Error> {
+        if len == 0 || len > out.len() || len > 4 {
+            return Err(Cyw43439Error::invalid());
+        }
+        let packet_length = u16::try_from(len).map_err(|_| Cyw43439Error::invalid())?;
+        let command = Cyw43439GspiCommand {
+            write: false,
+            incrementing: true,
+            function,
+            address,
+            packet_length,
+        }
+        .encode()
+        .ok_or_else(Cyw43439Error::invalid)?;
+        self.hardware
+            .write_controller_transport(Cyw43439Radio::Wifi, &command.to_le_bytes())?;
+
+        let padding = if matches!(function, Cyw43439GspiFunction::F1) {
+            CYW43439_GSPI_BACKPLANE_READ_PAD_LEN_BYTES
+        } else {
+            0
+        };
+        let aligned_len = (len + 3) & !3;
+        let mut scratch = [0_u8; CYW43439_GSPI_BACKPLANE_READ_PAD_LEN_BYTES + 4];
+        let transfer_len = padding + aligned_len;
+        let read = self
+            .hardware
+            .read_controller_transport(Cyw43439Radio::Wifi, &mut scratch[..transfer_len])?;
+        if read != transfer_len {
+            return Err(Cyw43439Error::invalid());
+        }
+        out[..len].copy_from_slice(&scratch[padding..padding + len]);
+        Ok(())
+    }
+
+    fn write_register_word(
+        &mut self,
+        function: Cyw43439GspiFunction,
+        address: u32,
+        packet_length: u16,
+        value: u32,
+    ) -> Result<(), Cyw43439Error> {
+        let command = Cyw43439GspiCommand {
+            write: true,
+            incrementing: true,
+            function,
+            address,
+            packet_length,
+        }
+        .encode()
+        .ok_or_else(Cyw43439Error::invalid)?;
+        let mut payload = [0_u8; 8];
+        payload[..4].copy_from_slice(&command.to_le_bytes());
+        payload[4..].copy_from_slice(&value.to_le_bytes());
+        self.hardware
+            .write_controller_transport(Cyw43439Radio::Wifi, &payload)
+    }
+
     /// Acquires one WLAN transport lease from the underlying hardware substrate.
     pub fn acquire(hardware: &'a mut H) -> Result<Self, Cyw43439Error> {
         hardware.acquire_transport(Cyw43439Radio::Wifi)?;
-        Ok(Self { hardware })
+        Ok(Self {
+            hardware,
+            current_backplane_window: None,
+        })
+    }
+
+    /// Issues one substrate-backed millisecond delay while this transport lease is held.
+    pub fn delay_ms(&self, milliseconds: u32) {
+        self.hardware.delay_ms(milliseconds);
+    }
+
+    /// Gives the host one best-effort chance to progress local cooperative runtime work.
+    pub fn progress_host_runtime(&self) {
+        self.hardware.progress_host_runtime();
     }
 
     /// Reads one 32-bit F0 register value.
     pub fn read_f0_u32(&mut self, register: Cyw43439GspiF0Register) -> Result<u32, Cyw43439Error> {
-        let command = Cyw43439GspiCommand::read_f0(register)
-            .encode()
-            .ok_or_else(Cyw43439Error::invalid)?;
-        self.hardware
-            .write_controller_transport(Cyw43439Radio::Wifi, &command.to_le_bytes())?;
-
         let mut out = [0_u8; 4];
-        let read = self
-            .hardware
-            .read_controller_transport(Cyw43439Radio::Wifi, &mut out)?;
-        if read != out.len() {
-            return Err(Cyw43439Error::invalid());
-        }
-
+        self.read_register_bytes(
+            Cyw43439GspiFunction::F0,
+            register.address(),
+            out.len(),
+            &mut out,
+        )?;
         Ok(u32::from_le_bytes(out))
+    }
+
+    /// Reads one 8-bit F0 register value.
+    pub fn read_f0_u8(&mut self, register: Cyw43439GspiF0Register) -> Result<u8, Cyw43439Error> {
+        let mut out = [0_u8; 1];
+        self.read_register_bytes(Cyw43439GspiFunction::F0, register.address(), 1, &mut out)?;
+        Ok(out[0])
     }
 
     /// Reads one 16-bit F0 register value.
     pub fn read_f0_u16(&mut self, register: Cyw43439GspiF0Register) -> Result<u16, Cyw43439Error> {
-        let raw = self.read_f0_u32(register)?;
-        Ok((raw & 0xffff) as u16)
+        let mut out = [0_u8; 2];
+        self.read_register_bytes(Cyw43439GspiFunction::F0, register.address(), 2, &mut out)?;
+        Ok(u16::from_le_bytes(out))
+    }
+
+    /// Writes one 8-bit F0 register value.
+    pub fn write_f0_u8(
+        &mut self,
+        register: Cyw43439GspiF0Register,
+        value: u8,
+    ) -> Result<(), Cyw43439Error> {
+        self.write_register_word(
+            Cyw43439GspiFunction::F0,
+            register.address(),
+            1,
+            value as u32,
+        )
     }
 
     /// Writes one 16-bit F0 register value.
@@ -329,14 +537,12 @@ where
         register: Cyw43439GspiF0Register,
         value: u16,
     ) -> Result<(), Cyw43439Error> {
-        let command = Cyw43439GspiCommand::write_f0(register, 2)
-            .encode()
-            .ok_or_else(Cyw43439Error::invalid)?;
-        let mut payload = [0_u8; 6];
-        payload[..4].copy_from_slice(&command.to_le_bytes());
-        payload[4..].copy_from_slice(&value.to_le_bytes());
-        self.hardware
-            .write_controller_transport(Cyw43439Radio::Wifi, &payload)
+        self.write_register_word(
+            Cyw43439GspiFunction::F0,
+            register.address(),
+            2,
+            value as u32,
+        )
     }
 
     /// Writes one 32-bit F0 register value.
@@ -345,20 +551,126 @@ where
         register: Cyw43439GspiF0Register,
         value: u32,
     ) -> Result<(), Cyw43439Error> {
-        let command = Cyw43439GspiCommand::write_f0(register, 4)
-            .encode()
-            .ok_or_else(Cyw43439Error::invalid)?;
-        let mut payload = [0_u8; 8];
-        payload[..4].copy_from_slice(&command.to_le_bytes());
-        payload[4..].copy_from_slice(&value.to_le_bytes());
-        self.hardware
-            .write_controller_transport(Cyw43439Radio::Wifi, &payload)
+        self.write_register_word(Cyw43439GspiFunction::F0, register.address(), 4, value)
+    }
+
+    /// Reads one raw function-0 bus register value outside the fixed F0 enum.
+    pub fn read_bus_u8(&mut self, address: u32) -> Result<u8, Cyw43439Error> {
+        let mut out = [0_u8; 1];
+        self.read_register_bytes(Cyw43439GspiFunction::F0, address, 1, &mut out)?;
+        Ok(out[0])
+    }
+
+    /// Writes one raw function-0 bus register value outside the fixed F0 enum.
+    pub fn write_bus_u8(&mut self, address: u32, value: u8) -> Result<(), Cyw43439Error> {
+        self.write_register_word(Cyw43439GspiFunction::F0, address, 1, value as u32)
+    }
+
+    /// Reads one direct function-1 register without backplane window translation.
+    pub fn read_f1_u8(&mut self, address: u32) -> Result<u8, Cyw43439Error> {
+        let mut out = [0_u8; 1];
+        self.read_register_bytes(Cyw43439GspiFunction::F1, address, 1, &mut out)?;
+        Ok(out[0])
+    }
+
+    /// Writes one direct function-1 register without backplane window translation.
+    pub fn write_f1_u8(&mut self, address: u32, value: u8) -> Result<(), Cyw43439Error> {
+        self.write_register_word(Cyw43439GspiFunction::F1, address, 1, value as u32)
+    }
+
+    /// Reads one 8-bit backplane register value via F1.
+    pub fn read_backplane_u8(&mut self, address: u32) -> Result<u8, Cyw43439Error> {
+        let mut out = [0_u8; 1];
+        self.set_backplane_window(address)?;
+        let register = (address & CYW43439_GSPI_BACKPLANE_ADDR_MASK)
+            | CYW43439_GSPI_BACKPLANE_ACCESS_2_4B_FLAG;
+        self.read_register_bytes(Cyw43439GspiFunction::F1, register, 1, &mut out)?;
+        Ok(out[0])
+    }
+
+    /// Reads one 32-bit backplane register value via F1.
+    pub fn read_backplane_u32(&mut self, address: u32) -> Result<u32, Cyw43439Error> {
+        let mut out = [0_u8; 4];
+        self.set_backplane_window(address)?;
+        let register = (address & CYW43439_GSPI_BACKPLANE_ADDR_MASK)
+            | CYW43439_GSPI_BACKPLANE_ACCESS_2_4B_FLAG;
+        self.read_register_bytes(Cyw43439GspiFunction::F1, register, 4, &mut out)?;
+        Ok(u32::from_le_bytes(out))
+    }
+
+    /// Reads an arbitrary backplane byte slice via F1 in SPI-sized chunks.
+    pub fn read_backplane_bytes(
+        &mut self,
+        mut address: u32,
+        mut out: &mut [u8],
+    ) -> Result<(), Cyw43439Error> {
+        while !out.is_empty() {
+            let offset_in_window = (address & CYW43439_GSPI_BACKPLANE_ADDR_MASK) as usize;
+            let remaining_in_window =
+                (CYW43439_GSPI_BACKPLANE_ADDR_MASK as usize + 1).saturating_sub(offset_in_window);
+            let chunk_len = out
+                .len()
+                .min(CYW43439_GSPI_BUS_MAX_BLOCK_SIZE)
+                .min(remaining_in_window);
+            self.set_backplane_window(address)?;
+            let register = (address & CYW43439_GSPI_BACKPLANE_ADDR_MASK)
+                | CYW43439_GSPI_BACKPLANE_ACCESS_2_4B_FLAG;
+            self.read_register_bytes(
+                Cyw43439GspiFunction::F1,
+                register,
+                chunk_len,
+                &mut out[..chunk_len],
+            )?;
+            address += chunk_len as u32;
+            out = &mut out[chunk_len..];
+        }
+        Ok(())
+    }
+
+    /// Writes one 8-bit backplane register value via F1.
+    pub fn write_backplane_u8(&mut self, address: u32, value: u8) -> Result<(), Cyw43439Error> {
+        self.set_backplane_window(address)?;
+        let register = (address & CYW43439_GSPI_BACKPLANE_ADDR_MASK)
+            | CYW43439_GSPI_BACKPLANE_ACCESS_2_4B_FLAG;
+        self.write_register_word(Cyw43439GspiFunction::F1, register, 1, value as u32)
+    }
+
+    /// Writes one 32-bit backplane register value via F1.
+    pub fn write_backplane_u32(&mut self, address: u32, value: u32) -> Result<(), Cyw43439Error> {
+        self.set_backplane_window(address)?;
+        let register = (address & CYW43439_GSPI_BACKPLANE_ADDR_MASK)
+            | CYW43439_GSPI_BACKPLANE_ACCESS_2_4B_FLAG;
+        self.write_register_word(Cyw43439GspiFunction::F1, register, 4, value)
+    }
+
+    /// Writes an arbitrary backplane byte slice via F1 in SPI-sized chunks.
+    pub fn write_backplane_bytes(
+        &mut self,
+        mut address: u32,
+        mut payload: &[u8],
+    ) -> Result<(), Cyw43439Error> {
+        while !payload.is_empty() {
+            let offset_in_window = (address & CYW43439_GSPI_BACKPLANE_ADDR_MASK) as usize;
+            let remaining_in_window =
+                (CYW43439_GSPI_BACKPLANE_ADDR_MASK as usize + 1).saturating_sub(offset_in_window);
+            let chunk_len = payload
+                .len()
+                .min(CYW43439_GSPI_BUS_MAX_BLOCK_SIZE)
+                .min(remaining_in_window);
+            self.set_backplane_window(address)?;
+            let register = (address & CYW43439_GSPI_BACKPLANE_ADDR_MASK)
+                | CYW43439_GSPI_BACKPLANE_ACCESS_2_4B_FLAG;
+            self.write_function_bytes(Cyw43439GspiFunction::F1, register, &payload[..chunk_len])?;
+            address += chunk_len as u32;
+            payload = &payload[chunk_len..];
+        }
+        Ok(())
     }
 
     /// Reads the gSPI bus-control register.
     pub fn read_bus_control(&mut self) -> Result<Cyw43439GspiBusControlFlags, Cyw43439Error> {
         Ok(Cyw43439GspiBusControlFlags::from_bits_retain(
-            self.read_f0_u16(Cyw43439GspiF0Register::BusControl)?,
+            (self.read_f0_u32(Cyw43439GspiF0Register::BusControl)? & 0xffff) as u16,
         ))
     }
 
@@ -449,6 +761,8 @@ mod tests {
     };
 
     use super::CYW43439_GSPI_TEST_PATTERN;
+    use super::CYW43439_GSPI_BACKPLANE_READ_PAD_LEN_BYTES;
+    use super::CYW43439_GSPI_SDIO_CHIP_CLOCK_CSR;
     use super::Cyw43439GspiBusControlFlags;
     use super::Cyw43439GspiCommand;
     use super::Cyw43439GspiF0Register;
@@ -716,11 +1030,13 @@ mod tests {
         let read = Cyw43439GspiCommand::read_f0(Cyw43439GspiF0Register::TestRead);
         assert_eq!(read.function, Cyw43439GspiFunction::F0);
         assert!(!read.write);
+        assert!(read.incrementing);
         assert_eq!(read.address, Cyw43439GspiF0Register::TestRead.address());
         assert_eq!(read.packet_length, 4);
 
         let write = Cyw43439GspiCommand::write_f0(Cyw43439GspiF0Register::BusControl, 2);
         assert!(write.write);
+        assert!(write.incrementing);
         assert_eq!(write.address, Cyw43439GspiF0Register::BusControl.address());
         assert_eq!(write.packet_length, 2);
     }
@@ -780,7 +1096,7 @@ mod tests {
             .unwrap()
             .to_le_bytes();
         let mut expected = Vec::from(command);
-        expected.extend_from_slice(&flags.bits().to_le_bytes());
+        expected.extend_from_slice(&(flags.bits() as u32).to_le_bytes());
         assert_eq!(hardware.writes, [expected]);
     }
 
@@ -812,5 +1128,46 @@ mod tests {
         assert!(info.enabled);
         assert!(info.ready);
         assert_eq!(info.max_packet_size, 0x0800);
+    }
+
+    #[test]
+    fn read_backplane_u8_discards_response_padding() {
+        let mut payload = [0_u8; CYW43439_GSPI_BACKPLANE_READ_PAD_LEN_BYTES + 4];
+        payload[CYW43439_GSPI_BACKPLANE_READ_PAD_LEN_BYTES] = 0x7f;
+        let mut hardware = FakeHardware::with_reads([payload.to_vec()]);
+        let value = {
+            let mut lease = Cyw43439WlanTransportLease::acquire(&mut hardware).unwrap();
+            lease
+                .read_backplane_u8(CYW43439_GSPI_SDIO_CHIP_CLOCK_CSR)
+                .unwrap()
+        };
+
+        assert_eq!(value, 0x7f);
+        assert_eq!(hardware.writes.len(), 4);
+    }
+
+    #[test]
+    fn read_f1_u8_uses_direct_function_register_access() {
+        let mut payload = [0_u8; CYW43439_GSPI_BACKPLANE_READ_PAD_LEN_BYTES + 4];
+        payload[CYW43439_GSPI_BACKPLANE_READ_PAD_LEN_BYTES] = 0x80;
+        let mut hardware = FakeHardware::with_reads([payload.to_vec()]);
+        let value = {
+            let mut lease = Cyw43439WlanTransportLease::acquire(&mut hardware).unwrap();
+            lease.read_f1_u8(CYW43439_GSPI_SDIO_CHIP_CLOCK_CSR).unwrap()
+        };
+
+        assert_eq!(value, 0x80);
+        let expected = Cyw43439GspiCommand {
+            write: false,
+            incrementing: true,
+            function: Cyw43439GspiFunction::F1,
+            address: CYW43439_GSPI_SDIO_CHIP_CLOCK_CSR,
+            packet_length: 1,
+        }
+        .encode()
+        .unwrap()
+        .to_le_bytes()
+        .to_vec();
+        assert_eq!(hardware.writes, [expected]);
     }
 }

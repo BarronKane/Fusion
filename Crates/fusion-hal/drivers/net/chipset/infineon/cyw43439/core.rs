@@ -14,6 +14,7 @@ use crate::firmware::{
     Cyw43439BluetoothFirmwareAssets,
     Cyw43439WlanFirmwareAssets,
 };
+use crate::boot::Cyw43439Bootstrap;
 use crate::interface::{
     backend::UnsupportedBackend,
     contract::{
@@ -45,10 +46,10 @@ pub(crate) enum Cyw43439ChipState {
 /// The host-side transport profile currently surfaced by one CYW43439 chipset binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Cyw43439TransportProfile {
-    pub bluetooth: Cyw43439BluetoothTransport,
-    pub bluetooth_clock: Cyw43439BluetoothTransportClockProfile,
-    pub wifi: Cyw43439WlanTransport,
-    pub wifi_clock: Cyw43439WlanTransportClockProfile,
+    pub bluetooth: Option<Cyw43439BluetoothTransport>,
+    pub bluetooth_clock: Option<Cyw43439BluetoothTransportClockProfile>,
+    pub wifi: Option<Cyw43439WlanTransport>,
+    pub wifi_clock: Option<Cyw43439WlanTransportClockProfile>,
     pub topology: Cyw43439TransportTopology,
 }
 
@@ -76,8 +77,9 @@ pub(crate) struct Cyw43439BootReadiness {
 /// Shared internal CYW43439 chipset wrapper used by the Bluetooth and Wi-Fi driver facets.
 #[derive(Debug)]
 pub(crate) struct Cyw43439Chipset<H: Cyw43439HardwareContract = UnsupportedBackend> {
-    hardware: H,
+    pub(crate) hardware: H,
     state: Cyw43439ChipState,
+    activity_depth: u32,
 }
 
 impl<H> Cyw43439Chipset<H>
@@ -90,7 +92,11 @@ where
             Ok(true) => Cyw43439ChipState::Powered,
             _ => Cyw43439ChipState::Cold,
         };
-        Self { hardware, state }
+        Self {
+            hardware,
+            state,
+            activity_depth: 0,
+        }
     }
 
     #[allow(dead_code)]
@@ -102,10 +108,12 @@ where
     #[allow(dead_code)]
     pub(crate) fn transport_profile(&self) -> Result<Cyw43439TransportProfile, Cyw43439Error> {
         Ok(Cyw43439TransportProfile {
-            bluetooth: self.hardware.bluetooth_transport()?,
-            bluetooth_clock: self.hardware.bluetooth_transport_clock_profile()?,
-            wifi: self.hardware.wifi_transport()?,
-            wifi_clock: self.hardware.wifi_transport_clock_profile()?,
+            bluetooth: optional_transport_profile(self.hardware.bluetooth_transport())?,
+            bluetooth_clock: optional_transport_profile(
+                self.hardware.bluetooth_transport_clock_profile(),
+            )?,
+            wifi: optional_transport_profile(self.hardware.wifi_transport())?,
+            wifi_clock: optional_transport_profile(self.hardware.wifi_transport_clock_profile())?,
             topology: self.hardware.transport_topology()?,
         })
     }
@@ -196,6 +204,34 @@ where
         self.state = Cyw43439ChipState::LowPower;
     }
 
+    pub(crate) fn begin_driver_activity(&mut self) {
+        self.activity_depth = self.activity_depth.saturating_add(1);
+        let _ = self.hardware.set_driver_activity_indicator(true);
+    }
+
+    pub(crate) fn end_driver_activity(&mut self) {
+        self.activity_depth = self.activity_depth.saturating_sub(1);
+        let _ = self
+            .hardware
+            .set_driver_activity_indicator(self.activity_depth != 0);
+    }
+
+    pub(crate) fn sync_driver_activity_indicator(&mut self) {
+        let _ = self
+            .hardware
+            .set_driver_activity_indicator(self.activity_depth != 0);
+    }
+
+    pub(crate) fn with_driver_activity<T, E>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.begin_driver_activity();
+        let result = f(self);
+        self.end_driver_activity();
+        result
+    }
+
     #[must_use]
     pub(crate) fn bluetooth_support(&self) -> BluetoothSupport {
         self.hardware.bluetooth_support()
@@ -251,11 +287,41 @@ where
     }
 
     pub(crate) fn set_bluetooth_enabled(&mut self, enabled: bool) -> Result<(), BluetoothError> {
-        self.hardware
-            .set_facet_enabled(Cyw43439Radio::Bluetooth, enabled)
-            .map_err(map_bluetooth_error)?;
-        self.refresh_power_state_from_hardware();
-        Ok(())
+        self.with_driver_activity(|this| {
+            this.hardware
+                .set_facet_enabled(Cyw43439Radio::Bluetooth, enabled)
+                .map_err(map_bluetooth_error)?;
+            if enabled
+                && matches!(
+                    this.transport_profile()
+                        .map_err(map_bluetooth_error)?
+                        .bluetooth,
+                    Some(Cyw43439BluetoothTransport::BoardSharedSpiHci)
+                )
+            {
+                let runtime_ready = match Cyw43439Bootstrap::ensure_wlan_runtime_ready(this) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == Cyw43439ErrorKind::StateConflict => {
+                        this.hardware
+                            .claim_controller(Cyw43439Radio::Wifi)
+                            .map_err(map_bluetooth_error)?;
+                        let retry = Cyw43439Bootstrap::ensure_wlan_runtime_ready(this);
+                        this.hardware.release_controller(Cyw43439Radio::Wifi);
+                        retry
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = runtime_ready {
+                    let _ = this
+                        .hardware
+                        .set_facet_enabled(Cyw43439Radio::Bluetooth, false);
+                    this.refresh_power_state_from_hardware();
+                    return Err(map_bluetooth_error(error));
+                }
+            }
+            this.refresh_power_state_from_hardware();
+            Ok(())
+        })
     }
 
     pub(crate) fn wifi_enabled(&self) -> Result<bool, WifiError> {
@@ -265,11 +331,20 @@ where
     }
 
     pub(crate) fn set_wifi_enabled(&mut self, enabled: bool) -> Result<(), WifiError> {
-        self.hardware
-            .set_facet_enabled(Cyw43439Radio::Wifi, enabled)
-            .map_err(map_wifi_error)?;
-        self.refresh_power_state_from_hardware();
-        Ok(())
+        self.with_driver_activity(|this| {
+            this.hardware
+                .set_facet_enabled(Cyw43439Radio::Wifi, enabled)
+                .map_err(map_wifi_error)?;
+            if enabled {
+                if let Err(error) = Cyw43439Bootstrap::ensure_wlan_runtime_ready(this) {
+                    let _ = this.hardware.set_facet_enabled(Cyw43439Radio::Wifi, false);
+                    this.refresh_power_state_from_hardware();
+                    return Err(map_wifi_error(error));
+                }
+            }
+            this.refresh_power_state_from_hardware();
+            Ok(())
+        })
     }
 }
 
@@ -324,6 +399,16 @@ pub(crate) fn map_wifi_error(error: Cyw43439Error) -> WifiError {
         Cyw43439ErrorKind::ResourceExhausted => WifiError::resource_exhausted(),
         Cyw43439ErrorKind::StateConflict => WifiError::state_conflict(),
         Cyw43439ErrorKind::Platform(code) => WifiError::platform(code),
+    }
+}
+
+fn optional_transport_profile<T>(
+    result: Result<T, Cyw43439Error>,
+) -> Result<Option<T>, Cyw43439Error> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if matches!(error.kind(), Cyw43439ErrorKind::Unsupported) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -607,21 +692,24 @@ mod tests {
         let chipset = Cyw43439Chipset::new(FakeHardware::new());
 
         let profile = chipset.transport_profile().unwrap();
-        assert_eq!(profile.bluetooth, Cyw43439BluetoothTransport::HciUartH4);
+        assert_eq!(
+            profile.bluetooth,
+            Some(Cyw43439BluetoothTransport::HciUartH4)
+        );
         assert_eq!(
             profile.bluetooth_clock,
-            Cyw43439BluetoothTransportClockProfile::HciUart {
+            Some(Cyw43439BluetoothTransportClockProfile::HciUart {
                 target_baud: Some(3_000_000),
                 host_source_clock_hz: Some(150_000_000),
-            }
+            })
         );
-        assert_eq!(profile.wifi, Cyw43439WlanTransport::Gspi);
+        assert_eq!(profile.wifi, Some(Cyw43439WlanTransport::Gspi));
         assert_eq!(
             profile.wifi_clock,
-            Cyw43439WlanTransportClockProfile::Gspi {
+            Some(Cyw43439WlanTransportClockProfile::Gspi {
                 target_clock_hz: Some(31_250_000),
                 host_source_clock_hz: Some(150_000_000),
-            }
+            })
         );
         assert_eq!(
             profile.topology,

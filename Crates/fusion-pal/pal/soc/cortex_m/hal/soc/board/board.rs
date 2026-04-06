@@ -363,6 +363,8 @@ pub struct CortexMBluetoothControllerBinding {
     pub reset_gpio: Option<u8>,
     /// Optional wake GPIO controlled by the Cortex-M host.
     pub wake_gpio: Option<u8>,
+    /// Optional controller-internal GPIO surfaced by the module itself for activity indication.
+    pub activity_gpio: Option<u8>,
     /// Controller clock truth surfaced by the board.
     pub clock: CortexMControllerClockProfile,
     /// Controller asset sources surfaced by the board.
@@ -386,6 +388,8 @@ pub struct CortexMWifiControllerBinding {
     pub reset_gpio: Option<u8>,
     /// Optional wake GPIO controlled by the Cortex-M host.
     pub wake_gpio: Option<u8>,
+    /// Optional controller-internal GPIO surfaced by the module itself for activity indication.
+    pub activity_gpio: Option<u8>,
     /// Controller clock truth surfaced by the board.
     pub clock: CortexMControllerClockProfile,
     /// Controller asset sources surfaced by the board.

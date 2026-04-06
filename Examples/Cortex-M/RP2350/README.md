@@ -3,6 +3,7 @@
 - [MinimalLed](/volumes/projects/rust/fusion/Examples/Cortex-M/RP2350/MinimalLed): minimal LED example with fibers + async
 - [Benchmark](/volumes/projects/rust/fusion/Examples/Cortex-M/RP2350/Benchmark): dedicated on-device benchmark firmware
 - [Display](/volumes/projects/rust/fusion/Examples/Cortex-M/RP2350/Display): seven-segment display example using chained `74HC595`s
+- [DebugChannel](/volumes/projects/rust/fusion/Examples/Cortex-M/RP2350/DebugChannel): cloned display example reserved for aggressive channel/fiber debugging and experimentation
 
 Workspace-root helpers:
 
@@ -10,6 +11,7 @@ Workspace-root helpers:
 cargo pico-build
 cargo pico-flash -- --release
 cargo pico-display-flash -- --release
+cargo pico-debug-channel-flash -- --release
 cargo pico-benchmark -- --release
 ```
 

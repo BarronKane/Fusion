@@ -2,6 +2,8 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[path = "boot/boot.rs"]
+mod boot;
 mod core;
 
 #[path = "bluetooth/bluetooth.rs"]

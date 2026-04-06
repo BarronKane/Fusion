@@ -28,6 +28,8 @@ use fusion_hal::contract::drivers::net::bluetooth::{
     BluetoothAttClientContract,
     BluetoothBaseContract,
     BluetoothBondState,
+    BluetoothCanonicalFrame,
+    BluetoothCanonicalFrameControlContract,
     BluetoothConnectionControlContract,
     BluetoothConnectionDescriptor,
     BluetoothConnectionId,
@@ -56,15 +58,23 @@ use fusion_hal::contract::drivers::net::bluetooth::{
     BluetoothScanningControlContract,
     BluetoothSecurityControlContract,
     BluetoothSupport,
+    BluetoothHciAclFrame,
+    BluetoothHciCommandFrame,
+    BluetoothHciEventFrame,
+    BluetoothHciFrame,
+    BluetoothHciFrameView,
+    BluetoothHciPacketType,
 };
 use crate::{
     core::{
         Cyw43439Chipset,
     },
+    transport::bluetooth::Cyw43439BluetoothTransportLease,
     interface::{
         backend::UnsupportedBackend,
         contract::{
             Cyw43439HardwareContract,
+            Cyw43439Radio,
         },
     },
 };
@@ -294,6 +304,126 @@ where
     fn unsupported<T>() -> Result<T, BluetoothError> {
         Err(BluetoothError::unsupported())
     }
+
+    fn send_hci_frame(
+        &mut self,
+        frame: BluetoothHciFrameView<'_>,
+        scratch: &mut [u8],
+    ) -> Result<(), BluetoothError> {
+        self.chipset.with_driver_activity(|chipset| {
+            let mut transport = Cyw43439BluetoothTransportLease::acquire(&mut chipset.hardware)
+                .map_err(crate::core::map_bluetooth_error)?;
+            match frame {
+                BluetoothHciFrameView::Command(BluetoothHciCommandFrame { header, parameters }) => {
+                    transport
+                        .write_command(header, parameters, scratch)
+                        .map_err(crate::core::map_bluetooth_error)?;
+                    Ok(())
+                }
+                BluetoothHciFrameView::Acl(BluetoothHciAclFrame { header, payload }) => {
+                    transport
+                        .write_acl(header, payload, scratch)
+                        .map_err(crate::core::map_bluetooth_error)?;
+                    Ok(())
+                }
+                BluetoothHciFrameView::Sco(payload) => {
+                    transport
+                        .write_packet(BluetoothHciPacketType::ScoData, payload, scratch)
+                        .map_err(crate::core::map_bluetooth_error)?;
+                    Ok(())
+                }
+                BluetoothHciFrameView::Iso(payload) => {
+                    transport
+                        .write_packet(BluetoothHciPacketType::IsoData, payload, scratch)
+                        .map_err(crate::core::map_bluetooth_error)?;
+                    Ok(())
+                }
+                BluetoothHciFrameView::Opaque(BluetoothHciFrame { packet_type, bytes }) => {
+                    if packet_type == BluetoothHciPacketType::Event {
+                        return Err(BluetoothError::invalid());
+                    }
+                    transport
+                        .write_packet(packet_type, bytes, scratch)
+                        .map_err(crate::core::map_bluetooth_error)?;
+                    Ok(())
+                }
+                BluetoothHciFrameView::Event(_) => Err(BluetoothError::invalid()),
+            }
+        })
+    }
+
+    fn parse_hci_frame<'a>(
+        packet_type: BluetoothHciPacketType,
+        bytes: &'a [u8],
+    ) -> BluetoothCanonicalFrame<'a> {
+        let view = match packet_type {
+            BluetoothHciPacketType::Command => {
+                if bytes.len() >= fusion_hal::contract::drivers::net::bluetooth::BluetoothHciCommandHeader::ENCODED_LEN
+                {
+                    let header =
+                        fusion_hal::contract::drivers::net::bluetooth::BluetoothHciCommandHeader::decode([
+                            bytes[0], bytes[1], bytes[2],
+                        ]);
+                    let declared = usize::from(header.parameter_length);
+                    if bytes.len() == 3 + declared {
+                        BluetoothHciFrameView::Command(BluetoothHciCommandFrame {
+                            header,
+                            parameters: &bytes[3..],
+                        })
+                    } else {
+                        BluetoothHciFrameView::Opaque(BluetoothHciFrame { packet_type, bytes })
+                    }
+                } else {
+                    BluetoothHciFrameView::Opaque(BluetoothHciFrame { packet_type, bytes })
+                }
+            }
+            BluetoothHciPacketType::Event => {
+                if bytes.len()
+                    >= fusion_hal::contract::drivers::net::bluetooth::BluetoothHciEventHeader::ENCODED_LEN
+                {
+                    let header =
+                        fusion_hal::contract::drivers::net::bluetooth::BluetoothHciEventHeader::decode([
+                            bytes[0], bytes[1],
+                        ]);
+                    let declared = usize::from(header.parameter_length);
+                    if bytes.len() == 2 + declared {
+                        BluetoothHciFrameView::Event(BluetoothHciEventFrame {
+                            header,
+                            parameters: &bytes[2..],
+                        })
+                    } else {
+                        BluetoothHciFrameView::Opaque(BluetoothHciFrame { packet_type, bytes })
+                    }
+                } else {
+                    BluetoothHciFrameView::Opaque(BluetoothHciFrame { packet_type, bytes })
+                }
+            }
+            BluetoothHciPacketType::AclData => {
+                if bytes.len()
+                    >= fusion_hal::contract::drivers::net::bluetooth::BluetoothHciAclHeader::ENCODED_LEN
+                {
+                    let header =
+                        fusion_hal::contract::drivers::net::bluetooth::BluetoothHciAclHeader::decode([
+                            bytes[0], bytes[1], bytes[2], bytes[3],
+                        ]);
+                    let declared = usize::from(header.payload_length);
+                    if bytes.len() == 4 + declared {
+                        BluetoothHciFrameView::Acl(BluetoothHciAclFrame {
+                            header,
+                            payload: &bytes[4..],
+                        })
+                    } else {
+                        BluetoothHciFrameView::Opaque(BluetoothHciFrame { packet_type, bytes })
+                    }
+                } else {
+                    BluetoothHciFrameView::Opaque(BluetoothHciFrame { packet_type, bytes })
+                }
+            }
+            BluetoothHciPacketType::ScoData => BluetoothHciFrameView::Sco(bytes),
+            BluetoothHciPacketType::IsoData => BluetoothHciFrameView::Iso(bytes),
+        };
+        BluetoothCanonicalFrame::Hci(view)
+    }
 }
 
 impl<H> BluetoothOwnedAdapterContract for Cyw43439Adapter<H>
@@ -302,6 +432,55 @@ where
 {
     fn descriptor(&self) -> &'static BluetoothAdapterDescriptor {
         self.descriptor
+    }
+}
+
+impl<H> BluetoothCanonicalFrameControlContract for Cyw43439Adapter<H>
+where
+    H: Cyw43439HardwareContract,
+{
+    fn wait_frame(&mut self, timeout_ms: Option<u32>) -> Result<bool, BluetoothError> {
+        self.chipset
+            .hardware
+            .acquire_transport(Cyw43439Radio::Bluetooth)
+            .map_err(crate::core::map_bluetooth_error)?;
+        let wait = self
+            .chipset
+            .hardware
+            .wait_for_controller_irq(Cyw43439Radio::Bluetooth, timeout_ms)
+            .map_err(crate::core::map_bluetooth_error);
+        self.chipset
+            .hardware
+            .release_transport(Cyw43439Radio::Bluetooth);
+        wait
+    }
+
+    fn send_frame(
+        &mut self,
+        frame: BluetoothCanonicalFrame<'_>,
+        scratch: &mut [u8],
+    ) -> Result<(), BluetoothError> {
+        match frame {
+            BluetoothCanonicalFrame::Hci(frame) => self.send_hci_frame(frame, scratch),
+            _ => Err(BluetoothError::unsupported()),
+        }
+    }
+
+    fn recv_frame<'a>(
+        &mut self,
+        out: &'a mut [u8],
+    ) -> Result<Option<BluetoothCanonicalFrame<'a>>, BluetoothError> {
+        self.chipset.with_driver_activity(|chipset| {
+            let mut transport = Cyw43439BluetoothTransportLease::acquire(&mut chipset.hardware)
+                .map_err(crate::core::map_bluetooth_error)?;
+            let Some((packet_type, bytes)) = transport
+                .read_packet(out)
+                .map_err(crate::core::map_bluetooth_error)?
+            else {
+                return Ok(None);
+            };
+            Ok(Some(Self::parse_hci_frame(packet_type, bytes)))
+        })
     }
 }
 

@@ -13,6 +13,7 @@ use fusion_hal::contract::drivers::net::wifi::{
     WifiSupport,
 };
 use crate::transport::{
+    wlan::Cyw43439GspiF0Register,
     Cyw43439BluetoothTransport,
     Cyw43439BluetoothTransportClockProfile,
     Cyw43439TransportTopology,
@@ -223,6 +224,43 @@ pub trait Cyw43439HardwareContract {
         radio: Cyw43439Radio,
         out: &mut [u8],
     ) -> Result<usize, Cyw43439Error>;
+
+    /// Best-effort driver activity indicator surfaced by the board/module when one exists.
+    ///
+    /// This is intentionally below the public radio contracts. Boards may choose to surface a
+    /// controller-internal activity LED or similar witness, and the driver may toggle it to show
+    /// "driver is currently doing work" without pretending this is part of Bluetooth or Wi-Fi
+    /// protocol law.
+    fn set_driver_activity_indicator(&mut self, _active: bool) -> Result<(), Cyw43439Error> {
+        Ok(())
+    }
+
+    /// Gives the host one best-effort chance to progress local cooperative runtime work while
+    /// the driver is inside a long synchronous operation.
+    fn progress_host_runtime(&self) {}
+
+    /// Reads one bootstrap-phase WLAN F0 register before the host has switched the shared bus into
+    /// the normal 32-bit transport mode.
+    fn bootstrap_read_wlan_register_swapped_u32(
+        &mut self,
+        _register: Cyw43439GspiF0Register,
+    ) -> Result<u32, Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    /// Writes one bootstrap-phase WLAN F0 register before the shared bus has switched into the
+    /// normal 32-bit transport mode.
+    fn bootstrap_write_wlan_register_swapped_u32(
+        &mut self,
+        _register: Cyw43439GspiF0Register,
+        _value: u32,
+    ) -> Result<(), Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    fn bootstrap_write_raw_bytes(&mut self, _payload: &[u8]) -> Result<(), Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
 
     /// Returns one optional controller firmware image for one radio facet.
     fn firmware_image(&self, radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error>;

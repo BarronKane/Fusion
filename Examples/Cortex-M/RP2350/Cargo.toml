@@ -5,6 +5,7 @@ members = [
     "MinimalLed",
     "Benchmark",
     "Display",
+    "DebugChannel",
 ]
 
 [workspace.package]

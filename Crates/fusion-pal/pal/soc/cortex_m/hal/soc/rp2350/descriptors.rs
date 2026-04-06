@@ -1747,6 +1747,7 @@ pub(crate) const BLUETOOTH_CONTROLLERS: [CortexMBluetoothControllerBinding; 1] =
         power_gpio: Some(23),
         reset_gpio: None,
         wake_gpio: None,
+        activity_gpio: Some(0),
         clock: RP2350_PICO2W_CYW43439_CLOCK,
         assets: RP2350_PICO2W_CYW43439_BLUETOOTH_ASSETS,
     }];
@@ -1766,6 +1767,7 @@ pub(crate) const WIFI_CONTROLLERS: [CortexMWifiControllerBinding; 1] =
         power_gpio: Some(23),
         reset_gpio: None,
         wake_gpio: None,
+        activity_gpio: Some(0),
         clock: RP2350_PICO2W_CYW43439_CLOCK,
         assets: RP2350_PICO2W_CYW43439_WIFI_ASSETS,
     }];

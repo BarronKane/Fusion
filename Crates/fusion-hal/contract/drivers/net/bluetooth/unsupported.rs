@@ -8,6 +8,8 @@ use super::BluetoothAdvertisingParameters;
 use super::BluetoothAdvertisingSetId;
 use super::BluetoothBaseContract;
 use super::BluetoothBondState;
+use super::BluetoothCanonicalFrame;
+use super::BluetoothCanonicalFrameControlContract;
 use super::BluetoothConnectionControlContract;
 use super::BluetoothConnectionDescriptor;
 use super::BluetoothConnectionId;
@@ -114,6 +116,27 @@ impl BluetoothOwnedAdapterContract for UnsupportedBluetoothAdapter {
         };
 
         &DESCRIPTOR
+    }
+}
+
+impl BluetoothCanonicalFrameControlContract for UnsupportedBluetoothAdapter {
+    fn wait_frame(&mut self, _timeout_ms: Option<u32>) -> Result<bool, BluetoothError> {
+        Err(BluetoothError::unsupported())
+    }
+
+    fn send_frame(
+        &mut self,
+        _frame: BluetoothCanonicalFrame<'_>,
+        _scratch: &mut [u8],
+    ) -> Result<(), BluetoothError> {
+        Err(BluetoothError::unsupported())
+    }
+
+    fn recv_frame<'a>(
+        &mut self,
+        _out: &'a mut [u8],
+    ) -> Result<Option<BluetoothCanonicalFrame<'a>>, BluetoothError> {
+        Err(BluetoothError::unsupported())
     }
 }
 
