@@ -144,6 +144,18 @@ pub const fn bind_reserved_pendsv_dispatch(
     Err(VectorError::unsupported())
 }
 
+/// Unsupported reserved event-timeout wake binding hook.
+///
+/// # Errors
+///
+/// Always returns `unsupported()` because this backend does not own a hardware vector table.
+pub const fn bind_reserved_event_timeout_wake(
+    _builder: &mut UnsupportedVectorBuilder,
+    _priority: Option<VectorPriority>,
+) -> Result<(), VectorError> {
+    Err(VectorError::unsupported())
+}
+
 /// Unsupported active-scope deferred-pending extraction hook.
 ///
 /// # Errors

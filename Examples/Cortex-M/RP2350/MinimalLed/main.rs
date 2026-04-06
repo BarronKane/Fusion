@@ -10,7 +10,7 @@ use core::sync::atomic::{
 };
 use core::time::Duration;
 
-use cortex_m_rt::{entry, exception};
+use cortex_m_rt::entry;
 
 use fusion_example_rp2350_on_device::gpio::{
     Rp2350FiberGpioOutputPin,
@@ -146,18 +146,6 @@ fn main() -> ! {
 
     loop {
         drive_once().expect("current-thread fiber runtime should progress");
-    }
-}
-
-#[exception]
-unsafe fn DefaultHandler(irqn: i16) {
-    if irqn == 3 {
-        fusion_pal::sys::soc::cortex_m::rp2350::service_event_timeout_irq()
-            .expect("event-timeout irq should service");
-        return;
-    }
-    loop {
-        cortex_m::asm::wfi();
     }
 }
 

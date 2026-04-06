@@ -1,65 +1,219 @@
 #![no_std]
 #![no_main]
 
+//! Pico 2 W four-digit seven-segment display wiring.
+//!
+//! Board layout:
+//! - two chained `74HC595` shift registers
+//! - `U1` is the segment bank: `Q0..Q7 -> A, B, C, D, E, F, G, DP`
+//! - `U2` is the digit-common bank: `Q0..Q3 -> DIG1, DIG2, DIG3, DIG4`
+//! - `U1` is first in the serial chain: `Pico -> U1.DS`, then `U1.Q7' -> U2.DS`
+//! - `OE`, `STcp`, and `SHcp` are shared across both chips
+//!
+//! Pico GPIO map:
+//! - `GP11` -> panic/fault LED (standalone red LED)
+//! - `GP12` -> serial data
+//! - `GP13` -> output enable
+//! - `GP14` -> latch
+//! - `GP15` -> shift clock
+//!
+//! Shift protocol:
+//! 1. shift digit byte first
+//! 2. shift segment byte second
+//! 3. pulse latch to update both banks together
+//!
+//! Electrical contract:
+//! - common cathode
+//! - segment lines are active high
+//! - digit commons are active low
+
 use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
-use core::pin::pin;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
-use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use core::time::Duration;
-
-use cortex_m_rt::{ExceptionFrame, entry, exception};
-
-use fusion_example_rp2350_on_device::pcu::{
-    PcuPioOnDeviceEvent,
-    PcuPioOnDeviceFailure,
-    run_pcu_pio_smoke_suite,
-    suite_pass_display_code,
+use core::ptr;
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
 };
-use fusion_example_rp2350_on_device::gpio::{
-    Rp2350FiberGpioOutputPin,
-    Rp2350FiberGpioService,
+
+use cortex_m_rt::{
+    ExceptionFrame,
+    entry,
+    exception,
 };
-use fusion_example_rp2350_on_device::runtime::{drive_once, spawn_with_stack};
+use fusion_example_rp2350_on_device::gpio::Rp2350FiberGpioService;
+use fusion_example_rp2350_on_device::runtime::drive_once;
+use fusion_example_rp2350_on_device::seven_segment::{
+    Rp2350FiberFourDigitSevenSegmentDisplay,
+    Rp2350FiberFourDigitSevenSegmentDisplayService,
+};
+use fusion_example_rp2350_on_device::shift_register_74hc595::Rp2350FiberShiftRegister74hc595Service;
 use fusion_hal::contract::drivers::bus::gpio::GpioDriveStrength;
-use fusion_hal::drivers::peripheral::{
-    SevenSegmentGlyph,
-    SevenSegmentPolarity,
-    ShiftedFourDigitSevenSegmentDisplay,
-};
-use fusion_std::pcu::PCU;
-use fusion_std::thread::yield_now;
+use fusion_hal::drivers::peripheral::SevenSegmentPolarity;
+use fusion_pal::sys::cpu::soc::board;
 use fusion_sys::thread::system_monotonic_time;
 
 const DISPLAY_DATA_PIN: u8 = 12;
 const DISPLAY_ENABLE_PIN: u8 = 13;
 const DISPLAY_LATCH_PIN: u8 = 14;
 const DISPLAY_SHIFT_CLOCK_PIN: u8 = 15;
+const PANIC_LED_PIN: u8 = 11;
 
-const LEFT_FIZZBUZZ_PERIOD: Duration = Duration::from_millis(200);
-const RIGHT_FIZZBUZZ_PERIOD: Duration = Duration::from_millis(300);
-const STARTUP_PHASE_PERIOD: Duration = Duration::from_millis(500);
-const TEST_PHASE_PERIOD: Duration = Duration::from_millis(250);
-const PANIC_PHASE_PERIOD: Duration = Duration::from_millis(500);
-const DISPLAY_REFRESH_PERIOD: Duration = Duration::from_millis(2);
-const QUIESCE_IRQS: &[u16] = &[10, 11, 12, 13, 15, 16, 17, 18, 19, 20];
 const GPIO_SERVICE_STACK_BYTES: usize = 4096;
+const SHIFT_REGISTER_SERVICE_STACK_BYTES: usize = 4096;
+const DISPLAY_SERVICE_STACK_BYTES: usize = 4096;
+const STARTUP_LED_MILLIS: u64 = 500;
+const DISPLAY_DIAGNOSTIC_FALLBACK_SPINS: usize = 12_000_000;
+const DISPLAY_BOOT_VALUE: u16 = 0x1234;
 
-// Flip this if your module turns out to be the opposite electrical contract. The pinout is the
-// same on both variants because apparently the universe enjoys cheap practical jokes.
-const DISPLAY_POLARITY: SevenSegmentPolarity = SevenSegmentPolarity::common_cathode();
+const RP2350_PAD_PUE_BIT: u32 = 1 << 3;
+const RP2350_PAD_DRIVE_LSB: u32 = 4;
+const RP2350_PAD_IE_BIT: u32 = 1 << 6;
+const RP2350_PAD_OD_BIT: u32 = 1 << 7;
+const RP2350_PAD_ISO_BIT: u32 = 1 << 8;
+const RP2350_RESET_DONE_OFFSET: usize = 0x08;
+const RP2350_REG_ALIAS_CLR_OFFSET: usize = 0x3000;
+const RP2350_RESET_IO_BANK0: u32 = 1 << 6;
+const RP2350_RESET_PADS_BANK0: u32 = 1 << 9;
+const RP2350_SIO_GPIO_OUT_SET_OFFSET: usize = 0x18;
+const RP2350_SIO_GPIO_OUT_CLR_OFFSET: usize = 0x20;
+const RP2350_SIO_GPIO_OE_SET_OFFSET: usize = 0x38;
+const RP2350_GPIO_CTRL_STRIDE: usize = 8;
+const RP2350_GPIO_CTRL_FUNCSEL_OFFSET: usize = 4;
+const RP2350_PAD_STRIDE: usize = 4;
+const RP2350_PADS_BANK0_FIRST_PAD_OFFSET: usize = 0x04;
+const RP2350_SIO_FUNCSEL: u32 = 5;
 
 type PicoGpioService = Rp2350FiberGpioService<4>;
-type PicoGpioPin = Rp2350FiberGpioOutputPin<16, 16>;
-type PicoDisplay =
-    ShiftedFourDigitSevenSegmentDisplay<PicoGpioPin, PicoGpioPin, PicoGpioPin, PicoGpioPin>;
+type PicoShiftRegisterService = Rp2350FiberShiftRegister74hc595Service<2>;
+type PicoDisplayService = Rp2350FiberFourDigitSevenSegmentDisplayService;
 
-static mut DISPLAY_STORAGE: MaybeUninit<PicoDisplay> = MaybeUninit::uninit();
 static mut GPIO_SERVICE_STORAGE: MaybeUninit<PicoGpioService> = MaybeUninit::uninit();
-static DISPLAY_READY: AtomicBool = AtomicBool::new(false);
-static DISPLAY_GLYPHS: [AtomicU8; 4] = [const { AtomicU8::new(0) }; 4];
-static PANIC_DISPLAY_CODE: AtomicU16 = AtomicU16::new(0xDEAD);
+static mut SHIFT_REGISTER_SERVICE_STORAGE: MaybeUninit<PicoShiftRegisterService> = MaybeUninit::uninit();
+static mut DISPLAY_SERVICE_STORAGE: MaybeUninit<PicoDisplayService> = MaybeUninit::uninit();
+#[unsafe(no_mangle)]
+static DISPLAY_MAIN_PHASE: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+static DISPLAY_MAIN_HEARTBEAT: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+static DISPLAY_SHIFT_INIT_STATUS: AtomicU32 = AtomicU32::new(0);
+
+fn panic_led_on() -> ! {
+    let _ = configure_panic_led_output(true);
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+fn spin_pause(mut spins: usize) {
+    while spins != 0 {
+        core::hint::spin_loop();
+        spins -= 1;
+    }
+}
+
+fn configure_panic_led_output(initial_high: bool) -> Result<(), ()> {
+    ensure_bank0_ready().ok_or(())?;
+    let ctrl = ctrl_register(PANIC_LED_PIN).ok_or(())?;
+    let pad = pad_register(PANIC_LED_PIN).ok_or(())?;
+    let sio_oe_set = sio_register_mut(RP2350_SIO_GPIO_OE_SET_OFFSET).ok_or(())?;
+    unsafe {
+        ptr::write_volatile(ctrl, RP2350_SIO_FUNCSEL);
+        let mut pad_value = ptr::read_volatile(pad);
+        pad_value |= RP2350_PAD_IE_BIT | RP2350_PAD_PUE_BIT;
+        pad_value &= !(RP2350_PAD_OD_BIT | RP2350_PAD_ISO_BIT);
+        pad_value &= !(0b11 << RP2350_PAD_DRIVE_LSB);
+        pad_value |= 0b01 << RP2350_PAD_DRIVE_LSB;
+        ptr::write_volatile(pad, pad_value);
+        write_panic_led(initial_high)?;
+        ptr::write_volatile(sio_oe_set, 1_u32 << PANIC_LED_PIN);
+    }
+    Ok(())
+}
+
+fn write_panic_led(high: bool) -> Result<(), ()> {
+    let register = if high {
+        sio_register_mut(RP2350_SIO_GPIO_OUT_SET_OFFSET)
+    } else {
+        sio_register_mut(RP2350_SIO_GPIO_OUT_CLR_OFFSET)
+    }
+    .ok_or(())?;
+    unsafe {
+        ptr::write_volatile(register, 1_u32 << PANIC_LED_PIN);
+    }
+    Ok(())
+}
+
+fn startup_led_sanity_pulse() {
+    DISPLAY_MAIN_PHASE.store(0x10, Ordering::Release);
+    let _ = configure_panic_led_output(true);
+    blocking_pause_millis(STARTUP_LED_MILLIS);
+    let _ = write_panic_led(false);
+    DISPLAY_MAIN_PHASE.store(0x11, Ordering::Release);
+}
+
+fn blocking_pause_millis(millis: u64) {
+    if system_monotonic_time()
+        .sleep_for(core::time::Duration::from_millis(millis))
+        .is_ok()
+    {
+        return;
+    }
+    spin_pause(DISPLAY_DIAGNOSTIC_FALLBACK_SPINS);
+}
+
+fn ensure_bank0_ready() -> Option<()> {
+    let resets_base = peripheral_base("resets")?;
+    let reset_clear = rebase_mut(resets_base, RP2350_REG_ALIAS_CLR_OFFSET) as *mut u32;
+    let reset_done = rebase(resets_base, RP2350_RESET_DONE_OFFSET) as *const u32;
+    unsafe {
+        ptr::write_volatile(reset_clear, RP2350_RESET_IO_BANK0 | RP2350_RESET_PADS_BANK0);
+        while ptr::read_volatile(reset_done) & (RP2350_RESET_IO_BANK0 | RP2350_RESET_PADS_BANK0)
+            != (RP2350_RESET_IO_BANK0 | RP2350_RESET_PADS_BANK0)
+        {}
+    }
+    Some(())
+}
+
+fn peripheral_base(name: &'static str) -> Option<usize> {
+    board::peripherals()
+        .iter()
+        .find(|descriptor| descriptor.name == name)
+        .map(|descriptor| descriptor.base)
+}
+
+fn ctrl_register(pin: u8) -> Option<*mut u32> {
+    let base = peripheral_base("io_bank0")?;
+    Some(
+        rebase_mut(
+            base,
+            usize::from(pin) * RP2350_GPIO_CTRL_STRIDE + RP2350_GPIO_CTRL_FUNCSEL_OFFSET,
+        ) as *mut u32,
+    )
+}
+
+fn pad_register(pin: u8) -> Option<*mut u32> {
+    let base = peripheral_base("pads_bank0")?;
+    Some(
+        rebase_mut(
+            base,
+            RP2350_PADS_BANK0_FIRST_PAD_OFFSET + usize::from(pin) * RP2350_PAD_STRIDE,
+        ) as *mut u32,
+    )
+}
+
+fn sio_register_mut(offset: usize) -> Option<*mut u32> {
+    let base = peripheral_base("sio")?;
+    Some(rebase_mut(base, offset) as *mut u32)
+}
+
+const fn rebase(base: usize, offset: usize) -> usize {
+    base.wrapping_add(offset)
+}
+
+const fn rebase_mut(base: usize, offset: usize) -> usize {
+    base.wrapping_add(offset)
+}
 
 fn init_gpio_service() -> *mut PicoGpioService {
     unsafe {
@@ -69,7 +223,8 @@ fn init_gpio_service() -> *mut PicoGpioService {
     }
 }
 
-fn init_display() -> &'static mut PicoDisplay {
+fn init_shift_register_service() -> fusion_example_rp2350_on_device::shift_register_74hc595::Rp2350FiberShiftRegister74hc595<2> {
+    DISPLAY_MAIN_PHASE.store(1, Ordering::Release);
     let gpio_service = init_gpio_service();
     let data = unsafe {
         Pin::new_unchecked(&mut *gpio_service)
@@ -96,396 +251,110 @@ fn init_display() -> &'static mut PicoDisplay {
             .spawn::<GPIO_SERVICE_STACK_BYTES>()
             .expect("display gpio service should spawn");
     }
+    DISPLAY_MAIN_PHASE.store(2, Ordering::Release);
 
-    unsafe {
-        let display = core::ptr::addr_of_mut!(DISPLAY_STORAGE).cast::<PicoDisplay>();
-        display.write(
-            ShiftedFourDigitSevenSegmentDisplay::with_output_enable(
-                data,
-                shift_clock,
-                latch_clock,
-                output_enable,
-                DISPLAY_POLARITY,
-            )
-            .expect("shifted display should configure"),
-        );
-        DISPLAY_READY.store(true, Ordering::Release);
-        &mut *display
-    }
-}
-
-fn panic_display() -> Option<&'static mut PicoDisplay> {
-    if !DISPLAY_READY.load(Ordering::Acquire) {
-        return None;
-    }
-    unsafe {
-        let display = core::ptr::addr_of_mut!(DISPLAY_STORAGE).cast::<PicoDisplay>();
-        Some(&mut *display)
-    }
-}
-
-fn refresh_cycles(duration: Duration) -> usize {
-    let slice_ms = DISPLAY_REFRESH_PERIOD.as_millis().max(1);
-    let total_ms = duration.as_millis().max(slice_ms);
-    usize::try_from(total_ms.div_ceil(slice_ms)).unwrap_or(usize::MAX)
-}
-
-fn blocking_display_pause(display: &mut PicoDisplay, duration: Duration) {
-    let mut remaining = refresh_cycles(duration);
-    while remaining != 0 {
-        display.refresh_next().expect("display scan should refresh");
-        system_monotonic_time()
-            .sleep_for(DISPLAY_REFRESH_PERIOD)
-            .expect("display pause should complete");
-        remaining -= 1;
-    }
-}
-
-fn panic_display_pause(display: &mut PicoDisplay, duration: Duration) {
-    let mut remaining = refresh_cycles(duration);
-    while remaining != 0 {
-        let _ = display.refresh_next();
-        if system_monotonic_time()
-            .sleep_for(DISPLAY_REFRESH_PERIOD)
-            .is_ok()
-        {
-            remaining -= 1;
-            continue;
-        }
-        let mut spins = 50_000usize;
-        while spins != 0 {
-            core::hint::spin_loop();
-            spins -= 1;
-        }
-        remaining -= 1;
-    }
-}
-
-fn startup_sequence(display: &mut PicoDisplay) {
-    const STARTUP_CODES: [u16; 4] = [0x0001, 0x0002, 0x0003, 0x0000];
-    let mut index = 0usize;
-    while index < STARTUP_CODES.len() {
-        display.set_hex(STARTUP_CODES[index]);
-        blocking_display_pause(display, STARTUP_PHASE_PERIOD);
-        index += 1;
-    }
-}
-
-fn display_code(display: &mut PicoDisplay, code: u16, duration: Duration) {
-    display.set_hex(code);
-    blocking_display_pause(display, duration);
-}
-
-fn display_failure_loop(display: &mut PicoDisplay, failure: PcuPioOnDeviceFailure) -> ! {
-    loop {
-        display.set_hex(failure.display_code());
-        blocking_display_pause(display, PANIC_PHASE_PERIOD);
-        display.clear();
-        blocking_display_pause(display, PANIC_PHASE_PERIOD);
-    }
-}
-
-fn startup_pcu_self_test(display: &mut PicoDisplay) {
-    let result = run_pcu_pio_smoke_suite(|event| match event {
-        PcuPioOnDeviceEvent::Starting { code } => {
-            display_code(display, 0x1000 | code, TEST_PHASE_PERIOD)
-        }
-        PcuPioOnDeviceEvent::Passed { code } => {
-            display_code(display, 0xA000 | code, TEST_PHASE_PERIOD)
-        }
-        PcuPioOnDeviceEvent::Failed { failure } => display_failure_loop(display, failure),
-    });
-
-    if let Err(failure) = result {
-        display_failure_loop(display, failure);
-    }
-    display_code(display, suite_pass_display_code(), STARTUP_PHASE_PERIOD);
-}
-
-fn quiesce_nonessential_irqs() {
-    let mut index = 0usize;
-    while index < QUIESCE_IRQS.len() {
-        let irqn = QUIESCE_IRQS[index];
-        let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_disable(irqn);
-        let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_clear_pending(irqn);
-        if fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge_supported(irqn) {
-            let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge(irqn);
-        }
-        index += 1;
-    }
-}
-
-fn is_quiesce_irq(irqn: u16) -> bool {
-    let mut index = 0usize;
-    while index < QUIESCE_IRQS.len() {
-        if QUIESCE_IRQS[index] == irqn {
-            return true;
-        }
-        index += 1;
-    }
-    false
-}
-
-fn display_exception_loop(code: u16) -> ! {
-    loop {
-        if let Some(display) = panic_display() {
-            display.set_hex(code);
-            panic_display_pause(display, PANIC_PHASE_PERIOD);
-            display.clear();
-            panic_display_pause(display, PANIC_PHASE_PERIOD);
-            continue;
-        }
-        cortex_m::asm::wfi();
-    }
-}
-
-fn repeated_nibble_code(nibble: u8) -> u16 {
-    let digit = u16::from(nibble & 0x0f);
-    digit | (digit << 4) | (digit << 8) | (digit << 12)
-}
-
-fn display_irq_exception_loop(irqn: u16) -> ! {
-    let high = ((irqn >> 4) & 0x0f) as u8;
-    let low = (irqn & 0x0f) as u8;
-    loop {
-        if let Some(display) = panic_display() {
-            display.set_hex(0xDDDD);
-            panic_display_pause(display, PANIC_PHASE_PERIOD);
-            display.set_hex(repeated_nibble_code(high));
-            panic_display_pause(display, PANIC_PHASE_PERIOD);
-            display.set_hex(repeated_nibble_code(low));
-            panic_display_pause(display, PANIC_PHASE_PERIOD);
-            display.clear();
-            panic_display_pause(display, PANIC_PHASE_PERIOD);
-            continue;
-        }
-        cortex_m::asm::wfi();
-    }
-}
-
-fn set_panic_display_code(code: u16) {
-    PANIC_DISPLAY_CODE.store(code, Ordering::Release);
-}
-
-fn panic_glyphs() -> [SevenSegmentGlyph; 4] {
-    [
-        SevenSegmentGlyph::from_hex(0xD).expect("D"),
-        SevenSegmentGlyph::from_hex(0xE).expect("E"),
-        SevenSegmentGlyph::from_hex(0xA).expect("A"),
-        SevenSegmentGlyph::from_hex(0xD).expect("D"),
-    ]
-}
-
-fn half_step_glyphs(step: u8) -> [SevenSegmentGlyph; 2] {
-    let mut glyphs = [
-        SevenSegmentGlyph::from_hex((step >> 4) & 0x0f).expect("upper nibble should be valid"),
-        SevenSegmentGlyph::from_hex(step & 0x0f).expect("lower nibble should be valid"),
-    ];
-    if step.is_multiple_of(3) {
-        glyphs[0] = glyphs[0].with_decimal_point(true);
-    }
-    if step.is_multiple_of(5) {
-        glyphs[1] = glyphs[1].with_decimal_point(true);
-    }
-    glyphs
-}
-
-fn store_half_glyphs(offset: usize, glyphs: [SevenSegmentGlyph; 2]) {
-    DISPLAY_GLYPHS[offset].store(glyphs[0].raw(), Ordering::Relaxed);
-    DISPLAY_GLYPHS[offset + 1].store(glyphs[1].raw(), Ordering::Relaxed);
-}
-
-fn load_framebuffer_glyphs() -> [SevenSegmentGlyph; 4] {
-    [
-        SevenSegmentGlyph::from_raw(DISPLAY_GLYPHS[0].load(Ordering::Relaxed)),
-        SevenSegmentGlyph::from_raw(DISPLAY_GLYPHS[1].load(Ordering::Relaxed)),
-        SevenSegmentGlyph::from_raw(DISPLAY_GLYPHS[2].load(Ordering::Relaxed)),
-        SevenSegmentGlyph::from_raw(DISPLAY_GLYPHS[3].load(Ordering::Relaxed)),
-    ]
-}
-
-fn publish_counter_display(offset: usize, step: u8) {
-    store_half_glyphs(offset, half_step_glyphs(step));
-}
-
-#[PCU]
-fn pcu_increment_counter(value: u8) -> u8 {
-    value.wrapping_add(1)
-}
-
-async fn run_half_fizzbuzz(slot: usize, offset: usize, period: Duration) -> ! {
-    let mut step = 0_u8;
-    loop {
-        set_panic_display_code(0x2100 | slot as u16);
-        publish_counter_display(offset, step);
-        set_panic_display_code(0x2200 | slot as u16);
-        MonotonicDelay::new(period).await;
-        set_panic_display_code(0x2300 | slot as u16);
-        step = pcu_increment_counter(step);
-        set_panic_display_code(0x2400 | slot as u16);
-    }
-}
-
-struct MonotonicDelay {
-    period: Duration,
-    deadline: Option<Duration>,
-}
-
-impl MonotonicDelay {
-    const fn new(period: Duration) -> Self {
-        Self {
-            period,
-            deadline: None,
-        }
-    }
-}
-
-impl core::future::Future for MonotonicDelay {
-    type Output = ();
-
-    fn poll(mut self: core::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let monotonic = system_monotonic_time();
-        let now = monotonic
-            .now()
-            .expect("counter delay should observe monotonic time");
-        let deadline = match self.deadline {
-            Some(deadline) => deadline,
-            None => {
-                let deadline = now
-                    .checked_add(self.period)
-                    .expect("counter delay deadline should remain representable");
-                self.deadline = Some(deadline);
-                deadline
+    let shift_service_ptr = unsafe {
+        let service = core::ptr::addr_of_mut!(SHIFT_REGISTER_SERVICE_STORAGE)
+            .cast::<PicoShiftRegisterService>();
+        match PicoShiftRegisterService::new(data, shift_clock, latch_clock, output_enable) {
+            Ok(shift_service) => {
+                DISPLAY_SHIFT_INIT_STATUS.store(1, Ordering::Release);
+                service.write(shift_service);
             }
-        };
-
-        if now >= deadline {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
+            Err(error) => {
+                DISPLAY_SHIFT_INIT_STATUS.store(
+                    match error.kind() {
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Unsupported => 0x10,
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Invalid => 0x11,
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Busy => 0x12,
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::ResourceExhausted => 0x13,
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::StateConflict => 0x14,
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Platform(code) => {
+                            0x8000_0000 | (code as u32)
+                        }
+                    },
+                    Ordering::Release,
+                );
+                panic!("display shift-register service should build");
+            }
+        }
+        service
+    };
+    let shift_register = unsafe { (&*shift_service_ptr).client_handle() };
+    unsafe {
+        match Pin::new_unchecked(&mut *shift_service_ptr).spawn::<SHIFT_REGISTER_SERVICE_STACK_BYTES>() {
+            Ok(()) => {
+                DISPLAY_SHIFT_INIT_STATUS.store(2, Ordering::Release);
+            }
+            Err(error) => {
+                DISPLAY_SHIFT_INIT_STATUS.store(
+                    match error.kind() {
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Unsupported => 0x20,
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Invalid => 0x21,
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Busy => 0x22,
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::ResourceExhausted => 0x23,
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::StateConflict => 0x24,
+                        fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Platform(code) => {
+                            0x9000_0000 | (code as u32)
+                        }
+                    },
+                    Ordering::Release,
+                );
+                panic!("display shift-register service should spawn");
+            }
         }
     }
+    DISPLAY_MAIN_PHASE.store(3, Ordering::Release);
+    shift_register
 }
 
-const NOOP_RAW_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
-    noop_raw_waker_clone,
-    noop_raw_waker_wake,
-    noop_raw_waker_wake,
-    noop_raw_waker_drop,
-);
-
-const fn noop_raw_waker() -> RawWaker {
-    RawWaker::new(core::ptr::null(), &NOOP_RAW_WAKER_VTABLE)
-}
-
-unsafe fn noop_raw_waker_clone(_data: *const ()) -> RawWaker {
-    noop_raw_waker()
-}
-
-unsafe fn noop_raw_waker_wake(_data: *const ()) {}
-
-unsafe fn noop_raw_waker_drop(_data: *const ()) {}
-
-fn noop_waker() -> Waker {
-    unsafe { Waker::from_raw(noop_raw_waker()) }
-}
-
-fn run_counter_fiber(slot: usize, offset: usize, period: Duration) -> ! {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    let mut future = pin!(run_half_fizzbuzz(slot, offset, period));
-
-    loop {
-        set_panic_display_code(0x1100 | slot as u16);
-        if matches!(future.as_mut().poll(&mut context), Poll::Ready(_)) {
-            display_exception_loop(0xE100 | slot as u16);
+fn init_display_service(
+    shift_register: fusion_example_rp2350_on_device::shift_register_74hc595::Rp2350FiberShiftRegister74hc595<2>,
+) -> Rp2350FiberFourDigitSevenSegmentDisplay {
+    let display_service_ptr = unsafe {
+        let service = core::ptr::addr_of_mut!(DISPLAY_SERVICE_STORAGE).cast::<PicoDisplayService>();
+        match PicoDisplayService::new(shift_register, SevenSegmentPolarity::common_cathode()) {
+            Ok(display_service) => service.write(display_service),
+            Err(_) => panic!("display service should build"),
         }
-        set_panic_display_code(0x1200 | slot as u16);
-        if yield_now().is_err() {
-            display_exception_loop(0xE101 | slot as u16);
+        service
+    };
+    let display = unsafe { (&*display_service_ptr).client_handle() };
+    unsafe {
+        match Pin::new_unchecked(&mut *display_service_ptr).spawn::<DISPLAY_SERVICE_STACK_BYTES>() {
+            Ok(()) => {}
+            Err(_) => panic!("display service should spawn"),
         }
     }
+    display
 }
 
 #[entry]
 fn main() -> ! {
-    let display = init_display();
-    display.clear();
+    startup_led_sanity_pulse();
+    let shift_register = init_shift_register_service();
+    let display = init_display_service(shift_register);
+    DISPLAY_MAIN_PHASE.store(4, Ordering::Release);
     display
-        .disable()
-        .expect("display should accept initial blanking");
-    startup_sequence(display);
-    startup_pcu_self_test(display);
-    quiesce_nonessential_irqs();
-    publish_counter_display(0, 0);
-    publish_counter_display(2, 0);
-
-    let _left = spawn_with_stack::<4096, _, _>(move || run_counter_fiber(0, 0, LEFT_FIZZBUZZ_PERIOD))
-        .expect("left counter fiber should spawn");
-    let _right =
-        spawn_with_stack::<4096, _, _>(move || run_counter_fiber(1, 2, RIGHT_FIZZBUZZ_PERIOD))
-        .expect("right counter fiber should spawn");
+        .set_hex(DISPLAY_BOOT_VALUE)
+        .expect("display boot value should write");
 
     loop {
-        set_panic_display_code(0x3100);
-        display.set_glyphs(load_framebuffer_glyphs());
-        if display.refresh_next().is_err() {
-            display_exception_loop(0xE400);
+        DISPLAY_MAIN_PHASE.store(5, Ordering::Release);
+        match drive_once() {
+            Ok(_) => {}
+            Err(_) => panic!("display runtime should keep advancing"),
         }
-        set_panic_display_code(0x3200);
-        if drive_once().is_err() {
-            display_exception_loop(0xE401);
-        }
-        set_panic_display_code(0x3300);
-        if system_monotonic_time()
-            .sleep_for(DISPLAY_REFRESH_PERIOD)
-            .is_err()
-        {
-            display_exception_loop(0xE402);
-        }
+        DISPLAY_MAIN_HEARTBEAT.fetch_add(1, Ordering::AcqRel);
     }
-}
-
-#[exception]
-unsafe fn DefaultHandler(irqn: i16) {
-    if irqn == 3 {
-        fusion_pal::sys::soc::cortex_m::rp2350::service_event_timeout_irq()
-            .expect("event-timeout irq should service");
-        return;
-    }
-    let irqn = irqn as u16;
-    if fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge_supported(irqn)
-        && fusion_pal::sys::soc::cortex_m::rp2350::irq_acknowledge(irqn).is_ok()
-    {
-        if is_quiesce_irq(irqn) {
-            let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_disable(irqn);
-            let _ = fusion_pal::sys::soc::cortex_m::rp2350::irq_clear_pending(irqn);
-        }
-        return;
-    }
-    display_irq_exception_loop(irqn);
 }
 
 #[exception]
 unsafe fn HardFault(_frame: &ExceptionFrame) -> ! {
-    display_exception_loop(0xBADF);
+    panic_led_on()
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        if let Some(display) = panic_display() {
-            let code = PANIC_DISPLAY_CODE.load(Ordering::Acquire);
-            if code == 0xDEAD {
-                display.set_glyphs(panic_glyphs());
-            } else {
-                display.set_hex(code);
-            }
-            panic_display_pause(display, PANIC_PHASE_PERIOD);
-            display.clear();
-            panic_display_pause(display, PANIC_PHASE_PERIOD);
-            continue;
-        }
-        cortex_m::asm::wfi();
-    }
+    panic_led_on()
 }

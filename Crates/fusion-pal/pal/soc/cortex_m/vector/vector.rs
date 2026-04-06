@@ -641,6 +641,41 @@ pub fn bind_reserved_pendsv_dispatch(
     Ok(())
 }
 
+/// Binds the selected board's reserved event-timeout wake IRQ into one owned Cortex-M vector
+/// table.
+///
+/// # Errors
+///
+/// Returns any honest unsupported, slot-binding, or priority-programming failure.
+pub fn bind_reserved_event_timeout_wake(
+    builder: &mut PlatformVectorBuilder,
+    priority: Option<VectorPriority>,
+) -> Result<(), VectorError> {
+    let irqn = crate::pal::soc::cortex_m::hal::soc::board::event_timeout_irq()
+        .ok_or_else(VectorError::unsupported)?;
+    VectorTableBuilderControlContract::bind(
+        builder,
+        VectorSlotBinding {
+            slot: IrqSlot(irqn),
+            core: None,
+            priority,
+            target: VectorSlotTarget::Inline {
+                handler: reserved_event_timeout_wake_handler,
+                stack: VectorInlineStackPolicy::CurrentExceptionStack,
+                eligibility: None,
+            },
+        },
+    )
+}
+
+unsafe extern "C" fn reserved_event_timeout_wake_handler() {
+    if let Some(irqn) = crate::pal::soc::cortex_m::hal::soc::board::event_timeout_irq() {
+        let _ = crate::pal::soc::cortex_m::hal::soc::board::service_reserved_runtime_irq(
+            i16::try_from(irqn).unwrap_or(i16::MAX),
+        );
+    }
+}
+
 /// Takes pending deferred-dispatch cookies from the active owned Cortex-M vector scope.
 ///
 /// # Errors

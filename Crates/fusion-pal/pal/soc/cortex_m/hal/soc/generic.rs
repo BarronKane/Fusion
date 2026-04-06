@@ -422,6 +422,17 @@ pub fn event_timeout_fired() -> Result<bool, HardwareError> {
     board_contract::event_timeout_fired(system_soc())
 }
 
+/// Services one reserved runtime IRQ for the selected generic Cortex-M board.
+///
+/// Returning `Ok(false)` means the IRQ is not one reserved runtime line for the selected board.
+///
+/// # Errors
+///
+/// Returns an error if the selected board recognizes the IRQ but cannot service it honestly.
+pub fn service_reserved_runtime_irq(irqn: i16) -> Result<bool, HardwareError> {
+    board_contract::service_reserved_runtime_irq(system_soc(), irqn)
+}
+
 /// Returns whether the selected generic Cortex-M board exposes one truthful monotonic timebase.
 #[must_use]
 pub fn monotonic_now_supported() -> bool {

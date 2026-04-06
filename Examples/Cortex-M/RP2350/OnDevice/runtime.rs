@@ -8,7 +8,8 @@ use fusion_std::thread::{
 };
 use fusion_sys::fiber::FiberError;
 
-static RP2350_EXAMPLE_BACKEND: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new();
+static RP2350_EXAMPLE_BACKEND: CurrentFiberAsyncSingleton =
+    CurrentFiberAsyncSingleton::new().with_fiber_capacity(8);
 
 pub fn spawn<F, T>(job: F) -> Result<CurrentFiberHandle<T>, FiberError>
 where

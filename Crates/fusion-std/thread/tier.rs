@@ -39,6 +39,8 @@ use super::{
     GeneratedExplicitFiberTaskContract,
     generated_explicit_task_contract_attributes,
 };
+use super::runtime::with_runtime_vector_builder;
+use crate::thread::ExecutorError;
 
 const TIERED_VECTOR_TARGET_CAPACITY: usize = 128;
 
@@ -264,6 +266,16 @@ impl From<VectorError> for TieredGreenPoolError {
 impl From<SyncError> for TieredGreenPoolError {
     fn from(value: SyncError) -> Self {
         Self::Sync(value)
+    }
+}
+
+const fn tiered_green_pool_error_from_executor(error: ExecutorError) -> TieredGreenPoolError {
+    match error {
+        ExecutorError::Unsupported => TieredGreenPoolError::Unsupported,
+        ExecutorError::Stopped | ExecutorError::Cancelled | ExecutorError::TaskPanicked => {
+            TieredGreenPoolError::Sync(SyncError::busy())
+        }
+        ExecutorError::Sync(kind) => TieredGreenPoolError::Sync(SyncError { kind }),
     }
 }
 
@@ -594,6 +606,29 @@ impl TieredGreenPool {
         Ok(cookie)
     }
 
+    /// Binds one vector slot through the runtime-owned vector broker.
+    ///
+    /// This is the backend-consistent path for runtimes that already adopted shared vector
+    /// ownership during bootstrap. Callers do not need to carry their own builder around and do
+    /// not get to fight the runtime for table ownership like little emperors.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest runtime-broker, vector-binding, registry, or lower-tier scheduling
+    /// failure.
+    pub fn bind_runtime_vector_task(
+        &self,
+        slot: IrqSlot,
+        priority: Option<VectorPriority>,
+        task: TieredTaskAttributes,
+        job: fn(),
+    ) -> Result<VectorDispatchCookie, TieredGreenPoolError> {
+        with_runtime_vector_builder(|builder| {
+            self.bind_vector_task(builder, slot, priority, task, job)
+        })
+        .map_err(tiered_green_pool_error_from_executor)?
+    }
+
     /// Binds one vector slot to one deferred green/blue runtime task target using one explicit
     /// preselected deferred cookie.
     ///
@@ -618,6 +653,27 @@ impl TieredGreenPool {
             return Err(error.into());
         }
         self.bind_vector_task_registered_cookie(builder, slot, priority, cookie, task, job)
+    }
+
+    /// Binds one vector slot through the runtime-owned vector broker using one explicit deferred
+    /// cookie.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest runtime-broker, vector-binding, registry, or lower-tier scheduling
+    /// failure.
+    pub fn bind_runtime_vector_task_with_cookie(
+        &self,
+        slot: IrqSlot,
+        priority: Option<VectorPriority>,
+        cookie: VectorDispatchCookie,
+        task: TieredTaskAttributes,
+        job: fn(),
+    ) -> Result<(), TieredGreenPoolError> {
+        with_runtime_vector_builder(|builder| {
+            self.bind_vector_task_with_cookie(builder, slot, priority, cookie, task, job)
+        })
+        .map_err(tiered_green_pool_error_from_executor)?
     }
 
     fn bind_vector_task_registered_cookie(
@@ -665,6 +721,21 @@ impl TieredGreenPool {
         }
         clear_tiered_vector_target(cookie);
         Ok(())
+    }
+
+    /// Unbinds one previously registered tiered vector task through the runtime-owned vector
+    /// broker.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest runtime-broker, vector unbind, or registry-release failure.
+    pub fn unbind_runtime_vector_task(
+        &self,
+        slot: IrqSlot,
+        cookie: VectorDispatchCookie,
+    ) -> Result<(), TieredGreenPoolError> {
+        with_runtime_vector_builder(|builder| self.unbind_vector_task(builder, slot, cookie))
+            .map_err(tiered_green_pool_error_from_executor)?
     }
 
     /// Drains deferred vector callbacks already surfaced through the sealed table and routes the

@@ -2,6 +2,10 @@ use std::alloc::{
     Layout,
     alloc_zeroed,
 };
+use std::sync::atomic::{
+    AtomicBool,
+    Ordering,
+};
 
 use fusion_pal::sys::mem::{
     Address,
@@ -640,6 +644,50 @@ fn current_runtime_singleton_respects_fiber_capacity_cap() {
     ));
 
     assert_eq!(first.join().expect("first fiber should join"), 55);
+    RUNTIME
+        .shutdown_fibers()
+        .expect("singleton fibers should shut down cleanly");
+}
+
+#[test]
+fn current_runtime_singleton_realizes_fiber_capacity_limit_up_front() {
+    let _guard = crate::thread::runtime_test_guard();
+    static RUNTIME: CurrentFiberAsyncSingleton =
+        CurrentFiberAsyncSingleton::new().with_fiber_capacity(2);
+    static RELEASE: AtomicBool = AtomicBool::new(false);
+
+    RELEASE.store(false, Ordering::Release);
+
+    let first = RUNTIME
+        .spawn_fiber_with_stack::<4096, _, _>(|| {
+            while !RELEASE.load(Ordering::Acquire) {
+                let _ = yield_now();
+            }
+            55_u8
+        })
+        .expect("first fiber should spawn");
+    let second = RUNTIME
+        .spawn_fiber_with_stack::<4096, _, _>(|| {
+            while !RELEASE.load(Ordering::Acquire) {
+                let _ = yield_now();
+            }
+            89_u8
+        })
+        .expect("second fiber should spawn while the first is still live");
+
+    RELEASE.store(true, Ordering::Release);
+    while !first
+        .is_finished()
+        .expect("first fiber completion should read")
+        || !second
+            .is_finished()
+            .expect("second fiber completion should read")
+    {
+        assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+    }
+
+    assert_eq!(first.join().expect("first fiber should join"), 55);
+    assert_eq!(second.join().expect("second fiber should join"), 89);
     RUNTIME
         .shutdown_fibers()
         .expect("singleton fibers should shut down cleanly");

@@ -310,6 +310,16 @@ fn configure_output(pin: u8, initial_high: bool) -> Result<(), GpioError> {
     validate_pin(pin)?;
     ensure_bank0_ready()?;
     set_function(pin, GpioFunction::Sio)?;
+    let pad = pad_register(pin)?;
+    // SAFETY: this reads and writes one selected-SoC pad-control register so output mode clears
+    // isolation/open-drain state left behind by reset or prior use before SIO starts driving.
+    unsafe {
+        let pad_value = ptr::read_volatile(pad);
+        ptr::write_volatile(
+            pad,
+            (pad_value | RP2350_PAD_IE_BIT) & !(RP2350_PAD_OD_BIT | RP2350_PAD_ISO_BIT),
+        );
+    }
     write(pin, initial_high)?;
     let sio_oe_set = sio_register_mut(RP2350_SIO_GPIO_OE_SET_OFFSET)?;
     // SAFETY: this writes one selected-SoC SIO GPIO output-enable register.

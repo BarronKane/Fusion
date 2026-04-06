@@ -203,6 +203,10 @@ impl CurrentFiberAsyncSingleton {
     /// Installs one explicit current-thread fiber capacity cap.
     ///
     /// This is runtime policy only. It does not describe backend structural minimums.
+    ///
+    /// When the singleton realizes its fiber runtime lazily for the first time, this value also
+    /// becomes the initial pool capacity unless the caller explicitly requests a different startup
+    /// size through a lower-level runtime path.
     #[must_use]
     pub const fn with_fiber_capacity(mut self, fiber_capacity: usize) -> Self {
         self.fiber_capacity_limit = Some(if fiber_capacity == 0 {
@@ -329,6 +333,7 @@ impl CurrentFiberAsyncSingleton {
         fiber_capacity: usize,
         stack_floor_bytes: usize,
     ) -> Result<CurrentFiberPool, FiberError> {
+        ensure_runtime_reserved_wake_vectors_best_effort();
         let mut bootstrap = self.fiber_bootstrap_with_policy(fiber_capacity, stack_floor_bytes)?;
         if let Some(courier_id) = self.courier_id {
             bootstrap = bootstrap.with_courier_id(courier_id);
@@ -352,6 +357,7 @@ impl CurrentFiberAsyncSingleton {
         &self,
         async_capacity: usize,
     ) -> Result<CurrentAsyncRuntime, ExecutorError> {
+        ensure_runtime_reserved_wake_vectors()?;
         let mut config = ExecutorConfig::new().with_capacity(async_capacity.max(1));
         if let Some(courier_id) = self.courier_id {
             config = config.with_courier_id(courier_id);

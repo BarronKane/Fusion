@@ -4,7 +4,7 @@
 use core::hint::black_box;
 use core::panic::PanicInfo;
 
-use cortex_m_rt::{entry, exception};
+use cortex_m_rt::entry;
 
 use fusion_example_rp2350_on_device::runtime::{
     block_on_with_poll_stack_bytes,
@@ -199,18 +199,6 @@ fn run_benchmarks() {
 #[entry]
 fn main() -> ! {
     run_benchmarks();
-    loop {
-        cortex_m::asm::wfi();
-    }
-}
-
-#[exception]
-unsafe fn DefaultHandler(irqn: i16) {
-    if irqn == 3 {
-        fusion_pal::sys::soc::cortex_m::rp2350::service_event_timeout_irq()
-            .expect("event-timeout irq should service");
-        return;
-    }
     loop {
         cortex_m::asm::wfi();
     }

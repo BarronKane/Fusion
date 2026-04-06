@@ -77,6 +77,9 @@ use crate::pal::hosted::macos as platform;
 #[cfg(target_os = "windows")]
 use crate::pal::hosted::windows as platform;
 
+#[path = "vector_runtime.rs"]
+mod vector_runtime;
+
 /// Public execution-context module re-exported from the selected platform backend.
 pub mod execution_context {
     pub use super::platform::context::{
@@ -438,12 +441,18 @@ pub mod transport {
 /// Public vector module re-exported from the selected platform backend.
 pub mod vector {
     pub use super::platform::vector::{
+        bind_reserved_event_timeout_wake,
         PlatformSealedVectorTable,
         PlatformVector,
         PlatformVectorBuilder,
         bind_reserved_pendsv_dispatch,
         system_vector,
         take_pending_active_scope,
+    };
+    pub use super::vector_runtime::{
+        ensure_runtime_reserved_wake_vectors,
+        ensure_runtime_reserved_wake_vectors_best_effort,
+        with_runtime_vector_builder,
     };
     pub use crate::contract::pal::vector::*;
 }

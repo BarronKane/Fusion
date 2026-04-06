@@ -39,6 +39,9 @@ pub mod power;
 #[cfg(feature = "soc-rp2350")]
 /// RP2350 SoC surface under the Cortex-M lane.
 pub mod rp2350;
+#[path = "runtime_irq/runtime_irq.rs"]
+/// Cortex-M backend-owned reserved runtime IRQ dispatch.
+pub mod runtime_irq;
 #[path = "sync/sync.rs"]
 /// Cortex-M bare-metal synchronization backend implementation.
 pub mod sync;

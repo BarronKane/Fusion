@@ -26,6 +26,13 @@ use abi::{
 const DRIVER_EXPORTS: [FdxeDriverExportV1; 1] =
     [FdxeDriverExportV1::new("bus.gpio", crate::driver_metadata)];
 
+static FDXE_MODULE_HEADER_V1: FdxeModuleV1 = FdxeModuleV1::new(
+    env!("CARGO_PKG_NAME"),
+    env!("FUSION_FDXE_TARGET_NAME"),
+    &DRIVER_EXPORTS,
+);
+
+#[cfg(feature = "fdxe-module")]
 #[allow(non_upper_case_globals)]
 #[unsafe(no_mangle)]
 pub static fdxe_module_v1: FdxeModuleV1 = FdxeModuleV1::new(
@@ -34,6 +41,8 @@ pub static fdxe_module_v1: FdxeModuleV1 = FdxeModuleV1::new(
     &DRIVER_EXPORTS,
 );
 
+#[cfg(target_os = "none")]
 #[used]
 #[unsafe(link_section = ".fdxe.modules")]
-pub static FDXE_STATIC_MODULE_V1: FdxeStaticModuleV1 = FdxeStaticModuleV1::new(&fdxe_module_v1);
+pub static FDXE_STATIC_MODULE_V1: FdxeStaticModuleV1 =
+    FdxeStaticModuleV1::new(&FDXE_MODULE_HEADER_V1);

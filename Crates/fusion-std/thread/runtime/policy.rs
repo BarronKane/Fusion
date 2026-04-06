@@ -191,7 +191,7 @@ pub(super) fn initial_runtime_capacity(
     limit: Option<usize>,
     requested_capacity: Option<usize>,
 ) -> Option<usize> {
-    let requested = requested_capacity.unwrap_or(1).max(1);
+    let requested = requested_capacity.or(limit).unwrap_or(1).max(1);
     match limit {
         Some(limit) if requested > limit => None,
         Some(_) | None => Some(requested),

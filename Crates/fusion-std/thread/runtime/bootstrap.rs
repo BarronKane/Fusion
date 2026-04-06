@@ -577,6 +577,7 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
     pub fn build_current_parts(
         self,
     ) -> Result<CurrentFiberAsyncParts, CurrentFiberAsyncRuntimeError> {
+        ensure_runtime_reserved_wake_vectors_best_effort();
         if uses_explicit_bound_runtime_backing() {
             let fibers = self.fibers.build_current()?;
             let layout = CurrentAsyncRuntime::backing_plan(self.executor)?;

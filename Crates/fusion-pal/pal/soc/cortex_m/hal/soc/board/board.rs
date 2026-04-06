@@ -985,6 +985,20 @@ pub trait CortexMSocBoard: Copy {
         Err(HardwareError::unsupported())
     }
 
+    /// Services one backend-reserved runtime IRQ owned by this board.
+    ///
+    /// This is the backend wake path for reserved runtime lines like the shared event-timeout
+    /// alarm. Returning `Ok(false)` means the IRQ does not belong to the board's reserved runtime
+    /// surface and should continue through ordinary dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the IRQ belongs to one reserved runtime line but the board cannot
+    /// service it honestly.
+    fn service_reserved_runtime_irq(&self, _irqn: i16) -> Result<bool, HardwareError> {
+        Ok(false)
+    }
+
     /// Returns whether the current exception stack has at least `required_bytes` of honest
     /// remaining headroom for one inline urgent handler body.
     ///
@@ -1455,6 +1469,21 @@ pub fn cancel_event_timeout<T: CortexMSocBoard>(soc: T) -> Result<(), HardwareEr
 /// Returns an error if the selected board cannot surface finite event timeouts honestly.
 pub fn event_timeout_fired<T: CortexMSocBoard>(soc: T) -> Result<bool, HardwareError> {
     soc.event_timeout_fired()
+}
+
+/// Services one selected-board reserved runtime IRQ when it belongs to backend wake machinery.
+///
+/// Returning `Ok(false)` means the IRQ is not one reserved runtime line for the selected board.
+///
+/// # Errors
+///
+/// Returns an error if the selected board recognizes the IRQ as reserved runtime state but cannot
+/// service it honestly.
+pub fn service_reserved_runtime_irq<T: CortexMSocBoard>(
+    soc: T,
+    irqn: i16,
+) -> Result<bool, HardwareError> {
+    soc.service_reserved_runtime_irq(irqn)
 }
 
 /// Returns whether the selected SoC board currently has enough honest exception-stack headroom

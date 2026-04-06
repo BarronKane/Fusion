@@ -1047,6 +1047,14 @@ impl CortexMSocBoard for Rp2350Soc {
         Ok(rp2350_event_timeout_fired_now())
     }
 
+    fn service_reserved_runtime_irq(&self, irqn: i16) -> Result<bool, HardwareError> {
+        if irqn == i16::try_from(RP2350_EVENT_TIMEOUT_IRQN).unwrap_or(i16::MAX) {
+            rp2350_service_event_timeout_irq()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn inline_current_exception_stack_allows(&self, required_bytes: usize) -> bool {
         rp2350_inline_current_exception_stack_allows(required_bytes)
     }
@@ -1805,6 +1813,17 @@ pub fn cancel_event_timeout() -> Result<(), HardwareError> {
 /// Returns an error if the selected board cannot surface finite event timeouts honestly.
 pub fn event_timeout_fired() -> Result<bool, HardwareError> {
     board_contract::event_timeout_fired(system_soc())
+}
+
+/// Services one backend-reserved runtime IRQ for the selected RP2350 board.
+///
+/// Returning `Ok(false)` means the IRQ is not one reserved runtime wake line for this board.
+///
+/// # Errors
+///
+/// Returns an error if the IRQ belongs to reserved runtime state but cannot be serviced honestly.
+pub fn service_reserved_runtime_irq(irqn: i16) -> Result<bool, HardwareError> {
+    board_contract::service_reserved_runtime_irq(system_soc(), irqn)
 }
 
 /// Records and acknowledges one serviced RP2350 event-timeout interrupt.

@@ -444,6 +444,8 @@ fn arm_board_timeout(timeout: core::time::Duration) -> Result<(), EventError> {
         return Err(EventError::unsupported());
     }
 
+    crate::sys::vector::ensure_runtime_reserved_wake_vectors().map_err(map_vector_error)?;
+
     crate::pal::soc::cortex_m::hal::soc::board::arm_event_timeout(timeout)
         .map_err(map_hardware_error)
 }
@@ -474,6 +476,27 @@ const fn map_hardware_error(error: crate::contract::pal::HardwareError) -> Event
         HardwareErrorKind::ResourceExhausted => EventError::resource_exhausted(),
         HardwareErrorKind::StateConflict => EventError::state_conflict(),
         HardwareErrorKind::Platform(code) => EventError::platform(code),
+    }
+}
+
+const fn map_vector_error(error: crate::contract::pal::vector::VectorError) -> EventError {
+    match error.kind() {
+        crate::contract::pal::vector::VectorErrorKind::Unsupported => EventError::unsupported(),
+        crate::contract::pal::vector::VectorErrorKind::Invalid
+        | crate::contract::pal::vector::VectorErrorKind::Reserved
+        | crate::contract::pal::vector::VectorErrorKind::CoreMismatch
+        | crate::contract::pal::vector::VectorErrorKind::WorldMismatch
+        | crate::contract::pal::vector::VectorErrorKind::SealViolation => EventError::invalid(),
+        crate::contract::pal::vector::VectorErrorKind::AlreadyBound
+        | crate::contract::pal::vector::VectorErrorKind::NotBound
+        | crate::contract::pal::vector::VectorErrorKind::StateConflict
+        | crate::contract::pal::vector::VectorErrorKind::Sealed
+        | crate::contract::pal::vector::VectorErrorKind::Platform(_) => {
+            EventError::state_conflict()
+        }
+        crate::contract::pal::vector::VectorErrorKind::ResourceExhausted => {
+            EventError::resource_exhausted()
+        }
     }
 }
 

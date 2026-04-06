@@ -185,6 +185,8 @@ impl ThreadSchedulerControlContract for CortexMThread {
             return Err(ThreadError::unsupported());
         }
 
+        crate::sys::vector::ensure_runtime_reserved_wake_vectors().map_err(map_vector_error)?;
+
         crate::pal::soc::cortex_m::hal::soc::board::arm_event_timeout(duration)
             .map_err(map_hardware_error)?;
 
@@ -296,5 +298,26 @@ const fn map_hardware_error(error: crate::contract::pal::HardwareError) -> Threa
         crate::contract::pal::HardwareErrorKind::StateConflict => ThreadError::state_conflict(),
         crate::contract::pal::HardwareErrorKind::Busy => ThreadError::busy(),
         crate::contract::pal::HardwareErrorKind::Platform(code) => ThreadError::platform(code),
+    }
+}
+
+const fn map_vector_error(error: crate::contract::pal::vector::VectorError) -> ThreadError {
+    match error.kind() {
+        crate::contract::pal::vector::VectorErrorKind::Unsupported => ThreadError::unsupported(),
+        crate::contract::pal::vector::VectorErrorKind::Invalid
+        | crate::contract::pal::vector::VectorErrorKind::Reserved
+        | crate::contract::pal::vector::VectorErrorKind::CoreMismatch
+        | crate::contract::pal::vector::VectorErrorKind::WorldMismatch
+        | crate::contract::pal::vector::VectorErrorKind::SealViolation => ThreadError::invalid(),
+        crate::contract::pal::vector::VectorErrorKind::ResourceExhausted => {
+            ThreadError::resource_exhausted()
+        }
+        crate::contract::pal::vector::VectorErrorKind::AlreadyBound
+        | crate::contract::pal::vector::VectorErrorKind::NotBound
+        | crate::contract::pal::vector::VectorErrorKind::StateConflict
+        | crate::contract::pal::vector::VectorErrorKind::Sealed
+        | crate::contract::pal::vector::VectorErrorKind::Platform(_) => {
+            ThreadError::state_conflict()
+        }
     }
 }

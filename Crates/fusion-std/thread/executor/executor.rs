@@ -191,6 +191,8 @@ use super::{
     RuntimeSizingStrategy,
     ThreadPool,
     default_runtime_sizing_strategy,
+    ensure_runtime_reserved_wake_vectors,
+    ensure_runtime_reserved_wake_vectors_best_effort,
     yield_now as green_yield_now,
 };
 
@@ -1489,6 +1491,7 @@ impl CurrentAsyncRuntime {
     /// Creates one current-thread async runtime.
     #[must_use]
     pub fn new() -> Self {
+        ensure_runtime_reserved_wake_vectors_best_effort();
         Self {
             executor: Executor::new_fast_current(),
             _not_send_sync: PhantomData,
@@ -1498,6 +1501,7 @@ impl CurrentAsyncRuntime {
     /// Creates one current-thread async runtime with one explicit executor configuration.
     #[must_use]
     pub fn with_executor_config(config: ExecutorConfig) -> Self {
+        ensure_runtime_reserved_wake_vectors_best_effort();
         Self {
             executor: Executor::with_scheduler(
                 config.with_mode(ExecutorMode::CurrentThread),
@@ -1517,6 +1521,7 @@ impl CurrentAsyncRuntime {
         config: ExecutorConfig,
         backing: CurrentAsyncRuntimeBacking,
     ) -> Result<Self, ExecutorError> {
+        ensure_runtime_reserved_wake_vectors()?;
         let executor = Executor::with_current_backing(
             config.with_mode(ExecutorMode::CurrentThread),
             true,

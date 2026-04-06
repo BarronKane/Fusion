@@ -37,6 +37,7 @@ pub mod vector {
         UnsupportedSealedVectorTable as PlatformSealedVectorTable,
         UnsupportedVector as PlatformVector,
         UnsupportedVectorBuilder as PlatformVectorBuilder,
+        bind_reserved_event_timeout_wake,
         bind_reserved_pendsv_dispatch,
         take_pending_active_scope,
     };

@@ -292,17 +292,43 @@ impl CommandOptions {
         ))
     }
 
+    fn package_name(&self) -> Result<String, String> {
+        parse_manifest_package_name(&self.manifest_path()?)
+    }
+
+    fn scoped_target_dir(&self) -> Result<PathBuf, String> {
+        let workspace_root = self.workspace_root()?;
+        let mut dir = workspace_root
+            .join("target")
+            .join("scoped-builds")
+            .join(sanitize_path_component(&self.package_name()?))
+            .join(sanitize_path_component(&self.bin_name));
+        if self.no_default_features {
+            dir = dir.join("no-default-features");
+        } else {
+            dir = dir.join("default-features");
+        }
+        if let Some(features) = self.features.as_ref() {
+            dir = dir.join(sanitize_path_component(features));
+        } else {
+            dir = dir.join("default");
+        }
+        Ok(dir)
+    }
+
+    fn active_build_output_dir(&self) -> Result<PathBuf, String> {
+        Ok(self
+            .scoped_target_dir()?
+            .join(&self.target)
+            .join(self.build_profile()))
+    }
+
     const fn build_profile(&self) -> &'static str {
         if self.release { "release" } else { "debug" }
     }
 
     fn elf_path(&self) -> Result<PathBuf, String> {
-        let root = self.workspace_root()?;
-        Ok(root
-            .join("target")
-            .join(&self.target)
-            .join(self.build_profile())
-            .join(&self.bin_name))
+        Ok(self.active_build_output_dir()?.join(&self.bin_name))
     }
 
     fn output_dir(&self) -> Result<PathBuf, String> {
@@ -397,6 +423,8 @@ fn run_probe_flash(options: &CommandOptions) -> Result<(), String> {
     let chip = options.resolve_chip();
     let mut command = Command::new("cargo-flash");
     command.current_dir(project_dir);
+    command.env("CARGO_TARGET_DIR", options.scoped_target_dir()?);
+    command.env("CARGO_BUILD_TARGET_DIR", options.scoped_target_dir()?);
     apply_generated_runtime_metadata_env(&mut command, &metadata);
     command.arg("--manifest-path").arg(manifest_path);
     command.arg("--target").arg(&options.target);
@@ -736,6 +764,8 @@ fn build_example_elf_impl(options: &CommandOptions, preserve_symbols: bool) -> R
     let project_dir = options.project_dir()?;
     let mut command = Command::new("cargo");
     command.current_dir(project_dir);
+    command.env("CARGO_TARGET_DIR", options.scoped_target_dir()?);
+    command.env("CARGO_BUILD_TARGET_DIR", options.scoped_target_dir()?);
     apply_generated_runtime_metadata_env(&mut command, &metadata);
     command.arg("build");
     command.arg("--manifest-path").arg(manifest_path);
@@ -771,7 +801,7 @@ fn generate_runtime_metadata(options: &CommandOptions) -> Result<GeneratedRuntim
     let workspace_manifest_path = workspace_root.join("Cargo.toml");
     let tool_workspace_root = fusion_workspace_root()?;
     let package = parse_manifest_package_name(&manifest_path)?;
-    let output_dir = generated_runtime_metadata_dir(&workspace_root, options, &package);
+    let output_dir = generated_runtime_metadata_dir(options)?;
     fs::create_dir_all(&output_dir)
         .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
     let metadata = GeneratedRuntimeMetadata {
@@ -858,28 +888,8 @@ fn fusion_workspace_root() -> Result<PathBuf, String> {
         })
 }
 
-fn generated_runtime_metadata_dir(
-    workspace_root: &Path,
-    options: &CommandOptions,
-    package: &str,
-) -> PathBuf {
-    let mut dir = workspace_root
-        .join("target")
-        .join("generated-runtime-metadata")
-        .join(sanitize_path_component(package))
-        .join(sanitize_path_component(&options.bin_name))
-        .join(sanitize_path_component(&options.target))
-        .join(options.build_profile());
-    if options.no_default_features {
-        dir = dir.join("no-default-features");
-    } else {
-        dir = dir.join("default-features");
-    }
-    if let Some(features) = options.features.as_ref() {
-        dir.join(sanitize_path_component(features))
-    } else {
-        dir.join("default")
-    }
+fn generated_runtime_metadata_dir(options: &CommandOptions) -> Result<PathBuf, String> {
+    options.active_build_output_dir()
 }
 
 fn sanitize_path_component(raw: &str) -> String {

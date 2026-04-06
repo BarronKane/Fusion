@@ -21,6 +21,8 @@ use fusion_sys::thread::vector::{
     VectorTableBuilder,
 };
 
+use super::runtime::with_runtime_vector_builder;
+use crate::thread::ExecutorError;
 use crate::thread::fiber::{
     CooperativeExclusionSpan,
     CooperativeExclusionSummaryTree,
@@ -529,6 +531,31 @@ fn validate_red_interrupt_config(
     })
 }
 
+const fn thread_error_from_executor(error: ExecutorError) -> ThreadError {
+    match error {
+        ExecutorError::Unsupported => ThreadError::unsupported(),
+        ExecutorError::Stopped | ExecutorError::Cancelled | ExecutorError::TaskPanicked => {
+            ThreadError::state_conflict()
+        }
+        ExecutorError::Sync(kind) => match kind {
+            fusion_pal::contract::pal::runtime::sync::SyncErrorKind::Unsupported => {
+                ThreadError::unsupported()
+            }
+            fusion_pal::contract::pal::runtime::sync::SyncErrorKind::Invalid => {
+                ThreadError::invalid()
+            }
+            fusion_pal::contract::pal::runtime::sync::SyncErrorKind::Overflow => {
+                ThreadError::resource_exhausted()
+            }
+            fusion_pal::contract::pal::runtime::sync::SyncErrorKind::Busy
+            | fusion_pal::contract::pal::runtime::sync::SyncErrorKind::PermissionDenied
+            | fusion_pal::contract::pal::runtime::sync::SyncErrorKind::Platform(_) => {
+                ThreadError::state_conflict()
+            }
+        },
+    }
+}
+
 #[allow(clippy::missing_const_for_fn)]
 impl RedInterrupt {
     /// Reports the current red interrupt-lane support surface.
@@ -644,6 +671,24 @@ impl RedInterrupt {
             let _ = (builder, config, handler);
             Err(ThreadError::unsupported())
         }
+    }
+
+    /// Safely binds one interrupt-backed urgent execution lane through the runtime-owned vector
+    /// broker.
+    ///
+    /// This is the normal runtime path once the backend bootstrap has already adopted vector
+    /// ownership. Callers get the same semantics as `bind_owned(...)` without smuggling their own
+    /// builder through unrelated layers.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest runtime-broker, vector-binding, or lower-level IRQ-control failure.
+    pub fn bind_runtime_owned(
+        config: &RedInterruptConfig<'_>,
+        handler: VectorInlineHandler,
+    ) -> Result<Self, ThreadError> {
+        with_runtime_vector_builder(|builder| Self::bind_owned(builder, config, handler))
+            .map_err(thread_error_from_executor)?
     }
 
     /// Returns the bound IRQ line.

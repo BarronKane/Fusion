@@ -59,6 +59,29 @@ use crate::runtime::{
 type SelectedHardwarePin = SystemGpioPin;
 
 const REQUEST_ID_WRAP_SENTINEL: u32 = u32::MAX;
+pub const RP2350_GPIO_BATCH_MAX_OPS: usize = 96;
+
+#[unsafe(no_mangle)]
+pub static RP2350_GPIO_SERVICE_HEARTBEAT: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static RP2350_GPIO_LAST_REQUEST_ID: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static RP2350_GPIO_LAST_COMMAND_KIND: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static RP2350_GPIO_CLIENT_REQUEST_ID: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static RP2350_GPIO_CLIENT_PHASE: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Debug, Clone, Copy)]
+enum Rp2350GpioBatchOp {
+    SetLevel {
+        slot_index: u8,
+        high: bool,
+    },
+    Pause {
+        spins: u8,
+    },
+}
 
 #[derive(Debug, Clone, Copy)]
 enum Rp2350GpioCommandKind {
@@ -67,6 +90,10 @@ enum Rp2350GpioCommandKind {
     },
     SetLevel {
         high: bool,
+    },
+    SetLevelsBatch {
+        count: u8,
+        ops: [Rp2350GpioBatchOp; RP2350_GPIO_BATCH_MAX_OPS],
     },
 }
 
@@ -199,6 +226,13 @@ pub struct Rp2350FiberGpioOutputPin<const COMMAND_CAPACITY: usize, const STATUS_
     pin: u8,
 }
 
+/// One batched GPIO transaction over the example-side fiber GPIO service.
+pub struct Rp2350FiberGpioBatch<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize> {
+    client: &'static Rp2350GpioClientIo<COMMAND_CAPACITY, STATUS_CAPACITY>,
+    ops: [Rp2350GpioBatchOp; RP2350_GPIO_BATCH_MAX_OPS],
+    count: u8,
+}
+
 impl<const MAX_PINS: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
     Rp2350FiberGpioService<MAX_PINS, COMMAND_CAPACITY, STATUS_CAPACITY>
 {
@@ -283,6 +317,16 @@ impl<const MAX_PINS: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPACITY
             .try_receive(self.command_consumer)
             .map_err(gpio_error_from_channel)?
         {
+            RP2350_GPIO_SERVICE_HEARTBEAT.fetch_add(1, Ordering::AcqRel);
+            RP2350_GPIO_LAST_REQUEST_ID.store(command.request_id, Ordering::Release);
+            RP2350_GPIO_LAST_COMMAND_KIND.store(
+                match command.kind {
+                    Rp2350GpioCommandKind::ConfigureOutput { .. } => 1,
+                    Rp2350GpioCommandKind::SetLevel { .. } => 2,
+                    Rp2350GpioCommandKind::SetLevelsBatch { .. } => 3,
+                },
+                Ordering::Release,
+            );
             let status = match self.handle_command(command) {
                 Ok(()) => Rp2350GpioStatus::Completed {
                     request_id: command.request_id,
@@ -300,18 +344,46 @@ impl<const MAX_PINS: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPACITY
 
     fn handle_command(&mut self, command: Rp2350GpioCommand) -> Result<(), GpioError> {
         let slot_index = usize::from(command.slot_index);
+        match command.kind {
+            Rp2350GpioCommandKind::ConfigureOutput { initial_high } => {
+                let pin = self.pin_for_slot(slot_index)?;
+                pin.configure_output(initial_high)
+            }
+            Rp2350GpioCommandKind::SetLevel { high } => {
+                let pin = self.pin_for_slot(slot_index)?;
+                pin.set_level(high)
+            }
+            Rp2350GpioCommandKind::SetLevelsBatch { count, ops } => {
+                let mut index = 0usize;
+                let count = usize::from(count);
+                while index < count {
+                    match ops[index] {
+                        Rp2350GpioBatchOp::SetLevel { slot_index, high } => {
+                            let pin = self.pin_for_slot(usize::from(slot_index))?;
+                            pin.set_level(high)?;
+                        }
+                        Rp2350GpioBatchOp::Pause { spins } => {
+                            let mut remaining = usize::from(spins);
+                            while remaining != 0 {
+                                core::hint::spin_loop();
+                                remaining -= 1;
+                            }
+                        }
+                    }
+                    index += 1;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn pin_for_slot(&mut self, slot_index: usize) -> Result<&mut SelectedHardwarePin, GpioError> {
         if slot_index >= self.claimed_count {
             return Err(GpioError::invalid());
         }
-        let pin = self.claimed_pins[slot_index]
+        self.claimed_pins[slot_index]
             .as_mut()
-            .ok_or_else(GpioError::state_conflict)?;
-        match command.kind {
-            Rp2350GpioCommandKind::ConfigureOutput { initial_high } => {
-                pin.configure_output(initial_high)
-            }
-            Rp2350GpioCommandKind::SetLevel { high } => pin.set_level(high),
-        }
+            .ok_or_else(GpioError::state_conflict)
     }
 
     fn send_status(&self, status: Rp2350GpioStatus) -> Result<(), GpioError> {
@@ -330,10 +402,145 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
 {
     fn perform(&self, kind: Rp2350GpioCommandKind) -> Result<(), GpioError> {
         let request_id = self.client.next_request_id();
+        RP2350_GPIO_CLIENT_REQUEST_ID.store(request_id, Ordering::Release);
+        RP2350_GPIO_CLIENT_PHASE.store(1, Ordering::Release);
         let command = Rp2350GpioCommand {
             request_id,
             slot_index: self.slot_index,
             kind,
+        };
+
+        loop {
+            match self
+                .client
+                .commands
+                .try_send(self.client.command_producer, command)
+            {
+                Ok(()) => {
+                    RP2350_GPIO_CLIENT_PHASE.store(2, Ordering::Release);
+                    break;
+                }
+                Err(error) if error.kind() == ChannelErrorKind::Busy => {
+                    RP2350_GPIO_CLIENT_PHASE.store(3, Ordering::Release);
+                    wait_for_service_progress()?
+                }
+                Err(error) => return Err(gpio_error_from_channel(error)),
+            }
+        }
+
+        loop {
+            RP2350_GPIO_CLIENT_PHASE.store(4, Ordering::Release);
+            match self.client.statuses.try_receive(self.client.status_consumer) {
+                Ok(Some(Rp2350GpioStatus::Completed {
+                    request_id: observed,
+                })) if observed == request_id => {
+                    RP2350_GPIO_CLIENT_PHASE.store(5, Ordering::Release);
+                    return Ok(());
+                }
+                Ok(Some(Rp2350GpioStatus::Failed {
+                    request_id: observed,
+                    kind,
+                })) if observed == request_id => return Err(gpio_error_from_kind(kind)),
+                Ok(Some(_)) => return Err(GpioError::state_conflict()),
+                Ok(None) => {
+                    RP2350_GPIO_CLIENT_PHASE.store(6, Ordering::Release);
+                    wait_for_service_progress()?
+                }
+                Err(error) if error.kind() == ChannelErrorKind::Busy => {
+                    RP2350_GPIO_CLIENT_PHASE.store(7, Ordering::Release);
+                    wait_for_service_progress()?
+                }
+                Err(error) => return Err(gpio_error_from_channel(error)),
+            }
+        }
+    }
+
+    /// Starts one batched GPIO transaction rooted in this pin's service.
+    #[must_use]
+    pub fn begin_batch(&self) -> Rp2350FiberGpioBatch<COMMAND_CAPACITY, STATUS_CAPACITY> {
+        Rp2350FiberGpioBatch {
+            client: self.client,
+            ops: [Rp2350GpioBatchOp::Pause { spins: 0 }; RP2350_GPIO_BATCH_MAX_OPS],
+            count: 0,
+        }
+    }
+}
+
+impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
+    Rp2350FiberGpioBatch<COMMAND_CAPACITY, STATUS_CAPACITY>
+{
+    /// Clears the queued batch operations.
+    pub fn clear(&mut self) {
+        self.count = 0;
+    }
+
+    /// Returns the number of queued operations.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    /// Returns the fixed batch capacity.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        RP2350_GPIO_BATCH_MAX_OPS
+    }
+
+    /// Queues one output-level change for one pin belonging to this batch's GPIO service.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest GPIO error when the pin belongs to a different service or the batch is
+    /// already full.
+    pub fn push_set_level(
+        &mut self,
+        pin: &Rp2350FiberGpioOutputPin<COMMAND_CAPACITY, STATUS_CAPACITY>,
+        high: bool,
+    ) -> Result<(), GpioError> {
+        if !core::ptr::eq(self.client, pin.client) {
+            return Err(GpioError::state_conflict());
+        }
+        let index = usize::from(self.count);
+        if index >= RP2350_GPIO_BATCH_MAX_OPS {
+            return Err(GpioError::resource_exhausted());
+        }
+        self.ops[index] = Rp2350GpioBatchOp::SetLevel {
+            slot_index: pin.slot_index,
+            high,
+        };
+        self.count = self.count.saturating_add(1);
+        Ok(())
+    }
+
+    /// Queues one short pause expressed as a fixed number of spin-loop iterations.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest GPIO error when the batch is already full.
+    pub fn push_pause(&mut self, spins: u8) -> Result<(), GpioError> {
+        let index = usize::from(self.count);
+        if index >= RP2350_GPIO_BATCH_MAX_OPS {
+            return Err(GpioError::resource_exhausted());
+        }
+        self.ops[index] = Rp2350GpioBatchOp::Pause { spins };
+        self.count = self.count.saturating_add(1);
+        Ok(())
+    }
+
+    /// Executes the queued batch as one request over the GPIO fiber service.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest GPIO error when the GPIO service cannot accept or execute the batch.
+    pub fn execute(&self) -> Result<(), GpioError> {
+        let request_id = self.client.next_request_id();
+        let command = Rp2350GpioCommand {
+            request_id,
+            slot_index: 0,
+            kind: Rp2350GpioCommandKind::SetLevelsBatch {
+                count: self.count,
+                ops: self.ops,
+            },
         };
 
         loop {

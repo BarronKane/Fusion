@@ -38,9 +38,13 @@ use fusion_pal::sys::vector::{
     PlatformSealedVectorTable,
     PlatformVector,
     PlatformVectorBuilder,
+    bind_reserved_event_timeout_wake as platform_bind_reserved_event_timeout_wake,
     bind_reserved_pendsv_dispatch as platform_bind_reserved_pendsv_dispatch,
+    ensure_runtime_reserved_wake_vectors as platform_ensure_runtime_reserved_wake_vectors,
+    ensure_runtime_reserved_wake_vectors_best_effort as platform_ensure_runtime_reserved_wake_vectors_best_effort,
     system_vector as pal_system_vector,
     take_pending_active_scope as platform_take_pending_active_scope,
+    with_runtime_vector_builder as platform_with_runtime_vector_builder,
 };
 
 const VECTOR_DEFERRED_REGISTRY_CAPACITY: usize = 128;
@@ -59,6 +63,7 @@ pub struct VectorSystem {
 }
 
 /// Mutable fusion-sys vector-table builder wrapper.
+#[repr(transparent)]
 #[derive(Debug)]
 pub struct VectorTableBuilder {
     inner: PlatformVectorBuilder,
@@ -132,6 +137,39 @@ impl VectorSystem {
     }
 }
 
+/// Ensures the selected backend's reserved runtime wake vectors are installed when that substrate
+/// can support them honestly.
+///
+/// # Errors
+///
+/// Returns any honest backend vector-ownership or reservation failure.
+pub fn ensure_runtime_reserved_wake_vectors() -> Result<(), VectorError> {
+    platform_ensure_runtime_reserved_wake_vectors()
+}
+
+/// Best-effort version of [`ensure_runtime_reserved_wake_vectors()`].
+pub fn ensure_runtime_reserved_wake_vectors_best_effort() {
+    platform_ensure_runtime_reserved_wake_vectors_best_effort();
+}
+
+/// Executes one closure against the retained runtime-owned vector builder when the backend has
+/// already adopted and reserved it.
+///
+/// # Errors
+///
+/// Returns any honest backend vector-ownership or reservation failure.
+pub fn with_runtime_vector_builder<R>(
+    bind: impl FnOnce(&mut VectorTableBuilder) -> R,
+) -> Result<R, VectorError> {
+    platform_with_runtime_vector_builder(|inner| {
+        // SAFETY: `VectorTableBuilder` is a transparent wrapper around `PlatformVectorBuilder`, so
+        // a mutable reference to the inner backend builder has the same representation and
+        // lifetime. The PAL runtime broker serializes mutable access before invoking this closure.
+        let builder = unsafe { VectorTableBuilder::from_platform_builder_mut(inner) };
+        bind(builder)
+    })
+}
+
 impl Default for VectorSystem {
     fn default() -> Self {
         Self::new()
@@ -139,6 +177,12 @@ impl Default for VectorSystem {
 }
 
 impl VectorTableBuilder {
+    unsafe fn from_platform_builder_mut(
+        inner: &mut PlatformVectorBuilder,
+    ) -> &mut VectorTableBuilder {
+        unsafe { &mut *(inner as *mut PlatformVectorBuilder as *mut VectorTableBuilder) }
+    }
+
     /// Reports the truthful vector support captured by this builder.
     #[must_use]
     pub fn support(&self) -> VectorSupport {
@@ -360,6 +404,18 @@ impl VectorTableBuilder {
             priority,
             reserved_pendsv_dispatch_handler,
         )
+    }
+
+    /// Binds the selected board's reserved timeout-wake IRQ into one owned Cortex-M vector table.
+    ///
+    /// # Errors
+    ///
+    /// Returns any honest backend ownership, reservation, or priority-programming failure.
+    pub fn bind_reserved_event_timeout_wake(
+        &mut self,
+        priority: Option<VectorPriority>,
+    ) -> Result<(), VectorError> {
+        platform_bind_reserved_event_timeout_wake(&mut self.inner, priority)
     }
 
     /// Seals this builder and returns one immutable runtime handle.
