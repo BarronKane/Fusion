@@ -53,6 +53,8 @@ use fusion_hal::drivers::peripheral::SevenSegmentPolarity;
 use fusion_pal::sys::cpu::soc::board;
 use fusion_sys::thread::system_monotonic_time;
 
+fusion_example_rp2350_on_device::fusion_rp2350_export_build_id!();
+
 const DISPLAY_DATA_PIN: u8 = 12;
 const DISPLAY_ENABLE_PIN: u8 = 13;
 const DISPLAY_LATCH_PIN: u8 = 14;

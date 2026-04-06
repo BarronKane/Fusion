@@ -19,6 +19,7 @@ use std::time::{
 
 use object::{
     Object,
+    ObjectSection,
     ObjectSegment,
     ObjectSymbol,
 };
@@ -39,6 +40,14 @@ const DEFAULT_PROBE_CHIP: &str = "RP235x";
 const DEFAULT_GDB_CONNECTION_STRING: &str = "[::1]:2345";
 const PROBE_CHIP_ENV: &str = "FUSION_PICO_PROBE_CHIP";
 const PROBE_SELECTOR_ENV: &str = "FUSION_PICO_PROBE_SELECTOR";
+const PICO_BUILD_ID_SYMBOL: &str = "FUSION_RP2350_BUILD_ID";
+// This is the *linked ELF output* section name. The source-level export uses
+// `.fusion.build_id` (dots), and the linker script intentionally emits `.fusion_build_id`
+// (underscore) as the retained output section that survives release stripping.
+const PICO_BUILD_ID_SECTION: &str = ".fusion_build_id";
+const PICO_BUILD_ID_MAGIC: u32 = 0x4642_4944;
+const PICO_BUILD_ID_VERSION: u16 = 1;
+const PICO_BUILD_ID_POST_RESET_DELAY: StdDuration = StdDuration::from_millis(75);
 const FIBER_TASK_METADATA_ENV: &str = "FUSION_FIBER_TASK_METADATA";
 const FIBER_TASK_REPORT_ENV: &str = "FUSION_FIBER_TASK_REPORT";
 const ASYNC_POLL_STACK_METADATA_ENV: &str = "FUSION_ASYNC_POLL_STACK_METADATA";
@@ -417,72 +426,42 @@ fn run_build(options: &CommandOptions) -> Result<(), String> {
 }
 
 fn run_probe_flash(options: &CommandOptions) -> Result<(), String> {
-    let metadata = generate_runtime_metadata(options)?;
-    let manifest_path = options.manifest_path()?;
-    let project_dir = options.project_dir()?;
-    let chip = options.resolve_chip();
-    let mut command = Command::new("cargo-flash");
-    command.current_dir(project_dir);
-    command.env("CARGO_TARGET_DIR", options.scoped_target_dir()?);
-    command.env("CARGO_BUILD_TARGET_DIR", options.scoped_target_dir()?);
-    apply_generated_runtime_metadata_env(&mut command, &metadata);
-    command.arg("--manifest-path").arg(manifest_path);
-    command.arg("--target").arg(&options.target);
-    command.arg("--bin").arg(&options.bin_name);
-    command.arg("--chip").arg(chip);
-    if options.release {
-        command.arg("--release");
-    }
-    if let Some(features) = &options.features {
-        command.arg("--features").arg(features);
-    }
-    if options.no_default_features {
-        command.arg("--no-default-features");
-    }
-    if let Some(probe) = options.resolve_probe_selector() {
-        command.arg("--probe").arg(probe);
-    }
-    run_command(&mut command, "cargo-flash")?;
+    build_example_elf(options)?;
+    flash_and_reset_via_probe(options)?;
     Ok(())
 }
 
 fn run_probe_rs(subcommand: &str, options: &CommandOptions) -> Result<(), String> {
-    build_example_elf(options)?;
-    let chip = options.resolve_chip();
-    let elf_path = options.elf_path()?;
-    let mut command = Command::new("probe-rs");
-    command.arg(subcommand);
-    command.arg("--chip").arg(chip);
-    if let Some(probe) = options.resolve_probe_selector() {
-        command.arg("--probe").arg(probe);
+    match subcommand {
+        "run" => {
+            build_example_elf(options)?;
+            flash_and_reset_via_probe(options)?;
+        }
+        "attach" => {
+            build_example_elf(options)?;
+            let chip = options.resolve_chip();
+            let elf_path = options.elf_path()?;
+            let mut command = Command::new("probe-rs");
+            command.arg(subcommand);
+            command.arg("--chip").arg(chip);
+            if let Some(probe) = options.resolve_probe_selector() {
+                command.arg("--probe").arg(probe);
+            }
+            command.arg(&elf_path);
+            run_command(&mut command, "probe-rs")?;
+        }
+        other => {
+            return Err(format!("unsupported probe-rs wrapper subcommand `{other}`"));
+        }
     }
-    command.arg(&elf_path);
-    run_command(&mut command, "probe-rs")?;
     Ok(())
 }
 
 fn run_benchmark(options: &CommandOptions) -> Result<(), String> {
     build_example_elf_with_symbols(options)?;
-    let chip = options.resolve_chip();
+    flash_and_reset_via_probe(options)?;
     let elf_path = options.elf_path()?;
     let (output_addr, output_size) = find_symbol_range(&elf_path, PICO_BENCH_OUTPUT_SYMBOL)?;
-
-    let mut download = Command::new("probe-rs");
-    download.arg("download");
-    download.arg("--chip").arg(&chip);
-    if let Some(probe) = options.resolve_probe_selector() {
-        download.arg("--probe").arg(probe);
-    }
-    download.arg(&elf_path);
-    run_command(&mut download, "probe-rs")?;
-
-    let mut reset = Command::new("probe-rs");
-    reset.arg("reset");
-    reset.arg("--chip").arg(&chip);
-    if let Some(probe) = options.resolve_probe_selector() {
-        reset.arg("--probe").arg(probe);
-    }
-    run_command(&mut reset, "probe-rs")?;
 
     let words = usize::try_from(output_size)
         .map_err(|_| "benchmark output size does not fit in usize".to_owned())?
@@ -540,6 +519,17 @@ fn probe_read_words(
         .collect()
 }
 
+fn probe_read_bytes(options: &CommandOptions, address: u64, len: usize) -> Result<Vec<u8>, String> {
+    let words = len.div_ceil(4);
+    let values = probe_read_words(options, address, words)?;
+    let mut bytes = Vec::with_capacity(words * 4);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.truncate(len);
+    Ok(bytes)
+}
+
 fn pico_bench_state(words: &[u32]) -> Option<u32> {
     if words.len() < 2 {
         return None;
@@ -592,15 +582,7 @@ fn run_debug_server(options: &CommandOptions) -> Result<(), String> {
     build_example_elf(options)?;
     let chip = options.resolve_chip();
     let elf_path = options.elf_path()?;
-
-    let mut flash = Command::new("probe-rs");
-    flash.arg("download");
-    flash.arg("--chip").arg(&chip);
-    if let Some(probe) = options.resolve_probe_selector() {
-        flash.arg("--probe").arg(probe);
-    }
-    flash.arg(&elf_path);
-    run_command(&mut flash, "probe-rs")?;
+    flash_and_reset_via_probe(options)?;
 
     println!("ELF : {}", elf_path.display());
     println!("LLDB: connect://{}", options.gdb_connection_string);
@@ -635,6 +617,195 @@ fn run_debug_server(options: &CommandOptions) -> Result<(), String> {
     }
     run_command(&mut command, "probe-rs")?;
     Ok(())
+}
+
+fn flash_and_reset_via_probe(options: &CommandOptions) -> Result<(), String> {
+    let chip = options.resolve_chip();
+    let elf_path = options.elf_path()?;
+    println!("ELF : {}", elf_path.display());
+
+    // Probe-based flashing is only considered complete once the exact ELF is written,
+    // read-back verified, and the target is reset into that image.
+    let mut download = Command::new("probe-rs");
+    download.arg("download");
+    download.arg("--verify");
+    download.arg("--chip").arg(&chip);
+    if let Some(probe) = options.resolve_probe_selector() {
+        download.arg("--probe").arg(probe);
+    }
+    download.arg(&elf_path);
+    run_command(&mut download, "probe-rs")?;
+
+    let mut reset = Command::new("probe-rs");
+    reset.arg("reset");
+    reset.arg("--chip").arg(&chip);
+    if let Some(probe) = options.resolve_probe_selector() {
+        reset.arg("--probe").arg(probe);
+    }
+    run_command(&mut reset, "probe-rs")?;
+    thread::sleep(PICO_BUILD_ID_POST_RESET_DELAY);
+    confirm_running_build_id(options, &elf_path)?;
+    Ok(())
+}
+
+fn confirm_running_build_id(options: &CommandOptions, elf_path: &Path) -> Result<(), String> {
+    let (address, expected) = locate_build_id_in_elf(elf_path)?;
+    let observed = probe_read_bytes(options, address, expected.len())?;
+
+    if observed == expected {
+        let build_id = describe_build_id(&expected).unwrap_or_else(|_| "<unparsed>".to_owned());
+        println!("BUILD-ID : {build_id}");
+        return Ok(());
+    }
+
+    let expected_desc = describe_build_id(&expected).unwrap_or_else(|_| "<unparsed>".to_owned());
+    let observed_desc = describe_build_id(&observed).unwrap_or_else(|_| "<unparsed>".to_owned());
+    Err(format!(
+        "post-reset build-id check failed at {address:#010x}: expected `{expected_desc}`, observed `{observed_desc}`"
+    ))
+}
+
+fn describe_build_id(bytes: &[u8]) -> Result<String, String> {
+    let build = parse_build_id(bytes)?;
+    Ok(format!(
+        "{}:{} profile={} target={} git={} dirty={} features={}",
+        build.package_name,
+        build.bin_name,
+        build.profile,
+        build.target,
+        build.git_sha,
+        if build.dirty { "yes" } else { "no" },
+        build.features_hash
+    ))
+}
+
+fn parse_build_id(bytes: &[u8]) -> Result<ParsedBuildId, String> {
+    const PACKAGE_NAME_LEN: usize = 48;
+    const BIN_NAME_LEN: usize = 32;
+    const PROFILE_LEN: usize = 12;
+    const TARGET_LEN: usize = 32;
+    const GIT_SHA_LEN: usize = 16;
+    const FEATURES_HASH_LEN: usize = 16;
+    const BUILD_ID_LEN: usize = 4
+        + 2
+        + 1
+        + 1
+        + PACKAGE_NAME_LEN
+        + BIN_NAME_LEN
+        + PROFILE_LEN
+        + TARGET_LEN
+        + GIT_SHA_LEN
+        + FEATURES_HASH_LEN;
+
+    if bytes.len() < BUILD_ID_LEN {
+        return Err(format!(
+            "build-id payload was {} bytes, expected at least {BUILD_ID_LEN}",
+            bytes.len()
+        ));
+    }
+
+    let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+    let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
+    if magic != PICO_BUILD_ID_MAGIC {
+        return Err(format!("unexpected build-id magic {magic:#010x}"));
+    }
+    if version != PICO_BUILD_ID_VERSION {
+        return Err(format!("unexpected build-id version {version}"));
+    }
+
+    let dirty = bytes[6] != 0;
+    let mut cursor = 8;
+    let package_name = decode_fixed_ascii(&bytes[cursor..cursor + PACKAGE_NAME_LEN]);
+    cursor += PACKAGE_NAME_LEN;
+    let bin_name = decode_fixed_ascii(&bytes[cursor..cursor + BIN_NAME_LEN]);
+    cursor += BIN_NAME_LEN;
+    let profile = decode_fixed_ascii(&bytes[cursor..cursor + PROFILE_LEN]);
+    cursor += PROFILE_LEN;
+    let target = decode_fixed_ascii(&bytes[cursor..cursor + TARGET_LEN]);
+    cursor += TARGET_LEN;
+    let git_sha = decode_fixed_ascii(&bytes[cursor..cursor + GIT_SHA_LEN]);
+    cursor += GIT_SHA_LEN;
+    let features_hash = decode_fixed_ascii(&bytes[cursor..cursor + FEATURES_HASH_LEN]);
+
+    Ok(ParsedBuildId {
+        dirty,
+        package_name,
+        bin_name,
+        profile,
+        target,
+        git_sha,
+        features_hash,
+    })
+}
+
+fn decode_fixed_ascii(bytes: &[u8]) -> String {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+fn read_symbol_bytes_from_elf(elf_path: &Path, symbol_name: &str) -> Result<Vec<u8>, String> {
+    let (address, size) = find_symbol_range(elf_path, symbol_name)?;
+    let image = extract_flash_image(elf_path, RP2350_FLASH_BASE, RP2350_FLASH_LEN)?;
+    let offset = usize::try_from(
+        address
+            .checked_sub(u64::from(image.base_address))
+            .ok_or_else(|| format!("symbol `{symbol_name}` was below flash image base"))?,
+    )
+    .map_err(|_| format!("symbol `{symbol_name}` offset did not fit usize"))?;
+    let size = usize::try_from(size)
+        .map_err(|_| format!("symbol `{symbol_name}` size did not fit usize"))?;
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| format!("symbol `{symbol_name}` range overflowed local image"))?;
+    if end > image.bytes.len() {
+        return Err(format!(
+            "symbol `{symbol_name}` extended beyond local flash image contents"
+        ));
+    }
+    Ok(image.bytes[offset..end].to_vec())
+}
+
+fn locate_build_id_in_elf(elf_path: &Path) -> Result<(u64, Vec<u8>), String> {
+    let bytes = fs::read(elf_path)
+        .map_err(|error| format!("failed to read {}: {error}", elf_path.display()))?;
+    let file = object::File::parse(&*bytes)
+        .map_err(|error| format!("failed to parse ELF {}: {error}", elf_path.display()))?;
+
+    for section in file.sections() {
+        let Ok(name) = section.name() else {
+            continue;
+        };
+        if name != PICO_BUILD_ID_SECTION {
+            continue;
+        }
+        let data = section
+            .data()
+            .map_err(|error| format!("failed to read build-id section data: {error}"))?;
+        if data.is_empty() {
+            return Err(format!(
+                "build-id section `{PICO_BUILD_ID_SECTION}` in {} was empty",
+                elf_path.display()
+            ));
+        }
+        return Ok((section.address(), data.to_vec()));
+    }
+
+    let (address, _) = find_symbol_range(elf_path, PICO_BUILD_ID_SYMBOL)?;
+    let bytes = read_symbol_bytes_from_elf(elf_path, PICO_BUILD_ID_SYMBOL)?;
+    Ok((address, bytes))
+}
+
+struct ParsedBuildId {
+    dirty: bool,
+    package_name: String,
+    bin_name: String,
+    profile: String,
+    target: String,
+    git_sha: String,
+    features_hash: String,
 }
 
 fn spawn_detached_probe_gdb(

@@ -15,6 +15,8 @@ use fusion_example_rp2350_on_device::runtime::{
 use fusion_std::thread::{async_yield_now, yield_now as fiber_yield_now};
 use fusion_sys::thread::system_monotonic_time;
 
+fusion_example_rp2350_on_device::fusion_rp2350_export_build_id!();
+
 const ITERATIONS: u32 = 512;
 
 const OUTPUT_MAGIC: u32 = 0x4655_4245;

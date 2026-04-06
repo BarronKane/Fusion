@@ -36,6 +36,7 @@ pub(crate) const RP2350_SYSINFO_GITREF_RP2350: *const u32 = 0x4000_0014 as *cons
 pub(crate) const RP2350_SYSINFO_CHIP_INFO: *const u32 = 0x4000_0018 as *const u32;
 pub(crate) const RP2350_OTP_DATA: *const u32 = 0x4013_0000 as *const u32;
 pub(crate) const RP2350_SIO_CPUID: *const u32 = 0xd000_0000 as *const u32;
+pub(crate) const RP2350_SIO_BASE: usize = 0xd000_0000;
 pub(crate) const CORTEX_M_SCB_SCR: *mut u32 = 0xE000_ED10 as *mut u32;
 pub(crate) const CORTEX_M_SCB_SCR_SLEEPDEEP: u32 = 1 << 2;
 pub(crate) const CORTEX_M_NVIC_ISER: *mut u32 = 0xE000_E100 as *mut u32;
@@ -46,9 +47,14 @@ pub(crate) const CORTEX_M_NVIC_IPR: *mut u8 = 0xE000_E400 as *mut u8;
 pub(crate) const RP2350_TICKS_BASE: usize = 0x4010_8000;
 pub(crate) const RP2350_TIMER0_BASE: usize = 0x400b_0000;
 pub(crate) const RP2350_TIMER1_BASE: usize = 0x400b_8000;
+pub(crate) const RP2350_CLOCKS_BASE: usize = 0x4001_0000;
 pub(crate) const RP2350_RESETS_BASE: usize = 0x4002_0000;
 pub(crate) const RP2350_IO_BANK0_BASE: usize = 0x4002_8000;
 pub(crate) const RP2350_IO_QSPI_BASE: usize = 0x4003_0000;
+pub(crate) const RP2350_PADS_BANK0_BASE: usize = 0x4003_8000;
+pub(crate) const RP2350_XOSC_BASE: usize = 0x4004_8000;
+pub(crate) const RP2350_PLL_SYS_BASE: usize = 0x4005_0000;
+pub(crate) const RP2350_PLL_USB_BASE: usize = 0x4005_8000;
 pub(crate) const RP2350_DMA_BASE: usize = 0x5000_0000;
 pub(crate) const RP2350_SPI0_BASE: usize = 0x4008_0000;
 pub(crate) const RP2350_SPI1_BASE: usize = 0x4008_8000;
@@ -142,9 +148,14 @@ pub(crate) const RP2350_I2C_IC_CLR_INTR_OFFSET: usize = 0x40;
 pub(crate) const RP2350_PIO_IRQ_OFFSET: usize = 0x30;
 pub(crate) const RP2350_PIO_IRQ0_INTS_OFFSET: usize = 0x178;
 pub(crate) const RP2350_PIO_IRQ1_INTS_OFFSET: usize = 0x184;
+pub(crate) const RP2350_BOOT_CLOCK_STATE_UNINITIALIZED: u8 = 0;
+pub(crate) const RP2350_BOOT_CLOCK_STATE_INITIALIZING: u8 = 1;
+pub(crate) const RP2350_BOOT_CLOCK_STATE_READY: u8 = 2;
 pub(crate) const RP2350_TIMER0_TICK_STATE_UNINITIALIZED: u8 = 0;
 pub(crate) const RP2350_TIMER0_TICK_STATE_INITIALIZING: u8 = 1;
 pub(crate) const RP2350_TIMER0_TICK_STATE_READY: u8 = 2;
+pub(crate) const RP2350_XOSC_HZ: u32 = 12_000_000;
+pub(crate) const RP2350_DEFAULT_SYS_CLOCK_HZ: u32 = 150_000_000;
 
 unsafe extern "C" {
     static __sheap: u8;
@@ -287,6 +298,9 @@ pub(crate) static RP2350_PIO_ENGINE_CLAIMS: [AtomicBool; RP2350_PIO_ENGINE_COUNT
     [const { AtomicBool::new(false) }; RP2350_PIO_ENGINE_COUNT];
 pub(crate) static RP2350_PIO_LANE_CLAIMS: [AtomicU8; RP2350_PIO_ENGINE_COUNT] =
     [const { AtomicU8::new(0) }; RP2350_PIO_ENGINE_COUNT];
+pub(crate) static RP2350_BOOT_CLOCK_STATE: AtomicU8 =
+    AtomicU8::new(RP2350_BOOT_CLOCK_STATE_UNINITIALIZED);
+pub(crate) static RP2350_ACTIVE_SYS_CLOCK_HZ: AtomicU32 = AtomicU32::new(RP2350_XOSC_HZ);
 pub(crate) static RP2350_TIMER0_TICK_STATE: AtomicU8 =
     AtomicU8::new(RP2350_TIMER0_TICK_STATE_UNINITIALIZED);
 pub(crate) static RP2350_EVENT_TIMEOUT_FIRED: AtomicBool = AtomicBool::new(false);

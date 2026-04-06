@@ -12,3 +12,7 @@ From the workspace root:
 ```sh
 cargo pico-display-flash -- --release
 ```
+
+That alias is the intended probe path. It builds the scoped ELF, performs `probe-rs download
+--verify`, resets the board into the flashed image, and then compares the exported build-id on the
+target against the ELF it just built so the deploy step stops pretending optimism is verification.

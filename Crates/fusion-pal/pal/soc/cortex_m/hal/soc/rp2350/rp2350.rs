@@ -11,6 +11,7 @@ use core::arch::asm;
 use core::ptr;
 use core::sync::atomic::{
     AtomicBool,
+    AtomicU32,
     AtomicU8,
     Ordering,
     compiler_fence,
@@ -244,6 +245,391 @@ pub type SocDevice = Rp2350Soc;
 #[must_use]
 pub const fn system_soc() -> SocDevice {
     SocDevice::new()
+}
+
+const RP2350_CLOCKS_CLK_REF_CTRL_OFFSET: usize = 0x30;
+const RP2350_CLOCKS_CLK_REF_DIV_OFFSET: usize = 0x34;
+const RP2350_CLOCKS_CLK_REF_SELECTED_OFFSET: usize = 0x38;
+const RP2350_CLOCKS_CLK_SYS_CTRL_OFFSET: usize = 0x3c;
+const RP2350_CLOCKS_CLK_SYS_DIV_OFFSET: usize = 0x40;
+const RP2350_CLOCKS_CLK_SYS_SELECTED_OFFSET: usize = 0x44;
+const RP2350_CLOCKS_CLK_PERI_CTRL_OFFSET: usize = 0x48;
+const RP2350_CLOCKS_CLK_PERI_DIV_OFFSET: usize = 0x4c;
+const RP2350_CLOCKS_CLK_HSTX_CTRL_OFFSET: usize = 0x54;
+const RP2350_CLOCKS_CLK_HSTX_DIV_OFFSET: usize = 0x58;
+const RP2350_CLOCKS_CLK_USB_CTRL_OFFSET: usize = 0x60;
+const RP2350_CLOCKS_CLK_USB_DIV_OFFSET: usize = 0x64;
+const RP2350_CLOCKS_CLK_ADC_CTRL_OFFSET: usize = 0x6c;
+const RP2350_CLOCKS_CLK_ADC_DIV_OFFSET: usize = 0x70;
+const RP2350_CLOCKS_CLK_SYS_RESUS_CTRL_OFFSET: usize = 0x84;
+const RP2350_CLOCKS_CLK_REF_CTRL_SRC_BITS: u32 = 0x0000_0003;
+const RP2350_CLOCKS_CLK_REF_CTRL_SRC_VALUE_ROSC_CLKSRC_PH: u32 = 0x0;
+const RP2350_CLOCKS_CLK_REF_CTRL_SRC_VALUE_XOSC_CLKSRC: u32 = 0x2;
+const RP2350_CLOCKS_CLK_SYS_CTRL_AUXSRC_BITS: u32 = 0x0000_00e0;
+const RP2350_CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB: u32 = 5;
+const RP2350_CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS: u32 = 0x0;
+const RP2350_CLOCKS_CLK_SYS_CTRL_SRC_BITS: u32 = 0x0000_0001;
+const RP2350_CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLK_REF: u32 = 0x0;
+const RP2350_CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX: u32 = 0x1;
+const RP2350_CLOCKS_CLK_PERI_CTRL_AUXSRC_BITS: u32 = 0x0000_00e0;
+const RP2350_CLOCKS_CLK_PERI_CTRL_AUXSRC_LSB: u32 = 5;
+const RP2350_CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS: u32 = 0x0;
+const RP2350_CLOCKS_CLK_HSTX_CTRL_AUXSRC_BITS: u32 = 0x0000_00e0;
+const RP2350_CLOCKS_CLK_HSTX_CTRL_AUXSRC_LSB: u32 = 5;
+const RP2350_CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS: u32 = 0x2;
+const RP2350_CLOCKS_CLK_USB_CTRL_AUXSRC_BITS: u32 = 0x0000_00e0;
+const RP2350_CLOCKS_CLK_USB_CTRL_AUXSRC_LSB: u32 = 5;
+const RP2350_CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB: u32 = 0x0;
+const RP2350_CLOCKS_CLK_ADC_CTRL_AUXSRC_BITS: u32 = 0x0000_00e0;
+const RP2350_CLOCKS_CLK_ADC_CTRL_AUXSRC_LSB: u32 = 5;
+const RP2350_CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB: u32 = 0x0;
+const RP2350_CLOCKS_CLK_CTRL_ENABLE_BITS: u32 = 0x0000_0800;
+const RP2350_CLOCKS_CLK_GPOUT0_DIV_INT_LSB: u32 = 16;
+const RP2350_CLOCKS_CLK_REF_SELECTED_ROSC: u32 = 0x1;
+const RP2350_CLOCKS_CLK_REF_SELECTED_XOSC: u32 = 0x4;
+const RP2350_CLOCKS_CLK_SYS_SELECTED_CLK_REF: u32 = 0x1;
+const RP2350_CLOCKS_CLK_SYS_SELECTED_AUX: u32 = 0x2;
+const RP2350_XOSC_CTRL_OFFSET: usize = 0x00;
+const RP2350_XOSC_STATUS_OFFSET: usize = 0x04;
+const RP2350_XOSC_STARTUP_OFFSET: usize = 0x0c;
+const RP2350_XOSC_CTRL_ENABLE_LSB: u32 = 12;
+const RP2350_XOSC_CTRL_ENABLE_VALUE_ENABLE: u32 = 0x0fab;
+const RP2350_XOSC_CTRL_FREQ_RANGE_VALUE_1_15MHZ: u32 = 0x0aa0;
+const RP2350_XOSC_STATUS_STABLE_BITS: u32 = 0x8000_0000;
+// Keep the XOSC startup window intentionally conservative for Pico-class boards instead of
+// chasing the SDK minimum exactly. Boot latency pays a few extra milliseconds; bring-up honesty is
+// worth more than one macho constant.
+const RP2350_XOSC_STARTUP_DELAY_POLICY_MULTIPLIER: u32 = 6;
+const RP2350_XOSC_STARTUP_DELAY: u32 =
+    (((RP2350_XOSC_HZ / 1_000) + 128) / 256) * RP2350_XOSC_STARTUP_DELAY_POLICY_MULTIPLIER;
+const RP2350_PLL_CS_OFFSET: usize = 0x00;
+const RP2350_PLL_PWR_OFFSET: usize = 0x04;
+const RP2350_PLL_FBDIV_INT_OFFSET: usize = 0x08;
+const RP2350_PLL_PRIM_OFFSET: usize = 0x0c;
+const RP2350_PLL_CS_LOCK_BITS: u32 = 0x8000_0000;
+const RP2350_PLL_CS_REFDIV_BITS: u32 = 0x0000_003f;
+const RP2350_PLL_PWR_PD_BITS: u32 = 0x0000_0001;
+const RP2350_PLL_PWR_POSTDIVPD_BITS: u32 = 0x0000_0008;
+const RP2350_PLL_PWR_VCOPD_BITS: u32 = 0x0000_0020;
+const RP2350_PLL_PRIM_POSTDIV1_LSB: u32 = 16;
+const RP2350_PLL_PRIM_POSTDIV2_LSB: u32 = 12;
+const RP2350_PLL_SYS_REFDIV: u32 = 1;
+const RP2350_PLL_SYS_FBDIV: u32 = 125;
+const RP2350_PLL_SYS_POSTDIV1: u32 = 5;
+const RP2350_PLL_SYS_POSTDIV2: u32 = 2;
+const RP2350_PLL_USB_REFDIV: u32 = 1;
+const RP2350_PLL_USB_FBDIV: u32 = 100;
+const RP2350_PLL_USB_POSTDIV1: u32 = 5;
+const RP2350_PLL_USB_POSTDIV2: u32 = 5;
+const RP2350_CLOCKS_DIV_UNDIVIDED: u32 = 1 << RP2350_CLOCKS_CLK_GPOUT0_DIV_INT_LSB;
+
+#[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+#[cortex_m_rt::pre_init]
+unsafe fn fusion_pal_rp2350_pre_init() {
+    // `pre_init` runs before `.bss`/`.data` are live, so this path must stay stateless and touch
+    // only MMIO. We still replay the same idempotent sequence once after RAM init so runtime state
+    // (`current_sys_clock_hz`, profile reporting) can become truthful without relying on UB.
+    rp2350_initialize_stock_boot_clocks_raw();
+}
+
+fn rp2350_boot_clock_profile_name(sys_clock_hz: u32) -> Option<&'static str> {
+    match sys_clock_hz {
+        150_000_000 => Some("stock-150mhz"),
+        200_000_000 => Some("oc-200mhz"),
+        250_000_000 => Some("oc-250mhz"),
+        300_000_000 => Some("oc-300mhz"),
+        _ => None,
+    }
+}
+
+fn rp2350_clock_write_masked(register: *mut u32, value: u32, mask: u32) {
+    // SAFETY: these are boot-time clock-control MMIO registers. The caller owns the selected
+    // register write sequence and masks updates to the documented field subset.
+    unsafe {
+        let current = ptr::read_volatile(register);
+        ptr::write_volatile(register, (current & !mask) | (value & mask));
+    }
+}
+
+fn rp2350_clock_enable_xosc() {
+    let ctrl = (RP2350_XOSC_BASE + RP2350_XOSC_CTRL_OFFSET) as *mut u32;
+    let startup = (RP2350_XOSC_BASE + RP2350_XOSC_STARTUP_OFFSET) as *mut u32;
+    let status = (RP2350_XOSC_BASE + RP2350_XOSC_STATUS_OFFSET) as *const u32;
+
+    // SAFETY: XOSC control/startup/status are fixed RP2350 registers. This is the stock 12 MHz
+    // Pico 2 W path from the SDK: program 1-15 MHz mode, set the startup delay, enable, then wait
+    // for the stable bit before touching PLLs.
+    unsafe {
+        ptr::write_volatile(ctrl, RP2350_XOSC_CTRL_FREQ_RANGE_VALUE_1_15MHZ);
+        ptr::write_volatile(startup, RP2350_XOSC_STARTUP_DELAY);
+        ptr::write_volatile(
+            ctrl,
+            RP2350_XOSC_CTRL_FREQ_RANGE_VALUE_1_15MHZ
+                | (RP2350_XOSC_CTRL_ENABLE_VALUE_ENABLE << RP2350_XOSC_CTRL_ENABLE_LSB),
+        );
+        while ptr::read_volatile(status) & RP2350_XOSC_STATUS_STABLE_BITS == 0 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+fn rp2350_reset_assert(bits: u32) {
+    rp2350_atomic_register_set(RP2350_RESETS_BASE + RP2350_RESETS_RESET_OFFSET, bits);
+}
+
+fn rp2350_reset_deassert(bits: u32) {
+    let reset_done = (RP2350_RESETS_BASE + RP2350_RESETS_RESET_DONE_OFFSET) as *const u32;
+    rp2350_atomic_register_clear(RP2350_RESETS_BASE + RP2350_RESETS_RESET_OFFSET, bits);
+    // SAFETY: RESET_DONE is the reset controller's architected summary of deasserted blocks.
+    while unsafe { ptr::read_volatile(reset_done) } & bits != bits {
+        core::hint::spin_loop();
+    }
+}
+
+fn rp2350_reset_cycle(bits: u32) {
+    rp2350_reset_assert(bits);
+    compiler_fence(Ordering::SeqCst);
+    rp2350_reset_deassert(bits);
+}
+
+fn rp2350_pll_init(base: usize, refdiv: u32, fbdiv: u32, postdiv1: u32, postdiv2: u32) {
+    let cs = (base + RP2350_PLL_CS_OFFSET) as *mut u32;
+    let pwr = (base + RP2350_PLL_PWR_OFFSET) as *mut u32;
+    let fbdiv_int = (base + RP2350_PLL_FBDIV_INT_OFFSET) as *mut u32;
+    let prim = (base + RP2350_PLL_PRIM_OFFSET) as *mut u32;
+    let pdiv =
+        (postdiv1 << RP2350_PLL_PRIM_POSTDIV1_LSB) | (postdiv2 << RP2350_PLL_PRIM_POSTDIV2_LSB);
+
+    // SAFETY: these are one selected RP2350 PLL instance's MMIO registers. The sequence mirrors
+    // Pico SDK `pll_init`: if already configured and locked, leave it alone. Otherwise reset-cycle
+    // the PLL so later runtime retune support is not built on "probably quiescent" folklore,
+    // program refdiv/fbdiv, power the VCO, wait for lock, then enable the post divider.
+    unsafe {
+        let cs_value = ptr::read_volatile(cs);
+        if (cs_value & RP2350_PLL_CS_LOCK_BITS) != 0
+            && (cs_value & RP2350_PLL_CS_REFDIV_BITS) == refdiv
+            && (ptr::read_volatile(fbdiv_int) & 0x0fff) == fbdiv
+            && (ptr::read_volatile(prim) & 0x0007_7000) == pdiv
+        {
+            return;
+        }
+
+        let reset_bit = if base == RP2350_PLL_SYS_BASE {
+            1 << 14
+        } else {
+            1 << 15
+        };
+        rp2350_reset_cycle(reset_bit);
+
+        ptr::write_volatile(cs, refdiv);
+        ptr::write_volatile(fbdiv_int, fbdiv);
+        let power_bits = RP2350_PLL_PWR_PD_BITS | RP2350_PLL_PWR_VCOPD_BITS;
+        ptr::write_volatile(pwr, ptr::read_volatile(pwr) & !power_bits);
+        while ptr::read_volatile(cs) & RP2350_PLL_CS_LOCK_BITS == 0 {
+            core::hint::spin_loop();
+        }
+        ptr::write_volatile(prim, pdiv);
+        ptr::write_volatile(
+            pwr,
+            ptr::read_volatile(pwr) & !RP2350_PLL_PWR_POSTDIVPD_BITS,
+        );
+    }
+}
+
+fn rp2350_clock_wait_selected(selected_offset: usize, selected_mask: u32) {
+    let selected = (RP2350_CLOCKS_BASE + selected_offset) as *const u32;
+    // SAFETY: the `SELECTED` register is the architected one-hot snapshot of the currently routed
+    // glitchless clock source. Waiting here avoids racing the mux before the source is actually
+    // live on the output.
+    while unsafe { ptr::read_volatile(selected) } != selected_mask {
+        core::hint::spin_loop();
+    }
+}
+
+fn rp2350_clock_set_div_undivided(div_offset: usize) {
+    let div = (RP2350_CLOCKS_BASE + div_offset) as *mut u32;
+    // SAFETY: the divider register belongs to the selected clock slice. The stock bring-up path
+    // uses integer divide-by-1 for the reference, system, peri, USB, ADC, and HSTX clocks.
+    unsafe { ptr::write_volatile(div, RP2350_CLOCKS_DIV_UNDIVIDED) };
+}
+
+fn rp2350_clock_configure_glitchless_undivided(
+    ctrl_offset: usize,
+    div_offset: usize,
+    selected_offset: usize,
+    selected_mask: u32,
+    src_bits: (u32, u32),
+    aux_bits: Option<(u32, u32, u32)>,
+) {
+    let ctrl = (RP2350_CLOCKS_BASE + ctrl_offset) as *mut u32;
+
+    if let Some((mask, lsb, value)) = aux_bits {
+        rp2350_clock_write_masked(ctrl, value << lsb, mask);
+    }
+    rp2350_clock_write_masked(ctrl, src_bits.1, src_bits.0);
+    rp2350_clock_set_div_undivided(div_offset);
+    rp2350_clock_wait_selected(selected_offset, selected_mask);
+}
+
+fn rp2350_clock_configure_aux_undivided(
+    ctrl_offset: usize,
+    div_offset: usize,
+    aux_bits: (u32, u32, u32),
+) {
+    let ctrl_register = RP2350_CLOCKS_BASE + ctrl_offset;
+    let ctrl = ctrl_register as *mut u32;
+
+    // Aux-only slices are safe to disable, retarget, and re-enable. Keep that ordering explicit
+    // so this helper remains valid when runtime clock-profile switching starts reusing it instead
+    // of only cold-boot bring-up.
+    rp2350_atomic_register_clear(ctrl_register, RP2350_CLOCKS_CLK_CTRL_ENABLE_BITS);
+    rp2350_clock_write_masked(ctrl, aux_bits.2 << aux_bits.1, aux_bits.0);
+    rp2350_clock_set_div_undivided(div_offset);
+    rp2350_atomic_register_set(ctrl_register, RP2350_CLOCKS_CLK_CTRL_ENABLE_BITS);
+}
+
+fn rp2350_initialize_stock_boot_clocks_raw() {
+    // Disable any stale resus configuration left behind by prior software before we start moving
+    // clk_sys around. This matches the SDK's first step and avoids “rescue” logic fighting the
+    // deliberate mux transition.
+    unsafe {
+        ptr::write_volatile(
+            (RP2350_CLOCKS_BASE + RP2350_CLOCKS_CLK_SYS_RESUS_CTRL_OFFSET) as *mut u32,
+            0,
+        );
+    }
+
+    rp2350_clock_enable_xosc();
+
+    // Move the glitchless roots away from aux sources before touching PLLs. That avoids surfacing
+    // PLL reconfiguration glitches on clk_ref/clk_sys while the core is still running.
+    rp2350_clock_configure_glitchless_undivided(
+        RP2350_CLOCKS_CLK_SYS_CTRL_OFFSET,
+        RP2350_CLOCKS_CLK_SYS_DIV_OFFSET,
+        RP2350_CLOCKS_CLK_SYS_SELECTED_OFFSET,
+        RP2350_CLOCKS_CLK_SYS_SELECTED_CLK_REF,
+        (
+            RP2350_CLOCKS_CLK_SYS_CTRL_SRC_BITS,
+            RP2350_CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLK_REF,
+        ),
+        None,
+    );
+    rp2350_clock_configure_glitchless_undivided(
+        RP2350_CLOCKS_CLK_REF_CTRL_OFFSET,
+        RP2350_CLOCKS_CLK_REF_DIV_OFFSET,
+        RP2350_CLOCKS_CLK_REF_SELECTED_OFFSET,
+        RP2350_CLOCKS_CLK_REF_SELECTED_ROSC,
+        (
+            RP2350_CLOCKS_CLK_REF_CTRL_SRC_BITS,
+            RP2350_CLOCKS_CLK_REF_CTRL_SRC_VALUE_ROSC_CLKSRC_PH,
+        ),
+        None,
+    );
+
+    rp2350_pll_init(
+        RP2350_PLL_SYS_BASE,
+        RP2350_PLL_SYS_REFDIV,
+        RP2350_PLL_SYS_FBDIV,
+        RP2350_PLL_SYS_POSTDIV1,
+        RP2350_PLL_SYS_POSTDIV2,
+    );
+    rp2350_pll_init(
+        RP2350_PLL_USB_BASE,
+        RP2350_PLL_USB_REFDIV,
+        RP2350_PLL_USB_FBDIV,
+        RP2350_PLL_USB_POSTDIV1,
+        RP2350_PLL_USB_POSTDIV2,
+    );
+
+    rp2350_clock_configure_glitchless_undivided(
+        RP2350_CLOCKS_CLK_REF_CTRL_OFFSET,
+        RP2350_CLOCKS_CLK_REF_DIV_OFFSET,
+        RP2350_CLOCKS_CLK_REF_SELECTED_OFFSET,
+        RP2350_CLOCKS_CLK_REF_SELECTED_XOSC,
+        (
+            RP2350_CLOCKS_CLK_REF_CTRL_SRC_BITS,
+            RP2350_CLOCKS_CLK_REF_CTRL_SRC_VALUE_XOSC_CLKSRC,
+        ),
+        None,
+    );
+    rp2350_clock_configure_glitchless_undivided(
+        RP2350_CLOCKS_CLK_SYS_CTRL_OFFSET,
+        RP2350_CLOCKS_CLK_SYS_DIV_OFFSET,
+        RP2350_CLOCKS_CLK_SYS_SELECTED_OFFSET,
+        RP2350_CLOCKS_CLK_SYS_SELECTED_AUX,
+        (
+            RP2350_CLOCKS_CLK_SYS_CTRL_SRC_BITS,
+            RP2350_CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+        ),
+        Some((
+            RP2350_CLOCKS_CLK_SYS_CTRL_AUXSRC_BITS,
+            RP2350_CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB,
+            RP2350_CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+        )),
+    );
+    rp2350_clock_configure_aux_undivided(
+        RP2350_CLOCKS_CLK_PERI_CTRL_OFFSET,
+        RP2350_CLOCKS_CLK_PERI_DIV_OFFSET,
+        (
+            RP2350_CLOCKS_CLK_PERI_CTRL_AUXSRC_BITS,
+            RP2350_CLOCKS_CLK_PERI_CTRL_AUXSRC_LSB,
+            RP2350_CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+        ),
+    );
+    rp2350_clock_configure_aux_undivided(
+        RP2350_CLOCKS_CLK_USB_CTRL_OFFSET,
+        RP2350_CLOCKS_CLK_USB_DIV_OFFSET,
+        (
+            RP2350_CLOCKS_CLK_USB_CTRL_AUXSRC_BITS,
+            RP2350_CLOCKS_CLK_USB_CTRL_AUXSRC_LSB,
+            RP2350_CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+        ),
+    );
+    rp2350_clock_configure_aux_undivided(
+        RP2350_CLOCKS_CLK_ADC_CTRL_OFFSET,
+        RP2350_CLOCKS_CLK_ADC_DIV_OFFSET,
+        (
+            RP2350_CLOCKS_CLK_ADC_CTRL_AUXSRC_BITS,
+            RP2350_CLOCKS_CLK_ADC_CTRL_AUXSRC_LSB,
+            RP2350_CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+        ),
+    );
+    rp2350_clock_configure_aux_undivided(
+        RP2350_CLOCKS_CLK_HSTX_CTRL_OFFSET,
+        RP2350_CLOCKS_CLK_HSTX_DIV_OFFSET,
+        (
+            RP2350_CLOCKS_CLK_HSTX_CTRL_AUXSRC_BITS,
+            RP2350_CLOCKS_CLK_HSTX_CTRL_AUXSRC_LSB,
+            RP2350_CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS,
+        ),
+    );
+}
+
+pub(crate) fn ensure_boot_clocks_initialized() -> Result<(), HardwareError> {
+    loop {
+        match RP2350_BOOT_CLOCK_STATE.load(Ordering::Acquire) {
+            RP2350_BOOT_CLOCK_STATE_READY => return Ok(()),
+            RP2350_BOOT_CLOCK_STATE_INITIALIZING => core::hint::spin_loop(),
+            RP2350_BOOT_CLOCK_STATE_UNINITIALIZED => {
+                if RP2350_BOOT_CLOCK_STATE
+                    .compare_exchange(
+                        RP2350_BOOT_CLOCK_STATE_UNINITIALIZED,
+                        RP2350_BOOT_CLOCK_STATE_INITIALIZING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    rp2350_initialize_stock_boot_clocks_raw();
+                    RP2350_ACTIVE_SYS_CLOCK_HZ
+                        .store(RP2350_DEFAULT_SYS_CLOCK_HZ, Ordering::Release);
+                    RP2350_BOOT_CLOCK_STATE.store(RP2350_BOOT_CLOCK_STATE_READY, Ordering::Release);
+                    return Ok(());
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 const fn rp2350_chip_revision(raw_chip_id: u32) -> u8 {
@@ -1094,11 +1480,15 @@ impl CortexMSocBoard for Rp2350Soc {
     }
 
     fn current_sys_clock_hz(&self) -> Option<u64> {
-        Some(150_000_000)
+        let _ = ensure_boot_clocks_initialized();
+        Some(u64::from(
+            RP2350_ACTIVE_SYS_CLOCK_HZ.load(Ordering::Acquire),
+        ))
     }
 
     fn active_overclock_profile(&self) -> Option<&'static str> {
-        Some("stock-150mhz")
+        let _ = ensure_boot_clocks_initialized();
+        rp2350_boot_clock_profile_name(RP2350_ACTIVE_SYS_CLOCK_HZ.load(Ordering::Acquire))
     }
 
     fn pal_power_modes(&self) -> &'static [PowerModeDescriptor] {

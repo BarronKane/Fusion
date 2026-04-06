@@ -12,3 +12,9 @@ cargo pico-flash -- --release
 cargo pico-display-flash -- --release
 cargo pico-benchmark -- --release
 ```
+
+Probe-based `pico-*-flash`, `pico-*-run`, and benchmark/debug wrappers are expected to be the
+canonical flashing path. They now build the scoped ELF, perform `probe-rs download --verify`,
+reset the board, and then confirm the exported image build-id against the ELF they just built,
+because apparently “the command returned” was not a strong enough definition of success for
+embedded work.

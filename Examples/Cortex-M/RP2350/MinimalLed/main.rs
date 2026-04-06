@@ -25,6 +25,8 @@ use fusion_hal::drivers::peripheral::LedPair;
 use fusion_std::thread::yield_now;
 use fusion_sys::thread::system_monotonic_time;
 
+fusion_example_rp2350_on_device::fusion_rp2350_export_build_id!();
+
 const BLUE_LED_PIN: u8 = 28;
 const RED_LED_PIN: u8 = 27;
 const FIZZBUZZ_PERIOD: Duration = Duration::from_millis(300);
