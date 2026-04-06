@@ -180,6 +180,8 @@ static PRIMARY_PENDING: [[AtomicU32; VECTOR_PENDING_WORDS]; VECTOR_SCOPE_COUNT] 
     [const { [const { AtomicU32::new(0) }; VECTOR_PENDING_WORDS] }; VECTOR_SCOPE_COUNT];
 static SECONDARY_PENDING: [[AtomicU32; VECTOR_PENDING_WORDS]; VECTOR_SCOPE_COUNT] =
     [const { [const { AtomicU32::new(0) }; VECTOR_PENDING_WORDS] }; VECTOR_SCOPE_COUNT];
+static RESERVED_PENDSV_VECTOR_HANDLER: AtomicUsize = AtomicUsize::new(0);
+static RESERVED_PENDSV_RUNTIME_HANDLER: AtomicUsize = AtomicUsize::new(0);
 
 static OWNED_VECTOR_TABLES: [ScopeStorageCell<CortexMOwnedVectorTable>; VECTOR_SCOPE_COUNT] =
     [const { ScopeStorageCell::new(CortexMOwnedVectorTable([0; MAX_VECTOR_ENTRIES])) };
@@ -630,13 +632,55 @@ pub fn bind_reserved_pendsv_dispatch(
 
     let installed = read_owned_vector_entry(builder.scope_index, index);
     if read_system_exception_bound(builder.scope_index, index) {
-        if installed == handler as usize {
-            return Ok(());
+        if installed == reserved_pendsv_dispatch_multiplexer as usize {
+            let observed = RESERVED_PENDSV_VECTOR_HANDLER.load(Ordering::Acquire);
+            if observed == 0 || observed == handler as usize {
+                RESERVED_PENDSV_VECTOR_HANDLER.store(handler as usize, Ordering::Release);
+                return Ok(());
+            }
         }
         return Err(VectorError::state_conflict());
     }
 
-    write_owned_vector_entry(builder.scope_index, index, handler as usize);
+    RESERVED_PENDSV_VECTOR_HANDLER.store(handler as usize, Ordering::Release);
+    write_owned_vector_entry(
+        builder.scope_index,
+        index,
+        reserved_pendsv_dispatch_multiplexer as usize,
+    );
+    write_system_exception_bound(builder.scope_index, index, true);
+    Ok(())
+}
+
+pub(crate) fn bind_reserved_runtime_dispatch(
+    builder: &mut PlatformVectorBuilder,
+    priority: Option<VectorPriority>,
+    handler: VectorInlineHandler,
+) -> Result<(), VectorError> {
+    let index =
+        system_exception_index(SystemException::PendSv).ok_or_else(VectorError::reserved)?;
+    if let Some(priority) = priority {
+        set_system_exception_priority(SystemException::PendSv, priority)?;
+    }
+
+    let installed = read_owned_vector_entry(builder.scope_index, index);
+    if read_system_exception_bound(builder.scope_index, index) {
+        if installed == reserved_pendsv_dispatch_multiplexer as usize {
+            let observed = RESERVED_PENDSV_RUNTIME_HANDLER.load(Ordering::Acquire);
+            if observed == 0 || observed == handler as usize {
+                RESERVED_PENDSV_RUNTIME_HANDLER.store(handler as usize, Ordering::Release);
+                return Ok(());
+            }
+        }
+        return Err(VectorError::state_conflict());
+    }
+
+    RESERVED_PENDSV_RUNTIME_HANDLER.store(handler as usize, Ordering::Release);
+    write_owned_vector_entry(
+        builder.scope_index,
+        index,
+        reserved_pendsv_dispatch_multiplexer as usize,
+    );
     write_system_exception_bound(builder.scope_index, index, true);
     Ok(())
 }
@@ -710,6 +754,17 @@ pub fn take_pending_active_scope(
         ),
         VectorDispatchLane::Inline => Err(VectorError::invalid()),
     }
+}
+
+pub fn request_reserved_pendsv_dispatch() -> Result<(), VectorError> {
+    let topology = active_topology();
+    let scope_index =
+        active_scope_index_for_topology(topology).ok_or_else(VectorError::core_mismatch)?;
+    if !scope_owned(scope_index) {
+        return Err(VectorError::state_conflict());
+    }
+    pend_pendsv();
+    Ok(())
 }
 
 const fn map_hardware_error(error: crate::contract::pal::HardwareError) -> VectorError {
@@ -1150,6 +1205,24 @@ fn pend_pendsv() {
     // SAFETY: ICSR is the architected interrupt-control register. Writing PENDSVSET requests one
     // deferred PendSV exception without mutating Rust-owned memory.
     unsafe { ptr::write_volatile(CORTEX_M_SCB_ICSR, CORTEX_M_ICSR_PENDSVSET) };
+}
+
+unsafe extern "C" fn reserved_pendsv_dispatch_multiplexer() {
+    let vector = RESERVED_PENDSV_VECTOR_HANDLER.load(Ordering::Acquire);
+    if vector != 0 {
+        // SAFETY: this slot only stores handlers bound through `bind_reserved_pendsv_dispatch()`.
+        let handler: VectorInlineHandler =
+            unsafe { core::mem::transmute::<usize, VectorInlineHandler>(vector) };
+        unsafe { handler() };
+    }
+
+    let runtime = RESERVED_PENDSV_RUNTIME_HANDLER.load(Ordering::Acquire);
+    if runtime != 0 {
+        // SAFETY: this slot only stores handlers bound through `bind_reserved_runtime_dispatch()`.
+        let handler: VectorInlineHandler =
+            unsafe { core::mem::transmute::<usize, VectorInlineHandler>(runtime) };
+        unsafe { handler() };
+    }
 }
 
 fn rollback_scope(scope_index: usize, slot_count: u16) {

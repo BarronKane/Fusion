@@ -20,6 +20,7 @@ use crate::contract::pal::vector::{
 use super::platform::vector::{
     PlatformVectorBuilder,
     bind_reserved_event_timeout_wake,
+    bind_reserved_runtime_dispatch,
     system_vector,
 };
 
@@ -132,6 +133,10 @@ impl Drop for RuntimeVectorBrokerGuard<'_> {
 
 static RUNTIME_VECTOR_BROKER: RuntimeVectorBroker = RuntimeVectorBroker::new();
 
+unsafe extern "C" fn reserved_runtime_dispatch_handler() {
+    crate::sys::runtime_dispatch::dispatch_pending_runtime_callbacks();
+}
+
 pub fn ensure_runtime_reserved_wake_vectors() -> Result<(), VectorError> {
     RUNTIME_VECTOR_BROKER.ensure()
 }
@@ -171,7 +176,10 @@ fn bootstrap_runtime_vector_builder() -> Result<Option<PlatformVectorBuilder>, V
     )?;
 
     match bind_reserved_event_timeout_wake(&mut builder, None) {
-        Ok(()) => Ok(Some(builder)),
+        Ok(()) => {
+            bind_reserved_runtime_dispatch(&mut builder, None, reserved_runtime_dispatch_handler)?;
+            Ok(Some(builder))
+        }
         Err(error)
             if error.kind() == crate::contract::pal::vector::VectorErrorKind::Unsupported =>
         {

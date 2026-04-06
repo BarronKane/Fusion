@@ -766,6 +766,7 @@ struct ExecutorCore {
     task_lifecycle: ExecutorCell<Option<AsyncTaskLifecycleInsightState>>,
     shutdown_requested: AtomicBool,
     external_inflight: AtomicUsize,
+    runtime_dispatch_cookie: AtomicUsize,
     _owned_backing: Option<ExtentLease>,
 }
 
@@ -795,6 +796,26 @@ impl ExecutorCore {
         runtime_sink
             .record_context(courier_id, context_id, self.runtime_tick())
             .map_err(executor_error_from_runtime_sink)
+    }
+
+    pub(crate) fn install_runtime_dispatch_cookie(
+        &self,
+        cookie: fusion_pal::sys::runtime_dispatch::RuntimeDispatchCookie,
+    ) {
+        self.runtime_dispatch_cookie
+            .store(usize::try_from(cookie.0).unwrap_or(0), Ordering::Release);
+    }
+
+    fn request_runtime_dispatch(&self) {
+        let raw = self.runtime_dispatch_cookie.load(Ordering::Acquire);
+        if raw == 0 {
+            return;
+        }
+        if let Ok(cookie) = u32::try_from(raw) {
+            let _ = fusion_pal::sys::runtime_dispatch::request_runtime_dispatch(
+                fusion_pal::sys::runtime_dispatch::RuntimeDispatchCookie(cookie),
+            );
+        }
     }
 
     fn publish_runtime_summary(&self) -> Result<(), ExecutorError> {

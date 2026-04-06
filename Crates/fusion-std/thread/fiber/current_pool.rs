@@ -186,6 +186,8 @@ pub struct CurrentFiberPoolBacking {
 }
 
 /// Public current-thread fiber pool wrapper for manual same-thread driving.
+///
+/// This is a manual/bootstrap runner surface, not the final autonomous courier runtime model.
 #[derive(Debug)]
 pub struct CurrentFiberPool {
     inner: GreenPoolLease,
@@ -193,6 +195,13 @@ pub struct CurrentFiberPool {
 }
 
 impl CurrentFiberPool {
+    pub(crate) fn install_runtime_dispatch_cookie(
+        &self,
+        cookie: fusion_pal::sys::runtime_dispatch::RuntimeDispatchCookie,
+    ) {
+        self.inner.install_runtime_dispatch_cookie(cookie);
+    }
+
     pub(crate) fn default_task_class(&self) -> Result<FiberStackClass, FiberError> {
         self.inner.stacks.default_task_class()
     }
@@ -364,6 +373,8 @@ impl CurrentFiberPool {
                 launch_control: config.launch_control,
                 launch_request: config.launch_request,
                 scheduling: config.scheduling,
+                #[cfg(feature = "std")]
+                spawn_locality_policy: config.spawn_locality_policy,
                 capacity_policy: config.capacity_policy,
                 yield_budget_supported: yield_budget_enforcement_supported(),
                 #[cfg(feature = "std")]
@@ -375,6 +386,7 @@ impl CurrentFiberPool {
                 launch_registered: AtomicBool::new(false),
                 next_id: AtomicUsize::new(1),
                 next_carrier: AtomicUsize::new(0),
+                runtime_dispatch_cookie: AtomicUsize::new(0),
                 carriers,
                 tasks,
                 stacks,
@@ -451,6 +463,8 @@ impl CurrentFiberPool {
                 launch_control: config.launch_control,
                 launch_request: config.launch_request,
                 scheduling: config.scheduling,
+                #[cfg(feature = "std")]
+                spawn_locality_policy: config.spawn_locality_policy,
                 capacity_policy: config.capacity_policy,
                 yield_budget_supported: yield_budget_enforcement_supported(),
                 #[cfg(feature = "std")]
@@ -462,6 +476,7 @@ impl CurrentFiberPool {
                 launch_registered: AtomicBool::new(false),
                 next_id: AtomicUsize::new(1),
                 next_carrier: AtomicUsize::new(0),
+                runtime_dispatch_cookie: AtomicUsize::new(0),
                 carriers,
                 tasks,
                 stacks,
@@ -866,23 +881,24 @@ impl CurrentFiberPool {
         )
     }
 
-    /// Drives at most one ready task segment on the current thread.
+    /// Pumps at most one ready task segment on the current thread.
     ///
     /// # Errors
     ///
     /// Returns an error when the current pool cannot resume the next ready fiber honestly.
-    pub fn drive_once(&self) -> Result<bool, FiberError> {
+    pub(crate) fn pump_once(&self) -> Result<bool, FiberError> {
         drive_current_pool_once(&self.inner)
     }
 
-    /// Drives ready work until the current-thread pool reaches an idle state.
+    /// Drains ready work until the current-thread pool reaches an idle state.
     ///
     /// # Errors
     ///
     /// Returns an error when one resumed task fails dishonestly.
-    pub fn run_until_idle(&self) -> Result<usize, FiberError> {
+    #[cfg(test)]
+    pub(crate) fn drain_until_idle(&self) -> Result<usize, FiberError> {
         let mut steps = 0usize;
-        while self.drive_once()? {
+        while self.pump_once()? {
             steps = steps.saturating_add(1);
         }
         Ok(steps)

@@ -1,7 +1,6 @@
 use core::future::Future;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::time::Duration;
 
-use fusion_pal::sys::runtime_progress::install_runtime_progress_hook;
 use fusion_std::thread::{
     CurrentFiberAsyncSingleton,
     CurrentFiberHandle,
@@ -9,38 +8,19 @@ use fusion_std::thread::{
     TaskHandle,
 };
 use fusion_sys::fiber::FiberError;
+use fusion_sys::thread::{
+    system_monotonic_time,
+    system_thread,
+};
 
 static RP2350_EXAMPLE_BACKEND: CurrentFiberAsyncSingleton =
     CurrentFiberAsyncSingleton::new().with_fiber_capacity(8);
-static RP2350_PROGRESS_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
-static RP2350_PROGRESS_HOOK_RUNNING: AtomicBool = AtomicBool::new(false);
-
-fn rp2350_example_progress_hook() {
-    if RP2350_PROGRESS_HOOK_RUNNING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-    let _ = RP2350_EXAMPLE_BACKEND.drive_once();
-    RP2350_PROGRESS_HOOK_RUNNING.store(false, Ordering::Release);
-}
-
-fn ensure_progress_hook_installed() {
-    if RP2350_PROGRESS_HOOK_INSTALLED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
-        install_runtime_progress_hook(rp2350_example_progress_hook);
-    }
-}
 
 pub fn spawn<F, T>(job: F) -> Result<CurrentFiberHandle<T>, FiberError>
 where
     F: FnOnce() -> T + Send + 'static,
     T: 'static,
 {
-    ensure_progress_hook_installed();
     RP2350_EXAMPLE_BACKEND.spawn_fiber(job)
 }
 
@@ -51,13 +31,7 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: 'static,
 {
-    ensure_progress_hook_installed();
     RP2350_EXAMPLE_BACKEND.spawn_fiber_with_stack::<STACK_BYTES, _, _>(job)
-}
-
-pub fn drive_once() -> Result<bool, FiberError> {
-    ensure_progress_hook_installed();
-    RP2350_EXAMPLE_BACKEND.drive_once()
 }
 
 pub fn shutdown_fibers() -> Result<(), FiberError> {
@@ -69,7 +43,6 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    ensure_progress_hook_installed();
     RP2350_EXAMPLE_BACKEND.spawn_async(future)
 }
 
@@ -81,7 +54,6 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    ensure_progress_hook_installed();
     RP2350_EXAMPLE_BACKEND.spawn_async_with_poll_stack_bytes(poll_stack_bytes, future)
 }
 
@@ -90,7 +62,6 @@ where
     F: Future + 'static,
     F::Output: 'static,
 {
-    ensure_progress_hook_installed();
     RP2350_EXAMPLE_BACKEND.block_on(future)
 }
 
@@ -102,6 +73,12 @@ where
     F: Future + 'static,
     F::Output: 'static,
 {
-    ensure_progress_hook_installed();
     RP2350_EXAMPLE_BACKEND.block_on_with_poll_stack_bytes(poll_stack_bytes, future)
+}
+
+pub fn wait_for_runtime_progress() {
+    if system_thread().yield_now().is_ok() {
+        return;
+    }
+    let _ = system_monotonic_time().sleep_for(Duration::from_micros(250));
 }

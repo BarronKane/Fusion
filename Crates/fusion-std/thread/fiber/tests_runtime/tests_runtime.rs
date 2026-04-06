@@ -33,19 +33,19 @@ fn hosted_carrier_count_policy_reads_requested_topology_count() {
         core_class_count: None,
     };
     assert_eq!(
-        hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::Automatic),
+        carrier_count_for_profile(summary, CarrierWorkloadProfile::DedicatedCore),
         Some(6)
     );
     assert_eq!(
-        hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::VisibleLogicalCpus),
+        carrier_count_from_summary(summary, CarrierCountPolicy::PerLogicalCpu),
         Some(12)
     );
     assert_eq!(
-        hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::VisibleCores),
+        carrier_count_from_summary(summary, CarrierCountPolicy::PerCore),
         Some(6)
     );
     assert_eq!(
-        hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::VisiblePackages),
+        carrier_count_from_summary(summary, CarrierCountPolicy::PerPackage),
         Some(2)
     );
 }
@@ -380,7 +380,7 @@ fn current_fiber_pool_run_until_idle_drives_multiple_ready_segments() {
 
     assert_eq!(
         fibers
-            .run_until_idle()
+            .drain_until_idle()
             .expect("current-thread pool should drive until idle"),
         3
     );
@@ -427,7 +427,7 @@ fn current_fiber_pool_runtime_summary_reports_active_fiber_lane_state() {
         "spawned fiber should make the lane runnable"
     );
 
-    let _ = fibers.run_until_idle().expect("pool should drain");
+    let _ = fibers.drain_until_idle().expect("pool should drain");
     assert_eq!(task.join().expect("task should complete"), 7);
     let drained = fibers
         .runtime_summary()
@@ -455,7 +455,7 @@ fn current_fiber_pool_binds_current_courier_identity() {
         })
         .expect("task should spawn");
 
-    assert_eq!(fibers.run_until_idle().expect("pool should drain"), 1);
+    assert_eq!(fibers.drain_until_idle().expect("pool should drain"), 1);
     assert_eq!(task.join().expect("task should complete"), 77);
 
     fibers
@@ -488,7 +488,7 @@ fn current_fiber_pool_publishes_courier_truth_to_runtime_sink() {
         .spawn_with_stack::<4096, _, _>(|| 7_u8)
         .expect("task should spawn");
 
-    assert_eq!(fibers.run_until_idle().expect("pool should drain"), 1);
+    assert_eq!(fibers.drain_until_idle().expect("pool should drain"), 1);
     assert_eq!(handle.join().expect("task should complete"), 7);
 
     let sink_state = sink_state
@@ -571,7 +571,7 @@ fn current_fiber_pool_realizes_child_launch_against_domain_registry() {
         .spawn_with_stack::<4096, _, _>(|| 7_u8)
         .expect("task should spawn");
 
-    assert_eq!(fibers.run_until_idle().expect("pool should drain"), 1);
+    assert_eq!(fibers.drain_until_idle().expect("pool should drain"), 1);
     assert_eq!(handle.join().expect("task should complete"), 7);
 
     let parent = registry.courier(ROOT_COURIER).unwrap();

@@ -67,7 +67,7 @@ use cortex_m_rt::{
     exception,
 };
 use fusion_example_rp2350_on_device::gpio::Rp2350FiberGpioService;
-use fusion_example_rp2350_on_device::runtime::drive_once;
+use fusion_example_rp2350_on_device::runtime::wait_for_runtime_progress;
 use fusion_example_rp2350_on_device::seven_segment::{
     Rp2350FiberFourDigitSevenSegmentDisplay,
     Rp2350FiberFourDigitSevenSegmentDisplayService,
@@ -357,7 +357,7 @@ fn set_status(display: &Rp2350FiberFourDigitSevenSegmentDisplay, code: u16) {
 
 fn pump_runtime(turns: usize) {
     for _ in 0..turns {
-        let _ = drive_once();
+        wait_for_runtime_progress();
     }
 }
 
@@ -365,7 +365,7 @@ fn fatal_status(display: &Rp2350FiberFourDigitSevenSegmentDisplay, code: u16) ->
     let _ = set_panic_led(true);
     set_status(display, code);
     loop {
-        let _ = drive_once();
+        wait_for_runtime_progress();
     }
 }
 
@@ -1041,7 +1041,7 @@ fn main() -> ! {
 
     DEBUG_CHANNEL_PHASE.store(60, Ordering::Release);
     loop {
-        drive_once().expect("debug-channel runtime should keep advancing");
+        wait_for_runtime_progress();
     }
 }
 

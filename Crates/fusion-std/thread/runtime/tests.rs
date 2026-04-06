@@ -325,7 +325,11 @@ fn current_runtime_singleton_grows_fiber_capacity_quiescently() {
         .spawn_fiber_with_stack::<4096, _, _>(|| 11_u8)
         .expect("first fiber should spawn");
     while !first.is_finished().expect("fiber completion should read") {
-        assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        assert!(
+            RUNTIME
+                .pump_fiber_once()
+                .expect("fiber drive should succeed")
+        );
     }
 
     let second = RUNTIME
@@ -341,7 +345,11 @@ fn current_runtime_singleton_grows_fiber_capacity_quiescently() {
     );
 
     while !second.is_finished().expect("fiber completion should read") {
-        assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        assert!(
+            RUNTIME
+                .pump_fiber_once()
+                .expect("fiber drive should succeed")
+        );
     }
 
     assert_eq!(first.join().expect("first fiber should join"), 11);
@@ -368,12 +376,9 @@ fn current_runtime_singleton_grows_async_capacity_quiescently() {
         .async_total_capacity()
         .expect("singleton async capacity should read");
     assert_eq!(after_first_capacity, 1);
-    assert_eq!(
-        RUNTIME
-            .run_async_until_idle()
-            .expect("singleton async runtime should run to idle"),
-        1
-    );
+    let _ = RUNTIME
+        .drain_async_until_idle()
+        .expect("singleton async runtime should run to idle");
     assert!(first.is_finished().expect("first task state should read"));
 
     let second = RUNTIME
@@ -387,12 +392,9 @@ fn current_runtime_singleton_grows_async_capacity_quiescently() {
         "async capacity should grow by appending another segment after slot exhaustion"
     );
 
-    assert_eq!(
-        RUNTIME
-            .run_async_until_idle()
-            .expect("singleton async runtime should run to idle"),
-        1
-    );
+    let _ = RUNTIME
+        .drain_async_until_idle()
+        .expect("singleton async runtime should run to idle");
 
     assert_eq!(first.join().expect("first task should join"), 21);
     assert_eq!(second.join().expect("second task should join"), 34);
@@ -402,6 +404,9 @@ fn current_runtime_singleton_grows_async_capacity_quiescently() {
 fn current_runtime_singleton_runtime_summary_combines_fiber_and_async_lanes() {
     let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new();
+    static RELEASE: AtomicBool = AtomicBool::new(false);
+
+    RELEASE.store(false, Ordering::Release);
 
     let idle = RUNTIME
         .runtime_summary()
@@ -411,13 +416,17 @@ fn current_runtime_singleton_runtime_summary_combines_fiber_and_async_lanes() {
 
     let fiber = RUNTIME
         .spawn_fiber_with_stack::<4096, _, _>(|| {
-            yield_now().expect("fiber should yield cleanly");
+            while !RELEASE.load(Ordering::Acquire) {
+                yield_now().expect("fiber should yield cleanly");
+            }
             5_u8
         })
         .expect("fiber should spawn");
     let task = RUNTIME
         .spawn_async_with_poll_stack_bytes(2048, async {
-            async_yield_now().await;
+            while !RELEASE.load(Ordering::Acquire) {
+                async_yield_now().await;
+            }
             8_u8
         })
         .expect("async task should spawn");
@@ -436,8 +445,13 @@ fn current_runtime_singleton_runtime_summary_combines_fiber_and_async_lanes() {
         "spawned fiber and async task should make the singleton runnable"
     );
 
+    RELEASE.store(true, Ordering::Release);
     while !fiber.is_finished().expect("fiber completion should read") {
-        assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        assert!(
+            RUNTIME
+                .pump_fiber_once()
+                .expect("fiber drive should succeed")
+        );
     }
     assert_eq!(fiber.join().expect("fiber should join"), 5);
     assert_eq!(
@@ -533,13 +547,10 @@ fn combined_current_runtime_realizes_child_launch_against_domain_registry() {
         })
         .expect("runtime fiber should spawn");
 
-    assert_eq!(
-        runtime
-            .fibers()
-            .run_until_idle()
-            .expect("pool should drain"),
-        1
-    );
+    let _ = runtime
+        .fibers()
+        .drain_until_idle()
+        .expect("pool should drain");
     assert_eq!(
         handle.join().expect("runtime fiber should complete"),
         (CHILD_CONTEXT, true, CourierResponsiveness::Responsive)
@@ -604,7 +615,11 @@ fn current_runtime_singleton_binds_courier_identity() {
         })
         .expect("fiber should spawn");
     while !fiber.is_finished().expect("fiber completion should read") {
-        assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        assert!(
+            RUNTIME
+                .pump_fiber_once()
+                .expect("fiber drive should succeed")
+        );
     }
     assert_eq!(fiber.join().expect("fiber should join"), 144);
 
@@ -615,12 +630,9 @@ fn current_runtime_singleton_binds_courier_identity() {
                 .get()
         })
         .expect("async task should spawn");
-    assert_eq!(
-        RUNTIME
-            .run_async_until_idle()
-            .expect("singleton async runtime should run to idle"),
-        1
-    );
+    let _ = RUNTIME
+        .drain_async_until_idle()
+        .expect("singleton async runtime should run to idle");
     assert_eq!(task.join().expect("async task should complete"), 144);
 }
 
@@ -634,7 +646,11 @@ fn current_runtime_singleton_respects_fiber_capacity_cap() {
         .spawn_fiber_with_stack::<4096, _, _>(|| 55_u8)
         .expect("first fiber should spawn");
     while !first.is_finished().expect("fiber completion should read") {
-        assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        assert!(
+            RUNTIME
+                .pump_fiber_once()
+                .expect("fiber drive should succeed")
+        );
     }
 
     let second = RUNTIME.spawn_fiber_with_stack::<4096, _, _>(|| 89_u8);
@@ -683,7 +699,11 @@ fn current_runtime_singleton_realizes_fiber_capacity_limit_up_front() {
             .is_finished()
             .expect("second fiber completion should read")
     {
-        assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        assert!(
+            RUNTIME
+                .pump_fiber_once()
+                .expect("fiber drive should succeed")
+        );
     }
 
     assert_eq!(first.join().expect("first fiber should join"), 55);
@@ -702,12 +722,9 @@ fn current_runtime_singleton_respects_async_capacity_cap() {
     let first = RUNTIME
         .spawn_async_with_poll_stack_bytes(2048, async { 144_u8 })
         .expect("first async task should spawn");
-    assert_eq!(
-        RUNTIME
-            .run_async_until_idle()
-            .expect("singleton async runtime should run to idle"),
-        1
-    );
+    let _ = RUNTIME
+        .drain_async_until_idle()
+        .expect("singleton async runtime should run to idle");
     assert!(first.is_finished().expect("task completion should read"));
 
     let second = RUNTIME.spawn_async_with_poll_stack_bytes(2048, async { 233_u8 });
@@ -734,12 +751,9 @@ fn current_runtime_singleton_courier_plan_respects_async_capacity_cap() {
     let first = RUNTIME
         .spawn_async_with_poll_stack_bytes(2048, async { 34_u8 })
         .expect("first async task should spawn");
-    assert_eq!(
-        RUNTIME
-            .run_async_until_idle()
-            .expect("singleton async runtime should run to idle"),
-        1
-    );
+    let _ = RUNTIME
+        .drain_async_until_idle()
+        .expect("singleton async runtime should run to idle");
     assert!(first.is_finished().expect("task completion should read"));
 
     let second = RUNTIME.spawn_async_with_poll_stack_bytes(2048, async { 55_u8 });
@@ -760,10 +774,15 @@ fn current_runtime_singleton_courier_plan_limits_total_runnable_units() {
                 .with_async_capacity(2)
                 .with_runnable_capacity(1),
         );
+    static RELEASE: AtomicBool = AtomicBool::new(false);
+
+    RELEASE.store(false, Ordering::Release);
 
     let fiber = RUNTIME
         .spawn_fiber_with_stack::<4096, _, _>(|| {
-            yield_now().expect("fiber should yield cleanly");
+            while !RELEASE.load(Ordering::Acquire) {
+                yield_now().expect("fiber should yield cleanly");
+            }
             21_u8
         })
         .expect("first fiber should spawn");
@@ -774,8 +793,13 @@ fn current_runtime_singleton_courier_plan_limits_total_runnable_units() {
         Err(ExecutorError::Sync(SyncErrorKind::Overflow))
     ));
 
+    RELEASE.store(true, Ordering::Release);
     while !fiber.is_finished().expect("fiber completion should read") {
-        assert!(RUNTIME.drive_once().expect("fiber drive should succeed"));
+        assert!(
+            RUNTIME
+                .pump_fiber_once()
+                .expect("fiber drive should succeed")
+        );
     }
     assert_eq!(fiber.join().expect("fiber should join"), 21);
     RUNTIME

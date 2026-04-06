@@ -13,8 +13,8 @@ use core::sync::atomic::{
 
 use fusion_hal::contract::drivers::bus::gpio::GpioOutputPinContract;
 use crate::runtime::{
-    drive_once,
     spawn_with_stack,
+    wait_for_runtime_progress,
 };
 use fusion_hal::contract::drivers::bus::gpio::{
     GpioError,
@@ -515,12 +515,8 @@ fn wait_for_service_progress() -> Result<(), GpioError> {
     if yield_now().is_ok() {
         return Ok(());
     }
-
-    match drive_once() {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(GpioError::busy()),
-        Err(error) => Err(gpio_error_from_fiber(error)),
-    }
+    wait_for_runtime_progress();
+    Ok(())
 }
 
 fn service_wait_for_client() -> Result<(), GpioError> {

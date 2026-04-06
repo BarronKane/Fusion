@@ -4,6 +4,7 @@
 //! It owns handles, exposes a stable wrapper surface, and keeps platform selection below the
 //! fusion-pal boundary where it belongs.
 
+mod carrier;
 mod handle;
 mod pool;
 mod system;
@@ -11,6 +12,7 @@ mod time;
 /// Scheduler-adjacent vector-dispatch ownership contracts and wrappers.
 pub mod vector;
 
+pub use carrier::*;
 pub use fusion_pal::sys::thread::{
     RawThreadEntry,
     ThreadAuthoritySet,

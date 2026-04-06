@@ -1345,6 +1345,7 @@ impl FiberStackClassPools {
                     growth_chunk: class.growth_chunk,
                     max_fibers_per_carrier: class.slots_per_carrier,
                     scheduling: config.scheduling,
+                    spawn_locality_policy: config.spawn_locality_policy,
                     priority_age_cap: config.priority_age_cap,
                     growth: config.growth,
                     telemetry: FiberTelemetry::Disabled,

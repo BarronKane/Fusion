@@ -21,6 +21,8 @@ pub struct FiberPoolConfig<'a> {
     pub max_fibers_per_carrier: usize,
     /// Scheduling policy across carriers.
     pub scheduling: GreenScheduling,
+    /// Locality preference when admitting new work from an already-running carrier.
+    pub spawn_locality_policy: CarrierSpawnLocalityPolicy,
     /// Optional cap on virtual waiting-age promotion for strict-priority scheduling.
     pub priority_age_cap: Option<FiberTaskAgeCap>,
     /// Pool population growth policy.
@@ -72,6 +74,7 @@ impl FiberPoolConfig<'static> {
             growth_chunk: 32,
             max_fibers_per_carrier: 64,
             scheduling: GreenScheduling::Fifo,
+            spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
             priority_age_cap: None,
             growth: GreenGrowth::OnDemand,
             telemetry: FiberTelemetry::Disabled,
@@ -98,6 +101,7 @@ impl FiberPoolConfig<'static> {
             growth_chunk: max_fibers_per_carrier,
             max_fibers_per_carrier,
             scheduling: GreenScheduling::Fifo,
+            spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
             priority_age_cap: None,
             growth: GreenGrowth::Fixed,
             telemetry: FiberTelemetry::Disabled,
@@ -139,6 +143,7 @@ impl FiberPoolConfig<'static> {
             growth_chunk,
             max_fibers_per_carrier,
             scheduling: GreenScheduling::Fifo,
+            spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
             priority_age_cap: None,
             growth: GreenGrowth::OnDemand,
             telemetry: FiberTelemetry::Disabled,
@@ -224,6 +229,7 @@ impl<'a> FiberPoolConfig<'a> {
             growth_chunk: total_capacity,
             max_fibers_per_carrier: total_capacity,
             scheduling: GreenScheduling::Fifo,
+            spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
             priority_age_cap: None,
             growth: GreenGrowth::Fixed,
             telemetry: FiberTelemetry::Disabled,
@@ -268,6 +274,16 @@ impl<'a> FiberPoolConfig<'a> {
     #[must_use]
     pub const fn with_scheduling(mut self, scheduling: GreenScheduling) -> Self {
         self.scheduling = scheduling;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit carrier spawn-locality policy.
+    #[must_use]
+    pub const fn with_spawn_locality_policy(
+        mut self,
+        spawn_locality_policy: CarrierSpawnLocalityPolicy,
+    ) -> Self {
+        self.spawn_locality_policy = spawn_locality_policy;
         self
     }
 

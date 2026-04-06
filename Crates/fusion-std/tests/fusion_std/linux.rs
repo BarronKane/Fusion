@@ -2,6 +2,7 @@ use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{
     AtomicU32,
+    AtomicU64,
     Ordering,
 };
 use core::task::{
@@ -716,6 +717,117 @@ fn priority_green_pool_rejects_multi_carrier_topology_until_domain_semantics_exi
     let error = GreenPool::new(&config, &carriers)
         .expect_err("multi-carrier priority should stay unsupported until domains exist");
     assert_eq!(error.kind(), FiberError::unsupported().kind());
+
+    carriers
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn carrier_pool_prefers_origin_carrier_for_nested_submission() {
+    let _guard = lock_fusion_std_tests();
+
+    let carriers = ThreadPool::new(&ThreadPoolConfig {
+        min_threads: 2,
+        max_threads: 2,
+        ..ThreadPoolConfig::new()
+    })
+    .expect("two-carrier pool should build");
+    let nested = carriers
+        .try_clone()
+        .expect("thread-pool handle should clone honestly");
+    let parent_thread = Arc::new(AtomicU64::new(0));
+    let child_thread = Arc::new(AtomicU64::new(0));
+
+    {
+        let parent_thread = Arc::clone(&parent_thread);
+        let child_thread = Arc::clone(&child_thread);
+        carriers
+            .submit(move || {
+                let parent = fusion_sys::thread::system_carrier()
+                    .observe_current()
+                    .expect("current carrier observation should succeed");
+                parent_thread.store(parent.thread_id.0, Ordering::Release);
+                nested
+                    .submit(move || {
+                        let child = fusion_sys::thread::system_carrier()
+                            .observe_current()
+                            .expect("nested current carrier observation should succeed");
+                        child_thread.store(child.thread_id.0, Ordering::Release);
+                    })
+                    .expect("nested submission should succeed");
+            })
+            .expect("outer submission should succeed");
+    }
+
+    while child_thread.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+
+    assert_eq!(
+        child_thread.load(Ordering::Acquire),
+        parent_thread.load(Ordering::Acquire)
+    );
+
+    carriers
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn carrier_pool_global_steal_runs_nested_work_on_another_carrier() {
+    let _guard = lock_fusion_std_tests();
+
+    let carriers = ThreadPool::new(&ThreadPoolConfig {
+        min_threads: 2,
+        max_threads: 2,
+        steal_boundary: fusion_std::thread::StealBoundary::Global,
+        ..ThreadPoolConfig::new()
+    })
+    .expect("two-carrier pool should build");
+    let nested = carriers
+        .try_clone()
+        .expect("thread-pool handle should clone honestly");
+    let parent_thread = Arc::new(AtomicU64::new(0));
+    let child_thread = Arc::new(AtomicU64::new(0));
+    let release = Arc::new(AtomicU32::new(0));
+
+    {
+        let parent_thread = Arc::clone(&parent_thread);
+        let child_thread = Arc::clone(&child_thread);
+        let release_inner = Arc::clone(&release);
+        carriers
+            .submit(move || {
+                let parent = fusion_sys::thread::system_carrier()
+                    .observe_current()
+                    .expect("current carrier observation should succeed");
+                parent_thread.store(parent.thread_id.0, Ordering::Release);
+                nested
+                    .submit(move || {
+                        let child = fusion_sys::thread::system_carrier()
+                            .observe_current()
+                            .expect("stolen current carrier observation should succeed");
+                        child_thread.store(child.thread_id.0, Ordering::Release);
+                    })
+                    .expect("nested submission should succeed");
+                while release_inner.load(Ordering::Acquire) == 0 {
+                    core::hint::spin_loop();
+                }
+            })
+            .expect("outer submission should succeed");
+    }
+
+    while child_thread.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    release.store(1, Ordering::Release);
+
+    assert_ne!(parent_thread.load(Ordering::Acquire), 0);
+    assert_ne!(child_thread.load(Ordering::Acquire), 0);
+    assert_ne!(
+        child_thread.load(Ordering::Acquire),
+        parent_thread.load(Ordering::Acquire)
+    );
 
     carriers
         .shutdown()

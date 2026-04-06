@@ -3,6 +3,10 @@ use crate::thread::{
     FiberTaskAttributes,
     FiberTaskPriority,
 };
+use core::sync::atomic::{
+    AtomicUsize,
+    Ordering,
+};
 use super::*;
 
 #[derive(Debug)]
@@ -109,11 +113,12 @@ impl CurrentAsyncRuntimeSlot {
 // serialized through the thin mutex, and appended segments remain stable for the singleton's life.
 unsafe impl Sync for CurrentAsyncRuntimeSlot {}
 
-/// Tiny lazy current-thread fiber+async runtime façade for board-local front doors.
+/// Tiny lazy current-thread fiber+async manual runner for bootstrap, audit, and board-local front
+/// doors.
 ///
-/// This exists for targets that want a `thread::spawn()`-clean consumer surface while the exact
-/// generated metadata pipeline still depends on build-time sidecars rather than compiler-native
-/// artifacts.
+/// This is not the final autonomous courier runtime model. It exists for targets that want a
+/// `thread::spawn()`-clean bootstrap surface while the exact generated metadata pipeline still
+/// depends on build-time sidecars rather than compiler-native artifacts.
 pub struct CurrentFiberAsyncSingleton {
     courier_id: Option<CourierId>,
     context_id: Option<ContextId>,
@@ -125,8 +130,19 @@ pub struct CurrentFiberAsyncSingleton {
     async_capacity_limit: Option<usize>,
     stack_floor_bytes: Option<usize>,
     guard_pages: Option<usize>,
+    runtime_dispatch_cookie: AtomicUsize,
     fibers: CurrentFiberRuntimeSlot,
     executor: CurrentAsyncRuntimeSlot,
+}
+
+fn current_singleton_runtime_dispatch_callback(context: usize) {
+    if context == 0 {
+        return;
+    }
+    // SAFETY: the runtime-dispatch broker stores only pointers registered from stable
+    // `CurrentFiberAsyncSingleton` instances.
+    let runtime = unsafe { &*(context as *const CurrentFiberAsyncSingleton) };
+    runtime.autonomous_dispatch_once();
 }
 
 impl CurrentFiberAsyncSingleton {
@@ -143,6 +159,7 @@ impl CurrentFiberAsyncSingleton {
             async_capacity_limit: None,
             stack_floor_bytes: None,
             guard_pages: None,
+            runtime_dispatch_cookie: AtomicUsize::new(0),
             fibers: CurrentFiberRuntimeSlot::new(),
             executor: CurrentAsyncRuntimeSlot::new(),
         }
@@ -244,6 +261,99 @@ impl CurrentFiberAsyncSingleton {
     pub const fn with_guard_pages(mut self, guard_pages: usize) -> Self {
         self.guard_pages = Some(guard_pages);
         self
+    }
+
+    fn runtime_dispatch_cookie_if_registered(
+        &self,
+    ) -> Option<fusion_pal::sys::runtime_dispatch::RuntimeDispatchCookie> {
+        let raw = self.runtime_dispatch_cookie.load(Ordering::Acquire);
+        if raw == 0 || raw == usize::MAX {
+            return None;
+        }
+        u32::try_from(raw)
+            .ok()
+            .map(fusion_pal::sys::runtime_dispatch::RuntimeDispatchCookie)
+    }
+
+    fn ensure_runtime_dispatch_cookie(
+        &'static self,
+    ) -> Option<fusion_pal::sys::runtime_dispatch::RuntimeDispatchCookie> {
+        loop {
+            match self.runtime_dispatch_cookie.load(Ordering::Acquire) {
+                0 => {
+                    if self
+                        .runtime_dispatch_cookie
+                        .compare_exchange(0, usize::MAX, Ordering::AcqRel, Ordering::Acquire)
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let registered =
+                        fusion_pal::sys::runtime_dispatch::register_runtime_dispatch_callback(
+                            current_singleton_runtime_dispatch_callback,
+                            self as *const Self as usize,
+                        )
+                        .ok();
+                    let stored = registered
+                        .and_then(|cookie| usize::try_from(cookie.0).ok())
+                        .unwrap_or(0);
+                    self.runtime_dispatch_cookie
+                        .store(stored, Ordering::Release);
+                    if let Some(cookie) = registered {
+                        self.install_runtime_dispatch_cookie_into_realized_runtimes(cookie);
+                    }
+                    return registered;
+                }
+                usize::MAX => core::hint::spin_loop(),
+                _ => return self.runtime_dispatch_cookie_if_registered(),
+            }
+        }
+    }
+
+    fn install_runtime_dispatch_cookie_into_realized_runtimes(
+        &'static self,
+        cookie: fusion_pal::sys::runtime_dispatch::RuntimeDispatchCookie,
+    ) {
+        if let Ok(_guard) = self.fibers.lock.lock() {
+            // SAFETY: the thin mutex serializes access to the singleton fiber slot state.
+            let state = unsafe { &mut *self.fibers.state.get() };
+            if let Some(runtime) = state.runtime.as_ref() {
+                runtime.install_runtime_dispatch_cookie(cookie);
+            }
+        }
+
+        if let Ok(_guard) = self.executor.lock.lock() {
+            // SAFETY: the thin mutex serializes access to the singleton async slot state.
+            let state = unsafe { &mut *self.executor.state.get() };
+            let mut segment = state.head;
+            while let Some(node) = segment {
+                // SAFETY: append-only async segments remain live and stable while linked.
+                let node_ref = unsafe { node.as_ref() };
+                let _ = node_ref.runtime.install_runtime_dispatch_cookie(cookie);
+                segment = node_ref.next;
+            }
+        }
+    }
+
+    fn request_runtime_dispatch_best_effort(&'static self) {
+        if let Some(cookie) = self.ensure_runtime_dispatch_cookie() {
+            let _ = fusion_pal::sys::runtime_dispatch::request_runtime_dispatch(cookie);
+        }
+    }
+
+    fn autonomous_dispatch_once(&'static self) {
+        let mut progressed = false;
+
+        if matches!(self.pump_async_once(), Ok(true)) {
+            progressed = true;
+        }
+        if matches!(self.pump_fiber_once(), Ok(true)) {
+            progressed = true;
+        }
+
+        if progressed {
+            self.request_runtime_dispatch_best_effort();
+        }
     }
 
     /// Returns the configured owning courier identity for this singleton, when present.
@@ -350,14 +460,18 @@ impl CurrentFiberAsyncSingleton {
         if let Some(launch_request) = self.launch_request {
             bootstrap = bootstrap.with_child_launch(launch_request);
         }
-        bootstrap.build_current()
+        let runtime = bootstrap.build_current()?;
+        if let Some(cookie) = self.runtime_dispatch_cookie_if_registered() {
+            runtime.install_runtime_dispatch_cookie(cookie);
+        }
+        Ok(runtime)
     }
 
     fn build_async_runtime_with_policy(
         &self,
         async_capacity: usize,
     ) -> Result<CurrentAsyncRuntime, ExecutorError> {
-        ensure_runtime_reserved_wake_vectors()?;
+        ensure_runtime_reserved_wake_vectors_best_effort();
         let mut config = ExecutorConfig::new().with_capacity(async_capacity.max(1));
         if let Some(courier_id) = self.courier_id {
             config = config.with_courier_id(courier_id);
@@ -379,7 +493,11 @@ impl CurrentFiberAsyncSingleton {
                 return CurrentAsyncRuntime::from_owned_extent(config, slab.lease);
             }
         }
-        Ok(CurrentAsyncRuntime::with_executor_config(config))
+        let runtime = CurrentAsyncRuntime::with_executor_config(config);
+        if let Some(cookie) = self.runtime_dispatch_cookie_if_registered() {
+            let _ = runtime.install_runtime_dispatch_cookie(cookie);
+        }
+        Ok(runtime)
     }
 
     fn allocate_runtime_node_backing(
@@ -699,18 +817,18 @@ impl CurrentFiberAsyncSingleton {
         Ok(state.head)
     }
 
-    /// Drives one ready async task across every realized singleton async segment.
+    /// Pumps one ready async task across every realized singleton async segment.
     ///
     /// # Errors
     ///
     /// Returns any honest executor failure from the realized segments.
-    pub fn drive_async_once(&'static self) -> Result<bool, ExecutorError> {
+    pub(crate) fn pump_async_once(&'static self) -> Result<bool, ExecutorError> {
         let mut segment = self.async_segment_head_snapshot()?;
         let mut progressed = false;
         while let Some(node) = segment {
             // SAFETY: append-only segment nodes remain live and stable while linked from the slot.
             let node_ref = unsafe { node.as_ref() };
-            progressed |= node_ref.runtime.drive_once()?;
+            progressed |= node_ref.runtime.pump_once()?;
             segment = node_ref.next;
         }
         Ok(progressed)
@@ -721,7 +839,8 @@ impl CurrentFiberAsyncSingleton {
     /// # Errors
     ///
     /// Returns any honest executor failure from the realized segments.
-    pub fn run_async_until_idle(&'static self) -> Result<usize, ExecutorError> {
+    #[cfg(test)]
+    pub(crate) fn drain_async_until_idle(&'static self) -> Result<usize, ExecutorError> {
         let mut total = 0_usize;
         loop {
             let mut segment = self.async_segment_head_snapshot()?;
@@ -730,7 +849,7 @@ impl CurrentFiberAsyncSingleton {
                 // SAFETY: append-only segment nodes remain live and stable while linked from the
                 // singleton slot.
                 let node_ref = unsafe { node.as_ref() };
-                progressed = progressed.saturating_add(node_ref.runtime.run_until_idle()?);
+                progressed = progressed.saturating_add(node_ref.runtime.drain_until_idle()?);
                 segment = node_ref.next;
             }
             if progressed == 0 {
@@ -933,13 +1052,16 @@ impl CurrentFiberAsyncSingleton {
             .fiber_runtime_borrow(None, None)?
             .closure_task_attributes::<F>()?;
         self.ensure_fiber_admission(task)?;
-        self.fiber_runtime_borrow(
-            None,
-            task.execution
-                .is_fiber()
-                .then(|| task.stack_class.size_bytes().get()),
-        )?
-        .spawn_with_attrs(task, job)
+        let handle = self
+            .fiber_runtime_borrow(
+                None,
+                task.execution
+                    .is_fiber()
+                    .then(|| task.stack_class.size_bytes().get()),
+            )?
+            .spawn_with_attrs(task, job)?;
+        self.request_runtime_dispatch_best_effort();
+        Ok(handle)
     }
 
     pub fn spawn_fiber_with_stack<const STACK_BYTES: usize, F, T>(
@@ -954,8 +1076,11 @@ impl CurrentFiberAsyncSingleton {
         let stack_bytes = NonZeroUsize::new(STACK_BYTES).ok_or_else(FiberError::invalid)?;
         let task = FiberTaskAttributes::from_stack_bytes(stack_bytes, FiberTaskPriority::DEFAULT)?;
         self.ensure_fiber_admission(task)?;
-        self.fiber_runtime_borrow(None, Some(stack_bytes.get()))?
-            .spawn_with_attrs(task, job)
+        let handle = self
+            .fiber_runtime_borrow(None, Some(stack_bytes.get()))?
+            .spawn_with_attrs(task, job)?;
+        self.request_runtime_dispatch_best_effort();
+        Ok(handle)
     }
 
     pub fn spawn_planned_fiber<T>(
@@ -968,19 +1093,22 @@ impl CurrentFiberAsyncSingleton {
         self.ensure_runnable_budget_for_fiber()?;
         let attributes = T::task_attributes()?;
         self.ensure_fiber_admission(attributes)?;
-        self.fiber_runtime_borrow(
-            None,
-            attributes
-                .execution
-                .is_fiber()
-                .then(|| attributes.stack_class.size_bytes().get()),
-        )?
-        .spawn_with_attrs(attributes, move || task.run())
+        let handle = self
+            .fiber_runtime_borrow(
+                None,
+                attributes
+                    .execution
+                    .is_fiber()
+                    .then(|| attributes.stack_class.size_bytes().get()),
+            )?
+            .spawn_with_attrs(attributes, move || task.run())?;
+        self.request_runtime_dispatch_best_effort();
+        Ok(handle)
     }
 
-    pub fn drive_once(&'static self) -> Result<bool, FiberError> {
+    pub(crate) fn pump_fiber_once(&'static self) -> Result<bool, FiberError> {
         self.fiber_runtime_if_initialized()?
-            .map_or(Ok(false), |runtime| runtime.drive_once())
+            .map_or(Ok(false), |runtime| runtime.pump_once())
     }
 
     /// Spawns one async task through the lazily owned current-thread runtime.
@@ -995,7 +1123,9 @@ impl CurrentFiberAsyncSingleton {
         F::Output: Send + 'static,
     {
         self.ensure_runnable_budget_for_async()?;
-        self.async_runtime_for_spawn()?.spawn(future)
+        let handle = self.async_runtime_for_spawn()?.spawn(future)?;
+        self.request_runtime_dispatch_best_effort();
+        Ok(handle)
     }
 
     /// Spawns one async task with one explicit poll-stack contract through the lazily owned
@@ -1014,8 +1144,11 @@ impl CurrentFiberAsyncSingleton {
         F::Output: Send + 'static,
     {
         self.ensure_runnable_budget_for_async()?;
-        self.async_runtime_for_spawn()?
-            .spawn_with_poll_stack_bytes(poll_stack_bytes, future)
+        let handle = self
+            .async_runtime_for_spawn()?
+            .spawn_with_poll_stack_bytes(poll_stack_bytes, future)?;
+        self.request_runtime_dispatch_best_effort();
+        Ok(handle)
     }
 
     /// Drives one future to completion through the lazily owned current-thread runtime.
@@ -1031,7 +1164,7 @@ impl CurrentFiberAsyncSingleton {
     {
         let handle = self.async_runtime_for_spawn()?.spawn_local(future)?;
         while !handle.is_finished()? {
-            if !self.drive_async_once()?
+            if !self.pump_async_once()?
                 && !self.drive_async_reactors_once(true)?
                 && system_thread().yield_now().is_err()
             {
@@ -1060,7 +1193,7 @@ impl CurrentFiberAsyncSingleton {
             .async_runtime_for_spawn()?
             .spawn_local_with_poll_stack_bytes(poll_stack_bytes, future)?;
         while !handle.is_finished()? {
-            if !self.drive_async_once()?
+            if !self.pump_async_once()?
                 && !self.drive_async_reactors_once(true)?
                 && system_thread().yield_now().is_err()
             {

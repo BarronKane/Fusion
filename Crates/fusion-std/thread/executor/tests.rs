@@ -4,6 +4,7 @@ use core::sync::atomic::{
     Ordering,
 };
 
+use std::boxed::Box;
 use std::sync::Arc;
 #[cfg(feature = "std")]
 use std::sync::atomic::AtomicBool;
@@ -61,6 +62,7 @@ use fusion_sys::mem::resource::{
     StateValue,
 };
 use fusion_sys::thread::{
+    CarrierSpawnLocalityPolicy,
     ThreadLogicalCpuId,
     ThreadProcessorGroupId,
 };
@@ -474,11 +476,19 @@ fn async_yield_now_reschedules_current_thread_task() {
         })
         .expect("task should spawn");
 
-    assert!(executor.drive_once().expect("drive should succeed"));
+    assert!(
+        executor
+            .pump_current_thread_once()
+            .expect("drive should succeed")
+    );
     assert_eq!(polls.load(Ordering::Acquire), 1);
     assert!(!handle.is_finished().expect("task state should read"));
 
-    assert!(executor.drive_once().expect("drive should succeed"));
+    assert!(
+        executor
+            .pump_current_thread_once()
+            .expect("drive should succeed")
+    );
     assert_eq!(polls.load(Ordering::Acquire), 2);
     assert_eq!(handle.join().expect("task should complete"), 7);
 }
@@ -626,7 +636,12 @@ fn run_until_idle_drains_ready_current_thread_tasks() {
         })
         .expect("task should spawn");
 
-    assert_eq!(executor.run_until_idle().expect("drain should succeed"), 3);
+    assert_eq!(
+        executor
+            .drain_current_thread_until_idle()
+            .expect("drain should succeed"),
+        3
+    );
     assert!(handle.is_finished().expect("task state should read"));
     assert_eq!(handle.join().expect("task should complete"), 11);
 }
@@ -660,7 +675,9 @@ fn executor_runtime_summary_reports_active_async_lane_state() {
         "spawned task should make the async lane runnable"
     );
 
-    let _ = executor.run_until_idle().expect("executor should drain");
+    let _ = executor
+        .drain_current_thread_until_idle()
+        .expect("executor should drain");
     assert_eq!(handle.join().expect("task should complete"), 13);
     let drained = executor
         .runtime_summary()
@@ -923,7 +940,7 @@ fn current_async_runtime_drives_async_fn_to_completion() {
     let handle = runtime
         .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, value())
         .expect("task should spawn");
-    assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 2);
+    let _ = runtime.drain_until_idle().expect("runtime should drain");
     assert_eq!(handle.join().expect("task should complete"), 34);
 }
 
@@ -941,7 +958,7 @@ fn current_async_runtime_binds_current_courier_identity() {
                 .get()
         })
         .expect("task should spawn");
-    assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 1);
+    let _ = runtime.drain_until_idle().expect("runtime should drain");
     assert_eq!(handle.join().expect("task should complete"), 91);
 }
 
@@ -986,7 +1003,7 @@ fn current_async_runtime_queries_courier_truth() {
         })
         .expect("task should spawn");
 
-    assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 1);
+    let _ = runtime.drain_until_idle().expect("runtime should drain");
     assert_eq!(
         handle.join().expect("task should complete"),
         (CONTEXT, CourierResponsiveness::Responsive)
@@ -1064,7 +1081,7 @@ fn current_async_runtime_updates_courier_owned_metadata_and_obligations() {
         })
         .expect("task should spawn");
 
-    assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 1);
+    let _ = runtime.drain_until_idle().expect("runtime should drain");
     assert_eq!(handle.join().expect("task should complete"), 1);
 
     let courier = registry.courier(COURIER).expect("courier should exist");
@@ -1107,7 +1124,7 @@ fn current_async_runtime_preserves_zero_identity_in_tls_context() {
             )
         })
         .expect("task should spawn");
-    assert_eq!(runtime.run_until_idle().expect("runtime should drain"), 1);
+    let _ = runtime.drain_until_idle().expect("runtime should drain");
     assert_eq!(handle.join().expect("task should complete"), (0, 0));
 }
 
@@ -1334,7 +1351,7 @@ fn current_runtime_waits_for_readiness() {
 
     assert!(
         runtime
-            .drive_once()
+            .pump_once()
             .expect("registration poll should succeed")
     );
     pipe.write_byte(37);
@@ -1454,6 +1471,42 @@ fn thread_async_runtime_defaults_to_direct_hosted_workers() {
         ThreadAsyncRuntimeBootstrap::DirectHostedWorkers
     );
     assert!(runtime.thread_pool().is_none());
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn thread_async_runtime_prefers_origin_worker_locality_for_nested_spawn() {
+    let _guard = crate::thread::runtime_test_guard();
+    let runtime = Box::leak(Box::new(
+        ThreadAsyncRuntime::with_executor_config(
+            &ThreadPoolConfig {
+                min_threads: 2,
+                max_threads: 2,
+                ..ThreadPoolConfig::new()
+            },
+            ExecutorConfig::thread_pool()
+                .with_spawn_locality_policy(CarrierSpawnLocalityPolicy::SameCore),
+        )
+        .expect("thread async runtime should build"),
+    ));
+    let executor = runtime.executor();
+
+    let handle = runtime
+        .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async move {
+            let parent_thread = thread::current().id();
+            let child_thread = executor
+                .spawn_with_poll_stack_bytes(TEST_ASYNC_POLL_STACK_BYTES, async move {
+                    thread::current().id()
+                })
+                .expect("nested task should spawn")
+                .await
+                .expect("nested task should complete");
+            (parent_thread, child_thread)
+        })
+        .expect("outer task should spawn");
+
+    let (parent_thread, child_thread) = handle.join().expect("outer task should complete");
+    assert_eq!(parent_thread, child_thread);
 }
 
 #[cfg(feature = "std")]

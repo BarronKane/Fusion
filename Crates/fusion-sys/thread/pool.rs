@@ -33,16 +33,21 @@ use crate::sync::{
 };
 use crate::thread::handle::ThreadHandle;
 use super::{
+    CarrierObservation,
+    CarrierSpawnLocalityPolicy,
     RawThreadEntry,
     ThreadConfig,
     ThreadCoreClassId,
     ThreadError,
+    ThreadErrorKind,
     ThreadLifecycleCaps,
     ThreadLogicalCpuId,
     ThreadSchedulerRequest,
     ThreadStackRequest,
     ThreadSupport,
     ThreadSystem,
+    carrier_spawn_locality_rank,
+    system_carrier,
 };
 
 #[cfg(feature = "sys-cortex-m")]
@@ -68,6 +73,38 @@ const ZERO_LOGICAL_CPU: ThreadLogicalCpuId = ThreadLogicalCpuId {
 enum WorkerPlacement<'a> {
     LogicalCpus([ThreadLogicalCpuId; MAX_POOL_WORKERS]),
     CoreClasses(&'a [ThreadCoreClassId]),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QueueLink {
+    item: Option<SystemWorkItem>,
+    next: Option<u16>,
+}
+
+impl QueueLink {
+    const fn empty() -> Self {
+        Self {
+            item: None,
+            next: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkerQueue {
+    head: Option<u16>,
+    tail: Option<u16>,
+    queued_items: usize,
+}
+
+impl WorkerQueue {
+    const fn empty() -> Self {
+        Self {
+            head: None,
+            tail: None,
+            queued_items: 0,
+        }
+    }
 }
 
 /// Pool worker identifier.
@@ -187,6 +224,8 @@ pub struct SystemThreadPoolConfig<'a> {
     pub placement: SystemPoolPlacement<'a>,
     /// Boundary at which work stealing is allowed.
     pub steal_boundary: SystemStealBoundary,
+    /// Locality bias when admitting new raw work into carrier queues.
+    pub spawn_locality_policy: CarrierSpawnLocalityPolicy,
     /// Whether the carrier count may change later.
     pub resize_policy: SystemResizePolicy,
     /// Shutdown behavior for existing workers and queued work.
@@ -208,6 +247,7 @@ impl SystemThreadPoolConfig<'_> {
             max_threads: 1,
             placement: SystemPoolPlacement::Inherit,
             steal_boundary: SystemStealBoundary::LocalOnly,
+            spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
             resize_policy: SystemResizePolicy::Fixed,
             shutdown_policy: SystemShutdownPolicy::Drain,
             name_prefix: None,
@@ -257,19 +297,23 @@ struct PoolRegistryStorage {
 #[derive(Debug)]
 struct PoolSlot {
     queue_lock: ThinMutex,
-    work_ready: Option<Semaphore>,
-    queue: [Option<SystemWorkItem>; MAX_POOL_QUEUE_ITEMS],
+    work_ready: [Option<Semaphore>; MAX_POOL_WORKERS],
+    queue_slots: [QueueLink; MAX_POOL_QUEUE_ITEMS],
+    worker_queues: [WorkerQueue; MAX_POOL_WORKERS],
     workers: [Option<ThreadHandle>; MAX_POOL_WORKERS],
+    worker_observations: [Option<CarrierObservation>; MAX_POOL_WORKERS],
     allocated: bool,
     accepting: bool,
     shutting_down: bool,
     shutdown_policy: SystemShutdownPolicy,
+    steal_boundary: SystemStealBoundary,
+    spawn_locality_policy: CarrierSpawnLocalityPolicy,
     min_threads: usize,
     max_threads: usize,
     worker_count: usize,
     queued_items: usize,
-    head: usize,
-    tail: usize,
+    free_head: Option<u16>,
+    next_worker: usize,
 }
 
 impl PoolRegistryStorage {
@@ -289,68 +333,266 @@ impl PoolSlot {
     fn new() -> Self {
         Self {
             queue_lock: ThinMutex::new(),
-            work_ready: None,
-            queue: [None; MAX_POOL_QUEUE_ITEMS],
+            work_ready: array::from_fn(|_| None),
+            queue_slots: [QueueLink::empty(); MAX_POOL_QUEUE_ITEMS],
+            worker_queues: [WorkerQueue::empty(); MAX_POOL_WORKERS],
             workers: array::from_fn(|_| None),
+            worker_observations: [None; MAX_POOL_WORKERS],
             allocated: false,
             accepting: false,
             shutting_down: false,
             shutdown_policy: SystemShutdownPolicy::Drain,
+            steal_boundary: SystemStealBoundary::LocalOnly,
+            spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
             min_threads: 0,
             max_threads: 0,
             worker_count: 0,
             queued_items: 0,
-            head: 0,
-            tail: 0,
+            free_head: None,
+            next_worker: 0,
         }
     }
 
     fn reset(&mut self) {
-        let work_ready = self.work_ready.take();
+        let work_ready = core::mem::replace(&mut self.work_ready, array::from_fn(|_| None));
         *self = Self::new();
         self.work_ready = work_ready;
         self.drain_work_ready();
     }
 
-    const fn enqueue(&mut self, item: SystemWorkItem) -> Result<(), ThreadError> {
-        if !self.accepting || self.shutting_down {
-            return Err(ThreadError::state_conflict());
+    fn initialize_free_list(&mut self) {
+        self.free_head = None;
+        for index in (0..self.queue_slots.len()).rev() {
+            let next = self.free_head;
+            let Some(next_index) = u16::try_from(index).ok() else {
+                continue;
+            };
+            self.queue_slots[index] = QueueLink { item: None, next };
+            self.free_head = Some(next_index);
         }
-        if self.queued_items == self.queue.len() {
-            return Err(ThreadError::resource_exhausted());
-        }
+    }
 
-        self.queue[self.tail] = Some(item);
-        self.tail = (self.tail + 1) % self.queue.len();
-        self.queued_items += 1;
+    fn configure_runtime(&mut self, config: &SystemThreadPoolConfig<'_>, worker_count: usize) {
+        self.accepting = true;
+        self.shutting_down = false;
+        self.shutdown_policy = config.shutdown_policy;
+        self.steal_boundary = config.steal_boundary;
+        self.spawn_locality_policy = config.spawn_locality_policy;
+        self.min_threads = config.min_threads;
+        self.max_threads = config.max_threads;
+        self.worker_count = worker_count;
+        self.queued_items = 0;
+        self.next_worker = 0;
+        self.worker_queues = [WorkerQueue::empty(); MAX_POOL_WORKERS];
+        self.worker_observations = [None; MAX_POOL_WORKERS];
+        self.initialize_free_list();
+    }
+
+    fn install_worker_semaphores(&mut self, worker_count: usize) -> Result<(), ThreadError> {
+        let semaphore_max = u32::try_from(MAX_POOL_QUEUE_ITEMS + MAX_POOL_WORKERS)
+            .map_err(|_| ThreadError::resource_exhausted())?;
+        for worker_index in 0..worker_count {
+            if self.work_ready[worker_index].is_none() {
+                self.work_ready[worker_index] =
+                    Some(Semaphore::new(0, semaphore_max).map_err(thread_error_from_sync)?);
+            }
+        }
+        self.drain_work_ready();
         Ok(())
     }
 
-    fn dequeue(&mut self) -> Option<SystemWorkItem> {
-        if self.queued_items == 0 {
-            return None;
+    fn enqueue(
+        &mut self,
+        item: SystemWorkItem,
+        preferred_worker: Option<usize>,
+    ) -> Result<usize, ThreadError> {
+        if !self.accepting || self.shutting_down {
+            return Err(ThreadError::state_conflict());
         }
-        let item = self.queue[self.head].take()?;
-        self.head = (self.head + 1) % self.queue.len();
-        self.queued_items -= 1;
+        if self.queued_items == self.queue_slots.len() {
+            return Err(ThreadError::resource_exhausted());
+        }
+
+        let worker_index = self.select_worker_for_submission(preferred_worker)?;
+        let slot_index = self
+            .free_head
+            .take()
+            .ok_or_else(ThreadError::resource_exhausted)?;
+        let slot = &mut self.queue_slots[usize::from(slot_index)];
+        self.free_head = slot.next.take();
+        slot.item = Some(item);
+
+        let queue = &mut self.worker_queues[worker_index];
+        if let Some(tail_index) = queue.tail {
+            self.queue_slots[usize::from(tail_index)].next = Some(slot_index);
+        } else {
+            queue.head = Some(slot_index);
+        }
+        queue.tail = Some(slot_index);
+        queue.queued_items += 1;
+        self.queued_items += 1;
+        Ok(worker_index)
+    }
+
+    fn dequeue_for_worker(&mut self, worker_index: usize) -> Option<SystemWorkItem> {
+        let queue = self.worker_queues.get_mut(worker_index)?;
+        let head_index = queue.head?;
+        let slot = &mut self.queue_slots[usize::from(head_index)];
+        let item = slot.item.take()?;
+        let next = slot.next.take();
+        queue.head = next;
+        if queue.head.is_none() {
+            queue.tail = None;
+        }
+        queue.queued_items = queue.queued_items.saturating_sub(1);
+        slot.next = self.free_head;
+        self.free_head = Some(head_index);
+        self.queued_items = self.queued_items.saturating_sub(1);
         Some(item)
     }
 
     fn clear_queue(&mut self) {
-        while let Some(item) = self.dequeue() {
-            if let Some(cancel) = item.cancel {
-                // SAFETY: cancellation only receives the caller-owned opaque context that would
-                // otherwise have been passed to the work entry.
-                unsafe { cancel(item.context) };
+        while self.queued_items != 0 {
+            let mut progressed = false;
+            for worker_index in 0..self.worker_count {
+                let Some(item) = self.dequeue_for_worker(worker_index) else {
+                    continue;
+                };
+                progressed = true;
+                if let Some(cancel) = item.cancel {
+                    // SAFETY: cancellation only receives the caller-owned opaque context that
+                    // would otherwise have been passed to the work entry.
+                    unsafe { cancel(item.context) };
+                }
+            }
+            if !progressed {
+                break;
             }
         }
     }
 
+    fn select_worker_for_submission(
+        &mut self,
+        preferred_worker: Option<usize>,
+    ) -> Result<usize, ThreadError> {
+        if self.worker_count == 0 {
+            return Err(ThreadError::state_conflict());
+        }
+        if let Some(worker_index) = preferred_worker
+            && worker_index < self.worker_count
+        {
+            return Ok(worker_index);
+        }
+        let worker_index = self.next_worker % self.worker_count;
+        self.next_worker = (self.next_worker + 1) % self.worker_count;
+        Ok(worker_index)
+    }
+
+    fn publish_worker_observation(&mut self, worker_index: usize, observation: CarrierObservation) {
+        if worker_index < self.worker_observations.len() {
+            self.worker_observations[worker_index] = Some(observation);
+        }
+    }
+
+    fn preferred_worker_for_current(&self) -> Option<usize> {
+        let origin = system_carrier().observe_current().ok()?;
+        let mut best: Option<(u8, usize)> = None;
+        for worker_index in 0..self.worker_count {
+            let Some(candidate) = self.worker_observations[worker_index] else {
+                continue;
+            };
+            if candidate.thread_id == origin.thread_id {
+                return Some(worker_index);
+            }
+            let Some(rank) = carrier_spawn_locality_rank(
+                self.spawn_locality_policy,
+                origin.location,
+                candidate.location,
+            ) else {
+                continue;
+            };
+            if best.is_none_or(|(best_rank, _)| rank < best_rank) {
+                best = Some((rank, worker_index));
+            }
+        }
+        best.map(|(_, worker_index)| worker_index)
+    }
+
+    fn companion_worker_for_submission(&self, worker_index: usize) -> Option<usize> {
+        if matches!(self.steal_boundary, SystemStealBoundary::LocalOnly) || self.worker_count <= 1 {
+            return None;
+        }
+        let origin = self
+            .worker_observations
+            .get(worker_index)
+            .copied()
+            .flatten();
+        for offset in 1..self.worker_count {
+            let candidate_index = (worker_index + offset) % self.worker_count;
+            let candidate = self
+                .worker_observations
+                .get(candidate_index)
+                .copied()
+                .flatten();
+            if steal_boundary_allows(self.steal_boundary, origin, candidate) {
+                return Some(candidate_index);
+            }
+        }
+        None
+    }
+
+    fn steal_for_worker(&mut self, worker_index: usize) -> Option<SystemWorkItem> {
+        if matches!(self.steal_boundary, SystemStealBoundary::LocalOnly) || self.worker_count <= 1 {
+            return None;
+        }
+
+        let origin = self
+            .worker_observations
+            .get(worker_index)
+            .copied()
+            .flatten();
+        for offset in 1..self.worker_count {
+            let victim_index = (worker_index + offset) % self.worker_count;
+            if self.worker_queues[victim_index].queued_items == 0 {
+                continue;
+            }
+            let victim = self
+                .worker_observations
+                .get(victim_index)
+                .copied()
+                .flatten();
+            if !steal_boundary_allows(self.steal_boundary, origin, victim) {
+                continue;
+            }
+            if let Some(item) = self.dequeue_for_worker(victim_index) {
+                return Some(item);
+            }
+        }
+        None
+    }
+
+    fn worker_semaphore_ptr(&self, worker_index: usize) -> Result<*const Semaphore, ThreadError> {
+        self.work_ready
+            .get(worker_index)
+            .and_then(Option::as_ref)
+            .map(core::ptr::from_ref)
+            .ok_or_else(ThreadError::unsupported)
+    }
+
+    fn release_shutdown_wakeups(&self) -> Result<(), ThreadError> {
+        for worker_index in 0..self.worker_count {
+            let semaphore = self.work_ready[worker_index]
+                .as_ref()
+                .ok_or_else(ThreadError::unsupported)?;
+            semaphore.release(1).map_err(thread_error_from_sync)?;
+        }
+        Ok(())
+    }
+
     fn drain_work_ready(&self) {
-        let Some(semaphore) = self.work_ready.as_ref() else {
-            return;
-        };
-        while semaphore.try_acquire().unwrap_or(false) {}
+        for semaphore in self.work_ready.iter().flatten() {
+            while semaphore.try_acquire().unwrap_or(false) {}
+        }
     }
 }
 
@@ -438,18 +680,25 @@ impl SystemThreadPool {
     /// longer coordinate submission honestly.
     pub fn submit(&self, work: SystemWorkItem) -> Result<(), SystemThreadPoolError> {
         let slot_index = self.slot_index.ok_or_else(ThreadError::state_conflict)?;
-        let semaphore = with_slot(slot_index, |slot| {
-            slot.enqueue(work)?;
-            slot.work_ready
-                .as_ref()
-                .map(core::ptr::from_ref)
-                .ok_or_else(ThreadError::unsupported)
+        let (primary, companion) = with_slot(slot_index, |slot| {
+            let preferred_worker = slot.preferred_worker_for_current();
+            let worker_index = slot.enqueue(work, preferred_worker)?;
+            Ok((
+                slot.worker_semaphore_ptr(worker_index)?,
+                slot.companion_worker_for_submission(worker_index)
+                    .map(|companion| slot.worker_semaphore_ptr(companion))
+                    .transpose()?,
+            ))
         })?;
         // SAFETY: the slot-owned semaphore remains valid while the slot stays allocated.
         // We intentionally release after dropping the queue lock so wakeups do not occur
         // while the caller still serializes access to the ring-buffer state.
-        let semaphore = unsafe { &*semaphore };
+        let semaphore = unsafe { &*primary };
         semaphore.release(1).map_err(thread_error_from_sync)?;
+        if let Some(companion) = companion {
+            let companion = unsafe { &*companion };
+            companion.release(1).map_err(thread_error_from_sync)?;
+        }
         Ok(())
     }
 
@@ -476,7 +725,7 @@ impl SystemThreadPool {
 
         let mut handles: [Option<ThreadHandle>; MAX_POOL_WORKERS] = array::from_fn(|_| None);
         let worker_count = {
-            let (worker_count, semaphore_ptr) = with_slot(slot_index, |slot| {
+            let worker_count = with_slot(slot_index, |slot| {
                 slot.accepting = false;
                 slot.shutting_down = true;
                 if !matches!(slot.shutdown_policy, SystemShutdownPolicy::Drain) {
@@ -487,24 +736,9 @@ impl SystemThreadPool {
                 for (dst, src) in handles.iter_mut().zip(slot.workers.iter_mut()) {
                     *dst = src.take();
                 }
-
-                let semaphore = slot
-                    .work_ready
-                    .as_ref()
-                    .ok_or_else(ThreadError::unsupported)?;
-                Ok((worker_count, core::ptr::from_ref(semaphore)))
+                slot.release_shutdown_wakeups()?;
+                Ok(worker_count)
             })?;
-
-            // SAFETY: `semaphore_ptr` points at the slot-owned semaphore, and the slot
-            // remains allocated until shutdown finishes and the registry resets it below.
-            // Releasing after the slot lock is dropped keeps worker wakeups out of the
-            // serialized queue mutation path during shutdown.
-            let semaphore = unsafe { &*semaphore_ptr };
-            semaphore
-                .release(
-                    u32::try_from(worker_count).map_err(|_| ThreadError::resource_exhausted())?,
-                )
-                .map_err(thread_error_from_sync)?;
             worker_count
         };
 
@@ -571,9 +805,6 @@ fn validate_pool_config(
     ) {
         return Err(ThreadError::unsupported());
     }
-    if !matches!(config.steal_boundary, SystemStealBoundary::LocalOnly) {
-        return Err(ThreadError::unsupported());
-    }
     if !support.lifecycle.caps.contains(ThreadLifecycleCaps::SPAWN)
         || !support.lifecycle.caps.contains(ThreadLifecycleCaps::JOIN)
     {
@@ -617,23 +848,9 @@ fn allocate_pool_slot(
     };
     let slot = &mut slots[slot_index];
 
-    let semaphore_max = u32::try_from(MAX_POOL_QUEUE_ITEMS + MAX_POOL_WORKERS)
-        .map_err(|_| ThreadError::resource_exhausted())?;
-    if slot.work_ready.is_none() {
-        slot.work_ready = Some(Semaphore::new(0, semaphore_max).map_err(thread_error_from_sync)?);
-    } else {
-        slot.drain_work_ready();
-    }
+    slot.install_worker_semaphores(worker_count)?;
     slot.allocated = true;
-    slot.accepting = true;
-    slot.shutting_down = false;
-    slot.shutdown_policy = config.shutdown_policy;
-    slot.min_threads = config.min_threads;
-    slot.max_threads = config.max_threads;
-    slot.worker_count = worker_count;
-    slot.queued_items = 0;
-    slot.head = 0;
-    slot.tail = 0;
+    slot.configure_runtime(config, worker_count);
     Ok(slot_index)
 }
 
@@ -758,25 +975,53 @@ fn resolve_worker_placement<'a>(
     }
 }
 
-unsafe fn worker_thread_entry(context: *mut ()) -> fusion_pal::sys::thread::ThreadEntryReturn {
-    enum WorkerDispatch {
-        Work(SystemWorkItem),
-        Retry,
-        Shutdown,
+fn steal_boundary_allows(
+    boundary: SystemStealBoundary,
+    origin: Option<CarrierObservation>,
+    candidate: Option<CarrierObservation>,
+) -> bool {
+    match boundary {
+        SystemStealBoundary::LocalOnly => false,
+        SystemStealBoundary::Global => true,
+        SystemStealBoundary::SameCoreCluster => {
+            let (Some(origin), Some(candidate)) = (origin, candidate) else {
+                return false;
+            };
+            origin.location.cluster.is_some()
+                && origin.location.cluster == candidate.location.cluster
+        }
+        SystemStealBoundary::SamePackage => {
+            let (Some(origin), Some(candidate)) = (origin, candidate) else {
+                return false;
+            };
+            origin.location.package.is_some()
+                && origin.location.package == candidate.location.package
+        }
+        SystemStealBoundary::SameNumaNode => {
+            let (Some(origin), Some(candidate)) = (origin, candidate) else {
+                return false;
+            };
+            origin.location.numa_node.is_some()
+                && origin.location.numa_node == candidate.location.numa_node
+        }
     }
+}
 
-    let (slot_index, _worker_index) = decode_worker_token(context.cast_const());
+unsafe fn worker_thread_entry(context: *mut ()) -> fusion_pal::sys::thread::ThreadEntryReturn {
+    let (slot_index, worker_index) = decode_worker_token(context.cast_const());
     if registry().is_err() {
         return fusion_pal::sys::thread::ThreadEntryReturn::new(1);
     }
+    if let Ok(observation) = system_carrier().observe_current() {
+        let _ = with_slot(slot_index, |slot| {
+            slot.publish_worker_observation(worker_index, observation);
+            Ok(())
+        });
+    }
 
     loop {
-        let Ok(semaphore) = with_slot(slot_index, |slot| {
-            slot.work_ready.as_ref().map_or_else(
-                || Err(ThreadError::unsupported()),
-                |semaphore| Ok(core::ptr::from_ref(semaphore)),
-            )
-        }) else {
+        let Ok(semaphore) = with_slot(slot_index, |slot| slot.worker_semaphore_ptr(worker_index))
+        else {
             return fusion_pal::sys::thread::ThreadEntryReturn::new(2);
         };
 
@@ -786,15 +1031,21 @@ unsafe fn worker_thread_entry(context: *mut ()) -> fusion_pal::sys::thread::Thre
         }
 
         let next = match with_slot(slot_index, |slot| {
-            Ok(match slot.dequeue() {
-                Some(item) => WorkerDispatch::Work(item),
-                None if slot.shutting_down => WorkerDispatch::Shutdown,
-                None => WorkerDispatch::Retry,
+            if let Ok(observation) = system_carrier().observe_current() {
+                slot.publish_worker_observation(worker_index, observation);
+            }
+            Ok(match slot.dequeue_for_worker(worker_index) {
+                Some(item) => Some(item),
+                None => match slot.steal_for_worker(worker_index) {
+                    Some(item) => Some(item),
+                    None if slot.shutting_down => None,
+                    None => return Err(ThreadError::busy()),
+                },
             })
         }) {
-            Ok(WorkerDispatch::Work(item)) => Some(item),
-            Ok(WorkerDispatch::Retry) => continue,
-            Ok(WorkerDispatch::Shutdown) => None,
+            Ok(Some(item)) => Some(item),
+            Ok(None) => None,
+            Err(error) if error.kind() == ThreadErrorKind::Busy => continue,
             Err(_) => return fusion_pal::sys::thread::ThreadEntryReturn::new(5),
         };
 

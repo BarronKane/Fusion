@@ -39,6 +39,8 @@ pub mod vector {
         UnsupportedVectorBuilder as PlatformVectorBuilder,
         bind_reserved_event_timeout_wake,
         bind_reserved_pendsv_dispatch,
+        bind_reserved_runtime_dispatch,
+        request_reserved_pendsv_dispatch,
         take_pending_active_scope,
     };
 

@@ -52,8 +52,8 @@ use fusion_sys::transport::{
 };
 
 use crate::runtime::{
-    drive_once,
     spawn_with_stack,
+    wait_for_runtime_progress,
 };
 
 type SelectedHardwarePin = SystemGpioPin;
@@ -618,12 +618,8 @@ fn wait_for_service_progress() -> Result<(), GpioError> {
     if yield_now().is_ok() {
         return Ok(());
     }
-
-    match drive_once() {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(GpioError::busy()),
-        Err(error) => Err(gpio_error_from_fiber(error)),
-    }
+    wait_for_runtime_progress();
+    Ok(())
 }
 
 fn service_wait_for_client() -> Result<(), GpioError> {

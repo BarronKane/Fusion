@@ -2,12 +2,26 @@ use super::*;
 use super::engine::{
     green_executor_dispatch_stack_size,
 };
+use std::boxed::Box;
 use crate::thread::{
     PoolPlacement,
     ResizePolicy,
     ShutdownPolicy,
     ThreadPoolConfig,
 };
+
+#[derive(Debug)]
+struct HostedThreadWorkerState {
+    ready: SyncMutex<HostedReadyQueueState>,
+    signal: Semaphore,
+    observation: SyncMutex<Option<fusion_sys::thread::CarrierObservation>>,
+}
+
+#[derive(Debug)]
+struct HostedThreadWorkerEntryContext {
+    scheduler: Arc<HostedThreadScheduler>,
+    worker_index: usize,
+}
 
 /// Hosted async runtime backed by system-thread carriers.
 #[derive(Debug)]
@@ -36,7 +50,8 @@ impl ThreadAsyncRuntime {
         executor_config: ExecutorConfig,
     ) -> Result<Self, ExecutorError> {
         if HostedThreadWorkers::direct_supported(config) {
-            let carriers = HostedThreadScheduler::new_direct(config)?;
+            let carriers =
+                HostedThreadScheduler::new_direct(config, executor_config.spawn_locality_policy)?;
             let executor = Executor::with_scheduler(
                 executor_config.with_mode(ExecutorMode::ThreadPool),
                 SchedulerBinding::ThreadWorkers(Arc::clone(&carriers.scheduler)),
@@ -379,10 +394,11 @@ impl ExecutorReactorDriverState {
 
 #[derive(Debug)]
 pub(super) struct HostedThreadScheduler {
-    ready: SyncMutex<HostedReadyQueueState>,
-    signal: Semaphore,
+    workers: Box<[HostedThreadWorkerState]>,
     shutdown: AtomicBool,
+    next_worker: AtomicUsize,
     worker_count: usize,
+    spawn_locality_policy: fusion_sys::thread::CarrierSpawnLocalityPolicy,
 }
 
 #[derive(Debug)]
@@ -408,43 +424,41 @@ pub enum ThreadAsyncRuntimeBootstrap {
 }
 
 impl HostedThreadScheduler {
-    pub(super) fn new(pool: &ThreadPool) -> Result<Arc<Self>, ExecutorError> {
+    pub(super) fn new(
+        pool: &ThreadPool,
+        spawn_locality_policy: fusion_sys::thread::CarrierSpawnLocalityPolicy,
+    ) -> Result<Arc<Self>, ExecutorError> {
         let worker_count = pool
             .stats()
             .map_err(executor_error_from_thread_pool)?
             .max_threads
             .max(1);
         let scheduler = Arc::new(Self {
-            ready: SyncMutex::new(HostedReadyQueueState::new()),
-            signal: Semaphore::new(
-                0,
-                u32::try_from(CURRENT_QUEUE_CAPACITY.saturating_add(worker_count))
-                    .unwrap_or(u32::MAX),
-            )
-            .map_err(executor_error_from_sync)?,
+            workers: Self::build_worker_states(worker_count)?,
             shutdown: AtomicBool::new(false),
+            next_worker: AtomicUsize::new(0),
             worker_count,
+            spawn_locality_policy,
         });
-        for _ in 0..worker_count {
+        for worker_index in 0..worker_count {
             let worker = Arc::clone(&scheduler);
-            pool.submit(move || run_hosted_thread_scheduler(&worker))
+            pool.submit(move || run_hosted_thread_scheduler(&worker, worker_index))
                 .map_err(executor_error_from_thread_pool)?;
         }
         Ok(scheduler)
     }
 
-    fn new_direct(config: &ThreadPoolConfig<'_>) -> Result<HostedThreadWorkers, ExecutorError> {
+    fn new_direct(
+        config: &ThreadPoolConfig<'_>,
+        spawn_locality_policy: fusion_sys::thread::CarrierSpawnLocalityPolicy,
+    ) -> Result<HostedThreadWorkers, ExecutorError> {
         let worker_count = config.max_threads.max(1);
         let scheduler = Arc::new(Self {
-            ready: SyncMutex::new(HostedReadyQueueState::new()),
-            signal: Semaphore::new(
-                0,
-                u32::try_from(CURRENT_QUEUE_CAPACITY.saturating_add(worker_count))
-                    .unwrap_or(u32::MAX),
-            )
-            .map_err(executor_error_from_sync)?,
+            workers: Self::build_worker_states(worker_count)?,
             shutdown: AtomicBool::new(false),
+            next_worker: AtomicUsize::new(0),
             worker_count,
+            spawn_locality_policy,
         });
         let mut handles = Vec::with_capacity(worker_count);
 
@@ -458,20 +472,23 @@ impl HostedThreadScheduler {
             stack: config.stack,
         };
 
-        for _ in 0..worker_count {
-            let scheduler_context = Arc::into_raw(Arc::clone(&scheduler));
+        for worker_index in 0..worker_count {
+            let scheduler_context = Box::into_raw(Box::new(HostedThreadWorkerEntryContext {
+                scheduler: Arc::clone(&scheduler),
+                worker_index,
+            }));
             let handle = unsafe {
                 system.spawn_raw(
                     &thread_config,
                     hosted_thread_scheduler_entry,
-                    scheduler_context.cast_mut().cast(),
+                    scheduler_context.cast::<()>(),
                 )
             };
             match handle {
                 Ok(handle) => handles.push(handle),
                 Err(error) => {
                     unsafe {
-                        drop(Arc::from_raw(scheduler_context));
+                        drop(Box::from_raw(scheduler_context));
                     }
                     let _ = scheduler.request_shutdown();
                     for handle in handles.drain(..) {
@@ -493,19 +510,105 @@ impl HostedThreadScheduler {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(ExecutorError::Stopped);
         }
-        let mut ready = self.ready.lock().map_err(executor_error_from_sync)?;
-        ready.enqueue(job)?;
-        drop(ready);
-        self.signal.release(1).map_err(executor_error_from_sync)
+        let start = self.next_worker.fetch_add(1, Ordering::AcqRel) % self.worker_count.max(1);
+        let preferred = self
+            .select_worker_for_current_observation(start)
+            .unwrap_or(start);
+        for offset in 0..self.worker_count {
+            let worker_index = (preferred + offset) % self.worker_count;
+            let worker = &self.workers[worker_index];
+            let mut ready = worker.ready.lock().map_err(executor_error_from_sync)?;
+            if ready.enqueue(job).is_ok() {
+                drop(ready);
+                worker.signal.release(1).map_err(executor_error_from_sync)?;
+                return Ok(());
+            }
+        }
+        Err(ExecutorError::Sync(SyncErrorKind::Overflow))
     }
 
     pub(super) fn request_shutdown(&self) -> Result<usize, ExecutorError> {
         self.shutdown.store(true, Ordering::Release);
-        let dropped = self.ready.lock().map_err(executor_error_from_sync)?.clear();
-        self.signal
-            .release(u32::try_from(self.worker_count).unwrap_or(u32::MAX))
-            .map_err(executor_error_from_sync)?;
+        let mut dropped = 0usize;
+        for worker in &*self.workers {
+            dropped = dropped.saturating_add(
+                worker
+                    .ready
+                    .lock()
+                    .map_err(executor_error_from_sync)?
+                    .clear(),
+            );
+            worker.signal.release(1).map_err(executor_error_from_sync)?;
+        }
         Ok(dropped)
+    }
+
+    fn build_worker_states(
+        worker_count: usize,
+    ) -> Result<Box<[HostedThreadWorkerState]>, ExecutorError> {
+        let mut workers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            workers.push(HostedThreadWorkerState {
+                ready: SyncMutex::new(HostedReadyQueueState::new()),
+                signal: Semaphore::new(
+                    0,
+                    u32::try_from(CURRENT_QUEUE_CAPACITY.saturating_add(worker_count))
+                        .unwrap_or(u32::MAX),
+                )
+                .map_err(executor_error_from_sync)?,
+                observation: SyncMutex::new(None),
+            });
+        }
+        Ok(workers.into_boxed_slice())
+    }
+
+    fn publish_current_observation(&self, worker_index: usize) {
+        let Ok(observation) = fusion_sys::thread::system_carrier().observe_current() else {
+            return;
+        };
+        if let Ok(mut slot) = self.workers[worker_index].observation.lock() {
+            *slot = Some(observation);
+        }
+    }
+
+    fn select_worker_for_current_observation(&self, start: usize) -> Option<usize> {
+        let policy = self.spawn_locality_policy;
+        if matches!(
+            policy,
+            fusion_sys::thread::CarrierSpawnLocalityPolicy::Inherit
+                | fusion_sys::thread::CarrierSpawnLocalityPolicy::Any
+        ) {
+            return None;
+        }
+        let origin = fusion_sys::thread::system_carrier()
+            .observe_current()
+            .ok()?;
+        let mut best: Option<(u8, usize)> = None;
+        for offset in 0..self.worker_count {
+            let worker_index = (start + offset) % self.worker_count;
+            let observed = self.workers[worker_index]
+                .observation
+                .lock()
+                .ok()
+                .and_then(|guard| *guard);
+            let Some(observed) = observed else {
+                continue;
+            };
+            if observed.thread_id == origin.thread_id {
+                return Some(worker_index);
+            }
+            let Some(rank) = fusion_sys::thread::carrier_spawn_locality_rank(
+                policy,
+                origin.location,
+                observed.location,
+            ) else {
+                continue;
+            };
+            if best.is_none_or(|(best_rank, _)| rank < best_rank) {
+                best = Some((rank, worker_index));
+            }
+        }
+        best.map(|(_, worker_index)| worker_index)
     }
 }
 
@@ -527,14 +630,15 @@ impl HostedThreadWorkers {
 }
 
 unsafe fn hosted_thread_scheduler_entry(context: *mut ()) -> ThreadEntryReturn {
-    let scheduler = unsafe { Arc::from_raw(context.cast::<HostedThreadScheduler>()) };
-    run_hosted_thread_scheduler(&scheduler);
+    let context = unsafe { Box::from_raw(context.cast::<HostedThreadWorkerEntryContext>()) };
+    run_hosted_thread_scheduler(&context.scheduler, context.worker_index);
     ThreadEntryReturn::new(0)
 }
 
-fn run_hosted_thread_scheduler(queue: &Arc<HostedThreadScheduler>) {
+fn run_hosted_thread_scheduler(queue: &Arc<HostedThreadScheduler>, worker_index: usize) {
+    queue.publish_current_observation(worker_index);
     loop {
-        if queue
+        if queue.workers[worker_index]
             .signal
             .acquire()
             .map_err(executor_error_from_sync)
@@ -542,8 +646,13 @@ fn run_hosted_thread_scheduler(queue: &Arc<HostedThreadScheduler>) {
         {
             return;
         }
+        queue.publish_current_observation(worker_index);
 
-        let job = match queue.ready.lock().map_err(executor_error_from_sync) {
+        let job = match queue.workers[worker_index]
+            .ready
+            .lock()
+            .map_err(executor_error_from_sync)
+        {
             Ok(mut ready) => ready.dequeue(),
             Err(_) => return,
         };

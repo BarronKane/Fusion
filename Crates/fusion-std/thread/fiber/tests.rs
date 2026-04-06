@@ -757,6 +757,7 @@ fn elastic_stack_slab_grows_and_shrinks_by_chunk() {
         growth_chunk: 2,
         max_fibers_per_carrier: 5,
         scheduling: GreenScheduling::Fifo,
+        spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
         priority_age_cap: None,
         growth: GreenGrowth::OnDemand,
         telemetry: FiberTelemetry::Full,
@@ -846,6 +847,7 @@ fn elastic_stack_fault_promotion_makes_detector_page_writable() {
         growth_chunk: 1,
         max_fibers_per_carrier: 1,
         scheduling: GreenScheduling::Fifo,
+        spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
         priority_age_cap: None,
         growth: GreenGrowth::OnDemand,
         telemetry: FiberTelemetry::Full,
@@ -900,6 +902,7 @@ fn elastic_stack_stats_track_growth_and_capacity() {
         growth_chunk: 1,
         max_fibers_per_carrier: 1,
         scheduling: GreenScheduling::Fifo,
+        spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
         priority_age_cap: None,
         growth: GreenGrowth::OnDemand,
         telemetry: FiberTelemetry::Full,
@@ -969,6 +972,7 @@ fn elastic_capacity_events_dispatch_with_fiber_identity() {
         growth_chunk: 1,
         max_fibers_per_carrier: 1,
         scheduling: GreenScheduling::Fifo,
+        spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
         priority_age_cap: None,
         growth: GreenGrowth::OnDemand,
         telemetry: FiberTelemetry::Full,
@@ -1032,6 +1036,7 @@ fn elastic_stack_registry_tracks_live_slots_and_clears_on_drop() {
         growth_chunk: 1,
         max_fibers_per_carrier: 1,
         scheduling: GreenScheduling::Fifo,
+        spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
         priority_age_cap: None,
         growth: GreenGrowth::OnDemand,
         telemetry: FiberTelemetry::Disabled,
@@ -1102,6 +1107,7 @@ fn elastic_huge_page_policy_leaves_a_small_page_growth_window() {
         growth_chunk: 1,
         max_fibers_per_carrier: 1,
         scheduling: GreenScheduling::Fifo,
+        spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
         priority_age_cap: None,
         growth: GreenGrowth::OnDemand,
         telemetry: FiberTelemetry::Disabled,
@@ -1855,6 +1861,7 @@ fn work_stealing_runs_ready_work_on_an_idle_carrier() {
     let fibers = GreenPool::new(
         &FiberPoolConfig {
             scheduling: GreenScheduling::WorkStealing,
+            spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
             growth_chunk: 4,
             max_fibers_per_carrier: 4,
             ..FiberPoolConfig::new()
@@ -1924,6 +1931,73 @@ fn work_stealing_runs_ready_work_on_an_idle_carrier() {
     fibers
         .shutdown()
         .expect("work-stealing fiber pool should shut down cleanly");
+    carrier
+        .shutdown()
+        .expect("carrier pool should shut down cleanly");
+}
+
+#[test]
+fn hosted_spawn_from_running_fiber_prefers_origin_carrier_locality() {
+    let _guard = crate::thread::runtime_test_guard();
+    let carrier = ThreadPool::new(&ThreadPoolConfig {
+        min_threads: 2,
+        max_threads: 2,
+        placement: PoolPlacement::Inherit,
+        ..ThreadPoolConfig::new()
+    })
+    .expect("two-carrier pool should build");
+    let fibers = GreenPool::new(
+        &FiberPoolConfig::new().with_scheduling(GreenScheduling::Fifo),
+        &carrier,
+    )
+    .expect("fifo fiber pool should build");
+
+    let parent_thread = Arc::new(StdMutex::new(None));
+    let child_thread = Arc::new(StdMutex::new(None));
+    let child_fibers = fibers.try_clone().expect("pool handle should clone");
+
+    fibers.inner.next_carrier.store(0, Ordering::Release);
+    let parent = fibers
+        .spawn_with_stack::<4096, _, _>({
+            let parent_thread = Arc::clone(&parent_thread);
+            let child_thread = Arc::clone(&child_thread);
+            move || {
+                *parent_thread
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(std::thread::current().id());
+                child_fibers
+                    .spawn_with_stack::<4096, _, _>(move || {
+                        *child_thread
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(std::thread::current().id());
+                    })
+                    .expect("child fiber should spawn from running parent")
+            }
+        })
+        .expect("parent fiber should spawn");
+
+    let child = parent
+        .join()
+        .expect("parent fiber should complete without runtime failure");
+    child
+        .join()
+        .expect("child fiber should complete without runtime failure");
+
+    let parent = parent_thread
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .expect("parent fiber should record a carrier thread");
+    let child = child_thread
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .expect("child fiber should record a carrier thread");
+    assert_eq!(parent, child);
+
+    fibers
+        .shutdown()
+        .expect("fifo fiber pool should shut down cleanly");
     carrier
         .shutdown()
         .expect("carrier pool should shut down cleanly");

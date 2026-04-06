@@ -80,6 +80,9 @@ use crate::pal::hosted::windows as platform;
 #[path = "vector_runtime.rs"]
 mod vector_runtime;
 
+#[path = "runtime_dispatch.rs"]
+pub mod runtime_dispatch;
+
 #[path = "runtime_progress.rs"]
 pub mod runtime_progress;
 
@@ -449,6 +452,7 @@ pub mod vector {
         PlatformVector,
         PlatformVectorBuilder,
         bind_reserved_pendsv_dispatch,
+        request_reserved_pendsv_dispatch,
         system_vector,
         take_pending_active_scope,
     };

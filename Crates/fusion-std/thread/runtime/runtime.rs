@@ -91,7 +91,6 @@ pub use self::bootstrap::*;
 pub use self::current::*;
 pub use self::policy::*;
 pub(crate) use self::vector_bootstrap::{
-    ensure_runtime_reserved_wake_vectors,
     ensure_runtime_reserved_wake_vectors_best_effort,
     with_runtime_vector_builder,
 };

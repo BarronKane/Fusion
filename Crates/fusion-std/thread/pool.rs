@@ -34,6 +34,10 @@ use fusion_sys::alloc::{
     Slab,
 };
 use fusion_sys::thread::{
+    CarrierCountPolicy,
+    CarrierSpawnLocalityPolicy,
+    CarrierStealPolicy,
+    CarrierWorkloadProfile,
     SystemPoolPlacement,
     SystemResizePolicy,
     SystemShutdownPolicy,
@@ -49,6 +53,7 @@ use fusion_sys::thread::{
     ThreadStackRequest,
     ThreadSupport,
     ThreadSystem,
+    system_carrier,
 };
 
 use crate::sync::{
@@ -117,6 +122,18 @@ impl From<StealBoundary> for SystemStealBoundary {
     }
 }
 
+impl From<CarrierStealPolicy> for StealBoundary {
+    fn from(value: CarrierStealPolicy) -> Self {
+        match value {
+            CarrierStealPolicy::LocalOnly => Self::LocalOnly,
+            CarrierStealPolicy::SameCluster => Self::SameCoreCluster,
+            CarrierStealPolicy::SamePackage => Self::SamePackage,
+            CarrierStealPolicy::SameNumaNode => Self::SameNumaNode,
+            CarrierStealPolicy::Global => Self::Global,
+        }
+    }
+}
+
 /// Public resize policy for the carrier pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResizePolicy {
@@ -170,6 +187,8 @@ pub struct ThreadPoolConfig<'a> {
     pub placement: PoolPlacement<'a>,
     /// Stealing boundary between workers.
     pub steal_boundary: StealBoundary,
+    /// Locality bias when admitting new work into carrier queues.
+    pub spawn_locality_policy: CarrierSpawnLocalityPolicy,
     /// Whether the pool may resize later.
     pub resize_policy: ResizePolicy,
     /// Shutdown behavior for queued and active work.
@@ -191,6 +210,7 @@ impl<'a> ThreadPoolConfig<'a> {
             max_threads: 1,
             placement: PoolPlacement::Inherit,
             steal_boundary: StealBoundary::LocalOnly,
+            spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
             resize_policy: ResizePolicy::Fixed,
             shutdown_policy: ShutdownPolicy::Drain,
             name_prefix: None,
@@ -199,12 +219,66 @@ impl<'a> ThreadPoolConfig<'a> {
         }
     }
 
+    /// Returns one copy with worker counts resolved from a canonical carrier-count policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the selected machine cannot surface the topology count
+    /// required by `policy`.
+    pub fn with_carrier_count_policy(
+        mut self,
+        policy: CarrierCountPolicy,
+    ) -> Result<Self, ThreadPoolError> {
+        let count = system_carrier()
+            .resolve_count(policy)
+            .map_err(|_| ThreadPoolError::unsupported())?
+            .ok_or_else(ThreadPoolError::unsupported)?;
+        self.min_threads = count;
+        self.max_threads = count;
+        Ok(self)
+    }
+
+    /// Returns one copy configured from a canonical carrier workload profile.
+    ///
+    /// This resolves the carrier count from machine topology and also applies the profile's
+    /// default steal boundary so the pool policy stops pretending count is the whole story.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the selected machine cannot surface the topology count
+    /// required by `profile`.
+    pub fn with_carrier_profile(
+        mut self,
+        profile: CarrierWorkloadProfile,
+    ) -> Result<Self, ThreadPoolError> {
+        let count = system_carrier()
+            .resolve_profile_count(profile)
+            .map_err(|_| ThreadPoolError::unsupported())?
+            .ok_or_else(ThreadPoolError::unsupported)?;
+        self.min_threads = count;
+        self.max_threads = count;
+        self.steal_boundary = StealBoundary::from(profile.steal_policy());
+        self.spawn_locality_policy = profile.spawn_locality_policy();
+        Ok(self)
+    }
+
+    /// Returns one copy with an explicit spawn-locality policy.
+    #[must_use]
+    pub const fn with_spawn_locality_policy(
+        mut self,
+        spawn_locality_policy: CarrierSpawnLocalityPolicy,
+    ) -> Self {
+        self.spawn_locality_policy = spawn_locality_policy;
+        self
+    }
+
     fn to_system(self) -> SystemThreadPoolConfig<'a> {
         SystemThreadPoolConfig {
             min_threads: self.min_threads,
             max_threads: self.max_threads,
             placement: self.placement.into(),
             steal_boundary: self.steal_boundary.into(),
+            spawn_locality_policy: self.spawn_locality_policy,
             resize_policy: self.resize_policy.into(),
             shutdown_policy: self.shutdown_policy.into(),
             name_prefix: self.name_prefix,

@@ -250,15 +250,6 @@ pub struct HostedFiberRuntimeConfig<'a> {
 }
 
 #[cfg(feature = "std")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum HostedCarrierCountPolicy {
-    Automatic,
-    VisibleLogicalCpus,
-    VisibleCores,
-    VisiblePackages,
-}
-
-#[cfg(feature = "std")]
 impl<'a> HostedFiberRuntimeConfig<'a> {
     /// Returns one explicit hosted runtime config with the supplied carrier count.
     #[must_use]
@@ -283,6 +274,73 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
         }
     }
 
+    /// Returns one hosted runtime config tuned for general-purpose work.
+    ///
+    /// This prefers one carrier per logical CPU / hyperthread when the topology truth exists,
+    /// because many small mixed workloads benefit from SMT width more than they suffer from shared
+    /// core resources.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the platform cannot truthfully report the visible
+    /// logical CPU count.
+    pub fn general_purpose() -> Result<Self, FiberError> {
+        let summary = system_cpu()
+            .topology_summary()
+            .map_err(|_| FiberError::unsupported())?;
+        let carrier_count = carrier_count_for_profile(summary, CarrierWorkloadProfile::GeneralPurpose)
+            .ok_or_else(FiberError::unsupported)?;
+        Ok(Self {
+            carrier_count,
+            bootstrap: HostedCarrierBootstrap::Direct,
+            placement: PoolPlacement::PerCore,
+            name_prefix: Some("fusion-fiber"),
+        })
+    }
+
+    /// Returns one hosted runtime config tuned for dedicated or contention-sensitive work.
+    ///
+    /// This prefers one carrier per physical or topology-defined core to avoid oversubscribing
+    /// shared SMT siblings when the workload wants cleaner cache and execution-unit ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the platform cannot truthfully report the visible
+    /// core count.
+    pub fn dedicated_cores() -> Result<Self, FiberError> {
+        let summary = system_cpu()
+            .topology_summary()
+            .map_err(|_| FiberError::unsupported())?;
+        let carrier_count = carrier_count_for_profile(summary, CarrierWorkloadProfile::DedicatedCore)
+            .ok_or_else(FiberError::unsupported)?;
+        Ok(Self {
+            carrier_count,
+            bootstrap: HostedCarrierBootstrap::Direct,
+            placement: PoolPlacement::Inherit,
+            name_prefix: Some("fusion-fiber"),
+        })
+    }
+
+    /// Returns one hosted runtime config tuned to keep work package/socket local.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest runtime error when the platform cannot truthfully report visible package
+    /// count.
+    pub fn package_local() -> Result<Self, FiberError> {
+        let summary = system_cpu()
+            .topology_summary()
+            .map_err(|_| FiberError::unsupported())?;
+        let carrier_count = carrier_count_for_profile(summary, CarrierWorkloadProfile::PackageLocal)
+            .ok_or_else(FiberError::unsupported)?;
+        Ok(Self {
+            carrier_count,
+            bootstrap: HostedCarrierBootstrap::Direct,
+            placement: PoolPlacement::PerPackage,
+            name_prefix: Some("fusion-fiber"),
+        })
+    }
+
     /// Returns one hosted runtime config sized to the visible logical CPU count.
     ///
     /// # Errors
@@ -293,11 +351,8 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
         let summary = system_cpu()
             .topology_summary()
             .map_err(|_| FiberError::unsupported())?;
-        let carrier_count = hosted_carrier_count_from_summary(
-            summary,
-            HostedCarrierCountPolicy::VisibleLogicalCpus,
-        )
-        .ok_or_else(FiberError::unsupported)?;
+        let carrier_count = carrier_count_from_summary(summary, CarrierCountPolicy::PerLogicalCpu)
+            .ok_or_else(FiberError::unsupported)?;
         Ok(Self {
             carrier_count,
             bootstrap: HostedCarrierBootstrap::Direct,
@@ -321,9 +376,8 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
         let summary = system_cpu()
             .topology_summary()
             .map_err(|_| FiberError::unsupported())?;
-        let carrier_count =
-            hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::VisibleCores)
-                .ok_or_else(FiberError::unsupported)?;
+        let carrier_count = carrier_count_from_summary(summary, CarrierCountPolicy::PerCore)
+            .ok_or_else(FiberError::unsupported)?;
         Ok(Self {
             carrier_count,
             bootstrap: HostedCarrierBootstrap::Direct,
@@ -346,9 +400,8 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
         let summary = system_cpu()
             .topology_summary()
             .map_err(|_| FiberError::unsupported())?;
-        let carrier_count =
-            hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::VisiblePackages)
-                .ok_or_else(FiberError::unsupported)?;
+        let carrier_count = carrier_count_from_summary(summary, CarrierCountPolicy::PerPackage)
+            .ok_or_else(FiberError::unsupported)?;
         Ok(Self {
             carrier_count,
             bootstrap: HostedCarrierBootstrap::Direct,
@@ -766,6 +819,8 @@ fn build_hosted_green_inner(
             launch_control: config.launch_control,
             launch_request: config.launch_request,
             scheduling: config.scheduling,
+            #[cfg(feature = "std")]
+            spawn_locality_policy: config.spawn_locality_policy,
             capacity_policy: config.capacity_policy,
             yield_budget_supported: yield_budget_enforcement_supported(),
             #[cfg(feature = "std")]
@@ -777,6 +832,7 @@ fn build_hosted_green_inner(
             launch_registered: AtomicBool::new(false),
             next_id: AtomicUsize::new(1),
             next_carrier: AtomicUsize::new(0),
+            runtime_dispatch_cookie: AtomicUsize::new(0),
             carriers,
             tasks,
             stacks,

@@ -41,7 +41,7 @@ use cortex_m_rt::{
     exception,
 };
 use fusion_example_rp2350_on_device::gpio::Rp2350FiberGpioService;
-use fusion_example_rp2350_on_device::runtime::drive_once;
+use fusion_example_rp2350_on_device::runtime::wait_for_runtime_progress;
 use fusion_example_rp2350_on_device::seven_segment::{
     Rp2350FiberFourDigitSevenSegmentDisplay,
     Rp2350FiberFourDigitSevenSegmentDisplayService,
@@ -205,7 +205,7 @@ fn main() -> ! {
         .expect("display boot value should write");
 
     loop {
-        drive_once().expect("display runtime should keep advancing");
+        wait_for_runtime_progress();
     }
 }
 

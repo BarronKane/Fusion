@@ -61,6 +61,7 @@ impl Executor {
                     task_lifecycle: ExecutorCell::new(fast_current, None),
                     shutdown_requested: AtomicBool::new(false),
                     external_inflight: AtomicUsize::new(0),
+                    runtime_dispatch_cookie: AtomicUsize::new(0),
                     _owned_backing: slab_owner,
                 })?;
                 Ok(core)
@@ -142,6 +143,7 @@ impl Executor {
                             task_lifecycle: ExecutorCell::new(fast_current, None),
                             shutdown_requested: AtomicBool::new(false),
                             external_inflight: AtomicUsize::new(0),
+                            runtime_dispatch_cookie: AtomicUsize::new(0),
                             _owned_backing: None,
                         },
                     )
@@ -529,7 +531,7 @@ impl Executor {
 
         let handle = self.spawn_local(future)?;
         while !handle.is_finished()? {
-            if !self.drive_once()?
+            if !self.pump_current_thread_once()?
                 && !core.drive_reactor_once(true)?
                 && system_thread().yield_now().is_err()
             {
@@ -561,7 +563,7 @@ impl Executor {
 
         let handle = self.spawn_local_with_poll_stack_bytes(poll_stack_bytes, future)?;
         while !handle.is_finished()? {
-            if !self.drive_once()?
+            if !self.pump_current_thread_once()?
                 && !core.drive_reactor_once(true)?
                 && system_thread().yield_now().is_err()
             {
@@ -571,12 +573,12 @@ impl Executor {
         handle.join()
     }
 
-    /// Drives one ready task on the current-thread executor.
+    /// Pumps one ready task on the current-thread executor.
     ///
     /// # Errors
     ///
     /// Returns `Unsupported` when this executor is not current-thread driven.
-    pub fn drive_once(&self) -> Result<bool, ExecutorError> {
+    pub(crate) fn pump_current_thread_once(&self) -> Result<bool, ExecutorError> {
         let core = self.core()?;
         let SchedulerBinding::Current = &core.scheduler else {
             return Err(ExecutorError::Unsupported);
@@ -595,9 +597,10 @@ impl Executor {
     /// # Errors
     ///
     /// Returns `Unsupported` when this executor is not current-thread driven.
-    pub fn run_until_idle(&self) -> Result<usize, ExecutorError> {
+    #[cfg(test)]
+    pub(crate) fn drain_current_thread_until_idle(&self) -> Result<usize, ExecutorError> {
         let mut ran = 0_usize;
-        while self.drive_once()? {
+        while self.pump_current_thread_once()? {
             ran = ran.saturating_add(1);
         }
         Ok(ran)
@@ -618,7 +621,10 @@ impl Executor {
             {
                 #[cfg(feature = "std")]
                 {
-                    SchedulerBinding::ThreadWorkers(HostedThreadScheduler::new(pool)?)
+                    SchedulerBinding::ThreadWorkers(HostedThreadScheduler::new(
+                        pool,
+                        self.config.spawn_locality_policy,
+                    )?)
                 }
                 #[cfg(not(feature = "std"))]
                 {

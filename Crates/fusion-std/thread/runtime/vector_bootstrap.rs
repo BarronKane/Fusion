@@ -2,17 +2,12 @@ use fusion_sys::thread::vector::{
     VectorError,
     VectorErrorKind,
     VectorTableBuilder,
-    ensure_runtime_reserved_wake_vectors as sys_ensure_runtime_reserved_wake_vectors,
     ensure_runtime_reserved_wake_vectors_best_effort as sys_ensure_runtime_reserved_wake_vectors_best_effort,
     with_runtime_vector_builder as sys_with_runtime_vector_builder,
 };
 
 use super::ExecutorError;
 use crate::sync::SyncErrorKind;
-
-pub(crate) fn ensure_runtime_reserved_wake_vectors() -> Result<(), ExecutorError> {
-    sys_ensure_runtime_reserved_wake_vectors().map_err(executor_error_from_vector)
-}
 
 pub(crate) fn ensure_runtime_reserved_wake_vectors_best_effort() {
     sys_ensure_runtime_reserved_wake_vectors_best_effort();

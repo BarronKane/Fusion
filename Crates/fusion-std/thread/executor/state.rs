@@ -188,7 +188,9 @@ impl CurrentQueue {
                 slot_index,
                 generation,
             })
-        })?
+        })??;
+        core.request_runtime_dispatch();
+        Ok(())
     }
 
     fn run_next(&self) -> Result<bool, ExecutorError> {

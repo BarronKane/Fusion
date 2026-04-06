@@ -7,8 +7,8 @@
 //! treating it as vague ambient kernel magic.
 //! Intended ring model once that work lands:
 //! - Ring 0: kernel core
-//! - Ring 1: OS services plus courier/fiber metadata surfaces
-//! - Ring 2: device drivers
+//! - Ring 1: drivers
+//! - Ring 2: system resources and operating services
 //! - Ring 3: user/context/application space
 
 use core::hash::{

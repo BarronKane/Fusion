@@ -17,8 +17,8 @@ use fusion_example_rp2350_on_device::gpio::{
     Rp2350FiberGpioService,
 };
 use fusion_example_rp2350_on_device::runtime::{
-    drive_once,
     spawn_with_stack,
+    wait_for_runtime_progress,
 };
 use fusion_hal::contract::drivers::bus::gpio::GpioDriveStrength;
 use fusion_hal::drivers::peripheral::LedPair;
@@ -147,7 +147,7 @@ fn main() -> ! {
         .expect("fizzbuzz fiber should spawn");
 
     loop {
-        drive_once().expect("current-thread fiber runtime should progress");
+        wait_for_runtime_progress();
     }
 }
 

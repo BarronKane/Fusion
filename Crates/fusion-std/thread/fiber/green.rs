@@ -192,10 +192,136 @@ struct GreenPoolMetadata {
     initialized_carriers: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct CarrierLoopContext {
     control: NonNull<GreenPoolControlBlock>,
     carrier_index: usize,
+    #[cfg(feature = "std")]
+    observed_thread_id: AtomicU64,
+    #[cfg(feature = "std")]
+    observed_logical_cpu_group: AtomicU16,
+    #[cfg(feature = "std")]
+    observed_logical_cpu_index: AtomicU16,
+    #[cfg(feature = "std")]
+    observed_core: AtomicU32,
+    #[cfg(feature = "std")]
+    observed_cluster: AtomicU32,
+    #[cfg(feature = "std")]
+    observed_package: AtomicU32,
+    #[cfg(feature = "std")]
+    observed_numa_node: AtomicU32,
+    #[cfg(feature = "std")]
+    observed_core_class: AtomicU16,
+}
+
+#[cfg(feature = "std")]
+const UNKNOWN_THREAD_ID_RAW: u64 = u64::MAX;
+#[cfg(feature = "std")]
+const UNKNOWN_U16_FIELD: u16 = u16::MAX;
+#[cfg(feature = "std")]
+const UNKNOWN_U32_FIELD: u32 = u32::MAX;
+
+#[cfg(feature = "std")]
+impl CarrierLoopContext {
+    fn publish_current_observation(&self) {
+        let Ok(observation) = system_carrier().observe_current() else {
+            return;
+        };
+        self.store_observation(observation);
+    }
+
+    fn store_observation(&self, observation: CarrierObservation) {
+        self.observed_thread_id
+            .store(observation.thread_id.0, Ordering::Release);
+        match observation.location.logical_cpu {
+            Some(logical_cpu) => {
+                self.observed_logical_cpu_group
+                    .store(logical_cpu.group.0, Ordering::Release);
+                self.observed_logical_cpu_index
+                    .store(logical_cpu.index, Ordering::Release);
+            }
+            None => {
+                self.observed_logical_cpu_group
+                    .store(UNKNOWN_U16_FIELD, Ordering::Release);
+                self.observed_logical_cpu_index
+                    .store(UNKNOWN_U16_FIELD, Ordering::Release);
+            }
+        }
+        self.observed_core.store(
+            observation
+                .location
+                .core
+                .map_or(UNKNOWN_U32_FIELD, |core| core.0),
+            Ordering::Release,
+        );
+        self.observed_cluster.store(
+            observation
+                .location
+                .cluster
+                .map_or(UNKNOWN_U32_FIELD, |cluster| cluster.0),
+            Ordering::Release,
+        );
+        self.observed_package.store(
+            observation
+                .location
+                .package
+                .map_or(UNKNOWN_U32_FIELD, |package| package.0),
+            Ordering::Release,
+        );
+        self.observed_numa_node.store(
+            observation
+                .location
+                .numa_node
+                .map_or(UNKNOWN_U32_FIELD, |numa_node| numa_node.0),
+            Ordering::Release,
+        );
+        self.observed_core_class.store(
+            observation
+                .location
+                .core_class
+                .map_or(UNKNOWN_U16_FIELD, |class| class.0),
+            Ordering::Release,
+        );
+    }
+
+    fn observed_thread_id(&self) -> Option<ThreadId> {
+        let raw = self.observed_thread_id.load(Ordering::Acquire);
+        (raw != UNKNOWN_THREAD_ID_RAW).then_some(ThreadId(raw))
+    }
+
+    fn observed_location(&self) -> fusion_sys::thread::CarrierLocation {
+        let logical_group = self.observed_logical_cpu_group.load(Ordering::Acquire);
+        let logical_index = self.observed_logical_cpu_index.load(Ordering::Acquire);
+        fusion_sys::thread::CarrierLocation {
+            logical_cpu: (logical_group != UNKNOWN_U16_FIELD && logical_index != UNKNOWN_U16_FIELD)
+                .then_some(ThreadLogicalCpuId {
+                    group: ThreadProcessorGroupId(logical_group),
+                    index: logical_index,
+                }),
+            core: {
+                let raw = self.observed_core.load(Ordering::Acquire);
+                (raw != UNKNOWN_U32_FIELD).then_some(fusion_sys::thread::ThreadCoreId(raw))
+            },
+            cluster: {
+                let raw = self.observed_cluster.load(Ordering::Acquire);
+                (raw != UNKNOWN_U32_FIELD).then_some(fusion_sys::thread::ThreadClusterId(raw))
+            },
+            package: {
+                let raw = self.observed_package.load(Ordering::Acquire);
+                (raw != UNKNOWN_U32_FIELD)
+                    .then_some(fusion_pal::contract::pal::mem::MemTopologyNodeId(raw))
+            },
+            numa_node: {
+                let raw = self.observed_numa_node.load(Ordering::Acquire);
+                (raw != UNKNOWN_U32_FIELD)
+                    .then_some(fusion_pal::contract::pal::mem::MemTopologyNodeId(raw))
+            },
+            core_class: {
+                let raw = self.observed_core_class.load(Ordering::Acquire);
+                (raw != UNKNOWN_U16_FIELD).then_some(fusion_sys::thread::ThreadCoreClassId(raw))
+            },
+        }
+    }
 }
 
 impl GreenPoolMetadata {
@@ -431,6 +557,22 @@ impl GreenPoolMetadata {
                     CarrierLoopContext {
                         control,
                         carrier_index,
+                        #[cfg(feature = "std")]
+                        observed_thread_id: AtomicU64::new(UNKNOWN_THREAD_ID_RAW),
+                        #[cfg(feature = "std")]
+                        observed_logical_cpu_group: AtomicU16::new(UNKNOWN_U16_FIELD),
+                        #[cfg(feature = "std")]
+                        observed_logical_cpu_index: AtomicU16::new(UNKNOWN_U16_FIELD),
+                        #[cfg(feature = "std")]
+                        observed_core: AtomicU32::new(UNKNOWN_U32_FIELD),
+                        #[cfg(feature = "std")]
+                        observed_cluster: AtomicU32::new(UNKNOWN_U32_FIELD),
+                        #[cfg(feature = "std")]
+                        observed_package: AtomicU32::new(UNKNOWN_U32_FIELD),
+                        #[cfg(feature = "std")]
+                        observed_numa_node: AtomicU32::new(UNKNOWN_U32_FIELD),
+                        #[cfg(feature = "std")]
+                        observed_core_class: AtomicU16::new(UNKNOWN_U16_FIELD),
                     },
                 )?;
             }
@@ -582,6 +724,13 @@ impl GreenPoolLease {
             runtime_metadata_bytes: block.metadata.mapping.len,
             control_bytes: block.region.len.saturating_sub(block.metadata.mapping.len),
         }
+    }
+
+    pub(crate) fn install_runtime_dispatch_cookie(
+        &self,
+        cookie: fusion_pal::sys::runtime_dispatch::RuntimeDispatchCookie,
+    ) {
+        self.block().inner.install_runtime_dispatch_cookie(cookie);
     }
 }
 
@@ -766,6 +915,8 @@ struct GreenPoolInner {
     launch_control: Option<CourierLaunchControl<'static>>,
     launch_request: Option<CourierChildLaunchRequest<'static>>,
     scheduling: GreenScheduling,
+    #[cfg(feature = "std")]
+    spawn_locality_policy: CarrierSpawnLocalityPolicy,
     capacity_policy: CapacityPolicy,
     yield_budget_supported: bool,
     #[cfg(feature = "std")]
@@ -777,6 +928,7 @@ struct GreenPoolInner {
     launch_registered: AtomicBool,
     next_id: AtomicUsize,
     next_carrier: AtomicUsize,
+    runtime_dispatch_cookie: AtomicUsize,
     carriers: MetadataSlice<CarrierQueue>,
     tasks: GreenTaskRegistry,
     stacks: FiberStackStore,
@@ -992,6 +1144,7 @@ impl GreenPoolInner {
             }
         }
         if !signal {
+            self.request_runtime_dispatch();
             return Ok(());
         }
         if matches!(self.scheduling, GreenScheduling::WorkStealing) {
@@ -1001,6 +1154,26 @@ impl GreenPoolInner {
             return Ok(());
         }
         queue.signal()
+    }
+
+    fn install_runtime_dispatch_cookie(
+        &self,
+        cookie: fusion_pal::sys::runtime_dispatch::RuntimeDispatchCookie,
+    ) {
+        self.runtime_dispatch_cookie
+            .store(usize::try_from(cookie.0).unwrap_or(0), Ordering::Release);
+    }
+
+    fn request_runtime_dispatch(&self) {
+        let raw = self.runtime_dispatch_cookie.load(Ordering::Acquire);
+        if raw == 0 {
+            return;
+        }
+        if let Ok(cookie) = u32::try_from(raw) {
+            let _ = fusion_pal::sys::runtime_dispatch::request_runtime_dispatch(
+                fusion_pal::sys::runtime_dispatch::RuntimeDispatchCookie(cookie),
+            );
+        }
     }
 
     fn request_shutdown(&self) -> Result<(), FiberError> {

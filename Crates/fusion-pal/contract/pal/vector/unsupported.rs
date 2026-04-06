@@ -144,6 +144,19 @@ pub const fn bind_reserved_pendsv_dispatch(
     Err(VectorError::unsupported())
 }
 
+/// Unsupported reserved runtime-dispatch binding hook.
+///
+/// # Errors
+///
+/// Always returns `unsupported()` because this backend does not own a hardware vector table.
+pub const fn bind_reserved_runtime_dispatch(
+    _builder: &mut UnsupportedVectorBuilder,
+    _priority: Option<VectorPriority>,
+    _handler: VectorInlineHandler,
+) -> Result<(), VectorError> {
+    Err(VectorError::unsupported())
+}
+
 /// Unsupported reserved event-timeout wake binding hook.
 ///
 /// # Errors
@@ -153,6 +166,15 @@ pub const fn bind_reserved_event_timeout_wake(
     _builder: &mut UnsupportedVectorBuilder,
     _priority: Option<VectorPriority>,
 ) -> Result<(), VectorError> {
+    Err(VectorError::unsupported())
+}
+
+/// Unsupported reserved deferred-dispatch request hook.
+///
+/// # Errors
+///
+/// Always returns `unsupported()` because this backend does not own a hardware vector table.
+pub const fn request_reserved_pendsv_dispatch() -> Result<(), VectorError> {
     Err(VectorError::unsupported())
 }
 

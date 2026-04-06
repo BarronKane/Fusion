@@ -164,6 +164,7 @@ use fusion_sys::thread::{
     ThreadSystem,
 };
 use fusion_sys::thread::{
+    CarrierSpawnLocalityPolicy,
     CanonicalInstant,
     MonotonicRawInstant,
     system_monotonic_time,
@@ -191,7 +192,6 @@ use super::{
     RuntimeSizingStrategy,
     ThreadPool,
     default_runtime_sizing_strategy,
-    ensure_runtime_reserved_wake_vectors,
     ensure_runtime_reserved_wake_vectors_best_effort,
     yield_now as green_yield_now,
 };
@@ -603,6 +603,8 @@ pub struct ExecutorConfig {
     pub reactor: ReactorConfig,
     /// Fixed task-registry capacity admitted by this executor.
     pub capacity: usize,
+    /// Locality preference when admitting new async work onto external carriers.
+    pub spawn_locality_policy: CarrierSpawnLocalityPolicy,
     /// Sizing strategy applied to executor-owned backing plans.
     pub sizing: RuntimeSizingStrategy,
     /// Optional owning courier identity carried by this runtime for self-query surfaces.
@@ -621,6 +623,7 @@ impl ExecutorConfig {
             mode: ExecutorMode::CurrentThread,
             reactor: ReactorConfig::new(),
             capacity: TASK_REGISTRY_CAPACITY,
+            spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
             sizing: default_runtime_sizing_strategy(),
             courier_id: None,
             context_id: None,
@@ -635,6 +638,7 @@ impl ExecutorConfig {
             mode: ExecutorMode::ThreadPool,
             reactor: ReactorConfig::new(),
             capacity: TASK_REGISTRY_CAPACITY,
+            spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
             sizing: default_runtime_sizing_strategy(),
             courier_id: None,
             context_id: None,
@@ -649,6 +653,7 @@ impl ExecutorConfig {
             mode: ExecutorMode::GreenPool,
             reactor: ReactorConfig::new(),
             capacity: TASK_REGISTRY_CAPACITY,
+            spawn_locality_policy: CarrierSpawnLocalityPolicy::SameCore,
             sizing: default_runtime_sizing_strategy(),
             courier_id: None,
             context_id: None,
@@ -667,6 +672,16 @@ impl ExecutorConfig {
     #[must_use]
     pub const fn with_capacity(mut self, capacity: usize) -> Self {
         self.capacity = capacity;
+        self
+    }
+
+    /// Returns one copy of this configuration with an explicit async spawn-locality policy.
+    #[must_use]
+    pub const fn with_spawn_locality_policy(
+        mut self,
+        spawn_locality_policy: CarrierSpawnLocalityPolicy,
+    ) -> Self {
+        self.spawn_locality_policy = spawn_locality_policy;
         self
     }
 
@@ -1437,7 +1452,10 @@ pub struct Executor {
     inner: ExecutorInner,
 }
 
-/// Current-thread async runtime using ordinary Rust futures as the front door.
+/// Current-thread async runtime using ordinary Rust futures as one manual/bootstrap front door.
+///
+/// This is not the final autonomous courier runtime model. It is the current-thread runner for
+/// bootstrap, audit, and explicitly cooperative local execution.
 #[derive(Debug)]
 pub struct CurrentAsyncRuntime {
     executor: Executor,
@@ -1451,6 +1469,16 @@ impl Default for CurrentAsyncRuntime {
 }
 
 impl CurrentAsyncRuntime {
+    pub(crate) fn install_runtime_dispatch_cookie(
+        &self,
+        cookie: fusion_pal::sys::runtime_dispatch::RuntimeDispatchCookie,
+    ) -> Result<(), ExecutorError> {
+        self.executor
+            .core()?
+            .install_runtime_dispatch_cookie(cookie);
+        Ok(())
+    }
+
     /// Returns the explicit current-thread runtime backing plan for one executor configuration.
     ///
     /// # Errors
@@ -1521,7 +1549,7 @@ impl CurrentAsyncRuntime {
         config: ExecutorConfig,
         backing: CurrentAsyncRuntimeBacking,
     ) -> Result<Self, ExecutorError> {
-        ensure_runtime_reserved_wake_vectors()?;
+        ensure_runtime_reserved_wake_vectors_best_effort();
         let executor = Executor::with_current_backing(
             config.with_mode(ExecutorMode::CurrentThread),
             true,
@@ -1803,13 +1831,13 @@ impl CurrentAsyncRuntime {
         self.executor.spawn_local_generated(future)
     }
 
-    /// Drives one ready async task.
+    /// Pumps one ready async task.
     ///
     /// # Errors
     ///
     /// Returns any honest executor failure.
-    pub fn drive_once(&self) -> Result<bool, ExecutorError> {
-        self.executor.drive_once()
+    pub(crate) fn pump_once(&self) -> Result<bool, ExecutorError> {
+        self.executor.pump_current_thread_once()
     }
 
     /// Drains the current-thread async queue until idle.
@@ -1817,8 +1845,9 @@ impl CurrentAsyncRuntime {
     /// # Errors
     ///
     /// Returns any honest executor failure.
-    pub fn run_until_idle(&self) -> Result<usize, ExecutorError> {
-        self.executor.run_until_idle()
+    #[cfg(test)]
+    pub(crate) fn drain_until_idle(&self) -> Result<usize, ExecutorError> {
+        self.executor.drain_current_thread_until_idle()
     }
 
     pub(crate) fn drive_reactor_once(&self, wait: bool) -> Result<bool, ExecutorError> {

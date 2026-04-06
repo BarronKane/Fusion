@@ -505,23 +505,7 @@ fn hal_visible_carrier_count() -> Option<usize> {
 
 #[cfg(feature = "std")]
 const fn select_automatic_carrier_count(summary: HardwareTopologySummary) -> Option<usize> {
-    hosted_carrier_count_from_summary(summary, HostedCarrierCountPolicy::Automatic)
-}
-
-#[cfg(feature = "std")]
-const fn hosted_carrier_count_from_summary(
-    summary: HardwareTopologySummary,
-    policy: HostedCarrierCountPolicy,
-) -> Option<usize> {
-    match policy {
-        HostedCarrierCountPolicy::Automatic => match summary.core_count {
-            Some(count) => Some(count),
-            None => summary.logical_cpu_count,
-        },
-        HostedCarrierCountPolicy::VisibleLogicalCpus => summary.logical_cpu_count,
-        HostedCarrierCountPolicy::VisibleCores => summary.core_count,
-        HostedCarrierCountPolicy::VisiblePackages => summary.package_count,
-    }
+    carrier_count_for_profile(summary, CarrierWorkloadProfile::DedicatedCore)
 }
 
 #[cfg(feature = "std")]
@@ -635,9 +619,13 @@ unsafe fn green_task_entry(context: *mut ()) -> FiberReturn {
     FiberReturn::new(0)
 }
 
-fn run_carrier_loop(inner: &GreenPoolInner, carrier_index: usize) -> Result<(), FiberError> {
+fn run_carrier_loop(
+    inner: &GreenPoolInner,
+    context: &CarrierLoopContext,
+) -> Result<(), FiberError> {
+    let carrier_index = context.carrier_index;
     if inner.carriers[carrier_index].reactor.is_some() {
-        return run_reactor_carrier_loop(inner, carrier_index);
+        return run_reactor_carrier_loop(inner, context);
     }
 
     let _alt_stack = if inner.stacks.requires_signal_handler() {
@@ -646,6 +634,8 @@ fn run_carrier_loop(inner: &GreenPoolInner, carrier_index: usize) -> Result<(), 
         None
     };
     loop {
+        #[cfg(feature = "std")]
+        context.publish_current_observation();
         while let Some(slot_index) = dequeue_ready(inner, carrier_index)? {
             if let Err(error) = run_ready_task(inner, carrier_index, slot_index) {
                 trace_carrier_failure("run_carrier_loop.run_ready_task", carrier_index, &error);
@@ -673,8 +663,9 @@ fn run_carrier_loop(inner: &GreenPoolInner, carrier_index: usize) -> Result<(), 
 
 fn run_reactor_carrier_loop(
     inner: &GreenPoolInner,
-    carrier_index: usize,
+    context: &CarrierLoopContext,
 ) -> Result<(), FiberError> {
+    let carrier_index = context.carrier_index;
     let _alt_stack = if inner.stacks.requires_signal_handler() {
         Some(install_carrier_signal_stack()?)
     } else {
@@ -686,6 +677,8 @@ fn run_reactor_carrier_loop(
         .ok_or_else(FiberError::unsupported)?;
 
     loop {
+        #[cfg(feature = "std")]
+        context.publish_current_observation();
         while let Some(slot_index) = dequeue_ready(inner, carrier_index)? {
             if let Err(error) = run_ready_task(inner, carrier_index, slot_index) {
                 trace_carrier_failure(
@@ -1017,7 +1010,9 @@ unsafe fn run_direct_carrier_thread(context: *mut ()) -> ThreadEntryReturn {
 unsafe fn run_carrier_loop_job(context: *mut ()) {
     let context = unsafe { &*context.cast::<CarrierLoopContext>() };
     let inner = unsafe { &context.control.as_ref().inner };
-    if let Err(_error) = run_carrier_loop(inner, context.carrier_index) {
+    #[cfg(feature = "std")]
+    context.publish_current_observation();
+    if let Err(_error) = run_carrier_loop(inner, context) {
         #[cfg(feature = "std")]
         {
             if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_some() {

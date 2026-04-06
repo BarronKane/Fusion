@@ -128,6 +128,9 @@ use fusion_sys::mem::resource::{
 use fusion_sys::sync::Mutex as SysMutex;
 #[cfg(feature = "std")]
 use fusion_sys::thread::{
+    CarrierObservation,
+    CarrierCountPolicy,
+    CarrierWorkloadProfile,
     RawThreadEntry,
     ThreadConfig,
     ThreadConstraintMode,
@@ -140,9 +143,14 @@ use fusion_sys::thread::{
     ThreadPlacementRequest,
     ThreadPlacementTarget,
     ThreadProcessorGroupId,
+    ThreadId,
     ThreadStartMode,
+    carrier_count_for_profile,
+    carrier_count_from_summary,
+    system_carrier,
 };
 use fusion_sys::thread::{
+    CarrierSpawnLocalityPolicy,
     RuntimeBackingError,
     RuntimeBackingErrorKind,
     SystemWorkItem,
@@ -198,7 +206,6 @@ const ZERO_LOGICAL_CPU: ThreadLogicalCpuId = ThreadLogicalCpuId {
     group: ThreadProcessorGroupId(0),
     index: 0,
 };
-
 #[allow(clippy::cast_possible_truncation)]
 const fn wake_token_to_word(token: PlatformWakeToken) -> usize {
     let raw = token.into_raw();
@@ -1721,6 +1728,61 @@ fn task_attributes_from_stack_bytes<const STACK_BYTES: usize>()
     FiberTaskAttributes::from_stack_bytes(stack_bytes, FiberTaskPriority::DEFAULT)
 }
 
+#[cfg(feature = "std")]
+fn select_spawn_carrier(inner: &GreenPoolLease) -> usize {
+    let carrier_count = inner.carriers.len();
+    if carrier_count <= 1 {
+        return 0;
+    }
+    let start = inner.next_carrier.fetch_add(1, Ordering::AcqRel) % carrier_count;
+    let Ok(origin) = system_carrier().observe_current() else {
+        return start;
+    };
+    select_spawn_carrier_by_locality(inner, origin, start, inner.spawn_locality_policy)
+        .unwrap_or(start)
+}
+
+#[cfg(not(feature = "std"))]
+fn select_spawn_carrier(inner: &GreenPoolLease) -> usize {
+    inner.next_carrier.fetch_add(1, Ordering::AcqRel) % inner.carriers.len()
+}
+
+#[cfg(feature = "std")]
+fn select_spawn_carrier_by_locality(
+    inner: &GreenPoolLease,
+    origin: CarrierObservation,
+    start: usize,
+    policy: CarrierSpawnLocalityPolicy,
+) -> Option<usize> {
+    let carrier_contexts = inner.block().metadata.carrier_contexts;
+    if carrier_contexts.is_empty() {
+        return None;
+    }
+
+    let mut best: Option<(u8, usize)> = None;
+    for offset in 0..carrier_contexts.len() {
+        let carrier_index = (start + offset) % carrier_contexts.len();
+        let Some(context) = carrier_contexts.get(carrier_index) else {
+            continue;
+        };
+        if context.observed_thread_id() == Some(origin.thread_id) {
+            return Some(carrier_index);
+        }
+        let rank = fusion_sys::thread::carrier_spawn_locality_rank(
+            policy,
+            origin.location,
+            context.observed_location(),
+        );
+        let Some(rank) = rank else {
+            continue;
+        };
+        if best.is_none_or(|(best_rank, _)| rank < best_rank) {
+            best = Some((rank, carrier_index));
+        }
+    }
+    best.map(|(_, carrier_index)| carrier_index)
+}
+
 fn reserve_spawn_slot_for(
     inner: &GreenPoolLease,
     task: FiberTaskAttributes,
@@ -1761,7 +1823,7 @@ fn reserve_spawn_slot_for(
     };
 
     let id = inner.next_id.fetch_add(1, Ordering::AcqRel) as u64;
-    let carrier = inner.next_carrier.fetch_add(1, Ordering::AcqRel) % inner.carriers.len();
+    let carrier = select_spawn_carrier(inner);
     let slot_index = match inner.tasks.reserve_slot() {
         Ok(slot_index) => slot_index,
         Err(error) => {

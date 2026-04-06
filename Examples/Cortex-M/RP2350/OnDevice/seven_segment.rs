@@ -9,6 +9,10 @@ use core::sync::atomic::{
     Ordering,
 };
 
+use crate::runtime::{
+    spawn_with_stack,
+    wait_for_runtime_progress,
+};
 use fusion_hal::contract::drivers::bus::gpio::{
     GpioError,
     GpioErrorKind,
@@ -48,10 +52,6 @@ use fusion_sys::transport::{
     TransportErrorKind,
 };
 
-use crate::runtime::{
-    drive_once,
-    spawn_with_stack,
-};
 use crate::shift_register_74hc595::{
     RP2350_SHIFT_REGISTER_FRAME_CYCLE_LEN,
     Rp2350FiberShiftRegister74hc595,
@@ -482,12 +482,8 @@ fn wait_for_service_progress() -> Result<(), GpioError> {
     if yield_now().is_ok() {
         return Ok(());
     }
-
-    match drive_once() {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(GpioError::busy()),
-        Err(error) => Err(gpio_error_from_fiber(error)),
-    }
+    wait_for_runtime_progress();
+    Ok(())
 }
 
 fn service_wait_for_client() -> Result<(), GpioError> {
