@@ -22,6 +22,10 @@ const GENERATED_CLOSURE_ROOT_SYMBOL_PREFIX: &str =
     "fusion_std::thread::fiber::generated_closure_task_root";
 const GENERATED_ASYNC_POLL_STACK_ROOT_SYMBOL_PREFIX: &str =
     "fusion_std::thread::executor::generated_async_poll_stack_root";
+const GENERATED_FUSION_FIRMWARE_ROOT_TASK_ANCHOR_SYMBOL_PREFIX: &str =
+    "__fusion_firmware_root_task_contract_anchor_";
+const GENERATED_FUSION_FIRMWARE_ROOT_TASK_LEAF_SYMBOL_PREFIX: &str =
+    "__fusion_firmware_root_task_contract_leaf_for_";
 
 fn main() {
     if let Err(error) = run() {
@@ -166,6 +170,7 @@ struct PipelineConfig {
     target: Option<String>,
     features: Option<String>,
     no_default_features: bool,
+    discover_closure_roots: bool,
 }
 
 impl PipelineConfig {
@@ -213,6 +218,7 @@ impl PipelineConfig {
         let mut target = None;
         let mut features = None;
         let mut no_default_features = false;
+        let mut discover_closure_roots = true;
 
         while let Some(arg) = args.next() {
             apply_cli_arg(
@@ -238,6 +244,7 @@ impl PipelineConfig {
                 &mut target,
                 &mut features,
                 &mut no_default_features,
+                &mut discover_closure_roots,
             )?;
         }
 
@@ -270,6 +277,7 @@ impl PipelineConfig {
             target,
             features,
             no_default_features,
+            discover_closure_roots,
         })
     }
 }
@@ -298,6 +306,7 @@ fn apply_cli_arg(
     target: &mut Option<String>,
     features: &mut Option<String>,
     no_default_features: &mut bool,
+    discover_closure_roots: &mut bool,
 ) -> Result<(), String> {
     match arg {
         "--manifest-path" => {
@@ -464,6 +473,9 @@ fn apply_cli_arg(
         "--no-default-features" => {
             *no_default_features = true;
         }
+        "--no-closure-roots" => {
+            *discover_closure_roots = false;
+        }
         other => return Err(usage(&format!("unexpected argument `{other}`"))),
     }
     Ok(())
@@ -587,12 +599,23 @@ fn materialize_roots(
             &config.crate_name,
         )?);
     }
+    if should_collect_generated_fusion_firmware_root_task_roots(config) {
+        rendered.push_str(&collect_generated_fusion_firmware_root_task_roots(
+            artifact,
+        )?);
+    }
     fs::write(&output_path, rendered)
         .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
     Ok(output_path)
 }
 
 fn should_collect_discovered_closure_roots(config: &PipelineConfig) -> bool {
+    config.discover_closure_roots
+        && (!matches!(config.target_artifact, TargetArtifact::Lib)
+            || config.package != "fusion-std")
+}
+
+fn should_collect_generated_fusion_firmware_root_task_roots(config: &PipelineConfig) -> bool {
     !matches!(config.target_artifact, TargetArtifact::Lib) || config.package != "fusion-std"
 }
 
@@ -894,6 +917,21 @@ fn collect_generated_async_poll_stack_roots(artifact: &Path) -> Result<String, S
     Ok(rendered)
 }
 
+fn collect_generated_fusion_firmware_root_task_roots(artifact: &Path) -> Result<String, String> {
+    let symbol_index = load_artifact_symbol_index(artifact)?;
+    let call_graph = load_artifact_call_graph(artifact)?;
+    let roots = collect_generated_fusion_firmware_root_task_entries(&symbol_index, &call_graph)?;
+
+    let mut rendered = String::new();
+    for (type_name, symbol) in roots {
+        rendered.push_str(&type_name);
+        rendered.push_str(" = ");
+        rendered.push_str(&symbol);
+        rendered.push('\n');
+    }
+    Ok(rendered)
+}
+
 fn extract_async_future_type_from_poll_symbol(symbol: &str) -> Option<&str> {
     let symbol = symbol.strip_prefix('<')?;
     let symbol = symbol.strip_suffix(" as core::future::future::Future>::poll")?;
@@ -940,6 +978,67 @@ fn collect_generated_async_poll_stack_root_entries(
     roots.sort();
     roots.dedup();
     roots
+}
+
+fn extract_fusion_firmware_root_task_type_from_leaf_symbol(symbol: &str) -> Option<&str> {
+    if !symbol.contains(GENERATED_FUSION_FIRMWARE_ROOT_TASK_LEAF_SYMBOL_PREFIX) {
+        return None;
+    }
+    let (_, type_name) = symbol.rsplit_once("::<")?;
+    let type_name = type_name.strip_suffix('>')?;
+    (!type_name.is_empty()).then_some(type_name)
+}
+
+fn synthesize_fusion_firmware_root_task_type_from_anchor_symbol(symbol: &str) -> Option<String> {
+    let (scope, function) =
+        symbol.rsplit_once(GENERATED_FUSION_FIRMWARE_ROOT_TASK_ANCHOR_SYMBOL_PREFIX)?;
+    if function.is_empty() {
+        return None;
+    }
+    Some(format!("{scope}__FusionFirmwareRootTaskFor{function}"))
+}
+
+fn collect_generated_fusion_firmware_root_task_entries(
+    symbol_index: &ArtifactSymbolIndex,
+    call_graph: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut roots = Vec::<(String, String)>::new();
+    for caller in symbol_index.entries.iter().filter(|entry| {
+        entry
+            .normalized_demangled
+            .contains(GENERATED_FUSION_FIRMWARE_ROOT_TASK_ANCHOR_SYMBOL_PREFIX)
+    }) {
+        let callees = call_graph.get(&caller.raw).ok_or_else(|| {
+            format!(
+                "failed to discover fusion-firmware root task type for `{}`: anchor had no call graph",
+                caller.normalized_demangled
+            )
+        })?;
+        let type_name = callees
+            .iter()
+            .filter_map(|callee| symbol_index.metadata_for_raw(callee))
+            .find_map(|metadata| {
+                extract_fusion_firmware_root_task_type_from_leaf_symbol(
+                    &metadata.normalized_demangled,
+                )
+            })
+            .map(str::to_owned)
+            .or_else(|| {
+                synthesize_fusion_firmware_root_task_type_from_anchor_symbol(
+                    &caller.normalized_demangled,
+                )
+            })
+            .ok_or_else(|| {
+                format!(
+                    "failed to discover fusion-firmware root task type for `{}`: no root-task leaf callee was visible",
+                    caller.normalized_demangled
+                )
+            })?;
+        roots.push((type_name, caller.raw.clone()));
+    }
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
 }
 
 fn synthetic_generated_async_poll_stack_root_key(raw_symbol: &str) -> String {
@@ -1256,7 +1355,7 @@ fn run_command(mut command: Command, label: &str) -> Result<(), String> {
 
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage: cargo run -p fusion-std --bin fusion_std_fiber_task_pipeline -- [--manifest-path <path>] [--roots <path>] [--contracts <path>] [--red-inline-contracts <path>] [--async-poll-stack-roots <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-rust <path>] [--output <path>] [--async-poll-stack-output <path>] [--async-poll-stack-rust <path>] [--toolchain <channel>] [--package <name>] [--crate-name <name>] [--bin <name> | --lib] [--profile <dev|release>] [--target <triple>] [--features <csv>] [--no-default-features]\n\nWhen --roots is omitted, the pipeline merges fusion-std's hidden generated-task root registry (for the fusion-std lib target) with generated closure roots discovered from the analyzed artifact."
+        "{reason}\nusage: cargo run -p fusion-std --bin fusion_std_fiber_task_pipeline -- [--manifest-path <path>] [--roots <path>] [--contracts <path>] [--red-inline-contracts <path>] [--async-poll-stack-roots <path>] [--report <path>] [--rust-contracts <path>] [--red-inline-rust <path>] [--output <path>] [--async-poll-stack-output <path>] [--async-poll-stack-rust <path>] [--toolchain <channel>] [--package <name>] [--crate-name <name>] [--bin <name> | --lib] [--profile <dev|release>] [--target <triple>] [--features <csv>] [--no-default-features] [--no-closure-roots]\n\nWhen --roots is omitted, the pipeline merges fusion-std's hidden generated-task root registry (for the fusion-std lib target) with generated closure roots discovered from the analyzed artifact."
     )
 }
 
@@ -1417,6 +1516,84 @@ mod tests {
         assert_eq!(
             roots,
             vec![("symbol:_ROOT_".to_owned(), "_ROOT_".to_owned())]
+        );
+    }
+
+    #[test]
+    fn extracts_fusion_firmware_root_task_type_from_leaf_symbol() {
+        assert_eq!(
+            extract_fusion_firmware_root_task_type_from_leaf_symbol(
+                "rp2350_display::__fusion_firmware_root_task_contract_leaf_for_main::<rp2350_display::__FusionFirmwareRootTaskFormain>"
+            ),
+            Some("rp2350_display::__FusionFirmwareRootTaskFormain")
+        );
+    }
+
+    #[test]
+    fn synthesizes_fusion_firmware_root_task_type_from_anchor_symbol() {
+        assert_eq!(
+            synthesize_fusion_firmware_root_task_type_from_anchor_symbol(
+                "root_execution_probe::__fusion_firmware_root_task_contract_anchor_main"
+            ),
+            Some("root_execution_probe::__FusionFirmwareRootTaskFormain".to_owned())
+        );
+    }
+
+    #[test]
+    fn collects_fusion_firmware_root_task_entries() {
+        let symbol_index = ArtifactSymbolIndex {
+            entries: vec![
+                ArtifactSymbolEntry {
+                    raw: "_ROOT_".to_owned(),
+                    normalized_demangled:
+                        "rp2350_display::__fusion_firmware_root_task_contract_anchor_main"
+                            .to_owned(),
+                },
+                ArtifactSymbolEntry {
+                    raw: "_LEAF_".to_owned(),
+                    normalized_demangled:
+                        "rp2350_display::__fusion_firmware_root_task_contract_leaf_for_main::<rp2350_display::__FusionFirmwareRootTaskFormain>"
+                            .to_owned(),
+                },
+            ],
+        };
+        let mut call_graph = BTreeMap::new();
+        call_graph.insert("_ROOT_".to_owned(), vec!["_LEAF_".to_owned()]);
+
+        let roots = collect_generated_fusion_firmware_root_task_entries(&symbol_index, &call_graph)
+            .expect("root task discovery should succeed");
+
+        assert_eq!(
+            roots,
+            vec![(
+                "rp2350_display::__FusionFirmwareRootTaskFormain".to_owned(),
+                "_ROOT_".to_owned(),
+            )]
+        );
+    }
+
+    #[test]
+    fn falls_back_to_anchor_name_when_leaf_callee_is_not_visible() {
+        let symbol_index = ArtifactSymbolIndex {
+            entries: vec![ArtifactSymbolEntry {
+                raw: "_ROOT_".to_owned(),
+                normalized_demangled:
+                    "root_execution_probe::__fusion_firmware_root_task_contract_anchor_main"
+                        .to_owned(),
+            }],
+        };
+        let mut call_graph = BTreeMap::new();
+        call_graph.insert("_ROOT_".to_owned(), vec!["_SOME_OTHER_CALLEE_".to_owned()]);
+
+        let roots = collect_generated_fusion_firmware_root_task_entries(&symbol_index, &call_graph)
+            .expect("root task discovery should synthesize from the anchor name");
+
+        assert_eq!(
+            roots,
+            vec![(
+                "root_execution_probe::__FusionFirmwareRootTaskFormain".to_owned(),
+                "_ROOT_".to_owned(),
+            )]
         );
     }
 }

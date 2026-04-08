@@ -1142,7 +1142,7 @@ impl CurrentFiberAsyncSingleton {
                     .is_fiber()
                     .then(|| attributes.stack_class.size_bytes().get()),
             )?
-            .spawn_with_attrs(attributes, move || task.run())?;
+            .spawn_explicit(task)?;
         Ok(handle)
     }
 
@@ -1170,7 +1170,7 @@ impl CurrentFiberAsyncSingleton {
                     .is_fiber()
                     .then(|| attributes.stack_class.size_bytes().get()),
             )?
-            .spawn_with_attrs(attributes, move || task.run())?;
+            .spawn_generated(task)?;
         Ok(handle)
     }
 
@@ -1199,7 +1199,7 @@ impl CurrentFiberAsyncSingleton {
                     .is_fiber()
                     .then(|| attributes.stack_class.size_bytes().get()),
             )?
-            .spawn_with_attrs(attributes, move || task.run())?;
+            .spawn_generated(task)?;
         Ok(handle)
     }
 

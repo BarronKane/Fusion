@@ -49,6 +49,7 @@ use crate::courier::{
     CourierRuntimeSink,
     CourierRuntimeSinkError,
     CourierRuntimeSinkVTable,
+    CourierScopeRole,
     CourierSupport,
     CourierVisibility,
     CourierVisibilityControlContract,
@@ -58,6 +59,11 @@ use crate::courier::{
 use crate::fiber::{
     FiberId,
     ManagedFiberSnapshot,
+};
+use crate::locator::{
+    is_valid_courier_local_name,
+    FusionSurfaceRef,
+    QualifiedCourierName,
 };
 
 /// Static descriptor used to construct one native domain.
@@ -74,6 +80,7 @@ pub struct DomainDescriptor<'a> {
 pub struct CourierDescriptor<'a> {
     pub id: CourierId,
     pub name: &'a str,
+    pub scope_role: CourierScopeRole,
     pub caps: CourierCaps,
     pub visibility: CourierVisibility,
     pub claim_awareness: ClaimAwareness,
@@ -256,6 +263,8 @@ impl<
 
         let launch = ChildCourierLaunchRecord::new(
             descriptor.id,
+            descriptor.name,
+            descriptor.scope_role,
             parent,
             principal,
             image_seal,
@@ -1197,6 +1206,8 @@ impl<
                 .ok_or_else(DomainError::not_found)?;
             pedigree.push(crate::courier::CourierPedigreeRecord::new(
                 current,
+                record.descriptor.name,
+                record.descriptor.scope_role,
                 record.parent,
                 record.launch,
             ))?;
@@ -1207,6 +1218,107 @@ impl<
         }
 
         Ok(pedigree)
+    }
+
+    /// Returns one canonical qualified courier name scoped through ancestor context roots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the courier does not exist or the supplied chain budget is too
+    /// small to hold the visible context-root ancestry.
+    pub fn qualified_courier_name<const MAX_CHAIN: usize>(
+        &self,
+        courier: CourierId,
+    ) -> Result<QualifiedCourierName<'a, MAX_CHAIN>, DomainError> {
+        let Some(record) = self.find_courier(courier) else {
+            return Err(DomainError::not_found());
+        };
+        let mut qualified = QualifiedCourierName::new(record.descriptor.name, self.domain_name())
+            .map_err(|_| DomainError::invalid())?;
+        let mut current = record.parent;
+        while let Some(parent) = current {
+            let parent_record = self
+                .find_courier(parent)
+                .ok_or_else(DomainError::not_found)?;
+            if parent_record.descriptor.scope_role.is_context_root() {
+                qualified
+                    .push_context_root(parent_record.descriptor.name)
+                    .map_err(|error| match error {
+                        crate::locator::FusionLocatorError::Invalid => DomainError::invalid(),
+                        crate::locator::FusionLocatorError::ResourceExhausted => {
+                            DomainError::resource_exhausted()
+                        }
+                    })?;
+            }
+            current = parent_record.parent;
+        }
+        Ok(qualified)
+    }
+
+    /// Resolves one canonical qualified courier name against this domain registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the domain name does not match or no courier resolves to the
+    /// supplied qualified name.
+    pub fn resolve_qualified_courier_name<const MAX_CHAIN: usize>(
+        &self,
+        target: &QualifiedCourierName<'_, MAX_CHAIN>,
+    ) -> Result<
+        CourierHandle<
+            '_,
+            'a,
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >,
+        DomainError,
+    > {
+        if target.domain() != self.domain_name() {
+            return Err(DomainError::not_found());
+        }
+        for index in 0..MAX_COURIERS {
+            let Some(record) = self.couriers[index] else {
+                continue;
+            };
+            if self.qualified_courier_name::<MAX_CHAIN>(record.descriptor.id)? == *target {
+                return Ok(CourierHandle {
+                    registry: self,
+                    index,
+                });
+            }
+        }
+        Err(DomainError::not_found())
+    }
+
+    /// Resolves one canonical Fusion surface reference to its owning courier.
+    ///
+    /// This first cut resolves the qualified courier authority honestly and leaves the
+    /// `/channel/...` or `/service/...` surface dispatch to the owning courier/runtime layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the qualified courier portion does not resolve in this domain.
+    pub fn resolve_fusion_surface_ref<const MAX_CHAIN: usize>(
+        &self,
+        target: &FusionSurfaceRef<'_, MAX_CHAIN>,
+    ) -> Result<
+        CourierHandle<
+            '_,
+            'a,
+            MAX_COURIERS,
+            MAX_CONTEXTS,
+            MAX_VISIBLE,
+            MAX_CHILDREN,
+            MAX_FIBERS,
+            MAX_METADATA,
+        >,
+        DomainError,
+    > {
+        self.resolve_qualified_courier_name(&target.courier())
     }
 
     /// Returns one registered context handle.
@@ -1238,6 +1350,36 @@ impl<
             index,
             projection: ContextProjectionKind::Owned,
         })
+    }
+
+    /// Returns one owned context descriptor plus support snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the context does not exist.
+    pub fn context_snapshot(
+        &self,
+        context: ContextId,
+    ) -> Result<(ContextDescriptor<'a>, ContextSupport), DomainError> {
+        let record = self
+            .find_context(context)
+            .ok_or_else(DomainError::not_found)?;
+        Ok((record.descriptor, record.support))
+    }
+
+    /// Returns one owned courier descriptor/support snapshot plus parent linkage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the courier does not exist.
+    pub fn courier_snapshot(
+        &self,
+        courier: CourierId,
+    ) -> Result<(CourierDescriptor<'a>, CourierSupport, Option<CourierId>), DomainError> {
+        let record = self
+            .find_courier(courier)
+            .ok_or_else(DomainError::not_found)?;
+        Ok((record.descriptor, record.support, record.parent))
     }
 
     /// Returns one generic runtime sink view over this registry.
@@ -1291,6 +1433,9 @@ impl<
         &self,
         descriptor: CourierDescriptor<'a>,
     ) -> Result<(), DomainError> {
+        if !is_valid_courier_local_name(descriptor.name) {
+            return Err(DomainError::invalid());
+        }
         if !descriptor.plan.is_valid() {
             return Err(DomainError::invalid());
         }
@@ -1303,6 +1448,10 @@ impl<
             return Err(DomainError::resource_exhausted());
         }
         Ok(())
+    }
+
+    pub(crate) const fn domain_name(&self) -> &'a str {
+        self.domain.descriptor.name
     }
 
     fn mark_child_responsiveness(

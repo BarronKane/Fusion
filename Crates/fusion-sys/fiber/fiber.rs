@@ -1041,6 +1041,19 @@ impl Fiber {
         self.resume_with_active_id(None, None, None)
     }
 
+    /// Resumes this fiber while binding one explicit active execution identity.
+    ///
+    /// Scheduler layers that already know the owning fiber/courier/context should use this
+    /// instead of hoping higher introspection surfaces can rediscover that truth after the fact.
+    pub fn resume_bound(
+        &mut self,
+        fiber_id: Option<FiberId>,
+        courier_id: Option<CourierId>,
+        context_id: Option<ContextId>,
+    ) -> Result<FiberYield, FiberError> {
+        self.resume_with_active_id(fiber_id, courier_id, context_id)
+    }
+
     fn resume_with_active_id(
         &mut self,
         fiber_id: Option<FiberId>,

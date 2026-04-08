@@ -24,3 +24,15 @@ pub mod sys;
 pub mod __fusion_pal_entry {
     pub use fusion_pal::sys::entry::*;
 }
+
+#[doc(hidden)]
+pub mod __fusion_std {
+    pub use fusion_std::declare_generated_fiber_task_contract;
+    pub use fusion_std::include_generated_fiber_task_contracts;
+    pub use fusion_std::thread;
+}
+
+#[doc(hidden)]
+pub mod __fusion_sys {
+    pub use fusion_sys::fiber;
+}

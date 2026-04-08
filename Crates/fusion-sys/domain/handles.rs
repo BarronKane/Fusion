@@ -97,6 +97,24 @@ impl<
     }
 
     #[must_use]
+    pub fn scope_role(self) -> crate::courier::CourierScopeRole {
+        self.record().descriptor.scope_role
+    }
+
+    #[must_use]
+    pub fn is_context_root(self) -> bool {
+        self.scope_role().is_context_root()
+    }
+
+    pub fn qualified_name<const MAX_CHAIN: usize>(
+        self,
+    ) -> Result<crate::locator::QualifiedCourierName<'a, MAX_CHAIN>, crate::domain::DomainError>
+    {
+        self.registry
+            .qualified_courier_name::<MAX_CHAIN>(self.record().descriptor.id)
+    }
+
+    #[must_use]
     pub fn metadata_entries(self) -> impl Iterator<Item = &'registry CourierMetadataEntry<'a>> {
         let record: &'registry CourierRecord<
             'a,
@@ -311,6 +329,7 @@ impl<
         CourierMetadata {
             id: self.record().descriptor.id,
             name: self.record().descriptor.name,
+            scope_role: self.record().descriptor.scope_role,
             support: self.record().support,
         }
     }

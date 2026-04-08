@@ -106,6 +106,10 @@ pub mod entry {
     pub use super::platform::entry::__rt;
     pub use crate::contract::pal::runtime::entry::*;
 }
+/// Public domain-identity module re-exported from the selected platform backend.
+pub mod identity {
+    pub use super::platform::identity::system_domain_name;
+}
 /// Public atomic substrate module re-exported from the selected platform backend.
 pub mod atomic {
     pub use super::platform::atomic::{

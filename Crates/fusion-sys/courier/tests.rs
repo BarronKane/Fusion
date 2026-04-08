@@ -58,6 +58,7 @@ fn courier_metadata_surfaces_identity_and_support() {
     let metadata = courier.metadata();
     assert_eq!(metadata.id, CourierId::new(1));
     assert_eq!(metadata.name, "demo");
+    assert_eq!(metadata.scope_role, CourierScopeRole::Leaf);
     assert_eq!(metadata.domain_id(), DomainId::new(7));
     assert!(metadata.claim_metadata().is_enabled());
     assert!(courier.is_full_visibility());
@@ -121,6 +122,8 @@ fn child_courier_registry_tracks_observed_progress_and_responsiveness() {
     children
         .register(ChildCourierLaunchRecord::new(
             CourierId::new(2),
+            "httpd",
+            CourierScopeRole::Leaf,
             CourierId::new(1),
             principal,
             seal,
@@ -136,6 +139,10 @@ fn child_courier_registry_tracks_observed_progress_and_responsiveness() {
     assert_eq!(
         children.child(CourierId::new(2)).unwrap().responsiveness,
         CourierResponsiveness::Responsive
+    );
+    assert_eq!(
+        children.child(CourierId::new(2)).unwrap().child_name,
+        "httpd"
     );
     children.mark_stale(CourierId::new(2)).unwrap();
     assert_eq!(

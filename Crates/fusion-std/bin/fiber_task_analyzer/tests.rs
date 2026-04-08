@@ -177,6 +177,33 @@ fn uses_contracts_to_break_recursive_cycles() {
 }
 
 #[test]
+fn known_symbol_without_stack_entry_resolves_as_zero_frame() {
+    let call_graph = parse_call_graph("root = leaf\n").expect("call graph should parse");
+    let index = parse_llvm_nm_symbol_index(
+        "root\nleaf\n",
+        "test::root::h1234567890abcdef\ntest::leaf::h1234567890abcdef\n",
+    )
+    .expect("llvm-nm output should parse");
+    let mut report = UnknownSymbolReport::default();
+    let mut aggregated = BTreeMap::new();
+
+    let resolved = resolve_stack_for_test(
+        "root",
+        "test::RootTask",
+        &BTreeMap::from([("root".to_owned(), 32usize)]),
+        &call_graph,
+        Some(&index),
+        &[],
+        &mut report,
+        &mut aggregated,
+    )
+    .expect("known zero-frame callee should resolve");
+
+    assert_eq!(resolved, 32);
+    assert!(report.observations.is_empty());
+}
+
+#[test]
 fn parses_llvm_objdump_call_graph_output() {
     let parsed = parse_call_graph(
         "\
@@ -225,6 +252,58 @@ Disassembly of section .text:\n\
     .expect("objdump call graph should parse");
 
     assert_eq!(parsed.get("root"), Some(&vec!["leaf".to_owned()]));
+}
+
+#[test]
+fn falls_back_to_objdump_stack_sizes_when_readobj_is_empty() {
+    let parsed = parse_llvm_objdump_stack_sizes(
+        "\
+/tmp/sample.o:\tfile format elf64-x86-64\n\
+\n\
+Disassembly of section .text:\n\
+\n\
+0000000000000000 <root>:\n\
+       0:\tpushq\t%rbp\n\
+       1:\tsubq\t$0x38, %rsp\n\
+       5:\tcallq\t0xa <root+0xa>\n\
+       a:\taddq\t$0x38, %rsp\n\
+       e:\tpopq\t%rbp\n\
+       f:\tretq\n\
+\n\
+0000000000000010 <leaf>:\n\
+      10:\tpushq\t%rax\n\
+      11:\tpopq\t%rcx\n\
+      12:\tretq\n",
+    );
+
+    assert_eq!(parsed.get("root"), Some(&(8 + 0x38)));
+    assert_eq!(parsed.get("leaf"), Some(&8));
+}
+
+#[test]
+fn parses_arm_objdump_stack_sizes() {
+    let parsed = parse_llvm_objdump_stack_sizes(
+        "\
+/tmp/sample.o:\tfile format elf32-littlearm\n\
+\n\
+Disassembly of section .text:\n\
+\n\
+00000000 <root>:\n\
+       0:\tpush\t{r4, r5, r7, lr}\n\
+       2:\tsub\tsp, #0x48\n\
+       4:\tbl\t0x0 <leaf>\n\
+       8:\tadd\tsp, #0x48\n\
+       a:\tpop\t{r4, r5, r7, pc}\n\
+\n\
+00000010 <leaf>:\n\
+      10:\tpush\t{r7, lr}\n\
+      12:\tsub.w\tsp, sp, #0x18\n\
+      16:\tadd.w\tsp, sp, #0x18\n\
+      1a:\tpop\t{r7, pc}\n",
+    );
+
+    assert_eq!(parsed.get("root"), Some(&(16 + 0x48)));
+    assert_eq!(parsed.get("leaf"), Some(&(8 + 0x18)));
 }
 
 #[test]

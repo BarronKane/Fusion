@@ -7,6 +7,20 @@ pub mod context;
 #[path = "dma/dma.rs"]
 /// Cortex-M bare-metal DMA backend implementation.
 pub mod dma;
+/// Cortex-M bare-metal identity surface.
+pub mod identity {
+    /// Returns the canonical local-domain name for the selected bare-metal target.
+    ///
+    /// Today this defaults to the selected SoC family name until a board- or user-supplied domain
+    /// name exists above it.
+    #[must_use]
+    pub fn system_domain_name() -> &'static str {
+        match super::hal::selected_soc_name() {
+            "rp2350" => "RP2350",
+            other => other,
+        }
+    }
+}
 /// Cortex-M bare-metal entry boundary owned by Fusion.
 pub mod entry {
     pub use crate::contract::pal::runtime::entry::{

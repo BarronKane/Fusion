@@ -4,6 +4,23 @@ pub mod context;
 #[path = "dma/dma.rs"]
 /// Windows fusion-pal DMA backend implementation.
 pub mod dma;
+/// Windows hosted machine identity surface.
+pub mod identity {
+    use std::sync::OnceLock;
+
+    static DOMAIN_NAME: OnceLock<String> = OnceLock::new();
+
+    /// Returns the canonical local-domain name for the current hosted machine.
+    #[must_use]
+    pub fn system_domain_name() -> &'static str {
+        DOMAIN_NAME.get_or_init(|| {
+            std::env::var("COMPUTERNAME")
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "windows".to_owned())
+        })
+    }
+}
 /// Windows hosted process entry remains ambient to the operating system.
 pub mod entry {
     pub use crate::contract::pal::runtime::entry::{

@@ -508,6 +508,7 @@ impl GreenPool {
             class,
             true,
             GreenHandleDriveMode::CarrierPool,
+            true,
         )
     }
 

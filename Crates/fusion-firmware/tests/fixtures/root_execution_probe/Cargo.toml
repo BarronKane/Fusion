@@ -1,0 +1,16 @@
+[package]
+name = "fusion-firmware-root-execution-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "root_execution_probe"
+path = "src/main.rs"
+
+[dependencies]
+fusion-firmware = { path = "../../.." }
+fusion-sys = { path = "../../../../fusion-sys" }
+
+[workspace]

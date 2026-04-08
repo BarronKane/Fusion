@@ -4,6 +4,34 @@ pub mod context;
 #[path = "dma/dma.rs"]
 /// iOS fusion-pal DMA backend implementation.
 pub mod dma;
+/// iOS hosted machine identity surface.
+pub mod identity {
+    use std::ffi::CStr;
+    use std::sync::OnceLock;
+
+    static DOMAIN_NAME: OnceLock<String> = OnceLock::new();
+
+    /// Returns the canonical local-domain name for the current hosted machine.
+    #[must_use]
+    pub fn system_domain_name() -> &'static str {
+        DOMAIN_NAME.get_or_init(|| {
+            let mut buffer = [0_i8; 256];
+            let rc = unsafe { libc::gethostname(buffer.as_mut_ptr(), buffer.len()) };
+            if rc != 0 {
+                return "ios".to_owned();
+            }
+            let name = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+                .to_string_lossy()
+                .trim()
+                .to_owned();
+            if name.is_empty() {
+                "ios".to_owned()
+            } else {
+                name
+            }
+        })
+    }
+}
 /// iOS hosted process entry remains ambient to the operating system.
 pub mod entry {
     pub use crate::contract::pal::runtime::entry::{

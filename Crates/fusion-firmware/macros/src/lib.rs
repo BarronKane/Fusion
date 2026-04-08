@@ -73,30 +73,95 @@ fn expand_fusion_firmware_main(
     let original_ident = sig.ident.clone();
     let user_ident = format_ident!("__fusion_firmware_user_{}", original_ident);
     let bootstrap_ident = format_ident!("__fusion_bootstrap");
+    let root_task_ident = format_ident!("__FusionFirmwareRootTaskFor{}", original_ident);
+    let root_leaf_ident = format_ident!(
+        "__fusion_firmware_root_task_contract_leaf_for_{}",
+        original_ident
+    );
+    let root_anchor_ident = format_ident!(
+        "__fusion_firmware_root_task_contract_anchor_{}",
+        original_ident
+    );
     let argument_count = sig.inputs.len();
     sig.ident = user_ident.clone();
-    let policy_expr = args.policy.map_or_else(
-        || quote! { ::fusion_firmware::RootCourierPolicy::disabled() },
-        |policy| quote! { #policy },
-    );
+    let disabled_policy_expr = quote! {
+        ::fusion_firmware::RootCourierPolicy {
+            security: ::fusion_firmware::RootCourierSecurityPolicy::Disabled,
+        }
+    };
+    let policy_expr = args
+        .policy
+        .map_or_else(|| disabled_policy_expr.clone(), |policy| quote! { #policy });
 
     let invocation = match argument_count {
         0 => quote! { #user_ident() },
-        1 => quote! {
-            #user_ident(&#bootstrap_ident)
-        },
+        1 => quote! { #user_ident(&self.bootstrap) },
         _ => unreachable!("signature already validated"),
     };
 
     Ok(quote! {
         #(#attrs)*
         #vis #sig #block
-        #[cfg(not(target_os = "none"))]
-        const _: () = {
-            ::core::compile_error!(
-                "#[fusion_firmware_main] currently requires one bare-metal PAL entry surface"
-            );
-        };
+
+        #[cfg(not(fusion_firmware_root_task_bootstrap))]
+        use ::fusion_firmware::__fusion_std as fusion_std;
+
+        #[cfg(not(fusion_firmware_root_task_bootstrap))]
+        ::fusion_firmware::__fusion_std::include_generated_fiber_task_contracts!(
+            env!("FUSION_FIRMWARE_GENERATED_FIBER_TASK_CONTRACTS_RS")
+        );
+
+        struct #root_task_ident {
+            bootstrap: ::fusion_firmware::FirmwareBootstrapContext,
+        }
+
+        #[inline(never)]
+        fn #root_leaf_ident<T: ::fusion_firmware::__fusion_std::thread::GeneratedExplicitFiberTask>(
+            task: T,
+        ) -> T::Output {
+            task.run()
+        }
+
+        #[unsafe(no_mangle)]
+        extern "Rust" fn #root_anchor_ident() {
+            let bootstrap = ::fusion_firmware::FirmwareBootstrapContext {
+                root_courier_id: ::fusion_firmware::sys::hal::runtime::MAIN_COURIER_ID,
+                root_context_id: ::fusion_firmware::sys::hal::runtime::MAIN_CONTEXT_ID,
+                adopted_carrier: None,
+                root_policy: #disabled_policy_expr,
+            };
+            #root_leaf_ident(#root_task_ident { bootstrap });
+        }
+
+        #[cfg(fusion_firmware_root_task_bootstrap)]
+        impl ::fusion_firmware::__fusion_std::thread::GeneratedExplicitFiberTaskContract
+            for #root_task_ident
+        {
+            const ATTRIBUTES: ::fusion_firmware::__fusion_std::thread::FiberTaskAttributes =
+                ::fusion_firmware::__fusion_std::thread::FiberTaskAttributes::new(
+                    ::fusion_firmware::__fusion_std::thread::FiberStackClass::MIN
+                )
+                .with_priority(::fusion_firmware::__fusion_std::thread::FiberTaskPriority::DEFAULT)
+                .with_execution(::fusion_firmware::__fusion_std::thread::FiberTaskExecution::Fiber);
+        }
+
+        impl ::fusion_firmware::__fusion_std::thread::GeneratedExplicitFiberTask for #root_task_ident {
+            type Output = ();
+
+            fn run(self) -> Self::Output {
+                #invocation
+            }
+
+            fn task_attributes(
+            ) -> ::core::result::Result<
+                ::fusion_firmware::__fusion_std::thread::FiberTaskAttributes,
+                ::fusion_firmware::__fusion_sys::fiber::FiberError,
+            > {
+                Ok(
+                    ::fusion_firmware::__fusion_std::thread::generated_explicit_task_contract_attributes::<Self>()
+                )
+            }
+        }
 
         #[cfg(target_os = "none")]
         #[::fusion_firmware::__fusion_pal_entry::__rt::entry]
@@ -107,10 +172,30 @@ fn expand_fusion_firmware_main(
                     __fusion_root_policy,
                 )
                 .expect("Fusion firmware entry should bootstrap root execution");
-            match ::fusion_firmware::sys::hal::runtime::run_root_fiber(move || {
-                #invocation
-            }) {
-                Ok(__fusion_never) => match __fusion_never {},
+            match ::fusion_firmware::sys::hal::runtime::run_root_generated_fiber(
+                #root_task_ident {
+                    bootstrap: #bootstrap_ident,
+                },
+            ) {
+                Ok(()) => panic!("Fusion firmware entry root fiber returned unexpectedly"),
+                Err(_) => panic!("Fusion firmware entry should run the root managed fiber"),
+            }
+        }
+
+        #[cfg(not(target_os = "none"))]
+        fn #original_ident() -> ! {
+            let __fusion_root_policy = #policy_expr;
+            let #bootstrap_ident =
+                ::fusion_firmware::sys::hal::runtime::bootstrap_root_execution_with_policy(
+                    __fusion_root_policy,
+                )
+                .expect("Fusion firmware entry should bootstrap root execution");
+            match ::fusion_firmware::sys::hal::runtime::run_root_generated_fiber(
+                #root_task_ident {
+                    bootstrap: #bootstrap_ident,
+                },
+            ) {
+                Ok(()) => panic!("Fusion firmware entry root fiber returned unexpectedly"),
                 Err(_) => panic!("Fusion firmware entry should run the root managed fiber"),
             }
         }
@@ -258,8 +343,9 @@ mod tests {
             expand_fusion_firmware_main(args, function).expect("expansion should succeed");
         let text = expanded.to_string();
         assert!(text.contains("bootstrap_root_execution_with_policy"));
-        assert!(text.contains("RootCourierPolicy :: disabled"));
-        assert!(text.contains("run_root_fiber"));
-        assert!(text.contains("move ||"));
+        assert!(text.contains("RootCourierSecurityPolicy :: Disabled"));
+        assert!(text.contains("run_root_generated_fiber"));
+        assert!(text.contains("__FusionFirmwareRootTaskFormain"));
+        assert!(text.contains("include_generated_fiber_task_contracts"));
     }
 }

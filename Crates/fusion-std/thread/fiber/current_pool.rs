@@ -783,6 +783,32 @@ impl CurrentFiberPool {
             class,
             false,
             GreenHandleDriveMode::CurrentThread,
+            true,
+        )?;
+        Ok(CurrentFiberHandle {
+            inner: handle,
+            _not_send_sync: PhantomData,
+        })
+    }
+
+    fn spawn_named_task_with_attrs_class<F, T>(
+        &self,
+        task: FiberTaskAttributes,
+        job: F,
+        class: fusion_sys::courier::CourierFiberClass,
+    ) -> Result<CurrentFiberHandle<T>, FiberError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: 'static,
+    {
+        let handle = spawn_on_lease(
+            &self.inner,
+            task,
+            job,
+            class,
+            false,
+            GreenHandleDriveMode::CurrentThread,
+            false,
         )?;
         Ok(CurrentFiberHandle {
             inner: handle,
@@ -813,7 +839,7 @@ impl CurrentFiberPool {
     {
         let attributes = T::task_attributes()?;
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs_class(
+        self.spawn_named_task_with_attrs_class(
             attributes,
             move || task.run(),
             fusion_sys::courier::CourierFiberClass::Planned,
@@ -832,7 +858,7 @@ impl CurrentFiberPool {
     {
         let attributes = T::task_attributes()?;
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs_class(
+        self.spawn_named_task_with_attrs_class(
             attributes,
             move || task.run(),
             fusion_sys::courier::CourierFiberClass::Planned,
@@ -852,7 +878,7 @@ impl CurrentFiberPool {
         let attributes = generated_explicit_task_contract_attributes::<T>()
             .with_optional_yield_budget(T::YIELD_BUDGET);
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs_class(
+        self.spawn_named_task_with_attrs_class(
             attributes,
             move || task.run(),
             fusion_sys::courier::CourierFiberClass::Planned,
@@ -874,7 +900,7 @@ impl CurrentFiberPool {
         let attributes = generated_explicit_task_contract_attributes::<T>()
             .with_optional_yield_budget(T::YIELD_BUDGET);
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs_class(
+        self.spawn_named_task_with_attrs_class(
             attributes,
             move || task.run(),
             fusion_sys::courier::CourierFiberClass::Planned,

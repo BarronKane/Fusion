@@ -7,6 +7,34 @@ pub mod context;
 #[path = "dma/dma.rs"]
 /// Linux fusion-pal DMA backend implementation.
 pub mod dma;
+/// Linux hosted machine identity surface.
+pub mod identity {
+    use std::sync::OnceLock;
+
+    use rustix::system;
+
+    static DOMAIN_NAME: OnceLock<String> = OnceLock::new();
+
+    /// Returns the canonical local-domain name for the current hosted machine.
+    #[must_use]
+    pub fn system_domain_name() -> &'static str {
+        DOMAIN_NAME.get_or_init(|| {
+            let uname = system::uname();
+            let raw = uname.nodename().to_bytes();
+            let trimmed = raw
+                .iter()
+                .copied()
+                .take_while(|byte| *byte != 0)
+                .collect::<Vec<_>>();
+            let name = String::from_utf8_lossy(&trimmed).trim().to_owned();
+            if name.is_empty() {
+                "linux".to_owned()
+            } else {
+                name
+            }
+        })
+    }
+}
 /// Linux hosted process entry remains ambient to the operating system.
 pub mod entry {
     pub use crate::contract::pal::runtime::entry::{

@@ -199,6 +199,7 @@ unsafe fn launch_control_register_child_courier<
             CourierDescriptor {
                 id: request.descriptor.id,
                 name: request.descriptor.name,
+                scope_role: request.descriptor.scope_role,
                 caps: request.descriptor.caps,
                 visibility: request.descriptor.visibility,
                 claim_awareness: request.descriptor.claim_awareness,

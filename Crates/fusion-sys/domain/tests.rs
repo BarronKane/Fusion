@@ -1,5 +1,6 @@
 use crate::claims::{ClaimsDigest, ImageSealId};
-use crate::courier::CourierLaunchDescriptor;
+use crate::courier::{CourierLaunchDescriptor, CourierScopeRole};
+use crate::locator::FusionSurfaceRef;
 use super::*;
 
 fn demo_plan(max_child_couriers: usize, max_live_fibers: usize) -> CourierPlan {
@@ -30,6 +31,7 @@ fn couriers_enumerate_only_their_visible_contexts() {
         .register_courier(CourierDescriptor {
             id: PRIMARY_COURIER,
             name: "primary",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS
                 | CourierCaps::PROJECT_CONTEXTS
                 | CourierCaps::SPAWN_SUB_FIBERS
@@ -68,6 +70,7 @@ fn couriers_enumerate_only_their_visible_contexts() {
         .register_courier(CourierDescriptor {
             id: SCOPED_COURIER,
             name: "scoped",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
             visibility: CourierVisibility::Scoped,
             claim_awareness: ClaimAwareness::Blind,
@@ -137,6 +140,7 @@ fn duplicate_courier_ids_are_rejected() {
         .register_courier(CourierDescriptor {
             id: PRIMARY_COURIER,
             name: "primary",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
             visibility: CourierVisibility::Full,
             claim_awareness: ClaimAwareness::Blind,
@@ -148,6 +152,7 @@ fn duplicate_courier_ids_are_rejected() {
     let result = registry.register_courier(CourierDescriptor {
         id: PRIMARY_COURIER,
         name: "duplicate",
+        scope_role: CourierScopeRole::Leaf,
         caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
         visibility: CourierVisibility::Scoped,
         claim_awareness: ClaimAwareness::Black,
@@ -179,6 +184,7 @@ fn child_couriers_and_fibers_are_visible_through_courier_handles() {
         .register_courier(CourierDescriptor {
             id: PRIMARY_COURIER,
             name: "root",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
             visibility: CourierVisibility::Full,
             claim_awareness: ClaimAwareness::Black,
@@ -192,6 +198,7 @@ fn child_couriers_and_fibers_are_visible_through_courier_handles() {
             CourierDescriptor {
                 id: SCOPED_COURIER,
                 name: "httpd",
+                scope_role: CourierScopeRole::Leaf,
                 caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
                 visibility: CourierVisibility::Scoped,
                 claim_awareness: ClaimAwareness::Black,
@@ -252,6 +259,7 @@ fn launch_control_registers_child_courier_launch_truth() {
         .register_courier(CourierDescriptor {
             id: PRIMARY_COURIER,
             name: "root",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
             visibility: CourierVisibility::Full,
             claim_awareness: ClaimAwareness::Black,
@@ -265,6 +273,7 @@ fn launch_control_registers_child_courier_launch_truth() {
         descriptor: CourierLaunchDescriptor {
             id: SCOPED_COURIER,
             name: "httpd",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
             visibility: CourierVisibility::Scoped,
             claim_awareness: ClaimAwareness::Black,
@@ -313,6 +322,7 @@ fn child_progress_updates_parent_and_child_launch_state() {
         .register_courier(CourierDescriptor {
             id: PRIMARY_COURIER,
             name: "root",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
             visibility: CourierVisibility::Full,
             claim_awareness: ClaimAwareness::Black,
@@ -326,6 +336,7 @@ fn child_progress_updates_parent_and_child_launch_state() {
             CourierDescriptor {
                 id: SCOPED_COURIER,
                 name: "child",
+                scope_role: CourierScopeRole::Leaf,
                 caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
                 visibility: CourierVisibility::Scoped,
                 claim_awareness: ClaimAwareness::Blind,
@@ -387,6 +398,7 @@ fn courier_owned_metadata_updates_drive_authoritative_progress() {
         .register_courier(CourierDescriptor {
             id: PRIMARY_COURIER,
             name: "root",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
             visibility: CourierVisibility::Full,
             claim_awareness: ClaimAwareness::Black,
@@ -402,6 +414,7 @@ fn courier_owned_metadata_updates_drive_authoritative_progress() {
             CourierDescriptor {
                 id: SCOPED_COURIER,
                 name: "worker",
+                scope_role: CourierScopeRole::Leaf,
                 caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
                 visibility: CourierVisibility::Scoped,
                 claim_awareness: ClaimAwareness::Blind,
@@ -511,6 +524,7 @@ fn courier_obligations_drive_child_responsiveness() {
         .register_courier(CourierDescriptor {
             id: PRIMARY_COURIER,
             name: "root",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
             visibility: CourierVisibility::Full,
             claim_awareness: ClaimAwareness::Black,
@@ -526,6 +540,7 @@ fn courier_obligations_drive_child_responsiveness() {
             CourierDescriptor {
                 id: SCOPED_COURIER,
                 name: "text-editor",
+                scope_role: CourierScopeRole::Leaf,
                 caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
                 visibility: CourierVisibility::Scoped,
                 claim_awareness: ClaimAwareness::Blind,
@@ -627,6 +642,7 @@ fn courier_plan_bounds_child_and_fiber_registration() {
         .register_courier(CourierDescriptor {
             id: PRIMARY_COURIER,
             name: "root",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
             visibility: CourierVisibility::Full,
             claim_awareness: ClaimAwareness::Blind,
@@ -640,6 +656,7 @@ fn courier_plan_bounds_child_and_fiber_registration() {
             CourierDescriptor {
                 id: SCOPED_COURIER,
                 name: "first",
+                scope_role: CourierScopeRole::Leaf,
                 caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
                 visibility: CourierVisibility::Scoped,
                 claim_awareness: ClaimAwareness::Blind,
@@ -658,6 +675,7 @@ fn courier_plan_bounds_child_and_fiber_registration() {
         CourierDescriptor {
             id: CourierId::new(3),
             name: "second",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
             visibility: CourierVisibility::Scoped,
             claim_awareness: ClaimAwareness::Blind,
@@ -709,4 +727,149 @@ fn courier_plan_bounds_child_and_fiber_registration() {
         second_fiber,
         Err(error) if error.kind() == DomainErrorKind::ResourceExhausted
     ));
+}
+
+#[test]
+fn invalid_courier_local_names_are_rejected_by_registry() {
+    let mut registry: DomainRegistry<'_, 2, 2, 2> = DomainRegistry::new(DomainDescriptor {
+        id: DOMAIN_ID,
+        name: "pvas",
+        kind: DomainKind::NativeSubstrate,
+        caps: DomainCaps::COURIER_REGISTRY,
+    });
+    let result = registry.register_courier(CourierDescriptor {
+        id: PRIMARY_COURIER,
+        name: "bad.name",
+        scope_role: CourierScopeRole::Leaf,
+        caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
+        visibility: CourierVisibility::Scoped,
+        claim_awareness: ClaimAwareness::Blind,
+        claim_context: None,
+        plan: demo_plan(0, 1),
+    });
+    assert!(matches!(
+        result,
+        Err(error) if error.kind() == DomainErrorKind::Invalid
+    ));
+}
+
+#[test]
+fn qualified_courier_names_follow_context_root_ancestry_and_resolve() {
+    const ROOT: CourierId = CourierId::new(0x10);
+    const FIRMWARE: CourierId = CourierId::new(0x11);
+    const CYW43439: CourierId = CourierId::new(0x12);
+
+    let mut registry: DomainRegistry<'_, 6, 4, 2, 4, 4> = DomainRegistry::new(DomainDescriptor {
+        id: DOMAIN_ID,
+        name: "fusion.local",
+        kind: DomainKind::NativeSubstrate,
+        caps: DomainCaps::COURIER_REGISTRY,
+    });
+    let seal = LocalAdmissionSeal::new(
+        ImageSealId::new(9),
+        ClaimsDigest::zero(),
+        ClaimsDigest::zero(),
+        ClaimsDigest::zero(),
+        99,
+    );
+
+    registry
+        .register_courier(CourierDescriptor {
+            id: ROOT,
+            name: "root-courier",
+            scope_role: CourierScopeRole::ContextRoot,
+            caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
+            visibility: CourierVisibility::Full,
+            claim_awareness: ClaimAwareness::Blind,
+            claim_context: None,
+            plan: demo_plan(2, 2),
+        })
+        .expect("root courier should register");
+    registry
+        .register_child_courier(
+            ROOT,
+            CourierDescriptor {
+                id: FIRMWARE,
+                name: "firmware",
+                scope_role: CourierScopeRole::ContextRoot,
+                caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
+                visibility: CourierVisibility::Scoped,
+                claim_awareness: ClaimAwareness::Blind,
+                claim_context: None,
+                plan: demo_plan(1, 2),
+            },
+            PrincipalId::parse("firmware@svc[fusion.local]").unwrap(),
+            seal,
+            1,
+            10,
+            FiberId::new(1),
+        )
+        .expect("firmware courier should register");
+    registry
+        .register_child_courier(
+            FIRMWARE,
+            CourierDescriptor {
+                id: CYW43439,
+                name: "cyw43439",
+                scope_role: CourierScopeRole::Leaf,
+                caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
+                visibility: CourierVisibility::Scoped,
+                claim_awareness: ClaimAwareness::Blind,
+                claim_context: None,
+                plan: demo_plan(0, 2),
+            },
+            PrincipalId::parse("cyw43439@driver[fusion.local]").unwrap(),
+            seal,
+            2,
+            20,
+            FiberId::new(2),
+        )
+        .expect("driver courier should register");
+
+    let root = registry.courier(ROOT).unwrap();
+    let firmware = registry.courier(FIRMWARE).unwrap();
+    let cyw = registry.courier(CYW43439).unwrap();
+
+    assert!(root.is_context_root());
+    assert!(firmware.is_context_root());
+    assert!(!cyw.is_context_root());
+    assert_eq!(
+        root.qualified_name::<4>().unwrap().to_string(),
+        "root-courier[fusion.local]"
+    );
+    assert_eq!(
+        firmware.qualified_name::<4>().unwrap().to_string(),
+        "firmware@root-courier[fusion.local]"
+    );
+    assert_eq!(
+        cyw.qualified_name::<4>().unwrap().to_string(),
+        "cyw43439@firmware.root-courier[fusion.local]"
+    );
+    assert_eq!(
+        cyw.launch_record().unwrap().child_name,
+        "cyw43439"
+    );
+    assert_eq!(
+        cyw.launch_record().unwrap().child_scope_role,
+        CourierScopeRole::Leaf
+    );
+
+    let resolved = registry
+        .resolve_qualified_courier_name(
+            &crate::locator::QualifiedCourierName::<4>::parse(
+                "cyw43439@firmware.root-courier[fusion.local]",
+            )
+            .unwrap(),
+        )
+        .expect("qualified courier name should resolve");
+    assert_eq!(resolved.courier_id(), CYW43439);
+    let resolved_surface = registry
+        .resolve_fusion_surface_ref(
+            &FusionSurfaceRef::<4>::parse(
+                "fusion://cyw43439@firmware.root-courier[fusion.local]/channel/control",
+            )
+            .unwrap(),
+        )
+        .expect("surface ref should resolve to the driver courier");
+    assert_eq!(resolved_surface.courier_id(), CYW43439);
 }

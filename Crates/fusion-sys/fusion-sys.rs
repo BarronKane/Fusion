@@ -12,6 +12,9 @@ pub use fusion_pal::{
     TARGET_PLATFORM,
 };
 
+#[doc(hidden)]
+#[path = "local/local.rs"]
+pub mod __local_syscall;
 #[path = "alloc/alloc.rs"]
 /// fusion-sys allocation contracts and allocator-facing surfaces.
 pub mod alloc;
@@ -21,6 +24,9 @@ pub mod channel;
 #[path = "claims/claims.rs"]
 /// fusion-sys claims vocabulary and composition-facing claim identity surface.
 pub mod claims;
+#[path = "context/context.rs"]
+/// fusion-sys execution-context contracts and ambient local syscall surface.
+pub mod context;
 #[path = "courier/courier.rs"]
 /// fusion-sys courier authority contracts and wrappers.
 pub mod courier;
@@ -33,6 +39,9 @@ pub mod event;
 #[path = "fiber/fiber.rs"]
 /// fusion-sys stackful execution and fiber contracts.
 pub mod fiber;
+#[path = "locator/locator.rs"]
+/// fusion-sys qualified courier names and Fusion surface locators.
+pub mod locator;
 #[path = "mem/mem.rs"]
 /// fusion-sys memory contracts and resource abstractions.
 pub mod mem;

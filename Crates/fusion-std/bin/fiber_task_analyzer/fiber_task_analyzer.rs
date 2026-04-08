@@ -1025,7 +1025,13 @@ fn parse_call_graph(contents: &str) -> Result<BTreeMap<String, Vec<String>>, Str
 
 fn load_artifact_stack_sizes(path: &Path) -> Result<BTreeMap<String, usize>, String> {
     let output = run_tool("llvm-readobj", ["--stack-sizes"], path)?;
-    parse_stack_sizes(&output)
+    let parsed = parse_stack_sizes(&output)?;
+    if !parsed.is_empty() {
+        return Ok(parsed);
+    }
+
+    let disassembly = run_tool("llvm-objdump", ["-d", "--no-show-raw-insn"], path)?;
+    Ok(parse_llvm_objdump_stack_sizes(&disassembly))
 }
 
 fn load_artifact_call_graph(path: &Path) -> Result<BTreeMap<String, Vec<String>>, String> {
@@ -1126,6 +1132,46 @@ fn parse_llvm_objdump_call_graph(contents: &str) -> BTreeMap<String, Vec<String>
     call_graph
 }
 
+fn parse_llvm_objdump_stack_sizes(contents: &str) -> BTreeMap<String, usize> {
+    let mut stack_sizes = BTreeMap::<String, usize>::new();
+    let mut current_function: Option<String> = None;
+    let mut current_depth = 0usize;
+    let mut max_depth = 0usize;
+
+    for raw_line in contents.lines() {
+        let line = raw_line.trim_end();
+        if let Some(function) = parse_objdump_function_header(line) {
+            flush_objdump_stack_size(&mut stack_sizes, current_function.take(), max_depth);
+            current_function = Some(function.to_owned());
+            current_depth = 0;
+            max_depth = 0;
+            continue;
+        }
+
+        let Some(mnemonic) = parse_objdump_instruction_mnemonic(line) else {
+            continue;
+        };
+        let operands = parse_objdump_instruction_operands(line, mnemonic).unwrap_or("");
+        apply_objdump_stack_effect(mnemonic, operands, &mut current_depth, &mut max_depth);
+    }
+
+    flush_objdump_stack_size(&mut stack_sizes, current_function, max_depth);
+    stack_sizes
+}
+
+fn flush_objdump_stack_size(
+    stack_sizes: &mut BTreeMap<String, usize>,
+    function: Option<String>,
+    max_depth: usize,
+) {
+    let Some(function) = function else {
+        return;
+    };
+    if max_depth > 0 {
+        stack_sizes.insert(function, max_depth);
+    }
+}
+
 fn record_call_edge(call_graph: &mut BTreeMap<String, Vec<String>>, caller: &str, target: &str) {
     let entry = call_graph.entry(caller.to_owned()).or_default();
     if !entry.iter().any(|existing| existing == target) {
@@ -1165,6 +1211,137 @@ fn parse_objdump_instruction_mnemonic(line: &str) -> Option<&str> {
         return None;
     }
     rest.split_whitespace().next()
+}
+
+fn parse_objdump_instruction_operands<'a>(line: &'a str, mnemonic: &str) -> Option<&'a str> {
+    let trimmed = line.trim();
+    let (_, rest) = trimmed.split_once(':')?;
+    let rest = rest.trim_start();
+    let tail = rest.strip_prefix(mnemonic)?;
+    let tail = tail.trim_start();
+    (!tail.is_empty()).then_some(tail)
+}
+
+fn apply_objdump_stack_effect(
+    mnemonic: &str,
+    operands: &str,
+    current_depth: &mut usize,
+    max_depth: &mut usize,
+) {
+    if let Some(bytes) = objdump_push_pop_bytes(mnemonic, operands) {
+        if mnemonic.starts_with("pop") || mnemonic.starts_with("vpop") {
+            *current_depth = current_depth.saturating_sub(bytes);
+        } else {
+            *current_depth = current_depth.saturating_add(bytes);
+            *max_depth = (*max_depth).max(*current_depth);
+        }
+        return;
+    }
+
+    if mnemonic.starts_with("sub") && objdump_targets_stack_pointer(operands) {
+        if let Some(bytes) = parse_objdump_stack_immediate(operands) {
+            *current_depth = current_depth.saturating_add(bytes);
+            *max_depth = (*max_depth).max(*current_depth);
+        }
+        return;
+    }
+
+    if mnemonic.starts_with("add") && objdump_targets_stack_pointer(operands) {
+        if let Some(bytes) = parse_objdump_stack_immediate(operands) {
+            if *current_depth == 0 {
+                *max_depth = (*max_depth).max(bytes);
+            } else {
+                *current_depth = current_depth.saturating_sub(bytes);
+            }
+        }
+    }
+}
+
+fn objdump_push_pop_bytes(mnemonic: &str, operands: &str) -> Option<usize> {
+    if (mnemonic == "push" || mnemonic == "pop" || mnemonic == "vpush" || mnemonic == "vpop")
+        && operands.contains('{')
+        && operands.contains('}')
+    {
+        let register_bytes = if mnemonic.starts_with("v") { 8 } else { 4 };
+        let register_count = count_objdump_register_list_entries(operands)?;
+        return Some(register_count * register_bytes);
+    }
+
+    match mnemonic {
+        "push" | "pushq" => return Some(8),
+        "pushl" => return Some(4),
+        "pop" | "popq" => return Some(8),
+        "popl" => return Some(4),
+        _ => {}
+    }
+
+    None
+}
+
+fn count_objdump_register_list_entries(operands: &str) -> Option<usize> {
+    let start = operands.find('{')?;
+    let end = operands[start + 1..].find('}')? + start + 1;
+    let list = &operands[start + 1..end];
+    let mut count = 0usize;
+    for entry in list
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        count = count.saturating_add(count_objdump_register_entry(entry)?);
+    }
+    Some(count)
+}
+
+fn count_objdump_register_entry(entry: &str) -> Option<usize> {
+    let Some((start, end)) = entry.split_once('-') else {
+        return Some(1);
+    };
+    let start_index = parse_objdump_register_index(start)?;
+    let end_index = parse_objdump_register_index(end)?;
+    (end_index >= start_index).then_some(end_index - start_index + 1)
+}
+
+fn parse_objdump_register_index(token: &str) -> Option<usize> {
+    let token = token.trim();
+    let digits = token
+        .trim_start_matches(|ch: char| !ch.is_ascii_digit())
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        match token {
+            "sp" | "lr" | "pc" | "fp" => Some(1),
+            _ => None,
+        }
+    } else {
+        digits.parse().ok()
+    }
+}
+
+fn objdump_targets_stack_pointer(operands: &str) -> bool {
+    let normalized = operands.to_ascii_lowercase();
+    normalized.contains("%rsp")
+        || normalized.contains("%esp")
+        || normalized.contains(" sp")
+        || normalized.starts_with("sp")
+}
+
+fn parse_objdump_stack_immediate(operands: &str) -> Option<usize> {
+    for token in operands.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let token = token.trim_start_matches('$').trim_start_matches('#');
+        if token.is_empty() {
+            continue;
+        }
+        if let Ok(bytes) = parse_stack_size_value(token) {
+            return Some(bytes);
+        }
+    }
+    None
 }
 
 fn instruction_maybe_calls(mnemonic: &str) -> bool {
@@ -1263,7 +1440,7 @@ impl ArtifactSymbolIndex {
     fn resolve(
         &self,
         requested: &str,
-        stack_sizes: &BTreeMap<String, usize>,
+        _stack_sizes: &BTreeMap<String, usize>,
     ) -> Result<Option<String>, String> {
         let mut exact_raw = Vec::new();
         let mut exact_demangled = Vec::new();
@@ -1272,10 +1449,6 @@ impl ArtifactSymbolIndex {
         let demangled_suffix_pattern = format!("::{requested}");
 
         for entry in &self.entries {
-            if !stack_sizes.contains_key(&entry.raw) {
-                continue;
-            }
-
             if entry.raw == requested {
                 exact_raw.push(entry.raw.clone());
                 continue;
@@ -1455,6 +1628,13 @@ impl SymbolResolutionContext<'_> {
     fn resolve_symbol_frame_stack(&mut self, symbol: &str, caller: Option<&str>) -> Option<usize> {
         if let Some(stack_bytes) = self.stack_sizes.get(symbol).copied() {
             return Some(stack_bytes);
+        }
+        if self
+            .symbol_index
+            .and_then(|index| index.metadata_for_raw(symbol))
+            .is_some()
+        {
+            return Some(0);
         }
 
         let resolved = resolve_unknown_symbol_contract(symbol, self.symbol_index, self.contracts);

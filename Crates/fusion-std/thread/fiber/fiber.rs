@@ -1890,6 +1890,7 @@ fn spawn_on_lease<F, T>(
     class: fusion_sys::courier::CourierFiberClass,
     signal: bool,
     drive_mode: GreenHandleDriveMode,
+    use_generated_closure_root: bool,
 ) -> Result<GreenHandle<T>, FiberError>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -1903,7 +1904,11 @@ where
     let fiber_id = next_green_fiber_id();
     let slot_addr = reservation.context as usize;
     let wrapped = move || {
-        let output = generated_closure_task_root(job);
+        let output = if use_generated_closure_root {
+            generated_closure_task_root(job)
+        } else {
+            job()
+        };
         if size_of::<T>() == 0 {
             return;
         }

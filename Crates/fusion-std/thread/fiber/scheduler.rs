@@ -1013,7 +1013,15 @@ impl GreenTaskSlot {
             })??
         };
 
-        match fiber.resume() {
+        let inner = self.owner.load(Ordering::Acquire) as *const GreenPoolInner;
+        if inner.is_null() {
+            return Err(FiberError::state_conflict());
+        }
+        let fiber_id = self.current_fiber_id()?;
+        let courier_id = unsafe { (*inner).courier_id };
+        let context_id = unsafe { (*inner).context_id };
+
+        match fiber.resume_bound(Some(fiber_id), courier_id, context_id) {
             Ok(FiberYield::Yielded) => {
                 self.record.with(|record| {
                     if !Self::matches_id(record, id) {

@@ -11,6 +11,9 @@
 //! - Ring 2: system resources and operating services
 //! - Ring 3: user/context/application space
 
+#[path = "local.rs"]
+pub mod local;
+
 use core::hash::{
     Hash,
     Hasher,
@@ -39,11 +42,32 @@ pub use crate::fiber::{
     current_fiber_id,
 };
 
+/// Scope role carried by one courier within the visible context tree.
+///
+/// Every courier is still just a courier. The role only determines whether it establishes a new
+/// visible context-root boundary for descendant naming and scoping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CourierScopeRole {
+    /// Ordinary courier that does not establish a new visible context root.
+    #[default]
+    Leaf,
+    /// Courier that becomes a visible context-root for descendant naming and scoping.
+    ContextRoot,
+}
+
+impl CourierScopeRole {
+    #[must_use]
+    pub const fn is_context_root(self) -> bool {
+        matches!(self, Self::ContextRoot)
+    }
+}
+
 /// Snapshot of one courier's public identity and support surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CourierMetadata<'a> {
     pub id: CourierId,
     pub name: &'a str,
+    pub scope_role: CourierScopeRole,
     pub support: CourierSupport,
 }
 
@@ -64,6 +88,11 @@ impl CourierMetadata<'_> {
             awareness: self.support.claim_awareness(),
             context: self.support.claim_context(),
         }
+    }
+
+    #[must_use]
+    pub const fn is_context_root(self) -> bool {
+        self.scope_role.is_context_root()
     }
 }
 
@@ -1157,6 +1186,8 @@ pub enum FiberTerminalStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChildCourierLaunchRecord<'a> {
     pub child: CourierId,
+    pub child_name: &'a str,
+    pub child_scope_role: CourierScopeRole,
     pub parent: CourierId,
     pub principal: PrincipalId<'a>,
     pub image_seal: LocalAdmissionSeal,
@@ -1172,6 +1203,8 @@ impl<'a> ChildCourierLaunchRecord<'a> {
     #[must_use]
     pub const fn new(
         child: CourierId,
+        child_name: &'a str,
+        child_scope_role: CourierScopeRole,
         parent: CourierId,
         principal: PrincipalId<'a>,
         image_seal: LocalAdmissionSeal,
@@ -1182,6 +1215,8 @@ impl<'a> ChildCourierLaunchRecord<'a> {
     ) -> Self {
         Self {
             child,
+            child_name,
+            child_scope_role,
             parent,
             principal,
             image_seal,
@@ -1206,6 +1241,8 @@ impl<'a> ChildCourierLaunchRecord<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CourierPedigreeRecord<'a> {
     pub courier: CourierId,
+    pub name: &'a str,
+    pub scope_role: CourierScopeRole,
     pub parent: Option<CourierId>,
     pub launch: Option<ChildCourierLaunchRecord<'a>>,
 }
@@ -1214,11 +1251,15 @@ impl<'a> CourierPedigreeRecord<'a> {
     #[must_use]
     pub const fn new(
         courier: CourierId,
+        name: &'a str,
+        scope_role: CourierScopeRole,
         parent: Option<CourierId>,
         launch: Option<ChildCourierLaunchRecord<'a>>,
     ) -> Self {
         Self {
             courier,
+            name,
+            scope_role,
             parent,
             launch,
         }
@@ -1622,6 +1663,7 @@ impl<const MAX_FIBERS: usize> Default for CourierFiberLedger<MAX_FIBERS> {
 pub struct CourierLaunchDescriptor<'a> {
     pub id: CourierId,
     pub name: &'a str,
+    pub scope_role: CourierScopeRole,
     pub caps: CourierCaps,
     pub visibility: CourierVisibility,
     pub claim_awareness: ClaimAwareness,
@@ -1929,11 +1971,17 @@ impl<T: CourierBaseContract> CourierClaims for T {}
 
 /// Readable metadata/introspection surface for one courier.
 pub trait CourierIntrospection: CourierClaims {
+    /// Returns the courier's visible scope role.
+    fn scope_role(&self) -> CourierScopeRole {
+        CourierScopeRole::Leaf
+    }
+
     /// Returns one stable metadata snapshot for this courier.
     fn metadata(&self) -> CourierMetadata<'_> {
         CourierMetadata {
             id: self.courier_id(),
             name: self.name(),
+            scope_role: self.scope_role(),
             support: self.courier_support(),
         }
     }
