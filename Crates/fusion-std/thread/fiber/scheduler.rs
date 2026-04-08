@@ -414,6 +414,7 @@ struct GreenTaskRecord {
     stack_pool_index: usize,
     stack_slot: usize,
     stack_class: FiberStackClass,
+    stack: Option<FiberStack>,
     priority: FiberTaskPriority,
     yield_budget: Option<Duration>,
     execution: FiberTaskExecution,
@@ -434,6 +435,7 @@ impl GreenTaskRecord {
             stack_pool_index: 0,
             stack_slot: 0,
             stack_class: FiberStackClass::MIN,
+            stack: None,
             priority: FiberTaskPriority::DEFAULT,
             yield_budget: None,
             execution: FiberTaskExecution::Fiber,
@@ -735,6 +737,7 @@ impl GreenTaskSlot {
             record.stack_pool_index = lease.map_or(0, |reserved| reserved.pool_index);
             record.stack_slot = lease.map_or(0, |reserved| reserved.slot_index);
             record.stack_class = lease.map_or(task.stack_class, |reserved| reserved.class);
+            record.stack = lease.map(|reserved| reserved.stack);
             record.priority = task.priority;
             record.yield_budget = task.yield_budget;
             record.execution = task.execution;
@@ -822,10 +825,31 @@ impl GreenTaskSlot {
             if !Self::matches_id(record, id) {
                 return Err(FiberError::state_conflict());
             }
+            record.stack = None;
             record.fiber = Some(fiber);
             Ok(())
         })??;
         Ok(())
+    }
+
+    fn materialize_fiber(
+        &self,
+        id: u64,
+        entry: FiberEntry,
+        arg: *mut (),
+    ) -> Result<(), FiberError> {
+        self.record.with(|record| {
+            if !Self::matches_id(record, id) {
+                return Err(FiberError::state_conflict());
+            }
+            if record.fiber.is_some() {
+                return Ok(());
+            }
+            let stack = record.stack.take().ok_or_else(FiberError::state_conflict)?;
+            let fiber = Fiber::new(stack, entry, arg)?;
+            record.fiber = Some(fiber);
+            Ok(())
+        })?
     }
 
     fn clear_fiber(&self, id: u64) -> Result<(), FiberError> {
@@ -1046,6 +1070,7 @@ impl GreenTaskSlot {
             record.stack_pool_index = 0;
             record.stack_slot = 0;
             record.stack_class = FiberStackClass::MIN;
+            record.stack = None;
             record.priority = FiberTaskPriority::DEFAULT;
             record.yield_budget = None;
             record.execution = FiberTaskExecution::Fiber;
@@ -1089,6 +1114,7 @@ impl GreenTaskSlot {
             record.stack_pool_index = 0;
             record.stack_slot = 0;
             record.stack_class = FiberStackClass::MIN;
+            record.stack = None;
             record.priority = FiberTaskPriority::DEFAULT;
             record.yield_budget = None;
             record.execution = FiberTaskExecution::Fiber;
@@ -1293,6 +1319,16 @@ impl GreenTaskRegistry {
 
     fn install_fiber(&self, slot_index: usize, id: u64, fiber: Fiber) -> Result<(), FiberError> {
         self.slot(slot_index)?.install_fiber(id, fiber)
+    }
+
+    fn materialize_fiber(
+        &self,
+        slot_index: usize,
+        id: u64,
+        entry: FiberEntry,
+        arg: *mut (),
+    ) -> Result<(), FiberError> {
+        self.slot(slot_index)?.materialize_fiber(id, entry, arg)
     }
 
     fn clear_fiber(&self, slot_index: usize, id: u64) -> Result<(), FiberError> {

@@ -42,7 +42,115 @@ impl GreenPool {
         let carrier_workers = carrier
             .worker_count()
             .map_err(fiber_error_from_thread_pool)?;
+        fusion_sys::fiber::prime_fiber_runtime_substrate()?;
+        if let Some(backing) = green_pool_owned_backing(config, carrier_workers)? {
+            return Self::from_backing(config, carrier, carrier_workers, backing);
+        }
         let inner = build_hosted_green_inner(config, carrier_workers)?;
+        launch_thread_pool_green_carriers(&inner, carrier)?;
+        Ok(Self { inner })
+    }
+
+    fn from_backing(
+        config: &FiberPoolConfig<'_>,
+        carrier: &ThreadPool,
+        carrier_workers: usize,
+        backing: GreenPoolOwnedBacking,
+    ) -> Result<Self, FiberError> {
+        let support = GreenPool::support();
+        if !support.context.caps.contains(ContextCaps::MAKE)
+            || !support.context.caps.contains(ContextCaps::SWAP)
+        {
+            return Err(FiberError::unsupported());
+        }
+        if support.context.guard_required && config.guard_pages == 0 {
+            return Err(FiberError::invalid());
+        }
+
+        let task_capacity_per_carrier = config.task_capacity_per_carrier()?;
+        if config.growth_chunk == 0 || task_capacity_per_carrier == 0 || carrier_workers == 0 {
+            return Err(FiberError::invalid());
+        }
+        if !config.uses_classes() && config.growth_chunk > config.max_fibers_per_carrier {
+            return Err(FiberError::invalid());
+        }
+        if matches!(config.scheduling, GreenScheduling::Priority) && carrier_workers > 1 {
+            return Err(FiberError::unsupported());
+        }
+        if matches!(config.scheduling, GreenScheduling::WorkStealing)
+            && support.context.migration != ContextMigrationSupport::CrossCarrier
+        {
+            return Err(FiberError::unsupported());
+        }
+        if !config.classes.is_empty() || config.guard_pages != 0 {
+            return Err(FiberError::unsupported());
+        }
+
+        let alignment = support.context.min_stack_alignment.max(16);
+        let stacks = FiberStackStore::Legacy(FiberStackSlab::from_backing(
+            config,
+            alignment,
+            support.context.stack_direction,
+            backing.stacks,
+            backing.stack_metadata,
+        )?);
+        let task_capacity = stacks.total_capacity();
+        let reactor_enabled = EventSystem::new()
+            .support()
+            .caps
+            .contains(EventCaps::READINESS)
+            && system_fiber_host().support().wake_signal
+            && matches!(config.reactor_policy, GreenReactorPolicy::Automatic);
+        let metadata_region = unsafe { backing.runtime_metadata.view().raw_region() };
+        let (pool_metadata, tasks, carriers) = GreenPoolMetadata::new_in_region(
+            metadata_region,
+            carrier_workers,
+            task_capacity,
+            config.scheduling,
+            config.priority_age_cap,
+            reactor_enabled,
+            false,
+        )?;
+
+        let inner = GreenPoolLease::new_with_backing(
+            backing.control,
+            backing.runtime_metadata,
+            backing.slab_owner,
+            GreenPoolInner {
+                support,
+                courier_id: config.courier_id,
+                context_id: config.context_id,
+                runtime_sink: config.runtime_sink,
+                launch_control: config.launch_control,
+                launch_request: config.launch_request,
+                scheduling: config.scheduling,
+                #[cfg(feature = "std")]
+                spawn_locality_policy: config.spawn_locality_policy,
+                capacity_policy: config.capacity_policy,
+                yield_budget_supported: yield_budget_enforcement_supported(),
+                #[cfg(feature = "std")]
+                yield_budget_policy: config.yield_budget_policy,
+                shutdown: AtomicBool::new(false),
+                client_refs: AtomicUsize::new(1),
+                active: AtomicUsize::new(0),
+                root_registered: AtomicBool::new(false),
+                launch_registered: AtomicBool::new(false),
+                next_id: AtomicUsize::new(1),
+                next_carrier: AtomicUsize::new(0),
+                runtime_dispatch_cookie: AtomicUsize::new(0),
+                carriers,
+                tasks,
+                stacks,
+                #[cfg(feature = "std")]
+                yield_budget_runtime: GreenYieldBudgetRuntime::new(carrier_workers),
+            },
+            pool_metadata,
+        )?;
+        inner
+            .block()
+            .metadata
+            .initialize_carrier_contexts(inner.ptr)?;
+        inner.tasks.initialize_owner(inner.as_ptr());
         launch_thread_pool_green_carriers(&inner, carrier)?;
         Ok(Self { inner })
     }
@@ -413,6 +521,119 @@ impl GreenPool {
     }
 }
 
+#[derive(Debug)]
+struct GreenPoolOwnedBacking {
+    control: MemoryResourceHandle,
+    runtime_metadata: MemoryResourceHandle,
+    stack_metadata: MemoryResourceHandle,
+    stacks: MemoryResourceHandle,
+    slab_owner: Option<fusion_sys::alloc::ExtentLease>,
+}
+
+fn green_pool_owned_backing(
+    config: &FiberPoolConfig<'_>,
+    carrier_workers: usize,
+) -> Result<Option<GreenPoolOwnedBacking>, FiberError> {
+    if !uses_explicit_bound_runtime_backing() {
+        return Ok(None);
+    }
+    if carrier_workers == 0 || !config.classes.is_empty() || config.guard_pages != 0 {
+        return Ok(None);
+    }
+
+    let support = FiberSystem::new().support();
+    if !support.context.caps.contains(ContextCaps::MAKE)
+        || !support.context.caps.contains(ContextCaps::SWAP)
+    {
+        return Err(FiberError::unsupported());
+    }
+    if matches!(
+        apply_fiber_sizing_strategy_backing(config.stack_backing, config.sizing)?,
+        FiberStackBacking::Elastic { .. }
+    ) {
+        return Ok(None);
+    }
+
+    let alignment = support.context.min_stack_alignment.max(16);
+    let (_, backing) =
+        FiberStackSlab::build_backing(config.stack_backing, 0, 1, alignment, support.context.stack_direction)?;
+    if matches!(backing, FiberStackBackingState::Elastic { .. }) {
+        return Ok(None);
+    }
+
+    let task_capacity = config.task_capacity_per_carrier()?;
+    let reactor_enabled = EventSystem::new()
+        .support()
+        .caps
+        .contains(EventCaps::READINESS)
+        && system_fiber_host().support().wake_signal
+        && matches!(config.reactor_policy, GreenReactorPolicy::Automatic);
+    let stacks = apply_fiber_backing_request(
+        FiberPoolBackingRequest {
+            bytes: config
+                .max_fibers_per_carrier
+                .checked_mul(FiberStackSlab::build_backing(
+                    config.stack_backing,
+                    0,
+                    1,
+                    alignment,
+                    support.context.stack_direction,
+                )?
+                .0)
+                .ok_or_else(FiberError::resource_exhausted)?,
+            align: alignment,
+        },
+        config.sizing,
+    )?;
+    let stack_metadata = apply_fiber_backing_request(
+        FiberPoolBackingRequest {
+            bytes: FiberStackSlab::metadata_bytes(config.max_fibers_per_carrier, false, 1)?,
+            align: align_of::<FiberStackSlabHeader>(),
+        },
+        config.sizing,
+    )?;
+    let runtime_metadata = apply_fiber_backing_request(
+        FiberPoolBackingRequest {
+            bytes: GreenPoolMetadata::metadata_bytes(
+                carrier_workers,
+                task_capacity,
+                config.scheduling,
+                reactor_enabled,
+                green_pool_metadata_alignment(),
+            )?,
+            align: green_pool_metadata_alignment(),
+        },
+        config.sizing,
+    )?;
+    let control = apply_fiber_backing_request(
+        FiberPoolBackingRequest {
+            bytes: size_of::<GreenPoolControlBlock>(),
+            align: align_of::<GreenPoolControlBlock>(),
+        },
+        config.sizing,
+    )?;
+
+    let plan = CurrentFiberPoolBackingPlan {
+        control,
+        runtime_metadata,
+        stack_metadata,
+        stacks,
+    }
+    .combined()?;
+    let Some(slab) = allocate_owned_runtime_slab(plan.slab.bytes, plan.slab.align)
+        .map_err(fiber_error_from_current_runtime_backing)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(GreenPoolOwnedBacking {
+        control: partition_bound_resource(&slab.handle, plan.control)?,
+        runtime_metadata: partition_bound_resource(&slab.handle, plan.runtime_metadata)?,
+        stack_metadata: partition_bound_resource(&slab.handle, plan.stack_metadata)?,
+        stacks: partition_bound_resource(&slab.handle, plan.stacks)?,
+        slab_owner: Some(slab.lease),
+    }))
+}
+
 impl GreenPool {
     /// Attempts to clone one green-thread pool handle.
     ///
@@ -594,28 +815,54 @@ fn yield_budget_enforcement_supported() -> bool {
 }
 
 unsafe fn green_task_entry(context: *mut ()) -> FiberReturn {
+    FUSION_GREEN_TASK_ENTRY_PHASE.store(1, Ordering::Release);
     let slot = unsafe { &*context.cast::<GreenTaskSlot>() };
     let Ok(id) = slot.current_id() else {
+        FUSION_GREEN_TASK_ENTRY_FAILURE_KIND.store(1, Ordering::Release);
         return FiberReturn::new(usize::MAX);
     };
+    FUSION_GREEN_TASK_ENTRY_PHASE.store(2, Ordering::Release);
 
     let runner = match slot.take_job_runner(id) {
         Ok(runner) => runner,
         Err(error) => {
+            let code = match error.kind() {
+                FiberErrorKind::Unsupported => 10,
+                FiberErrorKind::Invalid => 11,
+                FiberErrorKind::ResourceExhausted => 12,
+                FiberErrorKind::DeadlineExceeded => 13,
+                FiberErrorKind::StateConflict => 14,
+                FiberErrorKind::Context(kind) => match kind {
+                    ContextErrorKind::Unsupported => 100,
+                    ContextErrorKind::Invalid => 101,
+                    ContextErrorKind::Busy => 102,
+                    ContextErrorKind::PermissionDenied => 103,
+                    ContextErrorKind::ResourceExhausted => 104,
+                    ContextErrorKind::StateConflict => 105,
+                    ContextErrorKind::Platform(_) => 106,
+                },
+            };
+            FUSION_GREEN_TASK_ENTRY_FAILURE_KIND.store(code, Ordering::Release);
             let _ = slot.set_state(id, GreenTaskState::Failed(error));
             return FiberReturn::new(usize::MAX);
         }
     };
+    FUSION_GREEN_TASK_ENTRY_PHASE.store(3, Ordering::Release);
 
     #[cfg(feature = "std")]
     if run_green_job_contained(runner).is_err() {
+        FUSION_GREEN_TASK_ENTRY_FAILURE_KIND.store(2, Ordering::Release);
         let _ = slot.set_state(id, GreenTaskState::Failed(FiberError::state_conflict()));
         return FiberReturn::new(usize::MAX);
     }
 
     #[cfg(not(feature = "std"))]
-    run_green_job_contained(runner);
+    {
+        FUSION_GREEN_TASK_ENTRY_PHASE.store(4, Ordering::Release);
+        run_green_job_contained(runner);
+    }
 
+    FUSION_GREEN_TASK_ENTRY_PHASE.store(5, Ordering::Release);
     FiberReturn::new(0)
 }
 
@@ -624,6 +871,7 @@ fn run_carrier_loop(
     context: &CarrierLoopContext,
 ) -> Result<(), FiberError> {
     let carrier_index = context.carrier_index;
+    FUSION_GREEN_CARRIER_PHASE.store(1, Ordering::Release);
     if inner.carriers[carrier_index].reactor.is_some() {
         return run_reactor_carrier_loop(inner, context);
     }
@@ -637,12 +885,16 @@ fn run_carrier_loop(
         #[cfg(feature = "std")]
         context.publish_current_observation();
         while let Some(slot_index) = dequeue_ready(inner, carrier_index)? {
+            FUSION_GREEN_CARRIER_READY_COUNT.fetch_add(1, Ordering::AcqRel);
+            FUSION_GREEN_CARRIER_PHASE.store(2, Ordering::Release);
             if let Err(error) = run_ready_task(inner, carrier_index, slot_index) {
                 trace_carrier_failure("run_carrier_loop.run_ready_task", carrier_index, &error);
                 return Err(error);
             }
         }
         if let Some(slot_index) = inner.try_steal_ready(carrier_index)? {
+            FUSION_GREEN_CARRIER_READY_COUNT.fetch_add(1, Ordering::AcqRel);
+            FUSION_GREEN_CARRIER_PHASE.store(3, Ordering::Release);
             if let Err(error) = run_ready_task(inner, carrier_index, slot_index) {
                 trace_carrier_failure("run_carrier_loop.run_stolen_task", carrier_index, &error);
                 return Err(error);
@@ -652,12 +904,22 @@ fn run_carrier_loop(
         if inner.shutdown.load(Ordering::Acquire) {
             break;
         }
-        let carrier = &inner.carriers[carrier_index];
-        if let Err(error) = carrier.ready.acquire().map_err(fiber_error_from_sync) {
-            trace_carrier_failure("run_carrier_loop.ready.acquire", carrier_index, &error);
-            return Err(error);
+        #[cfg(feature = "std")]
+        {
+            let carrier = &inner.carriers[carrier_index];
+            FUSION_GREEN_CARRIER_PHASE.store(4, Ordering::Release);
+            if let Err(error) = carrier.ready.acquire().map_err(fiber_error_from_sync) {
+                trace_carrier_failure("run_carrier_loop.ready.acquire", carrier_index, &error);
+                return Err(error);
+            }
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            FUSION_GREEN_CARRIER_PHASE.store(5, Ordering::Release);
+            let _ = system_thread().yield_now();
         }
     }
+    FUSION_GREEN_CARRIER_PHASE.store(6, Ordering::Release);
     Ok(())
 }
 
@@ -762,19 +1024,93 @@ fn run_ready_task(
     slot_index: usize,
 ) -> Result<(), FiberError> {
     let slot = inner.tasks.slot(slot_index)?;
+    FUSION_GREEN_RESUME_PHASE.store(5, Ordering::Release);
     let (task_id, yield_budget, execution) = match slot.begin_run() {
         Ok(values) => values,
         Err(error) => {
+            FUSION_GREEN_RESUME_ERROR_KIND.store(
+                match error.kind() {
+                    FiberErrorKind::Unsupported => 1,
+                    FiberErrorKind::Invalid => 2,
+                    FiberErrorKind::ResourceExhausted => 3,
+                    FiberErrorKind::DeadlineExceeded => 4,
+                    FiberErrorKind::StateConflict => 5,
+                    FiberErrorKind::Context(kind) => match kind {
+                        ContextErrorKind::Unsupported => 100,
+                        ContextErrorKind::Invalid => 101,
+                        ContextErrorKind::Busy => 102,
+                        ContextErrorKind::PermissionDenied => 103,
+                        ContextErrorKind::ResourceExhausted => 104,
+                        ContextErrorKind::StateConflict => 105,
+                        ContextErrorKind::Platform(_) => 106,
+                    },
+                },
+                Ordering::Release,
+            );
+            FUSION_GREEN_RESUME_PHASE.store(6, Ordering::Release);
             trace_carrier_failure("run_ready_task.begin_run", carrier_index, &error);
             return Err(error);
         }
     };
-    let runtime_fiber_id = inner.tasks.current_fiber_id(slot_index)?;
-    inner.update_runtime_fiber(
+    FUSION_GREEN_RESUME_PHASE.store(7, Ordering::Release);
+    FUSION_GREEN_RESUME_PHASE.store(8, Ordering::Release);
+    let runtime_fiber_id = match inner.tasks.current_fiber_id(slot_index) {
+        Ok(id) => id,
+        Err(error) => {
+            FUSION_GREEN_RESUME_ERROR_KIND.store(
+                match error.kind() {
+                    FiberErrorKind::Unsupported => 1,
+                    FiberErrorKind::Invalid => 2,
+                    FiberErrorKind::ResourceExhausted => 3,
+                    FiberErrorKind::DeadlineExceeded => 4,
+                    FiberErrorKind::StateConflict => 5,
+                    FiberErrorKind::Context(kind) => match kind {
+                        ContextErrorKind::Unsupported => 100,
+                        ContextErrorKind::Invalid => 101,
+                        ContextErrorKind::Busy => 102,
+                        ContextErrorKind::PermissionDenied => 103,
+                        ContextErrorKind::ResourceExhausted => 104,
+                        ContextErrorKind::StateConflict => 105,
+                        ContextErrorKind::Platform(_) => 106,
+                    },
+                },
+                Ordering::Release,
+            );
+            FUSION_GREEN_RESUME_PHASE.store(9, Ordering::Release);
+            trace_carrier_failure("run_ready_task.current_fiber_id", carrier_index, &error);
+            return Err(error);
+        }
+    };
+    FUSION_GREEN_RESUME_PHASE.store(16, Ordering::Release);
+    if let Err(error) = inner.update_runtime_fiber(
         runtime_fiber_id,
         fusion_sys::fiber::FiberState::Running,
         true,
-    )?;
+    ) {
+        FUSION_GREEN_RESUME_ERROR_KIND.store(
+            match error.kind() {
+                FiberErrorKind::Unsupported => 1,
+                FiberErrorKind::Invalid => 2,
+                FiberErrorKind::ResourceExhausted => 3,
+                FiberErrorKind::DeadlineExceeded => 4,
+                FiberErrorKind::StateConflict => 5,
+                FiberErrorKind::Context(kind) => match kind {
+                    ContextErrorKind::Unsupported => 100,
+                    ContextErrorKind::Invalid => 101,
+                    ContextErrorKind::Busy => 102,
+                    ContextErrorKind::PermissionDenied => 103,
+                    ContextErrorKind::ResourceExhausted => 104,
+                    ContextErrorKind::StateConflict => 105,
+                    ContextErrorKind::Platform(_) => 106,
+                },
+            },
+            Ordering::Release,
+        );
+        FUSION_GREEN_RESUME_PHASE.store(17, Ordering::Release);
+        trace_carrier_failure("run_ready_task.update_runtime_fiber", carrier_index, &error);
+        return Err(error);
+    }
+    FUSION_GREEN_RESUME_PHASE.store(18, Ordering::Release);
     if !execution.requires_fiber() {
         let runner = match slot.take_job_runner(task_id) {
             Ok(runner) => runner,
@@ -804,8 +1140,87 @@ fn run_ready_task(
         return Ok(());
     }
     if let Err(error) = slot.set_yield_action(CurrentGreenYieldAction::Requeue) {
+        FUSION_GREEN_RESUME_ERROR_KIND.store(
+            match error.kind() {
+                FiberErrorKind::Unsupported => 1,
+                FiberErrorKind::Invalid => 2,
+                FiberErrorKind::ResourceExhausted => 3,
+                FiberErrorKind::DeadlineExceeded => 4,
+                FiberErrorKind::StateConflict => 5,
+                FiberErrorKind::Context(kind) => match kind {
+                    ContextErrorKind::Unsupported => 100,
+                    ContextErrorKind::Invalid => 101,
+                    ContextErrorKind::Busy => 102,
+                    ContextErrorKind::PermissionDenied => 103,
+                    ContextErrorKind::ResourceExhausted => 104,
+                    ContextErrorKind::StateConflict => 105,
+                    ContextErrorKind::Platform(_) => 106,
+                },
+            },
+            Ordering::Release,
+        );
+        FUSION_GREEN_RESUME_PHASE.store(10, Ordering::Release);
         trace_carrier_failure("run_ready_task.set_yield_action", carrier_index, &error);
         return Err(error);
+    }
+    FUSION_GREEN_RESUME_PHASE.store(11, Ordering::Release);
+    if inner.support.context.migration != ContextMigrationSupport::CrossCarrier {
+        let context = match inner.tasks.slot_context(slot_index) {
+            Ok(context) => context,
+            Err(error) => {
+                FUSION_GREEN_RESUME_ERROR_KIND.store(
+                    match error.kind() {
+                        FiberErrorKind::Unsupported => 1,
+                        FiberErrorKind::Invalid => 2,
+                        FiberErrorKind::ResourceExhausted => 3,
+                        FiberErrorKind::DeadlineExceeded => 4,
+                        FiberErrorKind::StateConflict => 5,
+                        FiberErrorKind::Context(kind) => match kind {
+                            ContextErrorKind::Unsupported => 100,
+                            ContextErrorKind::Invalid => 101,
+                            ContextErrorKind::Busy => 102,
+                            ContextErrorKind::PermissionDenied => 103,
+                            ContextErrorKind::ResourceExhausted => 104,
+                            ContextErrorKind::StateConflict => 105,
+                            ContextErrorKind::Platform(_) => 106,
+                        },
+                    },
+                    Ordering::Release,
+                );
+                FUSION_GREEN_RESUME_PHASE.store(12, Ordering::Release);
+                trace_carrier_failure("run_ready_task.slot_context", carrier_index, &error);
+                return Err(error);
+            }
+        };
+        FUSION_GREEN_RESUME_PHASE.store(13, Ordering::Release);
+        if let Err(error) = inner
+            .tasks
+            .materialize_fiber(slot_index, task_id, green_task_entry, context)
+        {
+            FUSION_GREEN_RESUME_ERROR_KIND.store(
+                match error.kind() {
+                    FiberErrorKind::Unsupported => 1,
+                    FiberErrorKind::Invalid => 2,
+                    FiberErrorKind::ResourceExhausted => 3,
+                    FiberErrorKind::DeadlineExceeded => 4,
+                    FiberErrorKind::StateConflict => 5,
+                    FiberErrorKind::Context(kind) => match kind {
+                        ContextErrorKind::Unsupported => 100,
+                        ContextErrorKind::Invalid => 101,
+                        ContextErrorKind::Busy => 102,
+                        ContextErrorKind::PermissionDenied => 103,
+                        ContextErrorKind::ResourceExhausted => 104,
+                        ContextErrorKind::StateConflict => 105,
+                        ContextErrorKind::Platform(_) => 106,
+                    },
+                },
+                Ordering::Release,
+            );
+            FUSION_GREEN_RESUME_PHASE.store(14, Ordering::Release);
+            trace_carrier_failure("run_ready_task.materialize_fiber", carrier_index, &error);
+            return Err(error);
+        }
+        FUSION_GREEN_RESUME_PHASE.store(15, Ordering::Release);
     }
 
     let run_started = yield_budget
@@ -821,9 +1236,28 @@ fn run_ready_task(
             start_nanos,
         );
     }
+    FUSION_GREEN_RESUME_PHASE.store(1, Ordering::Release);
     let resume = match inner.tasks.resume(slot_index, task_id) {
         Ok(resume) => Ok(resume),
         Err(error) => {
+            let code = match error.kind() {
+                FiberErrorKind::Unsupported => 1,
+                FiberErrorKind::Invalid => 2,
+                FiberErrorKind::ResourceExhausted => 3,
+                FiberErrorKind::DeadlineExceeded => 4,
+                FiberErrorKind::StateConflict => 5,
+                FiberErrorKind::Context(kind) => match kind {
+                    ContextErrorKind::Unsupported => 100,
+                    ContextErrorKind::Invalid => 101,
+                    ContextErrorKind::Busy => 102,
+                    ContextErrorKind::PermissionDenied => 103,
+                    ContextErrorKind::ResourceExhausted => 104,
+                    ContextErrorKind::StateConflict => 105,
+                    ContextErrorKind::Platform(_) => 106,
+                },
+            };
+            FUSION_GREEN_RESUME_ERROR_KIND.store(code, Ordering::Release);
+            FUSION_GREEN_RESUME_PHASE.store(4, Ordering::Release);
             trace_carrier_failure("run_ready_task.resume", carrier_index, &error);
             Err(error)
         }
@@ -852,7 +1286,9 @@ fn run_ready_task(
     }
 
     match resume {
-        Ok(FiberYield::Yielded) => match take_current_green_yield_action(inner, slot_index)
+        Ok(FiberYield::Yielded) => {
+            FUSION_GREEN_RESUME_PHASE.store(2, Ordering::Release);
+            match take_current_green_yield_action(inner, slot_index)
             .inspect_err(|error| {
                 trace_carrier_failure(
                     "run_ready_task.take_current_green_yield_action",
@@ -885,8 +1321,10 @@ fn run_ready_task(
                     inner.finish_task(slot_index, task_id, GreenTaskState::Failed(error))?;
                 }
             }
-        },
+        }
+        }
         Ok(FiberYield::Completed(_)) => {
+            FUSION_GREEN_RESUME_PHASE.store(3, Ordering::Release);
             inner.dispatch_capacity_for_task(slot_index, task_id)?;
             inner.finish_task(slot_index, task_id, GreenTaskState::Completed)?;
         }
@@ -1008,10 +1446,12 @@ unsafe fn run_direct_carrier_thread(context: *mut ()) -> ThreadEntryReturn {
 }
 
 unsafe fn run_carrier_loop_job(context: *mut ()) {
+    FUSION_GREEN_CARRIER_PHASE.store(7, Ordering::Release);
     let context = unsafe { &*context.cast::<CarrierLoopContext>() };
     let inner = unsafe { &context.control.as_ref().inner };
     #[cfg(feature = "std")]
     context.publish_current_observation();
+    FUSION_GREEN_CARRIER_PHASE.store(8, Ordering::Release);
     if let Err(_error) = run_carrier_loop(inner, context) {
         #[cfg(feature = "std")]
         {

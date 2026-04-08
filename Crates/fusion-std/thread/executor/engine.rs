@@ -283,8 +283,7 @@ impl Executor {
     /// # Errors
     ///
     /// Returns `Unsupported` when the executor has not been bound to a concrete scheduler
-    /// for the selected mode, when the future has no honest generated or explicit poll-stack
-    /// contract, or `Stopped` when the bound scheduler has shut down.
+    /// for the selected mode, or `Stopped` when the bound scheduler has shut down.
     pub fn spawn<F>(&self, future: F) -> Result<TaskHandle<F::Output>, ExecutorError>
     where
         F: Future + Send + 'static,
@@ -334,9 +333,7 @@ impl Executor {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        if matches!(admission.poll_stack, AsyncPollStackContract::Unknown) {
-            return Err(ExecutorError::Unsupported);
-        }
+        let admission = admission.resolve_poll_stack(self.config.sizing)?;
         let core = self.core()?;
         let handle_core = self
             .core_lease()?
@@ -395,8 +392,7 @@ impl Executor {
     ///
     /// # Errors
     ///
-    /// Returns `Unsupported` when this executor is not current-thread driven, or when the future
-    /// has no honest generated or explicit poll-stack contract.
+    /// Returns `Unsupported` when this executor is not current-thread driven.
     pub fn spawn_local<F>(&self, future: F) -> Result<LocalTaskHandle<F::Output>, ExecutorError>
     where
         F: Future + 'static,
@@ -454,9 +450,7 @@ impl Executor {
         F: Future + 'static,
         F::Output: 'static,
     {
-        if matches!(admission.poll_stack, AsyncPollStackContract::Unknown) {
-            return Err(ExecutorError::Unsupported);
-        }
+        let admission = admission.resolve_poll_stack(self.config.sizing)?;
         let core = self.core()?;
         let SchedulerBinding::Current = &core.scheduler else {
             return Err(ExecutorError::Unsupported);

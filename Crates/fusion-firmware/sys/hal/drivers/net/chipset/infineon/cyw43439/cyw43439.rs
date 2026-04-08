@@ -6,6 +6,9 @@
 //! - the backend is RP2350/Pico 2 W specific, but the activated drivers are still selected by
 //!   canonical driver keys surfaced through FDXE metadata
 
+#[path = "courier.rs"]
+mod courier;
+
 use fd_net_chipset_infineon_cyw43439::{
     bluetooth::{
         Cyw43439Binding as Cyw43439BluetoothBinding,
@@ -53,6 +56,11 @@ use crate::module::{
     requested_driver_by_key,
 };
 
+pub use courier::{
+    SystemBluetoothCourier,
+    system_bluetooth_courier,
+};
+
 const CYW43439_BLUETOOTH_DRIVER_KEY: &str = "net.bluetooth.infineon.cyw43439";
 const CYW43439_WIFI_DRIVER_KEY: &str = "net.wifi.infineon.cyw43439";
 
@@ -64,6 +72,12 @@ const CYW43439_WIFI_DRIVER_KEY: &str = "net.wifi.infineon.cyw43439";
 /// Returns an error if the CYW43439 driver module was not selected into this firmware image, the
 /// RP2350 board cannot surface the shared CYW43439 hardware honestly, or driver activation fails.
 pub fn system_bluetooth<'a>(
+    slot: StackDriverSlot<'a>,
+) -> Result<StackBluetoothAdapter<'a>, BluetoothError> {
+    activate_bluetooth_adapter(slot)
+}
+
+pub(crate) fn activate_bluetooth_adapter<'a>(
     slot: StackDriverSlot<'a>,
 ) -> Result<StackBluetoothAdapter<'a>, BluetoothError> {
     ensure_driver_selected(CYW43439_BLUETOOTH_DRIVER_KEY).map_err(map_driver_bluetooth)?;
@@ -139,11 +153,11 @@ pub fn system_wifi<'a>(slot: StackDriverSlot<'a>) -> Result<StackWifiAdapter<'a>
     bind_wifi_adapter(slot, cyw43439_wifi_driver_metadata(), adapter).map_err(map_driver_wifi)
 }
 
-fn ensure_driver_selected(key: &str) -> Result<(), DriverError> {
+pub(crate) fn ensure_driver_selected(key: &str) -> Result<(), DriverError> {
     requested_driver_by_key(key).map(|_| ())
 }
 
-fn map_cyw43439_to_bluetooth(error: Cyw43439Error) -> BluetoothError {
+pub(crate) fn map_cyw43439_to_bluetooth(error: Cyw43439Error) -> BluetoothError {
     match error.kind() {
         Cyw43439ErrorKind::Unsupported => BluetoothError::unsupported(),
         Cyw43439ErrorKind::Invalid => BluetoothError::invalid(),
@@ -165,7 +179,7 @@ fn map_cyw43439_to_wifi(error: Cyw43439Error) -> WifiError {
     }
 }
 
-fn map_driver_bluetooth(error: DriverError) -> BluetoothError {
+pub(crate) fn map_driver_bluetooth(error: DriverError) -> BluetoothError {
     match error.kind() {
         DriverErrorKind::Unsupported => BluetoothError::unsupported(),
         DriverErrorKind::Invalid => BluetoothError::invalid(),

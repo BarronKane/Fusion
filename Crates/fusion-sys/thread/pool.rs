@@ -12,6 +12,11 @@
 use core::array;
 use core::cell::UnsafeCell;
 use core::fmt;
+use core::num::NonZeroUsize;
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering,
+};
 
 use fusion_pal::contract::pal::HardwareTopologyQueryContract as _;
 use fusion_pal::sys::cpu::system_cpu;
@@ -46,6 +51,9 @@ use super::{
     ThreadStackRequest,
     ThreadSupport,
     ThreadSystem,
+    ThreadStackBacking,
+    OwnedRuntimeSlab,
+    allocate_owned_runtime_slab,
     carrier_spawn_locality_rank,
     system_carrier,
 };
@@ -56,18 +64,29 @@ const MAX_POOL_SLOTS: usize = 1;
 const MAX_POOL_SLOTS: usize = 4;
 
 #[cfg(feature = "sys-cortex-m")]
-const MAX_POOL_WORKERS: usize = 1;
+const MAX_POOL_WORKERS: usize = 2;
 #[cfg(not(feature = "sys-cortex-m"))]
 const MAX_POOL_WORKERS: usize = 32;
 
 #[cfg(feature = "sys-cortex-m")]
-const MAX_POOL_QUEUE_ITEMS: usize = 1;
+const MAX_POOL_QUEUE_ITEMS: usize = 16;
 #[cfg(not(feature = "sys-cortex-m"))]
 const MAX_POOL_QUEUE_ITEMS: usize = 256;
 const ZERO_LOGICAL_CPU: ThreadLogicalCpuId = ThreadLogicalCpuId {
     group: fusion_pal::sys::thread::ThreadProcessorGroupId(0),
     index: 0,
 };
+
+#[unsafe(no_mangle)]
+pub static FUSION_SYSTEM_POOL_SUBMIT_COUNT: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_SYSTEM_POOL_LAST_SUBMIT_WORKER: AtomicU32 = AtomicU32::new(u32::MAX);
+#[unsafe(no_mangle)]
+pub static FUSION_SYSTEM_POOL_WORKER_PHASE: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_SYSTEM_POOL_WORKER_DEQUEUE_COUNT: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_SYSTEM_POOL_WORKER_BUSY_COUNT: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy)]
 enum WorkerPlacement<'a> {
@@ -301,6 +320,7 @@ struct PoolSlot {
     queue_slots: [QueueLink; MAX_POOL_QUEUE_ITEMS],
     worker_queues: [WorkerQueue; MAX_POOL_WORKERS],
     workers: [Option<ThreadHandle>; MAX_POOL_WORKERS],
+    worker_stack_backing: [Option<OwnedRuntimeSlab>; MAX_POOL_WORKERS],
     worker_observations: [Option<CarrierObservation>; MAX_POOL_WORKERS],
     allocated: bool,
     accepting: bool,
@@ -337,6 +357,7 @@ impl PoolSlot {
             queue_slots: [QueueLink::empty(); MAX_POOL_QUEUE_ITEMS],
             worker_queues: [WorkerQueue::empty(); MAX_POOL_WORKERS],
             workers: array::from_fn(|_| None),
+            worker_stack_backing: array::from_fn(|_| None),
             worker_observations: [None; MAX_POOL_WORKERS],
             allocated: false,
             accepting: false,
@@ -683,6 +704,8 @@ impl SystemThreadPool {
         let (primary, companion) = with_slot(slot_index, |slot| {
             let preferred_worker = slot.preferred_worker_for_current();
             let worker_index = slot.enqueue(work, preferred_worker)?;
+            FUSION_SYSTEM_POOL_SUBMIT_COUNT.fetch_add(1, Ordering::AcqRel);
+            FUSION_SYSTEM_POOL_LAST_SUBMIT_WORKER.store(worker_index as u32, Ordering::Release);
             Ok((
                 slot.worker_semaphore_ptr(worker_index)?,
                 slot.companion_worker_for_submission(worker_index)
@@ -861,11 +884,16 @@ fn spawn_workers(
     worker_count: usize,
 ) -> Result<(), ThreadError> {
     let worker_placement = resolve_worker_placement(config, worker_count)?;
+    let support = system.support();
 
     for worker_index in 0..worker_count {
         let token = encode_worker_token(slot_index, worker_index);
-        let handle = match worker_placement.as_ref() {
+        match worker_placement.as_ref() {
             Some(WorkerPlacement::LogicalCpus(cpus)) => {
+                let PreparedWorkerStack {
+                    request: stack,
+                    owned_backing,
+                } = prepare_worker_stack_request(support, config)?;
                 let single = &cpus[worker_index..=worker_index];
                 let targets = [ThreadPlacementTarget::LogicalCpus(single)];
                 let placement = fusion_pal::sys::thread::ThreadPlacementRequest {
@@ -880,17 +908,27 @@ fn spawn_workers(
                     start_mode: ThreadStartMode::PlacementCommitted,
                     placement,
                     scheduler: config.scheduler,
-                    stack: config.stack,
+                    stack,
                 };
-                unsafe {
+                let handle = unsafe {
                     system.spawn_raw(
                         &thread_config,
                         worker_thread_entry as RawThreadEntry,
                         token.cast(),
                     )
-                }?
+                }?;
+                with_slot(slot_index, |slot| {
+                    slot.workers[worker_index] = Some(handle);
+                    slot.worker_stack_backing[worker_index] = owned_backing;
+                    Ok(())
+                })?;
+                continue;
             }
             Some(WorkerPlacement::CoreClasses(classes)) => {
+                let PreparedWorkerStack {
+                    request: stack,
+                    owned_backing,
+                } = prepare_worker_stack_request(support, config)?;
                 let targets = [ThreadPlacementTarget::CoreClasses(classes)];
                 let placement = fusion_pal::sys::thread::ThreadPlacementRequest {
                     targets: &targets,
@@ -904,39 +942,50 @@ fn spawn_workers(
                     start_mode: ThreadStartMode::PlacementCommitted,
                     placement,
                     scheduler: config.scheduler,
-                    stack: config.stack,
+                    stack,
                 };
-                unsafe {
+                let handle = unsafe {
                     system.spawn_raw(
                         &thread_config,
                         worker_thread_entry as RawThreadEntry,
                         token.cast(),
                     )
-                }?
+                }?;
+                with_slot(slot_index, |slot| {
+                    slot.workers[worker_index] = Some(handle);
+                    slot.worker_stack_backing[worker_index] = owned_backing;
+                    Ok(())
+                })?;
+                continue;
             }
             None => {
+                let PreparedWorkerStack {
+                    request: stack,
+                    owned_backing,
+                } = prepare_worker_stack_request(support, config)?;
                 let thread_config = ThreadConfig {
                     join_policy: fusion_pal::sys::thread::ThreadJoinPolicy::Joinable,
                     name: config.name_prefix,
                     start_mode: ThreadStartMode::Immediate,
                     placement: fusion_pal::sys::thread::ThreadPlacementRequest::new(),
                     scheduler: config.scheduler,
-                    stack: config.stack,
+                    stack,
                 };
-                unsafe {
+                let handle = unsafe {
                     system.spawn_raw(
                         &thread_config,
                         worker_thread_entry as RawThreadEntry,
                         token.cast(),
                     )
-                }?
+                }?;
+                with_slot(slot_index, |slot| {
+                    slot.workers[worker_index] = Some(handle);
+                    slot.worker_stack_backing[worker_index] = owned_backing;
+                    Ok(())
+                })?;
+                continue;
             }
-        };
-
-        with_slot(slot_index, |slot| {
-            slot.workers[worker_index] = Some(handle);
-            Ok(())
-        })?;
+        }
     }
 
     Ok(())
@@ -957,13 +1006,20 @@ fn resolve_worker_placement<'a>(
             Ok(Some(WorkerPlacement::LogicalCpus(resolved)))
         }
         SystemPoolPlacement::PerCore => {
+            let requested = system_cpu()
+                .topology_summary()
+                .ok()
+                .and_then(|summary| summary.logical_cpu_count)
+                .map_or(worker_count, |count| count.min(MAX_POOL_WORKERS))
+                .max(worker_count);
             let mut resolved = [ZERO_LOGICAL_CPU; MAX_POOL_WORKERS];
             let summary = system_cpu()
-                .write_logical_cpus(&mut resolved[..worker_count])
+                .write_logical_cpus(&mut resolved[..requested])
                 .map_err(|_| ThreadError::unsupported())?;
             if summary.total < worker_count {
                 return Err(ThreadError::resource_exhausted());
             }
+            prefer_non_current_logical_cpu_first(&mut resolved[..requested]);
             Ok(Some(WorkerPlacement::LogicalCpus(resolved)))
         }
         SystemPoolPlacement::CoreClasses(classes) => {
@@ -972,6 +1028,74 @@ fn resolve_worker_placement<'a>(
         SystemPoolPlacement::PerPackage | SystemPoolPlacement::Dynamic => {
             Err(ThreadError::unsupported())
         }
+    }
+}
+
+struct PreparedWorkerStack {
+    request: ThreadStackRequest,
+    owned_backing: Option<OwnedRuntimeSlab>,
+}
+
+fn prepare_worker_stack_request(
+    support: ThreadSupport,
+    config: &SystemThreadPoolConfig<'_>,
+) -> Result<PreparedWorkerStack, ThreadError> {
+    if !matches!(config.stack.backing, ThreadStackBacking::Default) {
+        return Ok(PreparedWorkerStack {
+            request: config.stack,
+            owned_backing: None,
+        });
+    }
+
+    let Some(explicit_backing) = support.stack.default_explicit_backing else {
+        return Ok(PreparedWorkerStack {
+            request: config.stack,
+            owned_backing: None,
+        });
+    };
+
+    let requested_bytes = config
+        .stack
+        .size_bytes
+        .unwrap_or(explicit_backing.size_bytes)
+        .get();
+    let Some(slab) =
+        allocate_owned_runtime_slab(requested_bytes, explicit_backing.align_bytes.get())
+            .map_err(thread_error_from_runtime_backing)?
+    else {
+        return Err(ThreadError::stack_denied());
+    };
+
+    let len = NonZeroUsize::new(slab.lease.len()).ok_or_else(ThreadError::invalid)?;
+    let request = ThreadStackRequest {
+        size_bytes: Some(len),
+        guard_bytes: None,
+        backing: ThreadStackBacking::CallerProvided {
+            base: slab.lease.as_non_null(),
+            len,
+        },
+        ..config.stack
+    };
+
+    Ok(PreparedWorkerStack {
+        request,
+        owned_backing: Some(slab),
+    })
+}
+
+fn prefer_non_current_logical_cpu_first(cpus: &mut [ThreadLogicalCpuId]) {
+    let Some(origin) = system_carrier()
+        .observe_current()
+        .ok()
+        .and_then(|observation| observation.location.logical_cpu)
+    else {
+        return;
+    };
+    let Some(origin_index) = cpus.iter().position(|candidate| *candidate == origin) else {
+        return;
+    };
+    if origin_index + 1 < cpus.len() {
+        cpus[origin_index..].rotate_left(1);
     }
 }
 
@@ -1009,6 +1133,7 @@ fn steal_boundary_allows(
 
 unsafe fn worker_thread_entry(context: *mut ()) -> fusion_pal::sys::thread::ThreadEntryReturn {
     let (slot_index, worker_index) = decode_worker_token(context.cast_const());
+    FUSION_SYSTEM_POOL_WORKER_PHASE.store(1, Ordering::Release);
     if registry().is_err() {
         return fusion_pal::sys::thread::ThreadEntryReturn::new(1);
     }
@@ -1018,8 +1143,10 @@ unsafe fn worker_thread_entry(context: *mut ()) -> fusion_pal::sys::thread::Thre
             Ok(())
         });
     }
+    FUSION_SYSTEM_POOL_WORKER_PHASE.store(2, Ordering::Release);
 
     loop {
+        FUSION_SYSTEM_POOL_WORKER_PHASE.store(3, Ordering::Release);
         let Ok(semaphore) = with_slot(slot_index, |slot| slot.worker_semaphore_ptr(worker_index))
         else {
             return fusion_pal::sys::thread::ThreadEntryReturn::new(2);
@@ -1029,6 +1156,7 @@ unsafe fn worker_thread_entry(context: *mut ()) -> fusion_pal::sys::thread::Thre
         if semaphore.acquire().is_err() {
             return fusion_pal::sys::thread::ThreadEntryReturn::new(4);
         }
+        FUSION_SYSTEM_POOL_WORKER_PHASE.store(4, Ordering::Release);
 
         let next = match with_slot(slot_index, |slot| {
             if let Ok(observation) = system_carrier().observe_current() {
@@ -1045,16 +1173,24 @@ unsafe fn worker_thread_entry(context: *mut ()) -> fusion_pal::sys::thread::Thre
         }) {
             Ok(Some(item)) => Some(item),
             Ok(None) => None,
-            Err(error) if error.kind() == ThreadErrorKind::Busy => continue,
+            Err(error) if error.kind() == ThreadErrorKind::Busy => {
+                FUSION_SYSTEM_POOL_WORKER_BUSY_COUNT.fetch_add(1, Ordering::AcqRel);
+                continue;
+            }
             Err(_) => return fusion_pal::sys::thread::ThreadEntryReturn::new(5),
         };
 
         match next {
-            Some(item) => unsafe { (item.entry)(item.context) },
+            Some(item) => {
+                FUSION_SYSTEM_POOL_WORKER_DEQUEUE_COUNT.fetch_add(1, Ordering::AcqRel);
+                FUSION_SYSTEM_POOL_WORKER_PHASE.store(5, Ordering::Release);
+                unsafe { (item.entry)(item.context) }
+            }
             None => break,
         }
     }
 
+    FUSION_SYSTEM_POOL_WORKER_PHASE.store(6, Ordering::Release);
     fusion_pal::sys::thread::ThreadEntryReturn::new(0)
 }
 
@@ -1103,5 +1239,14 @@ const fn thread_error_from_sync(error: SyncError) -> ThreadError {
         SyncErrorKind::Busy => ThreadError::busy(),
         SyncErrorKind::PermissionDenied => ThreadError::permission_denied(),
         SyncErrorKind::Platform(code) => ThreadError::platform(code),
+    }
+}
+
+const fn thread_error_from_runtime_backing(error: super::RuntimeBackingError) -> ThreadError {
+    match error.kind() {
+        super::RuntimeBackingErrorKind::Unsupported => ThreadError::unsupported(),
+        super::RuntimeBackingErrorKind::Invalid => ThreadError::invalid(),
+        super::RuntimeBackingErrorKind::ResourceExhausted => ThreadError::resource_exhausted(),
+        super::RuntimeBackingErrorKind::StateConflict => ThreadError::state_conflict(),
     }
 }

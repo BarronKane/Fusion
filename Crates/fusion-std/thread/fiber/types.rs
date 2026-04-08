@@ -1,11 +1,11 @@
 /// Scheduling policy for green threads on top of carrier workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GreenScheduling {
-    /// Simple FIFO scheduling across carriers.
+    /// Simple first-come-first-served scheduling across carrier queues.
     Fifo,
     /// Priority-aware scheduling across carriers.
     Priority,
-    /// Per-carrier deque scheduling with work stealing.
+    /// First-come-first-served carrier queues with idle-carrier work stealing.
     WorkStealing,
 }
 

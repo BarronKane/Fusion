@@ -1,18 +1,16 @@
 #![no_std]
 #![no_main]
 
+use core::future::poll_fn;
 use core::hint::black_box;
 use core::panic::PanicInfo;
 
-use cortex_m_rt::entry;
-
 use fusion_example_rp2350_on_device::runtime::{
-    block_on_with_poll_stack_bytes,
     shutdown_fibers,
-    spawn_with_stack,
-    spawn_async_with_poll_stack_bytes,
+    spawn_async,
+    spawn,
 };
-use fusion_std::thread::{async_yield_now, yield_now as fiber_yield_now};
+use fusion_std::thread::yield_now as fiber_yield_now;
 use fusion_sys::thread::system_monotonic_time;
 
 fusion_example_rp2350_on_device::fusion_rp2350_export_build_id!();
@@ -29,7 +27,6 @@ const BENCH_CURRENT_FIBER_SPAWN_JOIN_NOOP: u32 = 2;
 const BENCH_CURRENT_FIBER_SPAWN_JOIN_YIELD_ONCE: u32 = 3;
 const BENCH_CURRENT_ASYNC_SPAWN_JOIN_NOOP: u32 = 4;
 const BENCH_CURRENT_ASYNC_SPAWN_JOIN_YIELD_ONCE: u32 = 5;
-const BENCH_ASYNC_POLL_STACK_BYTES: usize = 2048;
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct BenchRecord {
@@ -119,8 +116,7 @@ fn run_benchmarks() {
             unsafe {
                 FUSION_RP2350_BENCH_OUTPUT.reserved = 0x1000 + iteration;
             }
-            let handle =
-                spawn_with_stack::<4096, _, _>(|| black_box(1_u32)).expect("noop fiber should spawn");
+            let handle = spawn(|| black_box(1_u32)).expect("noop fiber should spawn");
             unsafe {
                 FUSION_RP2350_BENCH_OUTPUT.reserved = 0x2000 + iteration;
             }
@@ -140,7 +136,7 @@ fn run_benchmarks() {
             unsafe {
                 FUSION_RP2350_BENCH_OUTPUT.reserved = 0x4000 + iteration;
             }
-            let handle = spawn_with_stack::<4096, _, _>(|| {
+            let handle = spawn(|| {
                 fiber_yield_now().expect("yielding fiber should yield");
                 black_box(1_u32)
             })
@@ -164,13 +160,8 @@ fn run_benchmarks() {
     }
     let total = measure_nanos(|| {
         for _ in 0..ITERATIONS {
-            let handle = spawn_async_with_poll_stack_bytes(BENCH_ASYNC_POLL_STACK_BYTES, async {
-                black_box(1_u32)
-            })
-            .expect("async noop should spawn");
-            let _ = block_on_with_poll_stack_bytes(BENCH_ASYNC_POLL_STACK_BYTES, handle)
-                .expect("runtime should drive noop async task")
-                .expect("noop async task should complete");
+            let handle = spawn_async(async { black_box(1_u32) }).expect("async noop should spawn");
+            let _ = handle.join().expect("noop async task should complete");
         }
     });
     write_record(3, BENCH_CURRENT_ASYNC_SPAWN_JOIN_NOOP, total);
@@ -180,14 +171,21 @@ fn run_benchmarks() {
 
     let total = measure_nanos(|| {
         for _ in 0..ITERATIONS {
-            let handle = spawn_async_with_poll_stack_bytes(BENCH_ASYNC_POLL_STACK_BYTES, async {
-                async_yield_now().await;
+            let mut yielded = false;
+            let handle = spawn_async(async move {
+                poll_fn(move |cx| {
+                    if yielded {
+                        return core::task::Poll::Ready(());
+                    }
+                    yielded = true;
+                    cx.waker().wake_by_ref();
+                    core::task::Poll::Pending
+                })
+                .await;
                 black_box(1_u32)
             })
             .expect("yielding async task should spawn");
-            let _ = block_on_with_poll_stack_bytes(BENCH_ASYNC_POLL_STACK_BYTES, handle)
-                .expect("runtime should drive yielding async task")
-                .expect("yielding async task should complete");
+            let _ = handle.join().expect("yielding async task should complete");
         }
     });
     write_record(4, BENCH_CURRENT_ASYNC_SPAWN_JOIN_YIELD_ONCE, total);
@@ -198,7 +196,7 @@ fn run_benchmarks() {
     }
 }
 
-#[entry]
+#[fusion_firmware::fusion_firmware_main]
 fn main() -> ! {
     run_benchmarks();
     loop {

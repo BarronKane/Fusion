@@ -1,4 +1,18 @@
 //! Platform abstraction contracts for every substrate Fusion can honestly target.
+//!
+//! Bare-metal entry doctrine:
+//! - on bare-metal targets, Fusion owns process entry
+//! - user code must not be the true reset/ABI entry boundary forever
+//! - the selected PAL + firmware bootstrap owns the real hardware entry and hands user code one
+//!   already-established Fusion execution context
+//! - in practice that means the initial hardware lane is adopted as the first carrier and the
+//!   root courier is bound there before ordinary user logic begins
+//! - the canonical selected export for that boundary should surface under `fusion_pal::sys::entry`
+//! - examples may temporarily carry raw target entry glue during bring-up, but that is debt, not
+//!   doctrine
+//!
+//! Hosted targets are different: the ambient process entry already exists and Fusion composes
+//! inside it honestly. Bare metal does not get that excuse.
 
 pub mod caps;
 #[path = "claims/claims.rs"]

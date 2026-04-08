@@ -56,6 +56,20 @@ pub enum ThreadStackLocalityPolicy {
     RequiredNumaNode(HardwareTopologyNodeId),
 }
 
+/// Canonical caller-provided stack-backing plan for explicit-bound thread backends.
+///
+/// This is the honest bridge for platforms that cannot materialize a thread stack on demand and
+/// instead require higher layers to provide one explicit backing region. When surfaced, this plan
+/// describes the backend's default requested region shape rather than inviting runtimes to invent
+/// their own folklore bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ThreadExplicitBackingPlan {
+    /// Default usable stack size in bytes.
+    pub size_bytes: NonZeroUsize,
+    /// Required base-alignment for the backing region.
+    pub align_bytes: NonZeroUsize,
+}
+
 /// Requested stack and startup-memory policy for a thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ThreadStackRequest {

@@ -911,8 +911,13 @@ fn collect_generated_async_poll_stack_root_entries(
             .contains(GENERATED_ASYNC_POLL_STACK_ROOT_SYMBOL_PREFIX)
     }) {
         let Some(callees) = call_graph.get(&caller.raw) else {
+            roots.push((
+                synthetic_generated_async_poll_stack_root_key(&caller.raw),
+                caller.raw.clone(),
+            ));
             continue;
         };
+        let mut discovered = false;
         for callee in callees {
             let Some(metadata) = symbol_index.metadata_for_raw(callee) else {
                 continue;
@@ -923,11 +928,22 @@ fn collect_generated_async_poll_stack_root_entries(
                 continue;
             };
             roots.push((type_name.to_owned(), metadata.raw.clone()));
+            discovered = true;
+        }
+        if !discovered {
+            roots.push((
+                synthetic_generated_async_poll_stack_root_key(&caller.raw),
+                caller.raw.clone(),
+            ));
         }
     }
     roots.sort();
     roots.dedup();
     roots
+}
+
+fn synthetic_generated_async_poll_stack_root_key(raw_symbol: &str) -> String {
+    format!("symbol:{raw_symbol}")
 }
 
 #[derive(Debug)]
@@ -1381,6 +1397,26 @@ mod tests {
                 "external_crate::task::ExternalFuture".to_owned(),
                 "_EXTERNAL_POLL_".to_owned(),
             )]
+        );
+    }
+
+    #[test]
+    fn falls_back_to_root_symbol_when_async_poll_symbol_is_inlined_away() {
+        let symbol_index = ArtifactSymbolIndex {
+            entries: vec![ArtifactSymbolEntry {
+                raw: "_ROOT_".to_owned(),
+                normalized_demangled:
+                    "fusion_std::thread::executor::generated_async_poll_stack_root".to_owned(),
+            }],
+        };
+        let mut call_graph = BTreeMap::new();
+        call_graph.insert("_ROOT_".to_owned(), vec!["_SOME_OTHER_CALLEE_".to_owned()]);
+
+        let roots = collect_generated_async_poll_stack_root_entries(&symbol_index, &call_graph);
+
+        assert_eq!(
+            roots,
+            vec![("symbol:_ROOT_".to_owned(), "_ROOT_".to_owned())]
         );
     }
 }

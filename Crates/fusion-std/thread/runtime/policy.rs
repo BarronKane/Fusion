@@ -90,7 +90,11 @@ pub struct CurrentFiberAsyncRuntime {
 pub(super) fn selected_stack_size_with_optional_floor(
     stack_floor_bytes: Option<usize>,
 ) -> Result<NonZeroUsize, FiberError> {
-    let requested = generated_default_fiber_stack_bytes()?.max(stack_floor_bytes.unwrap_or(0));
+    let requested = match stack_floor_bytes {
+        Some(stack_floor_bytes) => stack_floor_bytes,
+        None => generated_default_fiber_stack_bytes()
+            .unwrap_or_else(|_| FiberStackClass::MIN.size_bytes().get()),
+    };
     let requested = NonZeroUsize::new(requested).ok_or_else(FiberError::invalid)?;
     Ok(FiberStackClass::from_stack_bytes(requested)?.size_bytes())
 }

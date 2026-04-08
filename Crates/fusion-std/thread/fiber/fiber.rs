@@ -40,6 +40,7 @@ use fusion_pal::contract::pal::{
     HardwareTopologyQueryContract as _,
     HardwareTopologySummary,
 };
+use fusion_pal::contract::pal::runtime::context::ContextErrorKind;
 use fusion_pal::sys::cpu::CachePadded;
 #[cfg(feature = "std")]
 use fusion_pal::sys::cpu::system_cpu;
@@ -104,7 +105,9 @@ use fusion_sys::fiber::{
     ContextMigrationSupport,
     ContextStackDirection,
     Fiber,
+    FiberEntry,
     FiberError,
+    FiberErrorKind,
     FiberId,
     FiberReturn,
     FiberStack,
@@ -159,6 +162,8 @@ use fusion_sys::thread::{
     allocate_owned_runtime_slab,
     uses_explicit_bound_runtime_backing,
 };
+#[cfg(not(feature = "std"))]
+use fusion_sys::thread::system_thread;
 
 use crate::sync::{
     Mutex as SyncMutex,
@@ -206,6 +211,18 @@ const ZERO_LOGICAL_CPU: ThreadLogicalCpuId = ThreadLogicalCpuId {
     group: ThreadProcessorGroupId(0),
     index: 0,
 };
+#[unsafe(no_mangle)]
+pub static FUSION_GREEN_CARRIER_PHASE: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_GREEN_CARRIER_READY_COUNT: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_GREEN_TASK_ENTRY_PHASE: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_GREEN_TASK_ENTRY_FAILURE_KIND: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_GREEN_RESUME_PHASE: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_GREEN_RESUME_ERROR_KIND: AtomicU32 = AtomicU32::new(0);
 #[allow(clippy::cast_possible_truncation)]
 const fn wake_token_to_word(token: PlatformWakeToken) -> usize {
     let raw = token.into_raw();
@@ -1930,22 +1947,25 @@ where
             return Err(error);
         }
 
-        let fiber = match Fiber::new(lease.stack, green_task_entry, reservation.context) {
-            Ok(fiber) => fiber,
-            Err(error) => {
-                trace_spawn_failure("Fiber::new", Some(reservation.slot_index), &error);
+        if inner.support.context.migration == ContextMigrationSupport::CrossCarrier {
+            let fiber = match Fiber::new(lease.stack, green_task_entry, reservation.context) {
+                Ok(fiber) => fiber,
+                Err(error) => {
+                    trace_spawn_failure("Fiber::new", Some(reservation.slot_index), &error);
+                    cleanup_failed_spawn_for(inner, &reservation);
+                    return Err(error);
+                }
+            };
+
+            if let Err(error) =
+                inner
+                    .tasks
+                    .install_fiber(reservation.slot_index, reservation.id, fiber)
+            {
+                trace_spawn_failure("tasks.install_fiber", Some(reservation.slot_index), &error);
                 cleanup_failed_spawn_for(inner, &reservation);
                 return Err(error);
             }
-        };
-
-        if let Err(error) = inner
-            .tasks
-            .install_fiber(reservation.slot_index, reservation.id, fiber)
-        {
-            trace_spawn_failure("tasks.install_fiber", Some(reservation.slot_index), &error);
-            cleanup_failed_spawn_for(inner, &reservation);
-            return Err(error);
         }
     }
 

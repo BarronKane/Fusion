@@ -1175,6 +1175,40 @@ impl<
         })
     }
 
+    /// Returns one fixed-capacity ancestry chain for the supplied courier.
+    ///
+    /// The first pedigree entry is the courier itself. The last entry is the highest reachable
+    /// ancestor within `MAX_DEPTH`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the courier does not exist or the pedigree depth budget is
+    /// too small to hold the full lineage.
+    pub fn courier_pedigree<const MAX_DEPTH: usize>(
+        &self,
+        courier: CourierId,
+    ) -> Result<crate::courier::CourierPedigree<'a, MAX_DEPTH>, DomainError> {
+        let mut pedigree = crate::courier::CourierPedigree::new();
+        let mut current = courier;
+
+        loop {
+            let record = self
+                .find_courier(current)
+                .ok_or_else(DomainError::not_found)?;
+            pedigree.push(crate::courier::CourierPedigreeRecord::new(
+                current,
+                record.parent,
+                record.launch,
+            ))?;
+            let Some(parent) = record.parent else {
+                break;
+            };
+            current = parent;
+        }
+
+        Ok(pedigree)
+    }
+
     /// Returns one registered context handle.
     ///
     /// # Errors

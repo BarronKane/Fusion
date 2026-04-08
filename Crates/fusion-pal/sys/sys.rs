@@ -96,6 +96,16 @@ pub mod execution_context {
     };
     pub use crate::contract::pal::runtime::context::*;
 }
+/// Public entry-boundary module re-exported from the selected platform backend.
+pub mod entry {
+    pub use super::platform::entry::{
+        PlatformEntry,
+        system_entry,
+    };
+    #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
+    pub use super::platform::entry::__rt;
+    pub use crate::contract::pal::runtime::entry::*;
+}
 /// Public atomic substrate module re-exported from the selected platform backend.
 pub mod atomic {
     pub use super::platform::atomic::{

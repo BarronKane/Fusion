@@ -18,9 +18,19 @@ use fusion_hal::contract::drivers::driver::{
 };
 use fusion_hal::contract::drivers::net::NetVendorIdentity;
 use fusion_hal::contract::drivers::net::bluetooth::{
+    BLUETOOTH_HCI_EVENT_COMMAND_COMPLETE,
+    BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_DATA,
+    BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_ENABLE,
+    BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_PARAMETERS,
+    BLUETOOTH_HCI_OPCODE_LE_SET_SCAN_RESPONSE_DATA,
+    BLUETOOTH_HCI_OPCODE_READ_BD_ADDR,
+    BLUETOOTH_HCI_OPCODE_RESET,
+    BluetoothAddress,
+    BluetoothAddressKind,
     BluetoothAdapterDescriptor,
     BluetoothAdapterId,
     BluetoothAdvertisingControlContract,
+    BluetoothAdvertisingMode,
     BluetoothAdvertisingParameters,
     BluetoothAdvertisingSetId,
     BluetoothAttAttributeHandle,
@@ -36,6 +46,7 @@ use fusion_hal::contract::drivers::net::bluetooth::{
     BluetoothConnectionParameters,
     BluetoothControlContract,
     BluetoothError,
+    BluetoothHciCommandComplete,
     BluetoothGattAttributeValue,
     BluetoothGattCharacteristicHandle,
     BluetoothGattCharacteristicRange,
@@ -59,11 +70,20 @@ use fusion_hal::contract::drivers::net::bluetooth::{
     BluetoothSecurityControlContract,
     BluetoothSupport,
     BluetoothHciAclFrame,
+    BluetoothHciCommandHeader,
     BluetoothHciCommandFrame,
     BluetoothHciEventFrame,
     BluetoothHciFrame,
     BluetoothHciFrameView,
+    BluetoothHciLeAdvertisingChannelMap,
+    BluetoothHciLeAdvertisingData,
+    BluetoothHciLeAdvertisingFilterPolicy,
+    BluetoothHciLeAdvertisingParameters,
+    BluetoothHciLeAdvertisingType,
+    BluetoothHciLeOwnAddressType,
+    BluetoothHciLePeerAddressType,
     BluetoothHciPacketType,
+    BluetoothLePhy,
 };
 use crate::{
     core::{
@@ -185,7 +205,13 @@ pub struct CYW43439<H: Cyw43439HardwareContract = UnsupportedBackend> {
 pub struct Cyw43439Adapter<H: Cyw43439HardwareContract = UnsupportedBackend> {
     descriptor: &'static BluetoothAdapterDescriptor,
     chipset: Cyw43439Chipset<H>,
+    active_advertising_set: Option<BluetoothAdvertisingSetId>,
 }
+
+const CYW43439_ADVERTISING_SET_ID: BluetoothAdvertisingSetId = BluetoothAdvertisingSetId(0);
+const CYW43439_BLUETOOTH_VENDOR_SET_PUBLIC_BD_ADDR_OPCODE: u16 = 0xFC01;
+const CYW43439_HCI_SEND_SCRATCH_BYTES: usize = 320;
+const CYW43439_HCI_READ_BUFFER_BYTES: usize = 272;
 
 impl<H> CYW43439<H>
 where
@@ -284,6 +310,7 @@ where
         Ok(Cyw43439Adapter {
             descriptor,
             chipset,
+            active_advertising_set: None,
         })
     }
 }
@@ -303,6 +330,171 @@ where
 {
     fn unsupported<T>() -> Result<T, BluetoothError> {
         Err(BluetoothError::unsupported())
+    }
+
+    fn send_hci_command(
+        &mut self,
+        opcode: u16,
+        parameters: &[u8],
+        scratch: &mut [u8],
+    ) -> Result<(), BluetoothError> {
+        self.send_frame(
+            BluetoothCanonicalFrame::Hci(BluetoothHciFrameView::Command(
+                BluetoothHciCommandFrame {
+                    header: BluetoothHciCommandHeader {
+                        opcode,
+                        parameter_length: parameters.len() as u8,
+                    },
+                    parameters,
+                },
+            )),
+            scratch,
+        )
+    }
+
+    fn frame_command_complete(
+        frame: BluetoothCanonicalFrame<'_>,
+    ) -> Option<BluetoothHciCommandComplete<'_>> {
+        match frame {
+            BluetoothCanonicalFrame::Hci(BluetoothHciFrameView::Event(event)) => {
+                event.as_command_complete()
+            }
+            BluetoothCanonicalFrame::Hci(BluetoothHciFrameView::Opaque(BluetoothHciFrame {
+                packet_type: BluetoothHciPacketType::Event,
+                bytes,
+            })) => {
+                if bytes.len() < 5 || bytes[0] != BLUETOOTH_HCI_EVENT_COMMAND_COMPLETE {
+                    return None;
+                }
+                let parameter_length = usize::from(bytes[1]);
+                if bytes.len() != 2 + parameter_length || parameter_length < 3 {
+                    return None;
+                }
+                Some(BluetoothHciCommandComplete {
+                    num_hci_command_packets: bytes[2],
+                    opcode: u16::from_le_bytes([bytes[3], bytes[4]]),
+                    return_parameters: &bytes[5..],
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn wait_for_command_complete<T>(
+        &mut self,
+        expected_opcode: u16,
+        read_buffer: &mut [u8],
+        parser: impl Fn(BluetoothHciCommandComplete<'_>) -> Option<T>,
+    ) -> Result<T, BluetoothError> {
+        for _ in 0..4_096 {
+            if self.wait_frame(Some(0))? {
+                if let Some(frame) = self.recv_frame(read_buffer)? {
+                    if let Some(command_complete) = Self::frame_command_complete(frame) {
+                        if command_complete.opcode == expected_opcode {
+                            return parser(command_complete).ok_or_else(BluetoothError::invalid);
+                        }
+                    }
+                }
+            }
+        }
+        Err(BluetoothError::timed_out())
+    }
+
+    fn wait_for_command_complete_status_zero(
+        &mut self,
+        expected_opcode: u16,
+        read_buffer: &mut [u8],
+    ) -> Result<(), BluetoothError> {
+        self.wait_for_command_complete(expected_opcode, read_buffer, |command_complete| {
+            command_complete
+                .return_parameters
+                .first()
+                .copied()
+                .filter(|status| *status == 0)
+                .map(|_| ())
+        })
+    }
+
+    fn configure_public_identity(&mut self) -> Result<(), BluetoothError> {
+        let mut send_scratch = [0_u8; CYW43439_HCI_SEND_SCRATCH_BYTES];
+        let mut read_buffer = [0_u8; CYW43439_HCI_READ_BUFFER_BYTES];
+        self.send_hci_command(BLUETOOTH_HCI_OPCODE_READ_BD_ADDR, &[], &mut send_scratch)?;
+        let (_, bd_addr) = self.wait_for_command_complete(
+            BLUETOOTH_HCI_OPCODE_READ_BD_ADDR,
+            &mut read_buffer,
+            |command_complete| {
+                command_complete
+                    .bd_addr()
+                    .filter(|(status, _)| *status == 0)
+            },
+        )?;
+        if bd_addr.kind != BluetoothAddressKind::Public {
+            return Err(BluetoothError::unsupported());
+        }
+        self.send_hci_command(
+            CYW43439_BLUETOOTH_VENDOR_SET_PUBLIC_BD_ADDR_OPCODE,
+            &bd_addr.bytes,
+            &mut send_scratch,
+        )?;
+        self.wait_for_command_complete_status_zero(
+            CYW43439_BLUETOOTH_VENDOR_SET_PUBLIC_BD_ADDR_OPCODE,
+            &mut read_buffer,
+        )
+    }
+
+    fn map_legacy_advertising_parameters(
+        parameters: BluetoothAdvertisingParameters,
+    ) -> Result<BluetoothHciLeAdvertisingParameters, BluetoothError> {
+        if parameters.anonymous {
+            return Err(BluetoothError::unsupported());
+        }
+        if parameters.primary_phy != BluetoothLePhy::Le1M || parameters.secondary_phy.is_some() {
+            return Err(BluetoothError::unsupported());
+        }
+        if parameters.interval_min_units == 0
+            || parameters.interval_max_units == 0
+            || parameters.interval_min_units > parameters.interval_max_units
+            || parameters.interval_max_units > u16::MAX as u32
+        {
+            return Err(BluetoothError::invalid());
+        }
+
+        let advertising_type = match parameters.mode {
+            BluetoothAdvertisingMode::ConnectableUndirected
+                if parameters.connectable && parameters.scannable =>
+            {
+                BluetoothHciLeAdvertisingType::ConnectableUndirected
+            }
+            BluetoothAdvertisingMode::ScannableUndirected
+                if !parameters.connectable && parameters.scannable =>
+            {
+                BluetoothHciLeAdvertisingType::ScannableUndirected
+            }
+            BluetoothAdvertisingMode::NonConnectableUndirected
+                if !parameters.connectable && !parameters.scannable =>
+            {
+                BluetoothHciLeAdvertisingType::NonConnectableUndirected
+            }
+            BluetoothAdvertisingMode::DirectedHighDuty
+            | BluetoothAdvertisingMode::DirectedLowDuty => {
+                return Err(BluetoothError::unsupported());
+            }
+            _ => return Err(BluetoothError::invalid()),
+        };
+
+        Ok(BluetoothHciLeAdvertisingParameters {
+            interval_min: parameters.interval_min_units as u16,
+            interval_max: parameters.interval_max_units as u16,
+            advertising_type,
+            own_address_type: BluetoothHciLeOwnAddressType::PublicDevice,
+            peer_address_type: BluetoothHciLePeerAddressType::PublicDevice,
+            peer_address: BluetoothAddress {
+                bytes: [0; 6],
+                kind: BluetoothAddressKind::Public,
+            },
+            channel_map: BluetoothHciLeAdvertisingChannelMap::ALL,
+            filter_policy: BluetoothHciLeAdvertisingFilterPolicy::ProcessAll,
+        })
     }
 
     fn send_hci_frame(
@@ -489,7 +681,11 @@ where
     H: Cyw43439HardwareContract,
 {
     fn set_powered(&mut self, powered: bool) -> Result<(), BluetoothError> {
-        self.chipset.set_bluetooth_enabled(powered)
+        self.chipset.set_bluetooth_enabled(powered)?;
+        if !powered {
+            self.active_advertising_set = None;
+        }
+        Ok(())
     }
 
     fn is_powered(&self) -> Result<bool, BluetoothError> {
@@ -527,18 +723,104 @@ where
 {
     fn start_advertising(
         &mut self,
-        _parameters: BluetoothAdvertisingParameters,
-        _data: &[u8],
-        _scan_response: Option<&[u8]>,
+        parameters: BluetoothAdvertisingParameters,
+        data: &[u8],
+        scan_response: Option<&[u8]>,
     ) -> Result<BluetoothAdvertisingSetId, BluetoothError> {
-        Self::unsupported()
+        if self.active_advertising_set.is_some() {
+            return Err(BluetoothError::busy());
+        }
+
+        let hci_parameters = Self::map_legacy_advertising_parameters(parameters)?;
+        let advertising_data = BluetoothHciLeAdvertisingData { bytes: data }
+            .encode()
+            .ok_or_else(BluetoothError::invalid)?;
+        let scan_response_data = match scan_response {
+            Some(bytes) => Some(
+                BluetoothHciLeAdvertisingData { bytes }
+                    .encode()
+                    .ok_or_else(BluetoothError::invalid)?,
+            ),
+            None => None,
+        };
+        if scan_response_data.is_some() && !parameters.scannable {
+            return Err(BluetoothError::invalid());
+        }
+
+        let mut send_scratch = [0_u8; CYW43439_HCI_SEND_SCRATCH_BYTES];
+        let mut read_buffer = [0_u8; CYW43439_HCI_READ_BUFFER_BYTES];
+
+        self.send_hci_command(BLUETOOTH_HCI_OPCODE_RESET, &[], &mut send_scratch)?;
+        self.wait_for_command_complete_status_zero(BLUETOOTH_HCI_OPCODE_RESET, &mut read_buffer)?;
+        self.configure_public_identity()?;
+
+        let encoded_parameters = hci_parameters.encode();
+        self.send_hci_command(
+            BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_PARAMETERS,
+            &encoded_parameters,
+            &mut send_scratch,
+        )?;
+        self.wait_for_command_complete_status_zero(
+            BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_PARAMETERS,
+            &mut read_buffer,
+        )?;
+
+        self.send_hci_command(
+            BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_DATA,
+            &advertising_data,
+            &mut send_scratch,
+        )?;
+        self.wait_for_command_complete_status_zero(
+            BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_DATA,
+            &mut read_buffer,
+        )?;
+
+        if let Some(scan_response_data) = scan_response_data.as_ref() {
+            self.send_hci_command(
+                BLUETOOTH_HCI_OPCODE_LE_SET_SCAN_RESPONSE_DATA,
+                scan_response_data,
+                &mut send_scratch,
+            )?;
+            self.wait_for_command_complete_status_zero(
+                BLUETOOTH_HCI_OPCODE_LE_SET_SCAN_RESPONSE_DATA,
+                &mut read_buffer,
+            )?;
+        }
+
+        self.send_hci_command(
+            BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_ENABLE,
+            &[1],
+            &mut send_scratch,
+        )?;
+        self.wait_for_command_complete_status_zero(
+            BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_ENABLE,
+            &mut read_buffer,
+        )?;
+
+        self.active_advertising_set = Some(CYW43439_ADVERTISING_SET_ID);
+        Ok(CYW43439_ADVERTISING_SET_ID)
     }
 
     fn stop_advertising(
         &mut self,
-        _advertising_set: BluetoothAdvertisingSetId,
+        advertising_set: BluetoothAdvertisingSetId,
     ) -> Result<(), BluetoothError> {
-        Self::unsupported()
+        if self.active_advertising_set != Some(advertising_set) {
+            return Err(BluetoothError::invalid());
+        }
+        let mut send_scratch = [0_u8; CYW43439_HCI_SEND_SCRATCH_BYTES];
+        let mut read_buffer = [0_u8; CYW43439_HCI_READ_BUFFER_BYTES];
+        self.send_hci_command(
+            BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_ENABLE,
+            &[0],
+            &mut send_scratch,
+        )?;
+        self.wait_for_command_complete_status_zero(
+            BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_ENABLE,
+            &mut read_buffer,
+        )?;
+        self.active_advertising_set = None;
+        Ok(())
     }
 }
 

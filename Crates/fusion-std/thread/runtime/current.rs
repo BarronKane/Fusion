@@ -2,12 +2,22 @@ use crate::thread::{
     ExplicitFiberTask,
     FiberTaskAttributes,
     FiberTaskPriority,
+    GeneratedExplicitFiberTask,
+};
+#[cfg(feature = "critical-safe")]
+use crate::thread::{
+    GeneratedExplicitFiberTaskContract,
+    generated_explicit_task_contract_attributes,
 };
 use core::sync::atomic::{
+    AtomicU32,
     AtomicUsize,
     Ordering,
 };
 use super::*;
+
+#[unsafe(no_mangle)]
+pub static CURRENT_SINGLETON_FIBER_SPAWN_PHASE: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug)]
 struct CurrentFiberRuntimeSlotState {
@@ -146,6 +156,8 @@ fn current_singleton_runtime_dispatch_callback(context: usize) {
 }
 
 impl CurrentFiberAsyncSingleton {
+    const AUTONOMOUS_DISPATCH_BATCH_LIMIT: usize = 8;
+
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -336,23 +348,40 @@ impl CurrentFiberAsyncSingleton {
     }
 
     fn request_runtime_dispatch_best_effort(&'static self) {
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x50, Ordering::Release);
         if let Some(cookie) = self.ensure_runtime_dispatch_cookie() {
+            CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x51, Ordering::Release);
             let _ = fusion_pal::sys::runtime_dispatch::request_runtime_dispatch(cookie);
+            CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x52, Ordering::Release);
         }
     }
 
+    /// Requests one best-effort autonomous runtime dispatch pass for this singleton.
+    ///
+    /// This is the truthful wake surface for current-thread courier runtimes: callers can notify
+    /// the runtime that local work became runnable without regressing to manual pump vocabulary.
+    pub fn request_autonomous_dispatch(&'static self) {
+        self.request_runtime_dispatch_best_effort();
+    }
+
     fn autonomous_dispatch_once(&'static self) {
-        let mut progressed = false;
+        // One current-thread dispatch request must stay bounded. Unlike a real carrier, this path
+        // still runs on the caller's thread. Re-arming forever here lets one perpetually runnable
+        // service fiber seize the whole lane and turns "autonomous dispatch" back into hidden
+        // manual-pump theater with extra steps.
+        for _ in 0..Self::AUTONOMOUS_DISPATCH_BATCH_LIMIT {
+            let mut progressed = false;
 
-        if matches!(self.pump_async_once(), Ok(true)) {
-            progressed = true;
-        }
-        if matches!(self.pump_fiber_once(), Ok(true)) {
-            progressed = true;
-        }
+            if matches!(self.pump_async_once(), Ok(true)) {
+                progressed = true;
+            }
+            if matches!(self.pump_fiber_once(), Ok(true)) {
+                progressed = true;
+            }
 
-        if progressed {
-            self.request_runtime_dispatch_best_effort();
+            if !progressed {
+                break;
+            }
         }
     }
 
@@ -426,8 +455,9 @@ impl CurrentFiberAsyncSingleton {
             Some(guard_pages) => guard_pages,
             None => current_thread_default_guard_pages(),
         };
+        let stack_floor_bytes = (stack_floor_bytes != 0).then_some(stack_floor_bytes);
         FiberPoolBootstrap::uniform_growing(
-            selected_stack_size_with_optional_floor(Some(stack_floor_bytes))?,
+            selected_stack_size_with_optional_floor(stack_floor_bytes)?,
             fiber_capacity,
             1,
         )
@@ -523,13 +553,16 @@ impl CurrentFiberAsyncSingleton {
         requested_capacity: Option<usize>,
         requested_stack_floor_bytes: Option<usize>,
     ) -> Result<CurrentFiberPoolBorrow<'static>, FiberError> {
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x20, Ordering::Release);
         let _guard =
             self.fibers.lock.lock().map_err(|error| {
                 fiber_error_from_executor(executor_error_from_runtime_sync(error))
             })?;
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x21, Ordering::Release);
         // SAFETY: the thin mutex serializes access to the singleton fiber slot state.
         let state = unsafe { &mut *self.fibers.state.get() };
         if state.runtime.is_none() {
+            CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x22, Ordering::Release);
             state.configured_capacity =
                 initial_runtime_capacity(self.effective_fiber_capacity_limit(), requested_capacity)
                     .ok_or_else(FiberError::resource_exhausted)?;
@@ -537,20 +570,24 @@ impl CurrentFiberAsyncSingleton {
                 .stack_floor_bytes
                 .unwrap_or(0)
                 .max(requested_stack_floor_bytes.unwrap_or(0));
+            CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x23, Ordering::Release);
             state.runtime = Some(self.build_fiber_runtime_with_policy(
                 state.configured_capacity,
                 state.effective_stack_floor_bytes,
             )?);
+            CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x24, Ordering::Release);
         }
         state.borrows = state
             .borrows
             .checked_add(1)
             .ok_or_else(FiberError::resource_exhausted)?;
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x25, Ordering::Release);
         let runtime = state
             .runtime
             .as_ref()
             .map(core::ptr::from_ref)
             .ok_or_else(FiberError::invalid)?;
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x26, Ordering::Release);
         Ok(CurrentFiberPoolBorrow {
             slot: &self.fibers,
             runtime,
@@ -1060,7 +1097,6 @@ impl CurrentFiberAsyncSingleton {
                     .then(|| task.stack_class.size_bytes().get()),
             )?
             .spawn_with_attrs(task, job)?;
-        self.request_runtime_dispatch_best_effort();
         Ok(handle)
     }
 
@@ -1072,14 +1108,19 @@ impl CurrentFiberAsyncSingleton {
         F: FnOnce() -> T + Send + 'static,
         T: 'static,
     {
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(1, Ordering::Release);
         self.ensure_runnable_budget_for_fiber()?;
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(2, Ordering::Release);
         let stack_bytes = NonZeroUsize::new(STACK_BYTES).ok_or_else(FiberError::invalid)?;
         let task = FiberTaskAttributes::from_stack_bytes(stack_bytes, FiberTaskPriority::DEFAULT)?;
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(3, Ordering::Release);
         self.ensure_fiber_admission(task)?;
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(4, Ordering::Release);
         let handle = self
             .fiber_runtime_borrow(None, Some(stack_bytes.get()))?
             .spawn_with_attrs(task, job)?;
-        self.request_runtime_dispatch_best_effort();
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(5, Ordering::Release);
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(6, Ordering::Release);
         Ok(handle)
     }
 
@@ -1102,7 +1143,63 @@ impl CurrentFiberAsyncSingleton {
                     .then(|| attributes.stack_class.size_bytes().get()),
             )?
             .spawn_with_attrs(attributes, move || task.run())?;
-        self.request_runtime_dispatch_best_effort();
+        Ok(handle)
+    }
+
+    /// Spawns one named fiber task using build-generated stack metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when generated metadata is missing or the task cannot be admitted.
+    #[cfg(not(feature = "critical-safe"))]
+    pub fn spawn_generated_fiber<T>(
+        &'static self,
+        task: T,
+    ) -> Result<CurrentFiberHandle<T::Output>, FiberError>
+    where
+        T: GeneratedExplicitFiberTask,
+    {
+        self.ensure_runnable_budget_for_fiber()?;
+        let attributes = T::task_attributes()?;
+        self.ensure_fiber_admission(attributes)?;
+        let handle = self
+            .fiber_runtime_borrow(
+                None,
+                attributes
+                    .execution
+                    .is_fiber()
+                    .then(|| attributes.stack_class.size_bytes().get()),
+            )?
+            .spawn_with_attrs(attributes, move || task.run())?;
+        Ok(handle)
+    }
+
+    /// Spawns one named fiber task using a compile-time generated contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated contract is not provisioned by the current runtime.
+    #[cfg(feature = "critical-safe")]
+    pub fn spawn_generated_fiber<T>(
+        &'static self,
+        task: T,
+    ) -> Result<CurrentFiberHandle<T::Output>, FiberError>
+    where
+        T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+    {
+        self.ensure_runnable_budget_for_fiber()?;
+        let attributes = generated_explicit_task_contract_attributes::<T>()
+            .with_optional_yield_budget(T::YIELD_BUDGET);
+        self.ensure_fiber_admission(attributes)?;
+        let handle = self
+            .fiber_runtime_borrow(
+                None,
+                attributes
+                    .execution
+                    .is_fiber()
+                    .then(|| attributes.stack_class.size_bytes().get()),
+            )?
+            .spawn_with_attrs(attributes, move || task.run())?;
         Ok(handle)
     }
 
@@ -1124,7 +1221,6 @@ impl CurrentFiberAsyncSingleton {
     {
         self.ensure_runnable_budget_for_async()?;
         let handle = self.async_runtime_for_spawn()?.spawn(future)?;
-        self.request_runtime_dispatch_best_effort();
         Ok(handle)
     }
 
@@ -1147,7 +1243,6 @@ impl CurrentFiberAsyncSingleton {
         let handle = self
             .async_runtime_for_spawn()?
             .spawn_with_poll_stack_bytes(poll_stack_bytes, future)?;
-        self.request_runtime_dispatch_best_effort();
         Ok(handle)
     }
 

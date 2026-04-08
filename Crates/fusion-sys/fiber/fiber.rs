@@ -11,6 +11,7 @@ use core::num::NonZeroUsize;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use core::sync::atomic::{
+    AtomicU32,
     AtomicUsize,
     Ordering,
 };
@@ -221,6 +222,15 @@ impl FiberReturn {
 
 /// Fiber entry signature used by the low-level stackful runtime.
 pub type FiberEntry = unsafe fn(*mut ()) -> FiberReturn;
+
+#[unsafe(no_mangle)]
+pub static FUSION_FIBER_NEW_PHASE: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_FIBER_BOOTSTRAP_PHASE: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_FIBER_NEW_STACK_BASE_LOW: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_FIBER_NEW_STACK_TOP_LOW: AtomicU32 = AtomicU32::new(0);
 
 /// Safe typed entry contract for one pinned subsystem fiber state object.
 pub trait FiberRunnable {
@@ -925,11 +935,21 @@ impl Fiber {
     /// Returns an error when the selected backend cannot honestly construct a stackful
     /// execution context.
     pub fn new(stack: FiberStack, entry: FiberEntry, arg: *mut ()) -> Result<Self, FiberError> {
+        FUSION_FIBER_NEW_PHASE.store(1, Ordering::Release);
+        FUSION_FIBER_NEW_STACK_BASE_LOW.store(
+            (stack.base.as_ptr() as usize & 0xffff_ffff) as u32,
+            Ordering::Release,
+        );
+        FUSION_FIBER_NEW_STACK_TOP_LOW.store(
+            ((stack.base.as_ptr() as usize).saturating_add(stack.len.get()) & 0xffff_ffff) as u32,
+            Ordering::Release,
+        );
         let context = system_context();
         let support = context.support();
         if !support.caps.contains(ContextCaps::MAKE) || !support.caps.contains(ContextCaps::SWAP) {
             return Err(FiberError::unsupported());
         }
+        FUSION_FIBER_NEW_PHASE.store(2, Ordering::Release);
 
         let mut fiber = Self {
             context: PlatformSavedContext::default(),
@@ -940,6 +960,7 @@ impl Fiber {
         };
 
         let bootstrap_slot = allocate_bootstrap(entry, arg)?;
+        FUSION_FIBER_NEW_PHASE.store(3, Ordering::Release);
         let stack_layout = ContextStackLayout {
             base: stack.base,
             len: stack.len,
@@ -947,6 +968,7 @@ impl Fiber {
         let bootstrap_ptr = with_bootstrap(bootstrap_slot, |bootstrap| {
             Ok(core::ptr::from_mut(bootstrap).cast())
         })?;
+        FUSION_FIBER_NEW_PHASE.store(4, Ordering::Release);
         fiber.context =
             match unsafe { context.make(stack_layout, fiber_entry_trampoline, bootstrap_ptr) } {
                 Ok(saved) => saved,
@@ -955,7 +977,9 @@ impl Fiber {
                     return Err(FiberError::from(error));
                 }
             };
+        FUSION_FIBER_NEW_PHASE.store(5, Ordering::Release);
         fiber.bootstrap_slot = Some(bootstrap_slot);
+        FUSION_FIBER_NEW_PHASE.store(6, Ordering::Release);
         Ok(fiber)
     }
 
@@ -1228,7 +1252,8 @@ fn with_bootstrap_slots<R>(
 }
 
 fn allocate_bootstrap(entry: FiberEntry, arg: *mut ()) -> Result<usize, FiberError> {
-    with_bootstrap_slots(|slots| {
+    FUSION_FIBER_BOOTSTRAP_PHASE.store(1, Ordering::Release);
+    let slot = with_bootstrap_slots(|slots| {
         let (slot_index, slot) = slots
             .iter_mut()
             .enumerate()
@@ -1243,7 +1268,9 @@ fn allocate_bootstrap(entry: FiberEntry, arg: *mut ()) -> Result<usize, FiberErr
             outcome: core::ptr::null_mut(),
         };
         Ok(slot_index)
-    })
+    })?;
+    FUSION_FIBER_BOOTSTRAP_PHASE.store(2, Ordering::Release);
+    Ok(slot)
 }
 
 fn with_bootstrap<R>(
@@ -1275,6 +1302,22 @@ fn active_registry() -> Result<&'static ActiveFiberRegistry, FiberError> {
     REGISTRY
         .get_or_init(ActiveFiberRegistry::new)
         .map_err(fiber_error_from_sync)
+}
+
+/// Primes the process-wide fiber substrate registries on the current carrier.
+///
+/// This is intentionally tiny and boring: some runtimes want the global bootstrap/active-fiber
+/// tables realized on a known bootstrap lane before secondary carriers start materializing their
+/// first fibers.
+///
+/// # Errors
+///
+/// Returns an honest error if the selected synchronization or registry substrate cannot be
+/// realized.
+pub fn prime_fiber_runtime_substrate() -> Result<(), FiberError> {
+    let _ = bootstrap_registry()?;
+    let _ = active_registry()?;
+    Ok(())
 }
 
 fn with_active_slots<R>(

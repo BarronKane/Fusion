@@ -132,6 +132,15 @@ pub static CYW43439_BLUETOOTH_LAST_B2H_IN: AtomicU32 = AtomicU32::new(0);
 pub static CYW43439_BLUETOOTH_LAST_B2H_OUT: AtomicU32 = AtomicU32::new(0);
 #[unsafe(no_mangle)]
 pub static CYW43439_BLUETOOTH_LAST_SPACE: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static CYW43439_BLUETOOTH_LAST_WRITE_LEN: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static CYW43439_BLUETOOTH_LAST_RING_HEADER: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static CYW43439_BLUETOOTH_LAST_WRITE_WORDS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+#[unsafe(no_mangle)]
+pub static CYW43439_BLUETOOTH_LAST_RING_READBACK_WORDS: [AtomicU32; 8] =
+    [const { AtomicU32::new(0) }; 8];
 
 const CYW43439_BLUETOOTH_ADAPTERS: [BluetoothAdapterDescriptor; 1] = [BluetoothAdapterDescriptor {
     id: CYW43439_BLUETOOTH_ADAPTER_ID,
@@ -144,10 +153,17 @@ const CYW43439_BLUETOOTH_ADAPTERS: [BluetoothAdapterDescriptor; 1] = [BluetoothA
         maximum: BluetoothVersion::new(5, 2),
     },
     support: BluetoothAdapterSupport {
-        transports: fusion_hal::contract::drivers::net::bluetooth::BluetoothTransportCaps::empty(),
-        roles: fusion_hal::contract::drivers::net::bluetooth::BluetoothRoleCaps::empty(),
-        le_phys: fusion_hal::contract::drivers::net::bluetooth::BluetoothLePhyCaps::empty(),
-        advertising: fusion_hal::contract::drivers::net::bluetooth::BluetoothAdvertisingCaps::empty(
+        transports: fusion_hal::contract::drivers::net::bluetooth::BluetoothTransportCaps::LE,
+        roles: fusion_hal::contract::drivers::net::bluetooth::BluetoothRoleCaps::from_bits_retain(
+            fusion_hal::contract::drivers::net::bluetooth::BluetoothRoleCaps::PERIPHERAL.bits()
+                | fusion_hal::contract::drivers::net::bluetooth::BluetoothRoleCaps::BROADCASTER
+                    .bits(),
+        ),
+        le_phys: fusion_hal::contract::drivers::net::bluetooth::BluetoothLePhyCaps::LE_1M,
+        advertising: fusion_hal::contract::drivers::net::bluetooth::BluetoothAdvertisingCaps::from_bits_retain(
+            fusion_hal::contract::drivers::net::bluetooth::BluetoothAdvertisingCaps::LEGACY.bits()
+                | fusion_hal::contract::drivers::net::bluetooth::BluetoothAdvertisingCaps::CONNECTABLE.bits()
+                | fusion_hal::contract::drivers::net::bluetooth::BluetoothAdvertisingCaps::SCANNABLE.bits(),
         ),
         scanning: fusion_hal::contract::drivers::net::bluetooth::BluetoothScanningCaps::empty(),
         connection: fusion_hal::contract::drivers::net::bluetooth::BluetoothConnectionCaps::empty(),
@@ -157,7 +173,7 @@ const CYW43439_BLUETOOTH_ADAPTERS: [BluetoothAdapterDescriptor; 1] = [BluetoothA
         gatt: fusion_hal::contract::drivers::net::bluetooth::BluetoothGattCaps::empty(),
         iso: fusion_hal::contract::drivers::net::bluetooth::BluetoothIsoCaps::empty(),
         max_connections: 0,
-        max_advertising_sets: 0,
+        max_advertising_sets: 1,
         max_periodic_advertising_sets: 0,
         max_att_mtu: 0,
         max_attribute_value_len: 0,
@@ -533,6 +549,14 @@ impl<
         CYW43439_BLUETOOTH_LAST_B2H_IN.store(0, Ordering::Release);
         CYW43439_BLUETOOTH_LAST_B2H_OUT.store(0, Ordering::Release);
         CYW43439_BLUETOOTH_LAST_SPACE.store(0, Ordering::Release);
+        CYW43439_BLUETOOTH_LAST_WRITE_LEN.store(0, Ordering::Release);
+        CYW43439_BLUETOOTH_LAST_RING_HEADER.store(0, Ordering::Release);
+        for word in &CYW43439_BLUETOOTH_LAST_WRITE_WORDS {
+            word.store(0, Ordering::Release);
+        }
+        for word in &CYW43439_BLUETOOTH_LAST_RING_READBACK_WORDS {
+            word.store(0, Ordering::Release);
+        }
         Ok(())
     }
 
@@ -982,20 +1006,6 @@ impl<
         Self::bluetooth_circ_buf_count(out_val, in_val.wrapping_add(4))
     }
 
-    fn bluetooth_mem_write_ring(
-        &mut self,
-        base_addr: u32,
-        offset: u32,
-        payload: &[u8],
-    ) -> Result<(), Cyw43439Error> {
-        let first_len = ((CYW43439_BTSDIO_FWBUF_SIZE - offset) as usize).min(payload.len());
-        self.shared_bus_write_backplane_bytes(base_addr + offset, &payload[..first_len])?;
-        if payload.len() > first_len {
-            self.shared_bus_write_backplane_bytes(base_addr, &payload[first_len..])?;
-        }
-        Ok(())
-    }
-
     fn bluetooth_mem_read_ring(
         &mut self,
         base_addr: u32,
@@ -1008,6 +1018,93 @@ impl<
             self.shared_bus_read_backplane_bytes(base_addr, &mut out[first_len..])?;
         }
         Ok(())
+    }
+
+    fn bluetooth_fill_framed_tx_bytes(
+        header: [u8; 4],
+        body: &[u8],
+        logical_offset: usize,
+        out: &mut [u8],
+    ) {
+        for (index, slot) in out.iter_mut().enumerate() {
+            let absolute = logical_offset + index;
+            *slot = if absolute < header.len() {
+                header[absolute]
+            } else {
+                body.get(absolute - header.len()).copied().unwrap_or(0)
+            };
+        }
+    }
+
+    fn bluetooth_mem_write_framed_segment(
+        &mut self,
+        write_addr: u32,
+        header: [u8; 4],
+        body: &[u8],
+        logical_offset: usize,
+        len: usize,
+    ) -> Result<(), Cyw43439Error> {
+        let mut local_offset = 0_usize;
+        let mut chunk = [0_u8; 64];
+        while local_offset < len {
+            let chunk_len = (len - local_offset).min(chunk.len());
+            Self::bluetooth_fill_framed_tx_bytes(
+                header,
+                body,
+                logical_offset + local_offset,
+                &mut chunk[..chunk_len],
+            );
+            self.shared_bus_write_backplane_bytes(
+                write_addr + local_offset as u32,
+                &chunk[..chunk_len],
+            )?;
+            local_offset += chunk_len;
+        }
+        Ok(())
+    }
+
+    fn bluetooth_mem_write_framed_packet(
+        &mut self,
+        base_addr: u32,
+        offset: u32,
+        header: [u8; 4],
+        body: &[u8],
+        aligned_len: usize,
+    ) -> Result<u32, Cyw43439Error> {
+        let ring_len = CYW43439_BTSDIO_FWBUF_SIZE as usize;
+        let offset = offset as usize;
+        if offset + aligned_len <= ring_len {
+            self.bluetooth_mem_write_framed_segment(
+                base_addr + offset as u32,
+                header,
+                body,
+                0,
+                aligned_len,
+            )?;
+            return Ok(offset as u32);
+        }
+
+        let first_len = ring_len - offset;
+        if first_len < header.len() {
+            self.bluetooth_mem_write_framed_segment(base_addr, header, body, 0, aligned_len)?;
+            return Ok(0);
+        }
+
+        self.bluetooth_mem_write_framed_segment(
+            base_addr + offset as u32,
+            header,
+            body,
+            0,
+            first_len,
+        )?;
+        self.bluetooth_mem_write_framed_segment(
+            base_addr,
+            header,
+            body,
+            first_len,
+            aligned_len - first_len,
+        )?;
+        Ok(offset as u32)
     }
 
     fn bluetooth_write_patch_record(
@@ -1538,32 +1635,54 @@ impl<
             header[1] = ((body_len >> 8) & 0xff) as u8;
             header[2] = 0;
             header[3] = payload[0];
+            CYW43439_BLUETOOTH_LAST_WRITE_LEN.store(payload.len() as u32, Ordering::Release);
+            CYW43439_BLUETOOTH_LAST_RING_HEADER
+                .store(u32::from_le_bytes(header), Ordering::Release);
+            for (index, word) in CYW43439_BLUETOOTH_LAST_WRITE_WORDS.iter().enumerate() {
+                let base = index * 4;
+                let mut bytes = [0_u8; 4];
+                for (offset, slot) in bytes.iter_mut().enumerate() {
+                    if let Some(byte) = payload.get(base + offset) {
+                        *slot = *byte;
+                    }
+                }
+                word.store(u32::from_le_bytes(bytes), Ordering::Release);
+            }
 
             let write_offset = indices.host2bt_in_val & (CYW43439_BTSDIO_FWBUF_SIZE - 1);
-            self.bluetooth_mem_write_ring(layout.host2bt_buf_addr, write_offset, &header)
+            let readback_offset = self
+                .bluetooth_mem_write_framed_packet(
+                    layout.host2bt_buf_addr,
+                    write_offset,
+                    header,
+                    &payload[1..],
+                    aligned_len,
+                )
                 .inspect_err(|_| {
                     CYW43439_BLUETOOTH_LAST_ERROR.store(24, Ordering::Release);
                 })?;
-            if body_len != 0 {
-                let body_offset = (write_offset + 4) & (CYW43439_BTSDIO_FWBUF_SIZE - 1);
-                self.bluetooth_mem_write_ring(layout.host2bt_buf_addr, body_offset, &payload[1..])
-                    .inspect_err(|_| {
-                        CYW43439_BLUETOOTH_LAST_ERROR.store(25, Ordering::Release);
-                    })?;
-            }
-            let pad_len = aligned_len - total_len;
-            if pad_len != 0 {
-                let pad_offset =
-                    (write_offset + total_len as u32) & (CYW43439_BTSDIO_FWBUF_SIZE - 1);
-                let zero_pad = [0_u8; 3];
-                self.bluetooth_mem_write_ring(
-                    layout.host2bt_buf_addr,
-                    pad_offset,
-                    &zero_pad[..pad_len],
-                )
-                .inspect_err(|_| {
-                    CYW43439_BLUETOOTH_LAST_ERROR.store(26, Ordering::Release);
-                })?;
+
+            let mut readback = [0_u8; 32];
+            let readback_len = readback.len().min(aligned_len);
+            self.bluetooth_mem_read_ring(
+                layout.host2bt_buf_addr,
+                readback_offset,
+                &mut readback[..readback_len],
+            )
+            .inspect_err(|_| {
+                CYW43439_BLUETOOTH_LAST_ERROR.store(25, Ordering::Release);
+            })?;
+            for (index, word) in CYW43439_BLUETOOTH_LAST_RING_READBACK_WORDS
+                .iter()
+                .enumerate()
+            {
+                let base = index * 4;
+                let mut bytes = [0_u8; 4];
+                if base < readback_len {
+                    let end = (base + 4).min(readback_len);
+                    bytes[..end - base].copy_from_slice(&readback[base..end]);
+                }
+                word.store(u32::from_le_bytes(bytes), Ordering::Release);
             }
 
             let new_h2b_in = indices.host2bt_in_val.wrapping_add(aligned_len as u32)
@@ -1571,11 +1690,11 @@ impl<
             CYW43439_BLUETOOTH_PHASE.store(23, Ordering::Release);
             self.bluetooth_shared_reg_write(layout.host2bt_in_addr, new_h2b_in)
                 .inspect_err(|_| {
-                    CYW43439_BLUETOOTH_LAST_ERROR.store(27, Ordering::Release);
+                    CYW43439_BLUETOOTH_LAST_ERROR.store(26, Ordering::Release);
                 })?;
             CYW43439_BLUETOOTH_PHASE.store(24, Ordering::Release);
             self.bluetooth_toggle_data_valid().inspect_err(|_| {
-                CYW43439_BLUETOOTH_LAST_ERROR.store(28, Ordering::Release);
+                CYW43439_BLUETOOTH_LAST_ERROR.store(27, Ordering::Release);
             })?;
             CYW43439_BLUETOOTH_PHASE.store(25, Ordering::Release);
             return Ok(());

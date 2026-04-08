@@ -52,6 +52,25 @@ pub struct LocalChannel<P: ProtocolContract, const CAPACITY: usize, const MAX_CO
     _protocol: PhantomData<P>,
 }
 
+/// One debug snapshot of a local channel's ring-buffer state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalChannelDebugState {
+    /// Number of pending messages currently recorded by the queue length.
+    pub pending_len: usize,
+    /// Current ring-buffer head index.
+    pub head: usize,
+    /// Current ring-buffer tail index.
+    pub tail: usize,
+    /// Whether the current head slot is occupied.
+    pub head_occupied: bool,
+    /// Number of attached consumers.
+    pub consumer_count: usize,
+    /// Whether one producer is currently attached.
+    pub producer_attached: bool,
+    /// Stable identity of the channel object itself.
+    pub channel_addr: usize,
+}
+
 struct LocalChannelState<T, const CAPACITY: usize, const MAX_CONSUMERS: usize> {
     buffer: [Option<T>; CAPACITY],
     head: usize,
@@ -200,6 +219,27 @@ impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
         state.tail = 0;
         state.len = 0;
         Ok(dropped)
+    }
+
+    /// Returns one best-effort debug snapshot of the current queue state.
+    ///
+    /// This is intentionally inspection-only. It exists to debug channel-integrity failures
+    /// without smuggling a second control plane into normal runtime behavior.
+    pub fn debug_state(&self) -> Result<LocalChannelDebugState, ChannelError> {
+        let state = self
+            .state
+            .try_lock()
+            .map_err(channel_error_from_sync)?
+            .ok_or_else(ChannelError::busy)?;
+        Ok(LocalChannelDebugState {
+            pending_len: state.len,
+            head: state.head,
+            tail: state.tail,
+            head_occupied: state.buffer[state.head].is_some(),
+            consumer_count: state.consumer_count(),
+            producer_attached: state.producer.is_some(),
+            channel_addr: self as *const Self as usize,
+        })
     }
 }
 

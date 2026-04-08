@@ -40,20 +40,22 @@
 //! - `C2AF` HCI buffer-size query completed
 //! - `C2B0` LE buffer-size query sent
 //! - `C2BF` LE buffer-size query completed
-//! - `C2C0` LE advertising-parameters command sent
-//! - `C2CF` LE advertising-parameters command completed
-//! - `C2D0` LE advertising-data command sent
-//! - `C2DF` LE advertising-data command completed
-//! - `C2E0` LE scan-response command sent
-//! - `C2EF` LE scan-response command completed
-//! - `C2F0` LE advertising-enable command sent
-//! - `C2FF` LE advertising-enable command completed
+//! - `C2C0` LE random-address command sent
+//! - `C2CF` LE random-address command completed
+//! - `C2D0` LE advertising-parameters command sent
+//! - `C2DF` LE advertising-parameters command completed
+//! - `C2E0` LE advertising-data command sent
+//! - `C2EF` LE advertising-data command completed
+//! - `C2F0` LE scan-response command sent
+//! - `C2FF` LE scan-response command completed
+//! - `C300` LE advertising-enable command sent
+//! - `C30F` LE advertising-enable command completed
+//! - `C31F` LE advertising enabled
 //! - `C30F` legacy LE advertising enabled
 //! - `E2xx` failure stage
 
 use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
-use core::pin::Pin;
 use core::sync::atomic::{
     AtomicU16,
     AtomicU8,
@@ -63,59 +65,49 @@ use core::sync::atomic::{
 
 use cortex_m_rt::{
     ExceptionFrame,
-    entry,
     exception,
 };
-use fusion_example_rp2350_on_device::gpio::Rp2350FiberGpioService;
 use fusion_example_rp2350_on_device::runtime::wait_for_runtime_progress;
-use fusion_example_rp2350_on_device::seven_segment::{
-    Rp2350FiberFourDigitSevenSegmentDisplay,
-    Rp2350FiberFourDigitSevenSegmentDisplayService,
-};
-use fusion_example_rp2350_on_device::shift_register_74hc595::Rp2350FiberShiftRegister74hc595Service;
-use fusion_firmware::module::StackDriverStorage;
+use fusion_example_rp2350_on_device::seven_segment_timer::Rp2350TimerFourDigitSevenSegmentDisplay;
 use fusion_firmware::sys::hal::drivers::bus::gpio::{
     SystemGpioPin,
     system_gpio,
 };
-use fusion_firmware::sys::hal::drivers::net::chipset::infineon::cyw43439::system_bluetooth;
+use fusion_firmware::sys::hal::drivers::net::chipset::infineon::cyw43439::system_bluetooth_courier;
 use fusion_hal::contract::drivers::bus::gpio::{
     GpioControlContract,
     GpioDriveStrength,
+    GpioError,
+    GpioErrorKind,
 };
 use fusion_hal::contract::drivers::net::bluetooth::{
     BLUETOOTH_HCI_EVENT_COMMAND_COMPLETE,
+    BLUETOOTH_HCI_EVENT_LE_META,
     BLUETOOTH_HCI_OPCODE_READ_BD_ADDR,
     BLUETOOTH_HCI_OPCODE_READ_LOCAL_VERSION_INFORMATION,
     BLUETOOTH_HCI_OPCODE_READ_LOCAL_SUPPORTED_COMMANDS,
     BLUETOOTH_HCI_OPCODE_READ_LOCAL_SUPPORTED_FEATURES,
     BLUETOOTH_HCI_OPCODE_READ_BUFFER_SIZE,
-    BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_DATA,
-    BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_ENABLE,
-    BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_PARAMETERS,
-    BLUETOOTH_HCI_OPCODE_LE_SET_SCAN_RESPONSE_DATA,
+    BLUETOOTH_HCI_OPCODE_SET_EVENT_MASK,
+    BLUETOOTH_HCI_OPCODE_LE_SET_EVENT_MASK,
     BLUETOOTH_HCI_OPCODE_LE_READ_BUFFER_SIZE,
     BLUETOOTH_HCI_OPCODE_RESET,
     BLUETOOTH_HCI_OPCODE_LE_READ_LOCAL_SUPPORTED_FEATURES,
+    BluetoothAdvertisingControlContract,
+    BluetoothAdvertisingMode,
+    BluetoothAdvertisingParameters,
     BluetoothCanonicalFrame,
+    BluetoothCanonicalFrameControlContract,
     BluetoothHciCommandComplete,
-    BluetoothHciLeAdvertisingChannelMap,
-    BluetoothHciLeAdvertisingData,
-    BluetoothHciLeAdvertisingFilterPolicy,
-    BluetoothHciLeAdvertisingParameters,
-    BluetoothHciLeAdvertisingType,
-    BluetoothHciLeOwnAddressType,
-    BluetoothHciLePeerAddressType,
     BluetoothErrorKind,
-    BluetoothAddress,
-    BluetoothAddressKind,
     BluetoothHciCommandFrame,
     BluetoothHciCommandHeader,
     BluetoothHciFrame,
     BluetoothHciFrameView,
     BluetoothHciPacketType,
+    BluetoothLePhy,
+    BluetoothRadioControlContract,
 };
-use fusion_hal::drivers::peripheral::SevenSegmentPolarity;
 
 fusion_example_rp2350_on_device::fusion_rp2350_export_build_id!();
 
@@ -125,13 +117,9 @@ const DISPLAY_LATCH_PIN: u8 = 14;
 const DISPLAY_SHIFT_CLOCK_PIN: u8 = 15;
 const PANIC_LED_PIN: u8 = 11;
 
-const GPIO_SERVICE_STACK_BYTES: usize = 4096;
-const SHIFT_REGISTER_SERVICE_STACK_BYTES: usize = 4096;
-const DISPLAY_SERVICE_STACK_BYTES: usize = 4096;
-const BLUETOOTH_DRIVER_STORAGE_WORDS: usize = 256;
-
 const STATUS_STARTUP: u16 = 0xC100;
 const STATUS_DISPLAY_READY: u16 = 0xC110;
+const STATUS_ERROR_DISPLAY_INIT: u16 = 0xE110;
 const STATUS_BLUETOOTH_BOUND: u16 = 0xC220;
 const STATUS_BLUETOOTH_POWERED: u16 = 0xC230;
 const STATUS_BLUETOOTH_HCI_RESET_SENT: u16 = 0xC240;
@@ -150,15 +138,15 @@ const STATUS_BLUETOOTH_HCI_BUFFER_SIZE_SENT: u16 = 0xC2A0;
 const STATUS_BLUETOOTH_HCI_BUFFER_SIZE_COMPLETE: u16 = 0xC2AF;
 const STATUS_BLUETOOTH_HCI_LE_BUFFER_SIZE_SENT: u16 = 0xC2B0;
 const STATUS_BLUETOOTH_HCI_LE_BUFFER_SIZE_COMPLETE: u16 = 0xC2BF;
-const STATUS_BLUETOOTH_HCI_ADV_PARAMS_SENT: u16 = 0xC2C0;
-const STATUS_BLUETOOTH_HCI_ADV_PARAMS_COMPLETE: u16 = 0xC2CF;
-const STATUS_BLUETOOTH_HCI_ADV_DATA_SENT: u16 = 0xC2D0;
-const STATUS_BLUETOOTH_HCI_ADV_DATA_COMPLETE: u16 = 0xC2DF;
-const STATUS_BLUETOOTH_HCI_SCAN_RESPONSE_SENT: u16 = 0xC2E0;
-const STATUS_BLUETOOTH_HCI_SCAN_RESPONSE_COMPLETE: u16 = 0xC2EF;
-const STATUS_BLUETOOTH_HCI_ADV_ENABLE_SENT: u16 = 0xC2F0;
-const STATUS_BLUETOOTH_HCI_ADV_ENABLE_COMPLETE: u16 = 0xC2FF;
-const STATUS_BLUETOOTH_HCI_ADVERTISING_ENABLED: u16 = 0xC30F;
+const STATUS_BLUETOOTH_HCI_ADV_PARAMS_SENT: u16 = 0xC2D0;
+const STATUS_BLUETOOTH_HCI_ADV_PARAMS_COMPLETE: u16 = 0xC2DF;
+const STATUS_BLUETOOTH_HCI_ADV_DATA_SENT: u16 = 0xC2E0;
+const STATUS_BLUETOOTH_HCI_ADV_DATA_COMPLETE: u16 = 0xC2EF;
+const STATUS_BLUETOOTH_HCI_SCAN_RESPONSE_SENT: u16 = 0xC2F0;
+const STATUS_BLUETOOTH_HCI_SCAN_RESPONSE_COMPLETE: u16 = 0xC2FF;
+const STATUS_BLUETOOTH_HCI_ADV_ENABLE_SENT: u16 = 0xC300;
+const STATUS_BLUETOOTH_HCI_ADV_ENABLE_COMPLETE: u16 = 0xC30F;
+const STATUS_BLUETOOTH_HCI_ADVERTISING_ENABLED: u16 = 0xC31F;
 const STATUS_ERROR_BLUETOOTH_BIND: u16 = 0xE220;
 const STATUS_ERROR_BLUETOOTH_POWER: u16 = 0xE230;
 const STATUS_ERROR_BLUETOOTH_HCI_SEND: u16 = 0xE240;
@@ -170,23 +158,17 @@ const STATUS_ERROR_BLUETOOTH_HCI_FEATURES: u16 = 0xE28F;
 const STATUS_ERROR_BLUETOOTH_HCI_LE_FEATURES: u16 = 0xE29F;
 const STATUS_ERROR_BLUETOOTH_HCI_BUFFER_SIZE: u16 = 0xE2AF;
 const STATUS_ERROR_BLUETOOTH_HCI_LE_BUFFER_SIZE: u16 = 0xE2BF;
-const STATUS_ERROR_BLUETOOTH_HCI_ADV_PARAMS: u16 = 0xE2CF;
-const STATUS_ERROR_BLUETOOTH_HCI_ADV_DATA: u16 = 0xE2DF;
-const STATUS_ERROR_BLUETOOTH_HCI_SCAN_RESPONSE: u16 = 0xE2EF;
-const STATUS_ERROR_BLUETOOTH_HCI_ADV_ENABLE: u16 = 0xE2FF;
+const STATUS_ERROR_BLUETOOTH_HCI_ADV_PARAMS: u16 = 0xE2DF;
+const STATUS_ERROR_BLUETOOTH_HCI_ADV_DATA: u16 = 0xE2EF;
+const STATUS_ERROR_BLUETOOTH_HCI_ADV_ENABLE: u16 = 0xE30F;
+const BLUETOOTH_HCI_OPCODE_WRITE_LE_HOST_SUPPORT: u16 = 0x0C6D;
+const BLUETOOTH_HCI_OPCODE_CYW43_SET_PUBLIC_BD_ADDR: u16 = 0xFC01;
+const BLUETOOTH_HCI_OPCODE_SET_EVENT_MASK_PAGE_2: u16 = 0x0C63;
 
 const PANIC_LED_UNINITIALIZED: u8 = 0;
 const PANIC_LED_READY: u8 = 1;
 const PANIC_LED_FAILED: u8 = 2;
 
-type PicoGpioService = Rp2350FiberGpioService<4>;
-type PicoShiftRegisterService = Rp2350FiberShiftRegister74hc595Service<2>;
-type PicoDisplayService = Rp2350FiberFourDigitSevenSegmentDisplayService;
-
-static mut GPIO_SERVICE_STORAGE: MaybeUninit<PicoGpioService> = MaybeUninit::uninit();
-static mut SHIFT_REGISTER_SERVICE_STORAGE: MaybeUninit<PicoShiftRegisterService> =
-    MaybeUninit::uninit();
-static mut DISPLAY_SERVICE_STORAGE: MaybeUninit<PicoDisplayService> = MaybeUninit::uninit();
 static mut PANIC_LED_STORAGE: MaybeUninit<SystemGpioPin> = MaybeUninit::uninit();
 static PANIC_LED_STATE: AtomicU8 = AtomicU8::new(PANIC_LED_UNINITIALIZED);
 #[unsafe(no_mangle)]
@@ -236,6 +218,8 @@ pub static DEBUG_CHANNEL_LAST_BLUETOOTH_SCO_MAX_PACKET_COUNT: AtomicU32 = Atomic
 pub static DEBUG_CHANNEL_LAST_BLUETOOTH_LE_ACL_MAX_DATA_LENGTH: AtomicU32 = AtomicU32::new(0);
 #[unsafe(no_mangle)]
 pub static DEBUG_CHANNEL_LAST_BLUETOOTH_LE_ACL_MAX_PACKET_COUNT: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static DEBUG_CHANNEL_LAST_BLUETOOTH_ADV_PARAM_CANDIDATE: AtomicU32 = AtomicU32::new(0);
 
 fn panic_led_on() -> ! {
     let _ = set_panic_led(true);
@@ -275,93 +259,44 @@ fn set_panic_led(high: bool) -> Result<(), ()> {
     }
 }
 
-fn init_gpio_service() -> *mut PicoGpioService {
-    unsafe {
-        let service = core::ptr::addr_of_mut!(GPIO_SERVICE_STORAGE).cast::<PicoGpioService>();
-        service.write(PicoGpioService::new().expect("gpio service should build"));
-        service
+fn encode_gpio_error(error: GpioError) -> u32 {
+    match error.kind() {
+        GpioErrorKind::Unsupported => 1,
+        GpioErrorKind::Invalid => 2,
+        GpioErrorKind::Busy => 3,
+        GpioErrorKind::ResourceExhausted => 4,
+        GpioErrorKind::StateConflict => 5,
+        GpioErrorKind::Platform(code) => 0x4000_0000_u32 | (code as u32),
     }
 }
 
-fn init_shift_register_service()
--> fusion_example_rp2350_on_device::shift_register_74hc595::Rp2350FiberShiftRegister74hc595<2> {
-    let gpio_service = init_gpio_service();
-    let data = unsafe {
-        Pin::new_unchecked(&mut *gpio_service)
-            .claim_output_pin(DISPLAY_DATA_PIN, GpioDriveStrength::MilliAmps4)
-            .expect("display data pin should be claimable")
-    };
-    let shift_clock = unsafe {
-        Pin::new_unchecked(&mut *gpio_service)
-            .claim_output_pin(DISPLAY_SHIFT_CLOCK_PIN, GpioDriveStrength::MilliAmps4)
-            .expect("display shift clock pin should be claimable")
-    };
-    let latch_clock = unsafe {
-        Pin::new_unchecked(&mut *gpio_service)
-            .claim_output_pin(DISPLAY_LATCH_PIN, GpioDriveStrength::MilliAmps4)
-            .expect("display latch pin should be claimable")
-    };
-    let output_enable = unsafe {
-        Pin::new_unchecked(&mut *gpio_service)
-            .claim_output_pin(DISPLAY_ENABLE_PIN, GpioDriveStrength::MilliAmps4)
-            .expect("display output-enable pin should be claimable")
-    };
-    unsafe {
-        Pin::new_unchecked(&mut *gpio_service)
-            .spawn::<GPIO_SERVICE_STACK_BYTES>()
-            .expect("display gpio service should spawn");
-    }
-
-    let shift_service_ptr = unsafe {
-        let service = core::ptr::addr_of_mut!(SHIFT_REGISTER_SERVICE_STORAGE)
-            .cast::<PicoShiftRegisterService>();
-        let shift_service =
-            PicoShiftRegisterService::new(data, shift_clock, latch_clock, output_enable)
-                .expect("display shift-register service should build");
-        service.write(shift_service);
-        service
-    };
-    let shift_register = unsafe { (&*shift_service_ptr).client_handle() };
-    unsafe {
-        Pin::new_unchecked(&mut *shift_service_ptr)
-            .spawn::<SHIFT_REGISTER_SERVICE_STACK_BYTES>()
-            .expect("display shift-register service should spawn");
-    }
-    shift_register
+fn init_display() -> Result<Rp2350TimerFourDigitSevenSegmentDisplay, u32> {
+    DEBUG_CHANNEL_PHASE.store(0x31, Ordering::Release);
+    let display = Rp2350TimerFourDigitSevenSegmentDisplay::common_cathode(
+        DISPLAY_DATA_PIN,
+        DISPLAY_ENABLE_PIN,
+        DISPLAY_LATCH_PIN,
+        DISPLAY_SHIFT_CLOCK_PIN,
+    )
+    .map_err(encode_gpio_error)?;
+    DEBUG_CHANNEL_PHASE.store(0x32, Ordering::Release);
+    Ok(display)
 }
 
-fn init_display_service(
-    shift_register: fusion_example_rp2350_on_device::shift_register_74hc595::Rp2350FiberShiftRegister74hc595<2>,
-) -> Rp2350FiberFourDigitSevenSegmentDisplay {
-    let display_service_ptr = unsafe {
-        let service = core::ptr::addr_of_mut!(DISPLAY_SERVICE_STORAGE).cast::<PicoDisplayService>();
-        let display_service =
-            PicoDisplayService::new(shift_register, SevenSegmentPolarity::common_cathode())
-                .expect("display service should build");
-        service.write(display_service);
-        service
-    };
-    let display = unsafe { (&*display_service_ptr).client_handle() };
-    unsafe {
-        Pin::new_unchecked(&mut *display_service_ptr)
-            .spawn::<DISPLAY_SERVICE_STACK_BYTES>()
-            .expect("display service should spawn");
-    }
-    display
-}
-
-fn set_status(display: &Rp2350FiberFourDigitSevenSegmentDisplay, code: u16) {
+fn set_status(display: &Rp2350TimerFourDigitSevenSegmentDisplay, code: u16) {
     DEBUG_CHANNEL_LAST_STATUS.store(code, Ordering::Release);
     let _ = display.set_hex(code);
 }
 
-fn pump_runtime(turns: usize) {
-    for _ in 0..turns {
+fn fatal_without_display(code: u16) -> ! {
+    let _ = set_panic_led(true);
+    DEBUG_CHANNEL_LAST_STATUS.store(code, Ordering::Release);
+    loop {
         wait_for_runtime_progress();
     }
 }
 
-fn fatal_status(display: &Rp2350FiberFourDigitSevenSegmentDisplay, code: u16) -> ! {
+fn fatal_status(display: &Rp2350TimerFourDigitSevenSegmentDisplay, code: u16) -> ! {
     let _ = set_panic_led(true);
     set_status(display, code);
     loop {
@@ -416,12 +351,61 @@ fn frame_command_complete(frame: BluetoothCanonicalFrame<'_>) -> Option<Bluetoot
     }
 }
 
-fn send_hci_command(
-    bluetooth: &mut dyn fusion_hal::contract::drivers::net::bluetooth::BluetoothAdapterContract,
+fn record_observed_hci_frame(frame: BluetoothCanonicalFrame<'_>) {
+    match frame {
+        BluetoothCanonicalFrame::Hci(BluetoothHciFrameView::Event(event)) => {
+            DEBUG_CHANNEL_LAST_BLUETOOTH_EVENT
+                .store(event.header.event_code as u32, Ordering::Release);
+            DEBUG_CHANNEL_LAST_BLUETOOTH_STATUS.store(
+                event.parameters.first().copied().map_or(u32::MAX, u32::from),
+                Ordering::Release,
+            );
+            if event.header.event_code == BLUETOOTH_HCI_EVENT_LE_META {
+                DEBUG_CHANNEL_LAST_BLUETOOTH_OPCODE.store(
+                    event.parameters.first().copied().map_or(u32::MAX, u32::from),
+                    Ordering::Release,
+                );
+            }
+        }
+        BluetoothCanonicalFrame::Hci(BluetoothHciFrameView::Opaque(BluetoothHciFrame {
+            packet_type: BluetoothHciPacketType::Event,
+            bytes,
+        })) if bytes.len() >= 2 => {
+            DEBUG_CHANNEL_LAST_BLUETOOTH_EVENT.store(bytes[0] as u32, Ordering::Release);
+            DEBUG_CHANNEL_LAST_BLUETOOTH_STATUS.store(
+                bytes.get(2).copied().map_or(u32::MAX, u32::from),
+                Ordering::Release,
+            );
+            if bytes[0] == BLUETOOTH_HCI_EVENT_LE_META {
+                DEBUG_CHANNEL_LAST_BLUETOOTH_OPCODE.store(
+                    bytes.get(2).copied().map_or(u32::MAX, u32::from),
+                    Ordering::Release,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+trait BluetoothBenchControl:
+    BluetoothCanonicalFrameControlContract + BluetoothRadioControlContract
+{
+}
+
+impl<T> BluetoothBenchControl for T where
+    T: BluetoothCanonicalFrameControlContract + BluetoothRadioControlContract
+{
+}
+
+fn send_hci_command<B>(
+    bluetooth: &mut B,
     opcode: u16,
     parameters: &[u8],
     scratch: &mut [u8],
-) -> Result<(), fusion_hal::contract::drivers::net::bluetooth::BluetoothError> {
+) -> Result<(), fusion_hal::contract::drivers::net::bluetooth::BluetoothError>
+where
+    B: BluetoothBenchControl + ?Sized,
+{
     bluetooth.send_frame(
         BluetoothCanonicalFrame::Hci(BluetoothHciFrameView::Command(BluetoothHciCommandFrame {
             header: BluetoothHciCommandHeader {
@@ -434,11 +418,14 @@ fn send_hci_command(
     )
 }
 
-fn wait_for_command_complete_status_zero(
-    bluetooth: &mut dyn fusion_hal::contract::drivers::net::bluetooth::BluetoothAdapterContract,
+fn wait_for_command_complete_status_zero<B>(
+    bluetooth: &mut B,
     opcode: u16,
     read_buffer: &mut [u8],
-) -> Result<(), fusion_hal::contract::drivers::net::bluetooth::BluetoothError> {
+) -> Result<(), fusion_hal::contract::drivers::net::bluetooth::BluetoothError>
+where
+    B: BluetoothBenchControl + ?Sized,
+{
     wait_for_command_complete(bluetooth, opcode, read_buffer, |command_complete| {
         command_complete
             .return_parameters
@@ -449,42 +436,6 @@ fn wait_for_command_complete_status_zero(
     })
 }
 
-fn legacy_advertising_parameters() -> [u8; BluetoothHciLeAdvertisingParameters::ENCODED_LEN] {
-    BluetoothHciLeAdvertisingParameters {
-        interval_min: 0x00a0,
-        interval_max: 0x00a0,
-        advertising_type: BluetoothHciLeAdvertisingType::ConnectableUndirected,
-        own_address_type: BluetoothHciLeOwnAddressType::PublicDevice,
-        peer_address_type: BluetoothHciLePeerAddressType::PublicDevice,
-        peer_address: BluetoothAddress {
-            bytes: [0; 6],
-            kind: BluetoothAddressKind::Public,
-        },
-        channel_map: BluetoothHciLeAdvertisingChannelMap::ALL,
-        filter_policy: BluetoothHciLeAdvertisingFilterPolicy::ProcessAll,
-    }
-    .encode()
-}
-
-fn legacy_advertising_data() -> [u8; BluetoothHciLeAdvertisingData::ENCODED_LEN] {
-    let payload = [
-        0x02, 0x01, 0x06, // Flags: general discoverable, BR/EDR not supported
-        0x0a, 0x09, b'F', b'u', b's', b'i', b'o', b'n', b' ', b'D', b'B',
-    ];
-    BluetoothHciLeAdvertisingData { bytes: &payload }
-        .encode()
-        .expect("legacy advertising payload should fit")
-}
-
-fn legacy_scan_response_data() -> [u8; BluetoothHciLeAdvertisingData::ENCODED_LEN] {
-    let payload = [
-        0x09, 0x09, b'P', b'i', b'c', b'o', b'2', b'W', b' ', b'B',
-    ];
-    BluetoothHciLeAdvertisingData { bytes: &payload }
-        .encode()
-        .expect("legacy scan-response payload should fit")
-}
-
 fn record_supported_commands(commands: [u8; 64]) {
     for (index, chunk) in commands.chunks_exact(4).enumerate() {
         DEBUG_CHANNEL_LAST_BLUETOOTH_SUPPORTED_COMMANDS[index].store(
@@ -492,6 +443,37 @@ fn record_supported_commands(commands: [u8; 64]) {
             Ordering::Release,
         );
     }
+}
+
+fn command_bitmap_bit_is_set(commands: &[u8; 64], byte_index: usize, bit_index: u8) -> bool {
+    commands
+        .get(byte_index)
+        .map(|byte| (byte & (1_u8 << bit_index)) != 0)
+        .unwrap_or(false)
+}
+
+fn write_le_host_supported_is_supported(commands: &[u8; 64]) -> bool {
+    // HCI Read Local Supported Commands: byte 24, bit 6.
+    command_bitmap_bit_is_set(commands, 24, 6)
+}
+
+fn set_event_mask_page_2_is_supported(commands: &[u8; 64]) -> bool {
+    // HCI Read Local Supported Commands: byte 22, bit 2.
+    command_bitmap_bit_is_set(commands, 22, 2)
+}
+
+fn classic_event_mask() -> [u8; 8] {
+    [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f]
+}
+
+fn event_mask_page_2() -> [u8; 8] {
+    [0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00]
+}
+
+fn all_le_events_mask() -> [u8; 8] {
+    // Matches BTstack's legacy LE event mask without Enhanced Connection Complete. That is boring,
+    // conservative, and known-good enough to stop this bench from inventing its own theology.
+    [0xff, 0xfd, 0xff, 0xff, 0x07, 0xfc, 0x7f, 0x00]
 }
 
 fn record_feature_set(
@@ -533,12 +515,15 @@ fn record_le_buffer_sizes(le_acl_max_data_length: u16, le_acl_max_packet_count: 
         .store(le_acl_max_packet_count as u32, Ordering::Release);
 }
 
-fn wait_for_command_complete<T>(
-    bluetooth: &mut dyn fusion_hal::contract::drivers::net::bluetooth::BluetoothAdapterContract,
+fn wait_for_command_complete<B, T>(
+    bluetooth: &mut B,
     expected_opcode: u16,
     read_buffer: &mut [u8],
     parser: impl Fn(BluetoothHciCommandComplete<'_>) -> Option<T>,
-) -> Result<T, fusion_hal::contract::drivers::net::bluetooth::BluetoothError> {
+) -> Result<T, fusion_hal::contract::drivers::net::bluetooth::BluetoothError>
+where
+    B: BluetoothBenchControl + ?Sized,
+{
     for _ in 0..4_096 {
         if bluetooth.wait_frame(Some(0))? {
             if let Some(frame) = bluetooth.recv_frame(read_buffer)? {
@@ -557,30 +542,26 @@ fn wait_for_command_complete<T>(
                 }
             }
         }
-        pump_runtime(8);
     }
     Err(fusion_hal::contract::drivers::net::bluetooth::BluetoothError::timed_out())
 }
 
-#[entry]
+#[fusion_firmware::fusion_firmware_main]
 fn main() -> ! {
-    DEBUG_CHANNEL_PHASE.store(1, Ordering::Release);
-    let _ = set_panic_led(false);
-    DEBUG_CHANNEL_PHASE.store(2, Ordering::Release);
-    let shift_register = init_shift_register_service();
-    DEBUG_CHANNEL_PHASE.store(3, Ordering::Release);
-    let display = init_display_service(shift_register);
     DEBUG_CHANNEL_PHASE.store(4, Ordering::Release);
-    pump_runtime(128);
+    let display = match init_display() {
+        Ok(display) => display,
+        Err(error) => {
+            DEBUG_CHANNEL_LAST_ERROR_KIND.store(error, Ordering::Release);
+            fatal_without_display(STATUS_ERROR_DISPLAY_INIT);
+        }
+    };
     set_status(&display, STATUS_STARTUP);
-    pump_runtime(128);
     set_status(&display, STATUS_DISPLAY_READY);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(5, Ordering::Release);
-    let mut bluetooth_storage = StackDriverStorage::<BLUETOOTH_DRIVER_STORAGE_WORDS>::new();
     DEBUG_CHANNEL_PHASE.store(6, Ordering::Release);
-    let mut bluetooth = match system_bluetooth(bluetooth_storage.slot()) {
+    let mut bluetooth = match system_bluetooth_courier() {
         Ok(bluetooth) => bluetooth,
         Err(error) => {
             record_bluetooth_error(error);
@@ -589,22 +570,20 @@ fn main() -> ! {
     };
     DEBUG_CHANNEL_PHASE.store(7, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_BOUND);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(8, Ordering::Release);
-    if let Err(error) = bluetooth.adapter_mut().set_powered(true) {
+    if let Err(error) = bluetooth.set_powered(true) {
         record_bluetooth_error(error);
         fatal_status(&display, STATUS_ERROR_BLUETOOTH_POWER);
     }
     DEBUG_CHANNEL_PHASE.store(9, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_POWERED);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(10, Ordering::Release);
     let mut write_scratch = [0_u8; 16];
     let mut read_buffer = [0_u8; 272];
     if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_RESET,
         &[],
         &mut write_scratch,
@@ -614,12 +593,11 @@ fn main() -> ! {
     }
     DEBUG_CHANNEL_PHASE.store(11, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_RESET_SENT);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(12, Ordering::Release);
     if let Err(error) =
         wait_for_command_complete(
-            bluetooth.adapter_mut(),
+            &mut bluetooth,
             BLUETOOTH_HCI_OPCODE_RESET,
             &mut read_buffer,
             |command_complete| command_complete
@@ -634,11 +612,10 @@ fn main() -> ! {
     }
     DEBUG_CHANNEL_PHASE.store(13, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_RESET_COMPLETE);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(14, Ordering::Release);
     if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_READ_LOCAL_VERSION_INFORMATION,
         &[],
         &mut write_scratch,
@@ -648,11 +625,10 @@ fn main() -> ! {
     }
     DEBUG_CHANNEL_PHASE.store(15, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_VERSION_SENT);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(16, Ordering::Release);
     let local_version = match wait_for_command_complete(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_READ_LOCAL_VERSION_INFORMATION,
         &mut read_buffer,
         |command_complete| {
@@ -681,11 +657,10 @@ fn main() -> ! {
         .store(local_version.lmp_pal_subversion as u32, Ordering::Release);
     DEBUG_CHANNEL_PHASE.store(17, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_VERSION_COMPLETE);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(18, Ordering::Release);
     if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_READ_BD_ADDR,
         &[],
         &mut write_scratch,
@@ -695,11 +670,10 @@ fn main() -> ! {
     }
     DEBUG_CHANNEL_PHASE.store(19, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_BD_ADDR_SENT);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(20, Ordering::Release);
     let bd_addr = match wait_for_command_complete(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_READ_BD_ADDR,
         &mut read_buffer,
         |command_complete| command_complete.bd_addr().filter(|(status, _)| *status == 0),
@@ -725,11 +699,30 @@ fn main() -> ! {
 
     DEBUG_CHANNEL_PHASE.store(21, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_BD_ADDR_COMPLETE);
-    pump_runtime(128);
+
+    DEBUG_CHANNEL_PHASE.store(20_1, Ordering::Release);
+    if let Err(error) = send_hci_command(
+        &mut bluetooth,
+        BLUETOOTH_HCI_OPCODE_CYW43_SET_PUBLIC_BD_ADDR,
+        &bd_addr.bytes,
+        &mut write_scratch,
+    ) {
+        record_bluetooth_error(error);
+        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_SEND);
+    }
+    DEBUG_CHANNEL_PHASE.store(20_2, Ordering::Release);
+    if let Err(error) = wait_for_command_complete_status_zero(
+        &mut bluetooth,
+        BLUETOOTH_HCI_OPCODE_CYW43_SET_PUBLIC_BD_ADDR,
+        &mut read_buffer,
+    ) {
+        record_bluetooth_error(error);
+        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_BD_ADDR);
+    }
 
     DEBUG_CHANNEL_PHASE.store(22, Ordering::Release);
     if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_READ_LOCAL_SUPPORTED_COMMANDS,
         &[],
         &mut write_scratch,
@@ -739,11 +732,10 @@ fn main() -> ! {
     }
     DEBUG_CHANNEL_PHASE.store(23, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_COMMANDS_SENT);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(24, Ordering::Release);
     let supported_commands = match wait_for_command_complete(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_READ_LOCAL_SUPPORTED_COMMANDS,
         &mut read_buffer,
         |command_complete| command_complete
@@ -760,11 +752,95 @@ fn main() -> ! {
     record_supported_commands(supported_commands.bytes);
     DEBUG_CHANNEL_PHASE.store(25, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_COMMANDS_COMPLETE);
-    pump_runtime(128);
+
+    DEBUG_CHANNEL_PHASE.store(25_0, Ordering::Release);
+    let classic_event_mask = classic_event_mask();
+    if let Err(error) = send_hci_command(
+        &mut bluetooth,
+        BLUETOOTH_HCI_OPCODE_SET_EVENT_MASK,
+        &classic_event_mask,
+        &mut write_scratch,
+    ) {
+        record_bluetooth_error(error);
+        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_SEND);
+    }
+    if let Err(error) = wait_for_command_complete_status_zero(
+        &mut bluetooth,
+        BLUETOOTH_HCI_OPCODE_SET_EVENT_MASK,
+        &mut read_buffer,
+    ) {
+        record_bluetooth_error(error);
+        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_FEATURES);
+    }
+
+    if set_event_mask_page_2_is_supported(&supported_commands.bytes) {
+        DEBUG_CHANNEL_PHASE.store(25_0_1, Ordering::Release);
+        let event_mask_2 = event_mask_page_2();
+        if let Err(error) = send_hci_command(
+            &mut bluetooth,
+            BLUETOOTH_HCI_OPCODE_SET_EVENT_MASK_PAGE_2,
+            &event_mask_2,
+            &mut write_scratch,
+        ) {
+            record_bluetooth_error(error);
+            fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_SEND);
+        }
+        if let Err(error) = wait_for_command_complete_status_zero(
+            &mut bluetooth,
+            BLUETOOTH_HCI_OPCODE_SET_EVENT_MASK_PAGE_2,
+            &mut read_buffer,
+        ) {
+            record_bluetooth_error(error);
+            fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_FEATURES);
+        }
+    }
+
+    if write_le_host_supported_is_supported(&supported_commands.bytes) {
+        DEBUG_CHANNEL_PHASE.store(25_1, Ordering::Release);
+        if let Err(error) = send_hci_command(
+            &mut bluetooth,
+            BLUETOOTH_HCI_OPCODE_WRITE_LE_HOST_SUPPORT,
+            &[1, 0],
+            &mut write_scratch,
+        ) {
+            record_bluetooth_error(error);
+            fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_SEND);
+        }
+        DEBUG_CHANNEL_PHASE.store(25_2, Ordering::Release);
+        if let Err(error) = wait_for_command_complete_status_zero(
+            &mut bluetooth,
+            BLUETOOTH_HCI_OPCODE_WRITE_LE_HOST_SUPPORT,
+            &mut read_buffer,
+        ) {
+            record_bluetooth_error(error);
+            fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_LE_FEATURES);
+        }
+    }
+
+    DEBUG_CHANNEL_PHASE.store(25_3, Ordering::Release);
+    let le_event_mask = all_le_events_mask();
+    if let Err(error) = send_hci_command(
+        &mut bluetooth,
+        BLUETOOTH_HCI_OPCODE_LE_SET_EVENT_MASK,
+        &le_event_mask,
+        &mut write_scratch,
+    ) {
+        record_bluetooth_error(error);
+        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_SEND);
+    }
+    DEBUG_CHANNEL_PHASE.store(25_4, Ordering::Release);
+    if let Err(error) = wait_for_command_complete_status_zero(
+        &mut bluetooth,
+        BLUETOOTH_HCI_OPCODE_LE_SET_EVENT_MASK,
+        &mut read_buffer,
+    ) {
+        record_bluetooth_error(error);
+        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_LE_FEATURES);
+    }
 
     DEBUG_CHANNEL_PHASE.store(26, Ordering::Release);
     if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_READ_LOCAL_SUPPORTED_FEATURES,
         &[],
         &mut write_scratch,
@@ -774,11 +850,10 @@ fn main() -> ! {
     }
     DEBUG_CHANNEL_PHASE.store(27, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_FEATURES_SENT);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(28, Ordering::Release);
     let features = match wait_for_command_complete(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_READ_LOCAL_SUPPORTED_FEATURES,
         &mut read_buffer,
         |command_complete| command_complete
@@ -799,11 +874,10 @@ fn main() -> ! {
     );
     DEBUG_CHANNEL_PHASE.store(29, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_FEATURES_COMPLETE);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(30, Ordering::Release);
     if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_LE_READ_LOCAL_SUPPORTED_FEATURES,
         &[],
         &mut write_scratch,
@@ -813,11 +887,10 @@ fn main() -> ! {
     }
     DEBUG_CHANNEL_PHASE.store(31, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_LE_FEATURES_SENT);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(32, Ordering::Release);
     let le_features = match wait_for_command_complete(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_LE_READ_LOCAL_SUPPORTED_FEATURES,
         &mut read_buffer,
         |command_complete| command_complete
@@ -838,11 +911,10 @@ fn main() -> ! {
     );
     DEBUG_CHANNEL_PHASE.store(33, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_LE_FEATURES_COMPLETE);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(34, Ordering::Release);
     if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_READ_BUFFER_SIZE,
         &[],
         &mut write_scratch,
@@ -852,11 +924,10 @@ fn main() -> ! {
     }
     DEBUG_CHANNEL_PHASE.store(35, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_BUFFER_SIZE_SENT);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(36, Ordering::Release);
     let buffer_size = match wait_for_command_complete(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_READ_BUFFER_SIZE,
         &mut read_buffer,
         |command_complete| command_complete.buffer_size().filter(|buffer_size| buffer_size.status == 0),
@@ -875,11 +946,10 @@ fn main() -> ! {
     );
     DEBUG_CHANNEL_PHASE.store(37, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_BUFFER_SIZE_COMPLETE);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(38, Ordering::Release);
     if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_LE_READ_BUFFER_SIZE,
         &[],
         &mut write_scratch,
@@ -889,11 +959,10 @@ fn main() -> ! {
     }
     DEBUG_CHANNEL_PHASE.store(39, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_LE_BUFFER_SIZE_SENT);
-    pump_runtime(128);
 
     DEBUG_CHANNEL_PHASE.store(40, Ordering::Release);
     let le_buffer_size = match wait_for_command_complete(
-        bluetooth.adapter_mut(),
+        &mut bluetooth,
         BLUETOOTH_HCI_OPCODE_LE_READ_BUFFER_SIZE,
         &mut read_buffer,
         |command_complete| command_complete
@@ -912,123 +981,61 @@ fn main() -> ! {
     );
     DEBUG_CHANNEL_PHASE.store(41, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_LE_BUFFER_SIZE_COMPLETE);
-    pump_runtime(128);
 
-    DEBUG_CHANNEL_PHASE.store(42, Ordering::Release);
-    let advertising_parameters = legacy_advertising_parameters();
-    if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
-        BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_PARAMETERS,
-        &advertising_parameters,
-        &mut write_scratch,
-    ) {
-        record_bluetooth_error(error);
-        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_SEND);
-    }
-    DEBUG_CHANNEL_PHASE.store(43, Ordering::Release);
-    set_status(&display, STATUS_BLUETOOTH_HCI_ADV_PARAMS_SENT);
-    pump_runtime(128);
+    const LEGACY_ADVERTISING_DATA: [u8; 14] = [
+        0x02, 0x01, 0x06, 0x0a, 0x09, b'F', b'u', b's', b'i', b'o', b'n', b' ', b'D', b'B',
+    ];
+    const LEGACY_SCAN_RESPONSE_DATA: [u8; 10] =
+        [0x09, 0x09, b'P', b'i', b'c', b'o', b'2', b'W', b' ', b'B'];
+    let advertising_parameters = BluetoothAdvertisingParameters {
+        mode: BluetoothAdvertisingMode::ConnectableUndirected,
+        connectable: true,
+        scannable: true,
+        discoverable: true,
+        anonymous: false,
+        interval_min_units: 0x0800,
+        interval_max_units: 0x0800,
+        primary_phy: BluetoothLePhy::Le1M,
+        secondary_phy: None,
+    };
 
-    DEBUG_CHANNEL_PHASE.store(44, Ordering::Release);
-    if let Err(error) = wait_for_command_complete_status_zero(
-        bluetooth.adapter_mut(),
-        BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_PARAMETERS,
-        &mut read_buffer,
-    ) {
-        record_bluetooth_error(error);
-        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_ADV_PARAMS);
-    }
-    DEBUG_CHANNEL_PHASE.store(45, Ordering::Release);
-    set_status(&display, STATUS_BLUETOOTH_HCI_ADV_PARAMS_COMPLETE);
-    pump_runtime(128);
-
-    DEBUG_CHANNEL_PHASE.store(46, Ordering::Release);
-    let advertising_data = legacy_advertising_data();
-    if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
-        BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_DATA,
-        &advertising_data,
-        &mut write_scratch,
-    ) {
-        record_bluetooth_error(error);
-        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_SEND);
-    }
+    DEBUG_CHANNEL_LAST_BLUETOOTH_ADV_PARAM_CANDIDATE.store(1, Ordering::Release);
     DEBUG_CHANNEL_PHASE.store(47, Ordering::Release);
-    set_status(&display, STATUS_BLUETOOTH_HCI_ADV_DATA_SENT);
-    pump_runtime(128);
-
+    set_status(&display, STATUS_BLUETOOTH_HCI_ADV_PARAMS_SENT);
     DEBUG_CHANNEL_PHASE.store(48, Ordering::Release);
-    if let Err(error) = wait_for_command_complete_status_zero(
-        bluetooth.adapter_mut(),
-        BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_DATA,
-        &mut read_buffer,
-    ) {
-        record_bluetooth_error(error);
-        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_ADV_DATA);
-    }
-    DEBUG_CHANNEL_PHASE.store(49, Ordering::Release);
-    set_status(&display, STATUS_BLUETOOTH_HCI_ADV_DATA_COMPLETE);
-    pump_runtime(128);
-
-    DEBUG_CHANNEL_PHASE.store(50, Ordering::Release);
-    let scan_response_data = legacy_scan_response_data();
-    if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
-        BLUETOOTH_HCI_OPCODE_LE_SET_SCAN_RESPONSE_DATA,
-        &scan_response_data,
-        &mut write_scratch,
-    ) {
-        record_bluetooth_error(error);
-        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_SEND);
-    }
+    set_status(&display, STATUS_BLUETOOTH_HCI_ADV_PARAMS_COMPLETE);
     DEBUG_CHANNEL_PHASE.store(51, Ordering::Release);
-    set_status(&display, STATUS_BLUETOOTH_HCI_SCAN_RESPONSE_SENT);
-    pump_runtime(128);
-
-    DEBUG_CHANNEL_PHASE.store(52, Ordering::Release);
-    if let Err(error) = wait_for_command_complete_status_zero(
-        bluetooth.adapter_mut(),
-        BLUETOOTH_HCI_OPCODE_LE_SET_SCAN_RESPONSE_DATA,
-        &mut read_buffer,
-    ) {
-        record_bluetooth_error(error);
-        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_SCAN_RESPONSE);
-    }
+    set_status(&display, STATUS_BLUETOOTH_HCI_ADV_DATA_SENT);
     DEBUG_CHANNEL_PHASE.store(53, Ordering::Release);
-    set_status(&display, STATUS_BLUETOOTH_HCI_SCAN_RESPONSE_COMPLETE);
-    pump_runtime(128);
-
-    DEBUG_CHANNEL_PHASE.store(54, Ordering::Release);
-    if let Err(error) = send_hci_command(
-        bluetooth.adapter_mut(),
-        BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_ENABLE,
-        &[1],
-        &mut write_scratch,
-    ) {
-        record_bluetooth_error(error);
-        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_SEND);
-    }
+    set_status(&display, STATUS_BLUETOOTH_HCI_ADV_DATA_COMPLETE);
     DEBUG_CHANNEL_PHASE.store(55, Ordering::Release);
+    set_status(&display, STATUS_BLUETOOTH_HCI_SCAN_RESPONSE_SENT);
+    DEBUG_CHANNEL_PHASE.store(57, Ordering::Release);
+    set_status(&display, STATUS_BLUETOOTH_HCI_SCAN_RESPONSE_COMPLETE);
+    DEBUG_CHANNEL_PHASE.store(59, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_ADV_ENABLE_SENT);
-    pump_runtime(128);
-
-    DEBUG_CHANNEL_PHASE.store(56, Ordering::Release);
-    if let Err(error) = wait_for_command_complete_status_zero(
-        bluetooth.adapter_mut(),
-        BLUETOOTH_HCI_OPCODE_LE_SET_ADVERTISING_ENABLE,
-        &mut read_buffer,
+    if let Err(error) = bluetooth.start_advertising(
+        advertising_parameters,
+        &LEGACY_ADVERTISING_DATA,
+        Some(&LEGACY_SCAN_RESPONSE_DATA),
     ) {
         record_bluetooth_error(error);
-        fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_ADV_ENABLE);
+        match error.kind() {
+            BluetoothErrorKind::Invalid => fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_ADV_DATA),
+            BluetoothErrorKind::Unsupported | BluetoothErrorKind::StateConflict => {
+                fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_ADV_PARAMS)
+            }
+            BluetoothErrorKind::Busy => fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_ADV_ENABLE),
+            _ => fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_ADV_ENABLE),
+        }
     }
-    DEBUG_CHANNEL_PHASE.store(57, Ordering::Release);
+    DEBUG_CHANNEL_PHASE.store(61, Ordering::Release);
     set_status(&display, STATUS_BLUETOOTH_HCI_ADV_ENABLE_COMPLETE);
-    pump_runtime(128);
 
-    DEBUG_CHANNEL_PHASE.store(58, Ordering::Release);
-    match bluetooth.adapter().is_powered() {
+    DEBUG_CHANNEL_PHASE.store(62, Ordering::Release);
+    match bluetooth.is_powered() {
         Ok(true) => {
-            DEBUG_CHANNEL_PHASE.store(59, Ordering::Release);
+            DEBUG_CHANNEL_PHASE.store(63, Ordering::Release);
         }
         Ok(false) => fatal_status(&display, STATUS_ERROR_BLUETOOTH_HCI_ADV_ENABLE),
         Err(error) => {
@@ -1037,10 +1044,18 @@ fn main() -> ! {
         }
     }
     set_status(&display, STATUS_BLUETOOTH_HCI_ADVERTISING_ENABLED);
-    pump_runtime(128);
 
-    DEBUG_CHANNEL_PHASE.store(60, Ordering::Release);
+    DEBUG_CHANNEL_PHASE.store(0x40, Ordering::Release);
     loop {
+        match bluetooth.wait_frame(Some(1_000)) {
+            Ok(true) => match bluetooth.recv_frame(&mut read_buffer) {
+                Ok(Some(frame)) => record_observed_hci_frame(frame),
+                Ok(None) => {}
+                Err(error) => record_bluetooth_error(error),
+            },
+            Ok(false) => {}
+            Err(error) => record_bluetooth_error(error),
+        }
         wait_for_runtime_progress();
     }
 }

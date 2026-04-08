@@ -611,17 +611,68 @@ fn build_generated_async_poll_stack_trait_supports_spawn_generated() {
 }
 
 #[test]
-fn missing_generated_async_poll_stack_contract_is_rejected_by_default() {
+fn missing_generated_async_poll_stack_contract_is_derived_automatically() {
     let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
     let payload = [0_u8; 384];
-    assert!(matches!(
-        executor.spawn(async move {
+    let sample_payload = [0_u8; 384];
+    let sample = async move {
+        let _ = sample_payload[0];
+        5_u8
+    };
+    let expected_bytes = size_of_val(&sample).max(generated_explicit_async_poll_stack_bytes::<
+        GeneratedAsyncPollStackMetadataAnchorFuture,
+    >());
+
+    let handle = executor
+        .spawn(async move {
             let _ = payload[0];
             5_u8
-        }),
-        Err(ExecutorError::Unsupported)
-    ));
+        })
+        .expect("missing generated metadata should derive one automatic poll-stack contract");
+
+    assert_eq!(
+        handle.admission().poll_stack,
+        AsyncPollStackContract::Automatic {
+            bytes: expected_bytes,
+        }
+    );
+    assert_eq!(handle.join().expect("task should complete"), 5_u8);
+}
+
+#[test]
+fn automatic_async_poll_stack_contract_honors_runtime_sizing_strategy() {
+    let _guard = crate::thread::runtime_test_guard();
+    let executor = Executor::new(
+        ExecutorConfig::new().with_sizing_strategy(RuntimeSizingStrategy::GlobalNearestRoundUp),
+    );
+    let payload = [0_u8; 384];
+    let sample_payload = [0_u8; 384];
+    let sample = async move {
+        let _ = sample_payload[0];
+        7_u8
+    };
+    let base_bytes = size_of_val(&sample).max(generated_explicit_async_poll_stack_bytes::<
+        GeneratedAsyncPollStackMetadataAnchorFuture,
+    >());
+    let expected_bytes = RuntimeSizingStrategy::GlobalNearestRoundUp
+        .apply_bytes(base_bytes)
+        .expect("automatic async poll-stack sizing should not overflow");
+
+    let handle = executor
+        .spawn(async move {
+            let _ = payload[0];
+            7_u8
+        })
+        .expect("automatic poll-stack derivation should respect runtime sizing");
+
+    assert_eq!(
+        handle.admission().poll_stack,
+        AsyncPollStackContract::Automatic {
+            bytes: expected_bytes,
+        }
+    );
+    assert_eq!(handle.join().expect("task should complete"), 7_u8);
 }
 
 #[test]

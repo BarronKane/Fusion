@@ -7,6 +7,39 @@ pub mod context;
 #[path = "dma/dma.rs"]
 /// Cortex-M bare-metal DMA backend implementation.
 pub mod dma;
+/// Cortex-M bare-metal entry boundary owned by Fusion.
+pub mod entry {
+    pub use crate::contract::pal::runtime::entry::{
+        EntryBaseContract,
+        EntryImplementationKind,
+        EntryKind,
+        EntrySupport,
+    };
+
+    #[doc(hidden)]
+    pub use cortex_m_rt as __rt;
+
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct PlatformEntry;
+
+    impl PlatformEntry {
+        #[must_use]
+        pub const fn new() -> Self {
+            Self
+        }
+    }
+
+    impl EntryBaseContract for PlatformEntry {
+        fn support(&self) -> EntrySupport {
+            EntrySupport::fusion_owned_bare_metal()
+        }
+    }
+
+    #[must_use]
+    pub const fn system_entry() -> PlatformEntry {
+        PlatformEntry::new()
+    }
+}
 #[path = "event/event.rs"]
 /// Cortex-M bare-metal event backend implementation.
 pub mod event;

@@ -31,9 +31,11 @@ use fusion_sys::alloc::{
     AllocationStrategy,
     Allocator,
     ControlLease,
+    ExtentLease,
     Slab,
 };
 use fusion_sys::thread::{
+    allocate_owned_runtime_slab,
     CarrierCountPolicy,
     CarrierSpawnLocalityPolicy,
     CarrierStealPolicy,
@@ -248,18 +250,41 @@ impl<'a> ThreadPoolConfig<'a> {
     /// Returns an honest error when the selected machine cannot surface the topology count
     /// required by `profile`.
     pub fn with_carrier_profile(
-        mut self,
+        self,
         profile: CarrierWorkloadProfile,
     ) -> Result<Self, ThreadPoolError> {
         let count = system_carrier()
             .resolve_profile_count(profile)
             .map_err(|_| ThreadPoolError::unsupported())?
             .ok_or_else(ThreadPoolError::unsupported)?;
-        self.min_threads = count;
-        self.max_threads = count;
-        self.steal_boundary = StealBoundary::from(profile.steal_policy());
-        self.spawn_locality_policy = profile.spawn_locality_policy();
-        Ok(self)
+        Ok(self.apply_carrier_profile(profile, count))
+    }
+
+    /// Returns one copy configured from a canonical carrier workload profile, reserving the
+    /// current observed carrier for non-pool work when requested.
+    ///
+    /// This is the honest surface for runtimes that keep the caller on one hardware execution
+    /// resource and only want the pool to realize the remaining spawned carriers. Small SMP
+    /// systems like RP2350 often need exactly this split: one current carrier stays attached to
+    /// root/bootstrap logic while one or more sibling carriers run courier work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an honest error when the selected machine cannot surface the topology count
+    /// required by `profile`, or when reserving the current carrier would leave no spawned worker
+    /// carriers at all.
+    pub fn with_spawned_carrier_profile(
+        self,
+        profile: CarrierWorkloadProfile,
+        reserve_current_carrier: bool,
+    ) -> Result<Self, ThreadPoolError> {
+        let total = system_carrier()
+            .resolve_profile_count(profile)
+            .map_err(|_| ThreadPoolError::unsupported())?
+            .ok_or_else(ThreadPoolError::unsupported)?;
+        let count = spawned_carrier_count(total, reserve_current_carrier)
+            .ok_or_else(ThreadPoolError::unsupported)?;
+        Ok(self.apply_carrier_profile(profile, count))
     }
 
     /// Returns one copy with an explicit spawn-locality policy.
@@ -269,6 +294,14 @@ impl<'a> ThreadPoolConfig<'a> {
         spawn_locality_policy: CarrierSpawnLocalityPolicy,
     ) -> Self {
         self.spawn_locality_policy = spawn_locality_policy;
+        self
+    }
+
+    fn apply_carrier_profile(mut self, profile: CarrierWorkloadProfile, count: usize) -> Self {
+        self.min_threads = count;
+        self.max_threads = count;
+        self.steal_boundary = StealBoundary::from(profile.steal_policy());
+        self.spawn_locality_policy = profile.spawn_locality_policy();
         self
     }
 
@@ -292,6 +325,14 @@ impl Default for ThreadPoolConfig<'_> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+const fn spawned_carrier_count(total: usize, reserve_current_carrier: bool) -> Option<usize> {
+    let reserved = if reserve_current_carrier { 1 } else { 0 };
+    let Some(spawned) = total.checked_sub(reserved) else {
+        return None;
+    };
+    if spawned == 0 { None } else { Some(spawned) }
 }
 
 /// Public snapshot of carrier-pool statistics.
@@ -324,6 +365,7 @@ struct ThreadPoolShared {
 struct ThreadPoolSharedBlock {
     header: SharedHeader,
     region: Region,
+    owned_backing: Option<ExtentLease>,
     shared: ThreadPoolShared,
 }
 
@@ -347,23 +389,8 @@ impl ThreadPoolSharedLease {
         let memory = system_mem();
         let page = memory.page_info().alloc_granule.get();
         let len = thread_pool_align_up(size_of::<ThreadPoolSharedBlock>(), page)?;
-        let region = if let Some(region) = try_take_cached_thread_pool_shared_region(len)? {
-            region
-        } else {
-            unsafe {
-                memory.map(&MapRequest {
-                    len,
-                    align: page.max(align_of::<ThreadPoolSharedBlock>()),
-                    protect: Protect::READ | Protect::WRITE,
-                    flags: MapFlags::PRIVATE,
-                    attrs: RegionAttrs::VIRTUAL_ONLY,
-                    cache: CachePolicy::Default,
-                    placement: Placement::Anywhere,
-                    backing: Backing::Anonymous,
-                })
-            }
-            .map_err(thread_pool_error_from_mem)?
-        };
+        let align = page.max(align_of::<ThreadPoolSharedBlock>());
+        let (region, owned_backing) = allocate_thread_pool_shared_region(len, align)?;
 
         let ptr = NonNull::new(region.base.cast::<ThreadPoolSharedBlock>())
             .ok_or_else(ThreadPoolError::invalid)?;
@@ -371,6 +398,7 @@ impl ThreadPoolSharedLease {
             ptr.as_ptr().write(ThreadPoolSharedBlock {
                 header: SharedHeader::new(),
                 region,
+                owned_backing,
                 shared,
             });
         }
@@ -410,9 +438,13 @@ impl Drop for ThreadPoolSharedLease {
         let block = self.ptr.as_ptr();
         unsafe {
             ptr::drop_in_place(core::ptr::addr_of_mut!((*block).shared));
-            let region = (*block).region;
-            if !cache_thread_pool_shared_region(region).unwrap_or(false) {
-                let _ = system_mem().unmap(region);
+            if (*block).owned_backing.is_some() {
+                ptr::drop_in_place(core::ptr::addr_of_mut!((*block).owned_backing));
+            } else {
+                let region = (*block).region;
+                if !cache_thread_pool_shared_region(region).unwrap_or(false) {
+                    let _ = system_mem().unmap(region);
+                }
             }
         }
     }
@@ -453,6 +485,40 @@ fn cache_thread_pool_shared_region(region: Region) -> Result<bool, ThreadPoolErr
         }
     }
     Ok(false)
+}
+
+fn allocate_thread_pool_shared_region(
+    len: usize,
+    align: usize,
+) -> Result<(Region, Option<ExtentLease>), ThreadPoolError> {
+    if let Some(region) = try_take_cached_thread_pool_shared_region(len)? {
+        return Ok((region, None));
+    }
+
+    let memory = system_mem();
+    match unsafe {
+        memory.map(&MapRequest {
+            len,
+            align,
+            protect: Protect::READ | Protect::WRITE,
+            flags: MapFlags::PRIVATE,
+            attrs: RegionAttrs::VIRTUAL_ONLY,
+            cache: CachePolicy::Default,
+            placement: Placement::Anywhere,
+            backing: Backing::Anonymous,
+        })
+    } {
+        Ok(region) => Ok((region, None)),
+        Err(error) if error.kind == fusion_pal::sys::mem::MemErrorKind::Unsupported => {
+            let Some(slab) = allocate_owned_runtime_slab(len, align)
+                .map_err(thread_pool_error_from_runtime_backing)?
+            else {
+                return Err(thread_pool_error_from_mem(error));
+            };
+            Ok((slab.lease.region(), Some(slab.lease)))
+        }
+        Err(error) => Err(thread_pool_error_from_mem(error)),
+    }
 }
 
 type InlineThreadJobBytes = CachePadded<[u8; THREAD_POOL_JOB_INLINE_BYTES]>;
@@ -909,4 +975,33 @@ const fn thread_pool_error_from_alloc(error: fusion_sys::alloc::AllocError) -> T
     }
 }
 
+const fn thread_pool_error_from_runtime_backing(
+    error: fusion_sys::thread::RuntimeBackingError,
+) -> ThreadPoolError {
+    match error.kind() {
+        fusion_sys::thread::RuntimeBackingErrorKind::Unsupported => ThreadPoolError::unsupported(),
+        fusion_sys::thread::RuntimeBackingErrorKind::Invalid => ThreadPoolError::invalid(),
+        fusion_sys::thread::RuntimeBackingErrorKind::ResourceExhausted => {
+            ThreadPoolError::resource_exhausted()
+        }
+        fusion_sys::thread::RuntimeBackingErrorKind::StateConflict => {
+            ThreadPoolError::state_conflict()
+        }
+    }
+}
+
 pub use fusion_sys::thread::WorkerId;
+
+#[cfg(test)]
+mod tests {
+    use super::spawned_carrier_count;
+
+    #[test]
+    fn spawned_carrier_count_reserves_current_carrier_honestly() {
+        assert_eq!(spawned_carrier_count(2, true), Some(1));
+        assert_eq!(spawned_carrier_count(8, true), Some(7));
+        assert_eq!(spawned_carrier_count(4, false), Some(4));
+        assert_eq!(spawned_carrier_count(1, true), None);
+        assert_eq!(spawned_carrier_count(0, false), None);
+    }
+}

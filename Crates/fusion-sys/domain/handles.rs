@@ -90,6 +90,13 @@ impl<
     }
 
     #[must_use]
+    pub fn pedigree<const MAX_DEPTH: usize>(
+        self,
+    ) -> Result<crate::courier::CourierPedigree<'a, MAX_DEPTH>, crate::domain::DomainError> {
+        self.registry.courier_pedigree(self.record().descriptor.id)
+    }
+
+    #[must_use]
     pub fn metadata_entries(self) -> impl Iterator<Item = &'registry CourierMetadataEntry<'a>> {
         let record: &'registry CourierRecord<
             'a,

@@ -13,14 +13,18 @@ use core::sync::atomic::{
 
 use fusion_hal::contract::drivers::bus::gpio::GpioOutputPinContract;
 use crate::runtime::{
-    spawn_with_stack,
+    request_runtime_dispatch,
+    spawn,
     wait_for_runtime_progress,
 };
 use fusion_hal::contract::drivers::bus::gpio::{
     GpioError,
     GpioErrorKind,
 };
-use fusion_std::thread::yield_now;
+use fusion_std::thread::{
+    GreenHandle,
+    yield_now,
+};
 use fusion_sys::channel::{
     ChannelError,
     ChannelErrorKind,
@@ -229,6 +233,7 @@ pub struct Rp2350FiberShiftRegister74hc595Service<
     latch_clock: ExampleGpioPin,
     output_enable: ExampleGpioPin,
     spawned: bool,
+    service_handle: Option<GreenHandle<()>>,
 }
 
 impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
@@ -271,6 +276,7 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
             latch_clock,
             output_enable,
             spawned: false,
+            service_handle: None,
         };
         RP2350_SHIFT_INIT_PHASE.store(7, Ordering::Release);
         service.write_frame_internal(&[0; FRAME_BYTES])?;
@@ -295,9 +301,7 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
     /// # Errors
     ///
     /// Returns one honest GPIO error when the service fiber cannot be admitted.
-    pub fn spawn<const STACK_BYTES: usize>(
-        self: core::pin::Pin<&'static mut Self>,
-    ) -> Result<(), GpioError> {
+    pub fn spawn(self: core::pin::Pin<&'static mut Self>) -> Result<(), GpioError> {
         // SAFETY: this service is pinned in static storage by the examples and never moved again.
         let this = unsafe { self.get_unchecked_mut() };
         if this.spawned {
@@ -306,10 +310,13 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
         this.spawned = true;
 
         let service_addr = this as *mut Self as usize;
-        spawn_with_stack::<STACK_BYTES, _, _>(move || {
-            run_shift_register_service::<FRAME_BYTES, COMMAND_CAPACITY, STATUS_CAPACITY>(service_addr)
+        let handle = spawn(move || {
+            run_shift_register_service::<FRAME_BYTES, COMMAND_CAPACITY, STATUS_CAPACITY>(
+                service_addr,
+            )
         })
         .map_err(gpio_error_from_fiber)?;
+        this.service_handle = Some(handle);
         Ok(())
     }
 
@@ -463,7 +470,10 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
                 .commands
                 .try_send(self.client.command_producer, command)
             {
-                Ok(()) => break,
+                Ok(()) => {
+                    request_runtime_dispatch();
+                    break;
+                }
                 Err(error) if error.kind() == ChannelErrorKind::Busy => {
                     wait_for_service_progress()?
                 }

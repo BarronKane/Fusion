@@ -155,6 +155,7 @@ const LINUX_THREAD_SUPPORT: ThreadSupport = ThreadSupport {
         lock: ThreadGuarantee::Unsupported,
         locality: ThreadGuarantee::Unsupported,
         usage_observation: ThreadGuarantee::Unknown,
+        default_explicit_backing: None,
         authorities: ThreadAuthoritySet::OPERATING_SYSTEM,
         implementation: crate::contract::pal::runtime::thread::ThreadImplementationKind::Native,
     },

@@ -665,13 +665,11 @@ fn rp2350_pico2w_firmware_assets(
     wifi_available: bool,
 ) -> Cyw43439FirmwareAssets {
     let packed_wifi = if wifi_available {
-        Some(if bluetooth_available {
-            Cyw43439PackedWlanFirmwareImage {
-                image: PICO2W_CYW43439_WIFI_BT_COMBINED_FW,
-                firmware_len: PICO2W_CYW43439_WIFI_BT_FW_LEN,
-                clm_len: PICO2W_CYW43439_WIFI_BT_CLM_LEN,
-            }
-        } else {
+        Some({
+            // Pico's upstream CYW43 stack uses the stock `w43439A0_7_95_49_00_combined`
+            // image even when Bluetooth is enabled, and then layers the dedicated
+            // `cyw43_btfw_43439` patch on top. That pairing is the official board truth.
+            let _ = bluetooth_available;
             Cyw43439PackedWlanFirmwareImage {
                 image: PICO2W_CYW43439_WIFI_ONLY_COMBINED_FW,
                 firmware_len: PICO2W_CYW43439_WIFI_ONLY_FW_LEN,

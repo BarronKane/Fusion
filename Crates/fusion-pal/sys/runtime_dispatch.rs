@@ -7,6 +7,7 @@
 
 use core::sync::atomic::{
     AtomicBool,
+    AtomicU32,
     AtomicUsize,
     Ordering,
 };
@@ -36,6 +37,8 @@ static RUNTIME_DISPATCH_CONTEXTS: [AtomicUsize; RUNTIME_DISPATCH_REGISTRY_CAPACI
 static RUNTIME_DISPATCH_PENDING: [AtomicUsize; RUNTIME_DISPATCH_REGISTRY_CAPACITY] =
     [const { AtomicUsize::new(0) }; RUNTIME_DISPATCH_REGISTRY_CAPACITY];
 static RUNTIME_DISPATCH_RUNNING: AtomicBool = AtomicBool::new(false);
+#[unsafe(no_mangle)]
+pub static RUNTIME_DISPATCH_PHASE: AtomicU32 = AtomicU32::new(0);
 
 /// Registers one runtime-dispatch callback with one opaque caller context.
 ///
@@ -94,12 +97,20 @@ pub fn unregister_runtime_dispatch_callback(
 ///
 /// Returns `Invalid` for malformed cookies and `StateConflict` when the cookie is not bound.
 pub fn request_runtime_dispatch(cookie: RuntimeDispatchCookie) -> Result<(), HardwareError> {
+    RUNTIME_DISPATCH_PHASE.store(1, Ordering::Release);
     let index = runtime_dispatch_cookie_index(cookie)?;
+    RUNTIME_DISPATCH_PHASE.store(2, Ordering::Release);
     if RUNTIME_DISPATCH_CALLBACKS[index].load(Ordering::Acquire) == 0 {
         return Err(HardwareError::state_conflict());
     }
     RUNTIME_DISPATCH_PENDING[index].store(1, Ordering::Release);
+    RUNTIME_DISPATCH_PHASE.store(3, Ordering::Release);
+    if RUNTIME_DISPATCH_RUNNING.load(Ordering::Acquire) {
+        RUNTIME_DISPATCH_PHASE.store(5, Ordering::Release);
+        return Ok(());
+    }
     schedule_runtime_dispatch();
+    RUNTIME_DISPATCH_PHASE.store(4, Ordering::Release);
     Ok(())
 }
 
@@ -108,26 +119,18 @@ pub fn request_runtime_dispatch(cookie: RuntimeDispatchCookie) -> Result<(), Har
 /// This is the backend-facing path invoked from reserved deferred-dispatch handlers such as
 /// Cortex-M PendSV. Callers outside the PAL should use [`request_runtime_dispatch()`] instead.
 pub fn dispatch_pending_runtime_callbacks() {
+    RUNTIME_DISPATCH_PHASE.store(10, Ordering::Release);
     if RUNTIME_DISPATCH_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         return;
     }
-
-    loop {
-        dispatch_pending_runtime_callback_batch();
-
-        if !runtime_dispatch_pending_any() {
-            break;
-        }
-    }
+    RUNTIME_DISPATCH_PHASE.store(11, Ordering::Release);
+    dispatch_pending_runtime_callback_batch();
 
     RUNTIME_DISPATCH_RUNNING.store(false, Ordering::Release);
-
-    if runtime_dispatch_pending_any() {
-        schedule_runtime_dispatch();
-    }
+    RUNTIME_DISPATCH_PHASE.store(12, Ordering::Release);
 }
 
 fn runtime_dispatch_cookie_index(cookie: RuntimeDispatchCookie) -> Result<usize, HardwareError> {
@@ -139,12 +142,6 @@ fn runtime_dispatch_cookie_index(cookie: RuntimeDispatchCookie) -> Result<usize,
         return Err(HardwareError::invalid());
     }
     Ok(index)
-}
-
-fn runtime_dispatch_pending_any() -> bool {
-    RUNTIME_DISPATCH_PENDING
-        .iter()
-        .any(|pending| pending.load(Ordering::Acquire) != 0)
 }
 
 fn dispatch_pending_runtime_callback_batch() {
@@ -168,6 +165,7 @@ fn dispatch_pending_runtime_callback_batch() {
 }
 
 fn dispatch_pending_runtime_callbacks_once() {
+    RUNTIME_DISPATCH_PHASE.store(20, Ordering::Release);
     if RUNTIME_DISPATCH_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -177,16 +175,23 @@ fn dispatch_pending_runtime_callbacks_once() {
 
     dispatch_pending_runtime_callback_batch();
     RUNTIME_DISPATCH_RUNNING.store(false, Ordering::Release);
+    RUNTIME_DISPATCH_PHASE.store(21, Ordering::Release);
 }
 
 fn schedule_runtime_dispatch() {
+    RUNTIME_DISPATCH_PHASE.store(30, Ordering::Release);
     ensure_runtime_reserved_wake_vectors_best_effort();
+    RUNTIME_DISPATCH_PHASE.store(31, Ordering::Release);
     match request_reserved_pendsv_dispatch() {
-        Ok(()) => {}
+        Ok(()) => {
+            RUNTIME_DISPATCH_PHASE.store(32, Ordering::Release);
+        }
         Err(error) if error.kind() == VectorErrorKind::Unsupported => {
+            RUNTIME_DISPATCH_PHASE.store(33, Ordering::Release);
             dispatch_pending_runtime_callbacks_once();
         }
         Err(_) => {
+            RUNTIME_DISPATCH_PHASE.store(34, Ordering::Release);
             dispatch_pending_runtime_callbacks_once();
         }
     }

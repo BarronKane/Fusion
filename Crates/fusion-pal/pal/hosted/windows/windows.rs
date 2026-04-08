@@ -4,6 +4,36 @@ pub mod context;
 #[path = "dma/dma.rs"]
 /// Windows fusion-pal DMA backend implementation.
 pub mod dma;
+/// Windows hosted process entry remains ambient to the operating system.
+pub mod entry {
+    pub use crate::contract::pal::runtime::entry::{
+        EntryBaseContract,
+        EntryImplementationKind,
+        EntryKind,
+        EntrySupport,
+    };
+
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct PlatformEntry;
+
+    impl PlatformEntry {
+        #[must_use]
+        pub const fn new() -> Self {
+            Self
+        }
+    }
+
+    impl EntryBaseContract for PlatformEntry {
+        fn support(&self) -> EntrySupport {
+            EntrySupport::ambient_hosted()
+        }
+    }
+
+    #[must_use]
+    pub const fn system_entry() -> PlatformEntry {
+        PlatformEntry::new()
+    }
+}
 /// Windows atomic surface remains unsupported for now.
 pub mod atomic {
     pub use crate::contract::pal::runtime::atomic::{

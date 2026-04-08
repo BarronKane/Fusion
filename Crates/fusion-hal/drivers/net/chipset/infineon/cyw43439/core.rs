@@ -211,9 +211,9 @@ where
 
     pub(crate) fn end_driver_activity(&mut self) {
         self.activity_depth = self.activity_depth.saturating_sub(1);
-        let _ = self
-            .hardware
-            .set_driver_activity_indicator(self.activity_depth != 0);
+        if self.activity_depth != 0 {
+            let _ = self.hardware.set_driver_activity_indicator(true);
+        }
     }
 
     pub(crate) fn sync_driver_activity_indicator(&mut self) {

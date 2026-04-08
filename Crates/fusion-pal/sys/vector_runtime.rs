@@ -4,6 +4,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{
     AtomicBool,
     AtomicU8,
+    AtomicU32,
     Ordering,
 };
 
@@ -45,6 +46,7 @@ impl RuntimeVectorBroker {
     }
 
     fn ensure(&self) -> Result<(), VectorError> {
+        RUNTIME_VECTOR_PHASE.store(1, Ordering::Release);
         loop {
             match self.state.load(Ordering::Acquire) {
                 RUNTIME_VECTOR_READY => return Ok(()),
@@ -66,19 +68,23 @@ impl RuntimeVectorBroker {
 
                     match bootstrap_runtime_vector_builder() {
                         Ok(Some(builder)) => {
+                            RUNTIME_VECTOR_PHASE.store(2, Ordering::Release);
                             // SAFETY: successful initialization happens once and the builder stays
                             // pinned in place for process lifetime behind the broker lock.
                             unsafe { (*self.builder.get()).write(builder) };
                             self.state.store(RUNTIME_VECTOR_READY, Ordering::Release);
+                            RUNTIME_VECTOR_PHASE.store(3, Ordering::Release);
                             return Ok(());
                         }
                         Ok(None) => {
                             self.state.store(RUNTIME_VECTOR_SKIPPED, Ordering::Release);
+                            RUNTIME_VECTOR_PHASE.store(4, Ordering::Release);
                             return Err(VectorError::unsupported());
                         }
                         Err(error) => {
                             self.state
                                 .store(RUNTIME_VECTOR_UNINITIALIZED, Ordering::Release);
+                            RUNTIME_VECTOR_PHASE.store(5, Ordering::Release);
                             return Err(error);
                         }
                     }
@@ -132,6 +138,8 @@ impl Drop for RuntimeVectorBrokerGuard<'_> {
 }
 
 static RUNTIME_VECTOR_BROKER: RuntimeVectorBroker = RuntimeVectorBroker::new();
+#[unsafe(no_mangle)]
+pub static RUNTIME_VECTOR_PHASE: AtomicU32 = AtomicU32::new(0);
 
 unsafe extern "C" fn reserved_runtime_dispatch_handler() {
     crate::sys::runtime_dispatch::dispatch_pending_runtime_callbacks();
@@ -152,6 +160,7 @@ pub fn with_runtime_vector_builder<R>(
 }
 
 fn bootstrap_runtime_vector_builder() -> Result<Option<PlatformVectorBuilder>, VectorError> {
+    RUNTIME_VECTOR_PHASE.store(10, Ordering::Release);
     let vector = system_vector();
     let support = VectorBaseContract::support(&vector);
     if !support
@@ -174,10 +183,13 @@ fn bootstrap_runtime_vector_builder() -> Result<Option<PlatformVectorBuilder>, V
             domain: mode.domain,
         },
     )?;
+    RUNTIME_VECTOR_PHASE.store(11, Ordering::Release);
 
     match bind_reserved_event_timeout_wake(&mut builder, None) {
         Ok(()) => {
+            RUNTIME_VECTOR_PHASE.store(12, Ordering::Release);
             bind_reserved_runtime_dispatch(&mut builder, None, reserved_runtime_dispatch_handler)?;
+            RUNTIME_VECTOR_PHASE.store(13, Ordering::Release);
             Ok(Some(builder))
         }
         Err(error)

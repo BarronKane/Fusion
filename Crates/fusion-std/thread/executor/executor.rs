@@ -307,6 +307,8 @@ impl AsyncTaskAdmission {
 pub enum AsyncPollStackContract {
     /// No honest poll-stack bound has been attached.
     Unknown,
+    /// One runtime-derived poll-stack budget was attached automatically.
+    Automatic { bytes: usize },
     /// One build-generated poll-stack budget was emitted for this exact future type.
     Generated { bytes: usize },
     /// One explicit poll-stack byte budget was attached to the task admission.
@@ -406,12 +408,26 @@ fn generated_async_poll_stack_bytes_by_type_name(type_name: &str) -> Option<usiz
         .map(|index| GENERATED_ASYNC_POLL_STACK_TASKS[index].poll_stack_bytes)
 }
 
-fn generated_async_poll_stack_contract<F: 'static>() -> Option<AsyncPollStackContract> {
-    // TODO: unnamed async blocks and other anonymous future types remain a metadata blind spot
-    // across crate boundaries under the current sidecar bridge. Rejecting `Unknown` is the honest
-    // path for now; the real fix is toolchain-owned future metadata instead of heuristic cosplay.
+fn generated_async_poll_stack_contract<F: 'static + Future>() -> Option<AsyncPollStackContract> {
     generated_async_poll_stack_bytes_by_type_name(type_name::<F>())
         .map(|bytes| AsyncPollStackContract::Generated { bytes })
+}
+
+const GENERATED_ASYNC_POLL_STACK_ANCHOR_BYTES: usize = 1536;
+
+impl AsyncTaskAdmission {
+    fn resolve_poll_stack(mut self, sizing: RuntimeSizingStrategy) -> Result<Self, ExecutorError> {
+        if matches!(self.poll_stack, AsyncPollStackContract::Unknown) {
+            let base_bytes = self
+                .future_bytes
+                .max(GENERATED_ASYNC_POLL_STACK_ANCHOR_BYTES);
+            let bytes = sizing
+                .apply_bytes(base_bytes)
+                .ok_or_else(executor_overflow)?;
+            self.poll_stack = AsyncPollStackContract::Automatic { bytes };
+        }
+        Ok(self)
+    }
 }
 
 fn runtime_monotonic_now_instant() -> Result<CanonicalInstant, ExecutorError> {

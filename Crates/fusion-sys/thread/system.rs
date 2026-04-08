@@ -257,6 +257,7 @@ impl RuntimeBackingAllocator {
 }
 
 /// One exact owned runtime slab leased from the system-selected explicit-backing domain.
+#[derive(Debug)]
 pub struct OwnedRuntimeSlab {
     /// Partitionable runtime-backing view for higher-level runtime construction.
     pub handle: MemoryResourceHandle,

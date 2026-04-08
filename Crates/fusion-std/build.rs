@@ -76,8 +76,14 @@ struct GeneratedFiberTaskEntry {
 
 #[derive(Debug, Clone)]
 struct GeneratedAsyncPollStackEntry {
-    type_name: String,
+    key: GeneratedAsyncPollStackKey,
     poll_stack_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum GeneratedAsyncPollStackKey {
+    TypeName(String),
+    RootSymbol(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,35 +298,37 @@ fn generate_async_poll_stack_metadata(auto_manifest_candidates: &[PathBuf]) -> S
             )
         });
     entries = merge_async_poll_stack_entries(entries);
-    if !entries
-        .iter()
-        .any(|entry| entry.type_name == GENERATED_ASYNC_POLL_STACK_ANCHOR_TYPE_NAME)
-    {
+    if !entries.iter().any(|entry| {
+        matches!(
+            entry.key,
+            GeneratedAsyncPollStackKey::TypeName(ref type_name)
+                if type_name == GENERATED_ASYNC_POLL_STACK_ANCHOR_TYPE_NAME
+        )
+    }) {
         entries.push(GeneratedAsyncPollStackEntry {
-            type_name: GENERATED_ASYNC_POLL_STACK_ANCHOR_TYPE_NAME.to_owned(),
+            key: GeneratedAsyncPollStackKey::TypeName(
+                GENERATED_ASYNC_POLL_STACK_ANCHOR_TYPE_NAME.to_owned(),
+            ),
             poll_stack_bytes: GENERATED_ASYNC_POLL_STACK_ANCHOR_BYTES,
         });
     }
-    entries.sort_by(|left, right| left.type_name.cmp(&right.type_name));
     render_generated_async_poll_stack_entries(&entries)
 }
 
 fn merge_async_poll_stack_entries(
     entries: Vec<GeneratedAsyncPollStackEntry>,
 ) -> Vec<GeneratedAsyncPollStackEntry> {
-    let mut merged = BTreeMap::<String, usize>::new();
+    let mut merged = BTreeMap::<GeneratedAsyncPollStackKey, usize>::new();
     for entry in entries {
-        let budget = merged.entry(entry.type_name).or_insert(0);
+        let budget = merged.entry(entry.key).or_insert(0);
         *budget = (*budget).max(entry.poll_stack_bytes);
     }
     merged
         .into_iter()
-        .map(
-            |(type_name, poll_stack_bytes)| GeneratedAsyncPollStackEntry {
-                type_name,
-                poll_stack_bytes,
-            },
-        )
+        .map(|(key, poll_stack_bytes)| GeneratedAsyncPollStackEntry {
+            key,
+            poll_stack_bytes,
+        })
         .collect()
 }
 
@@ -703,13 +711,10 @@ fn load_generated_async_poll_stack_entries(
             continue;
         }
 
-        let (type_name, raw_bytes) = line
+        let (raw_key, raw_bytes) = line
             .split_once('=')
             .ok_or_else(|| format!("line {} is missing '='", line_no + 1))?;
-        let type_name = type_name.trim();
-        if type_name.is_empty() {
-            return Err(format!("line {} has an empty type name", line_no + 1));
-        }
+        let key = parse_generated_async_poll_stack_key(raw_key.trim(), line_no)?;
 
         let poll_stack_bytes = parse_linker_scalar(raw_bytes.trim())
             .map_err(|error| format!("line {} poll stack parse failed: {error}", line_no + 1))?;
@@ -721,12 +726,39 @@ fn load_generated_async_poll_stack_entries(
         }
 
         entries.push(GeneratedAsyncPollStackEntry {
-            type_name: type_name.to_owned(),
+            key,
             poll_stack_bytes,
         });
     }
 
     Ok(entries)
+}
+
+fn parse_generated_async_poll_stack_key(
+    raw: &str,
+    line_no: usize,
+) -> Result<GeneratedAsyncPollStackKey, String> {
+    if raw.is_empty() {
+        return Err(format!(
+            "line {} has an empty async poll-stack key",
+            line_no + 1
+        ));
+    }
+    if let Some(type_name) = raw.strip_prefix("type:") {
+        let type_name = type_name.trim();
+        if type_name.is_empty() {
+            return Err(format!("line {} has an empty type key", line_no + 1));
+        }
+        return Ok(GeneratedAsyncPollStackKey::TypeName(type_name.to_owned()));
+    }
+    if let Some(symbol) = raw.strip_prefix("symbol:") {
+        let symbol = symbol.trim();
+        if symbol.is_empty() {
+            return Err(format!("line {} has an empty root-symbol key", line_no + 1));
+        }
+        return Ok(GeneratedAsyncPollStackKey::RootSymbol(symbol.to_owned()));
+    }
+    Ok(GeneratedAsyncPollStackKey::TypeName(raw.to_owned()))
 }
 
 fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
@@ -792,31 +824,41 @@ fn render_generated_entries(entries: &[GeneratedFiberTaskEntry]) -> String {
 }
 
 fn render_generated_async_poll_stack_entries(entries: &[GeneratedAsyncPollStackEntry]) -> String {
+    let type_entries = entries
+        .iter()
+        .filter_map(|entry| match &entry.key {
+            GeneratedAsyncPollStackKey::TypeName(type_name) => {
+                Some((type_name.as_str(), entry.poll_stack_bytes))
+            }
+            GeneratedAsyncPollStackKey::RootSymbol(_) => None,
+        })
+        .collect::<Vec<_>>();
+
     let mut rendered = String::from(
         "#[allow(dead_code)]\n\
          const GENERATED_ASYNC_POLL_STACK_TASKS: &[GeneratedAsyncPollStackMetadataEntry] = &[\n",
     );
-    for entry in entries {
+    for (type_name, poll_stack_bytes) in &type_entries {
         rendered.push_str("    GeneratedAsyncPollStackMetadataEntry {\n");
         rendered.push_str("        type_name: \"");
-        rendered.push_str(&escape_rust_string(&entry.type_name));
+        rendered.push_str(&escape_rust_string(type_name));
         rendered.push_str("\",\n");
         rendered.push_str("        poll_stack_bytes: ");
-        rendered.push_str(&entry.poll_stack_bytes.to_string());
+        rendered.push_str(&poll_stack_bytes.to_string());
         rendered.push_str(",\n");
         rendered.push_str("    },\n");
     }
     rendered.push_str("];\n\n");
 
-    for entry in entries {
-        if !generated_contract_type_is_nameable(&entry.type_name) {
+    for (type_name, poll_stack_bytes) in type_entries {
+        if !generated_contract_type_is_nameable(type_name) {
             continue;
         }
         rendered.push_str("impl GeneratedExplicitAsyncPollStackContract for ");
-        rendered.push_str(&render_type_path(&entry.type_name));
+        rendered.push_str(&render_type_path(type_name));
         rendered.push_str(" {\n");
         rendered.push_str("    const POLL_STACK_BYTES: usize = ");
-        rendered.push_str(&entry.poll_stack_bytes.to_string());
+        rendered.push_str(&poll_stack_bytes.to_string());
         rendered.push_str(";\n");
         rendered.push_str("}\n\n");
     }
@@ -873,23 +915,29 @@ mod tests {
     fn merge_async_poll_stack_entries_keeps_worst_case_budget_per_type() {
         let merged = merge_async_poll_stack_entries(vec![
             GeneratedAsyncPollStackEntry {
-                type_name: "crate::future::A".to_owned(),
+                key: GeneratedAsyncPollStackKey::TypeName("crate::future::A".to_owned()),
                 poll_stack_bytes: 512,
             },
             GeneratedAsyncPollStackEntry {
-                type_name: "crate::future::A".to_owned(),
+                key: GeneratedAsyncPollStackKey::TypeName("crate::future::A".to_owned()),
                 poll_stack_bytes: 1024,
             },
             GeneratedAsyncPollStackEntry {
-                type_name: "crate::future::B".to_owned(),
+                key: GeneratedAsyncPollStackKey::TypeName("crate::future::B".to_owned()),
                 poll_stack_bytes: 768,
             },
         ]);
 
         assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].type_name, "crate::future::A");
+        assert_eq!(
+            merged[0].key,
+            GeneratedAsyncPollStackKey::TypeName("crate::future::A".to_owned())
+        );
         assert_eq!(merged[0].poll_stack_bytes, 1024);
-        assert_eq!(merged[1].type_name, "crate::future::B");
+        assert_eq!(
+            merged[1].key,
+            GeneratedAsyncPollStackKey::TypeName("crate::future::B".to_owned())
+        );
         assert_eq!(merged[1].poll_stack_bytes, 768);
     }
 
@@ -897,14 +945,24 @@ mod tests {
     fn render_generated_async_poll_stack_entries_emits_trait_impls_for_nameable_types() {
         let rendered = render_generated_async_poll_stack_entries(&[
             GeneratedAsyncPollStackEntry {
-                type_name:
+                key: GeneratedAsyncPollStackKey::TypeName(
                     "fusion_std::thread::executor::GeneratedAsyncPollStackMetadataAnchorFuture"
                         .to_owned(),
+                ),
                 poll_stack_bytes: 1536,
             },
             GeneratedAsyncPollStackEntry {
-                type_name: "fusion_example_pico::main::{{closure}}".to_owned(),
+                key: GeneratedAsyncPollStackKey::TypeName(
+                    "fusion_example_pico::main::{{closure}}".to_owned(),
+                ),
                 poll_stack_bytes: 1024,
+            },
+            GeneratedAsyncPollStackEntry {
+                key: GeneratedAsyncPollStackKey::RootSymbol(
+                    "_ZN10fusion_std6thread8executor31generated_async_poll_stack_root17hfeedbeefE"
+                        .to_owned(),
+                ),
+                poll_stack_bytes: 2048,
             },
         ]);
 
@@ -916,5 +974,6 @@ mod tests {
         assert!(!rendered.contains(
             "impl GeneratedExplicitAsyncPollStackContract for ::fusion_example_pico::main::{{closure}}"
         ));
+        assert!(!rendered.contains("feedbeef"));
     }
 }

@@ -10,14 +10,12 @@ use core::sync::atomic::{
 };
 use core::time::Duration;
 
-use cortex_m_rt::entry;
-
 use fusion_example_rp2350_on_device::gpio::{
     Rp2350FiberGpioOutputPin,
     Rp2350FiberGpioService,
 };
 use fusion_example_rp2350_on_device::runtime::{
-    spawn_with_stack,
+    spawn,
     wait_for_runtime_progress,
 };
 use fusion_hal::contract::drivers::bus::gpio::GpioDriveStrength;
@@ -32,9 +30,6 @@ const RED_LED_PIN: u8 = 27;
 const FIZZBUZZ_PERIOD: Duration = Duration::from_millis(300);
 const STARTUP_PHASE_PERIOD: Duration = Duration::from_millis(500);
 const PANIC_PHASE_PERIOD: Duration = Duration::from_millis(500);
-const GPIO_SERVICE_STACK_BYTES: usize = 2048;
-const FIZZBUZZ_STACK_BYTES: usize = 4096;
-
 type PicoGpioService = Rp2350FiberGpioService<2>;
 type PicoGpioPin = Rp2350FiberGpioOutputPin<16, 16>;
 type PicoLeds = LedPair<PicoGpioPin, PicoGpioPin>;
@@ -65,7 +60,7 @@ fn init_leds() -> &'static mut PicoLeds {
     };
     unsafe {
         Pin::new_unchecked(&mut *gpio_service)
-            .spawn::<GPIO_SERVICE_STACK_BYTES>()
+            .spawn()
             .expect("gpio service fiber should spawn");
     }
 
@@ -137,14 +132,13 @@ fn fizzbuzz_loop(leds: &mut PicoLeds) -> ! {
     }
 }
 
-#[entry]
+#[fusion_firmware::fusion_firmware_main]
 fn main() -> ! {
     let leds = init_leds();
     leds.off().expect("LEDs should start off");
     startup_dance(leds);
 
-    let _fizzbuzz = spawn_with_stack::<FIZZBUZZ_STACK_BYTES, _, _>(move || fizzbuzz_loop(leds))
-        .expect("fizzbuzz fiber should spawn");
+    let _fizzbuzz = spawn(move || fizzbuzz_loop(leds)).expect("fizzbuzz fiber should spawn");
 
     loop {
         wait_for_runtime_progress();

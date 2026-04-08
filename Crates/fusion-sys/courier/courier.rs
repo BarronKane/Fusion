@@ -1202,6 +1202,96 @@ impl<'a> ChildCourierLaunchRecord<'a> {
     }
 }
 
+/// One lineage hop in a courier ancestry chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CourierPedigreeRecord<'a> {
+    pub courier: CourierId,
+    pub parent: Option<CourierId>,
+    pub launch: Option<ChildCourierLaunchRecord<'a>>,
+}
+
+impl<'a> CourierPedigreeRecord<'a> {
+    #[must_use]
+    pub const fn new(
+        courier: CourierId,
+        parent: Option<CourierId>,
+        launch: Option<ChildCourierLaunchRecord<'a>>,
+    ) -> Self {
+        Self {
+            courier,
+            parent,
+            launch,
+        }
+    }
+}
+
+/// Fixed-capacity courier ancestry chain.
+///
+/// The first entry is always the queried courier itself. Subsequent entries walk upward through
+/// parents until the root is reached or the fixed review budget is exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CourierPedigree<'a, const MAX_DEPTH: usize> {
+    depth: usize,
+    records: [Option<CourierPedigreeRecord<'a>>; MAX_DEPTH],
+}
+
+impl<'a, const MAX_DEPTH: usize> CourierPedigree<'a, MAX_DEPTH> {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            depth: 0,
+            records: [None; MAX_DEPTH],
+        }
+    }
+
+    pub fn push(
+        &mut self,
+        record: CourierPedigreeRecord<'a>,
+    ) -> Result<(), crate::domain::DomainError> {
+        if self.depth >= MAX_DEPTH {
+            return Err(crate::domain::DomainError::resource_exhausted());
+        }
+        self.records[self.depth] = Some(record);
+        self.depth += 1;
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.depth
+    }
+
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.depth == 0
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> impl Iterator<Item = &CourierPedigreeRecord<'a>> {
+        self.records[..self.depth].iter().flatten()
+    }
+
+    #[must_use]
+    pub fn leaf(&self) -> Option<&CourierPedigreeRecord<'a>> {
+        self.records.first().and_then(Option::as_ref)
+    }
+
+    #[must_use]
+    pub fn root(&self) -> Option<&CourierPedigreeRecord<'a>> {
+        if self.depth == 0 {
+            None
+        } else {
+            self.records[self.depth - 1].as_ref()
+        }
+    }
+}
+
+impl<'a, const MAX_DEPTH: usize> Default for CourierPedigree<'a, MAX_DEPTH> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Authoritative courier-owned snapshot for one live or recently terminal fiber.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CourierFiberRecord {

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     # fusion substrate crates.
+    "Crates/fusion-firmware/macros",
     "Crates/fusion-firmware",
     "Crates/fusion-hal",
     "Crates/fusion-pal",
@@ -26,6 +27,7 @@ repository = ""
 [workspace.dependencies]
 # Fusion substrate stack.
 fusion-firmware = { path = "Crates/fusion-firmware", default-features = false }
+fusion-firmware-macros = { path = "Crates/fusion-firmware/macros" }
 fusion-hal = { path = "Crates/fusion-hal", default-features = false }
 fusion-pal = { path = "Crates/fusion-pal", default-features = false }
 fusion-pcu = { path = "Crates/fusion-pcu", default-features = false }

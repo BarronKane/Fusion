@@ -34,6 +34,11 @@ fn current_green_context() -> Option<CurrentGreenContext> {
 include!("query.rs");
 include!("errors.rs");
 
+#[unsafe(no_mangle)]
+pub static FUSION_GREEN_RUNTIME_SINK_PHASE: AtomicU32 = AtomicU32::new(0);
+#[unsafe(no_mangle)]
+pub static FUSION_GREEN_RUNTIME_SINK_ERROR_KIND: AtomicU32 = AtomicU32::new(0);
+
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct CooperativeGreenLockToken {
@@ -981,6 +986,7 @@ fn ensure_yield_budget_watchdog_started(
 
 impl GreenPoolInner {
     fn runtime_tick(&self) -> u64 {
+        FUSION_GREEN_RUNTIME_SINK_PHASE.store(1, Ordering::Release);
         current_monotonic_nanos().unwrap_or(0)
     }
 
@@ -999,12 +1005,16 @@ impl GreenPoolInner {
         let (Some(runtime_sink), Some(courier_id)) = (self.runtime_sink, self.courier_id) else {
             return Ok(());
         };
+        FUSION_GREEN_RUNTIME_SINK_PHASE.store(10, Ordering::Release);
         let (active_units, runnable_units, running_units, blocked_units) =
             self.tasks.lane_counts()?;
+        FUSION_GREEN_RUNTIME_SINK_PHASE.store(11, Ordering::Release);
         let available_slots = self.tasks.available_slots()?;
+        FUSION_GREEN_RUNTIME_SINK_PHASE.store(12, Ordering::Release);
         let responsiveness = runtime_sink
             .evaluate_responsiveness(courier_id, self.runtime_tick())
             .map_err(fiber_error_from_runtime_sink)?;
+        FUSION_GREEN_RUNTIME_SINK_PHASE.store(13, Ordering::Release);
         let summary = CourierRuntimeSummary::new(
             match self.scheduling {
                 GreenScheduling::Fifo => CourierSchedulingPolicy::CooperativeRoundRobin,
@@ -1021,9 +1031,12 @@ impl GreenPoolInner {
             blocked_units,
             available_slots,
         });
+        FUSION_GREEN_RUNTIME_SINK_PHASE.store(14, Ordering::Release);
         runtime_sink
             .record_runtime_summary(courier_id, summary, self.runtime_tick())
-            .map_err(fiber_error_from_runtime_sink)
+            .map_err(fiber_error_from_runtime_sink)?;
+        FUSION_GREEN_RUNTIME_SINK_PHASE.store(15, Ordering::Release);
+        Ok(())
     }
 
     fn register_runtime_fiber(
@@ -1081,6 +1094,7 @@ impl GreenPoolInner {
         let (Some(runtime_sink), Some(courier_id)) = (self.runtime_sink, self.courier_id) else {
             return Ok(());
         };
+        FUSION_GREEN_RUNTIME_SINK_PHASE.store(20, Ordering::Release);
         runtime_sink
             .update_fiber(
                 courier_id,
@@ -1094,6 +1108,7 @@ impl GreenPoolInner {
                 self.runtime_tick(),
             )
             .map_err(fiber_error_from_runtime_sink)?;
+        FUSION_GREEN_RUNTIME_SINK_PHASE.store(21, Ordering::Release);
         self.publish_runtime_summary()
     }
 

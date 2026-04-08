@@ -261,6 +261,8 @@ pub struct ThreadStackSupport {
     pub locality: ThreadGuarantee,
     /// Strength of stack-usage or high-water-mark observation.
     pub usage_observation: ThreadGuarantee,
+    /// Canonical caller-provided backing plan for explicit-bound backends, when one exists.
+    pub default_explicit_backing: Option<super::ThreadExplicitBackingPlan>,
     /// Evidence sources used to justify the stack surface.
     pub authorities: ThreadAuthoritySet,
     /// Whether the stack support is native, emulated, or unavailable.
@@ -279,6 +281,7 @@ impl ThreadStackSupport {
             lock: ThreadGuarantee::Unsupported,
             locality: ThreadGuarantee::Unsupported,
             usage_observation: ThreadGuarantee::Unsupported,
+            default_explicit_backing: None,
             authorities: ThreadAuthoritySet::empty(),
             implementation: ThreadImplementationKind::Unsupported,
         }

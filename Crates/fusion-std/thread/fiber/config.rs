@@ -287,6 +287,22 @@ impl<'a> FiberPoolConfig<'a> {
         self
     }
 
+    /// Returns one copy configured for first-come-first-served multicarrier execution with
+    /// sticky locality and idle-carrier stealing.
+    ///
+    /// This is the small-SMP default Fusion should want first: run fibers in admission order on
+    /// whichever carrier dequeued them, prefer keeping follow-on spawns local, and let idle
+    /// carriers steal when that helps more than purity theater.
+    #[must_use]
+    pub const fn with_fcfs_steal_locality(
+        mut self,
+        spawn_locality_policy: CarrierSpawnLocalityPolicy,
+    ) -> Self {
+        self.scheduling = GreenScheduling::WorkStealing;
+        self.spawn_locality_policy = spawn_locality_policy;
+        self
+    }
+
     /// Returns one copy of this configuration with an explicit strict-priority virtual age cap.
     #[must_use]
     pub const fn with_priority_age_cap(mut self, priority_age_cap: FiberTaskAgeCap) -> Self {
@@ -874,3 +890,20 @@ impl<'a> FiberPoolBootstrap<'a> {
 
 /// Backward-compatible alias for the older green-pool naming.
 pub type GreenPoolConfig<'a> = FiberPoolConfig<'a>;
+
+#[cfg(test)]
+mod config_policy_tests {
+    use super::*;
+
+    #[test]
+    fn fcfs_steal_locality_sets_work_stealing_and_requested_locality() {
+        let config = FiberPoolConfig::new()
+            .with_scheduling(GreenScheduling::Priority)
+            .with_fcfs_steal_locality(CarrierSpawnLocalityPolicy::SameCore);
+        assert_eq!(config.scheduling, GreenScheduling::WorkStealing);
+        assert_eq!(
+            config.spawn_locality_policy,
+            CarrierSpawnLocalityPolicy::SameCore
+        );
+    }
+}

@@ -29,24 +29,17 @@
 
 use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
-use core::pin::Pin;
 use core::sync::atomic::{
     AtomicU8,
     Ordering,
 };
+use core::time::Duration;
 
 use cortex_m_rt::{
     ExceptionFrame,
-    entry,
     exception,
 };
-use fusion_example_rp2350_on_device::gpio::Rp2350FiberGpioService;
-use fusion_example_rp2350_on_device::runtime::wait_for_runtime_progress;
-use fusion_example_rp2350_on_device::seven_segment::{
-    Rp2350FiberFourDigitSevenSegmentDisplay,
-    Rp2350FiberFourDigitSevenSegmentDisplayService,
-};
-use fusion_example_rp2350_on_device::shift_register_74hc595::Rp2350FiberShiftRegister74hc595Service;
+use fusion_example_rp2350_on_device::seven_segment_timer::Rp2350TimerFourDigitSevenSegmentDisplay;
 use fusion_firmware::sys::hal::drivers::bus::gpio::{
     SystemGpioPin,
     system_gpio,
@@ -55,7 +48,7 @@ use fusion_hal::contract::drivers::bus::gpio::{
     GpioControlContract,
     GpioDriveStrength,
 };
-use fusion_hal::drivers::peripheral::SevenSegmentPolarity;
+use fusion_sys::thread::system_monotonic_time;
 
 fusion_example_rp2350_on_device::fusion_rp2350_export_build_id!();
 
@@ -65,23 +58,43 @@ const DISPLAY_LATCH_PIN: u8 = 14;
 const DISPLAY_SHIFT_CLOCK_PIN: u8 = 15;
 const PANIC_LED_PIN: u8 = 11;
 
-const GPIO_SERVICE_STACK_BYTES: usize = 4096;
-const SHIFT_REGISTER_SERVICE_STACK_BYTES: usize = 4096;
-const DISPLAY_SERVICE_STACK_BYTES: usize = 4096;
 const DISPLAY_VALUE: u16 = 0x1234;
 const PANIC_LED_UNINITIALIZED: u8 = 0;
 const PANIC_LED_READY: u8 = 1;
 const PANIC_LED_FAILED: u8 = 2;
+const DISPLAY_MAIN_PANIC_REASON_NONE: u32 = 0;
+const DISPLAY_MAIN_PANIC_REASON_PANIC: u32 = 1;
+const DISPLAY_MAIN_PANIC_REASON_HARDFAULT: u32 = 2;
 
-type PicoGpioService = Rp2350FiberGpioService<4>;
-type PicoShiftRegisterService = Rp2350FiberShiftRegister74hc595Service<2>;
-type PicoDisplayService = Rp2350FiberFourDigitSevenSegmentDisplayService;
-
-static mut GPIO_SERVICE_STORAGE: MaybeUninit<PicoGpioService> = MaybeUninit::uninit();
-static mut SHIFT_REGISTER_SERVICE_STORAGE: MaybeUninit<PicoShiftRegisterService> = MaybeUninit::uninit();
-static mut DISPLAY_SERVICE_STORAGE: MaybeUninit<PicoDisplayService> = MaybeUninit::uninit();
 static mut PANIC_LED_STORAGE: MaybeUninit<SystemGpioPin> = MaybeUninit::uninit();
 static PANIC_LED_STATE: AtomicU8 = AtomicU8::new(PANIC_LED_UNINITIALIZED);
+#[used]
+#[unsafe(no_mangle)]
+pub static mut DISPLAY_MAIN_PHASE: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+pub static mut DISPLAY_MAIN_HEARTBEAT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+pub static mut DISPLAY_MAIN_PANIC_REASON: u32 = DISPLAY_MAIN_PANIC_REASON_NONE;
+
+fn write_display_main_phase(phase: u32) {
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(DISPLAY_MAIN_PHASE), phase) };
+}
+
+fn bump_display_main_heartbeat() {
+    unsafe {
+        let slot = core::ptr::addr_of_mut!(DISPLAY_MAIN_HEARTBEAT);
+        let current = core::ptr::read_volatile(slot);
+        core::ptr::write_volatile(slot, current.wrapping_add(1));
+    }
+}
+
+fn write_display_main_panic_reason(reason: u32) {
+    unsafe {
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(DISPLAY_MAIN_PANIC_REASON), reason)
+    };
+}
 
 fn panic_led_on() -> ! {
     let _ = set_panic_led(true);
@@ -121,100 +134,39 @@ fn set_panic_led(high: bool) -> Result<(), ()> {
     }
 }
 
-fn init_gpio_service() -> *mut PicoGpioService {
-    unsafe {
-        let service = core::ptr::addr_of_mut!(GPIO_SERVICE_STORAGE).cast::<PicoGpioService>();
-        service.write(PicoGpioService::new().expect("gpio service should build"));
-        service
-    }
-}
-
-fn init_shift_register_service() -> fusion_example_rp2350_on_device::shift_register_74hc595::Rp2350FiberShiftRegister74hc595<2> {
-    let gpio_service = init_gpio_service();
-    let data = unsafe {
-        Pin::new_unchecked(&mut *gpio_service)
-            .claim_output_pin(DISPLAY_DATA_PIN, GpioDriveStrength::MilliAmps4)
-            .expect("display data pin should be claimable")
-    };
-    let shift_clock = unsafe {
-        Pin::new_unchecked(&mut *gpio_service)
-            .claim_output_pin(DISPLAY_SHIFT_CLOCK_PIN, GpioDriveStrength::MilliAmps4)
-            .expect("display shift clock pin should be claimable")
-    };
-    let latch_clock = unsafe {
-        Pin::new_unchecked(&mut *gpio_service)
-            .claim_output_pin(DISPLAY_LATCH_PIN, GpioDriveStrength::MilliAmps4)
-            .expect("display latch pin should be claimable")
-    };
-    let output_enable = unsafe {
-        Pin::new_unchecked(&mut *gpio_service)
-            .claim_output_pin(DISPLAY_ENABLE_PIN, GpioDriveStrength::MilliAmps4)
-            .expect("display output-enable pin should be claimable")
-    };
-    unsafe {
-        Pin::new_unchecked(&mut *gpio_service)
-            .spawn::<GPIO_SERVICE_STACK_BYTES>()
-            .expect("display gpio service should spawn");
-    }
-
-    let shift_service_ptr = unsafe {
-        let service = core::ptr::addr_of_mut!(SHIFT_REGISTER_SERVICE_STORAGE)
-            .cast::<PicoShiftRegisterService>();
-        let shift_service = PicoShiftRegisterService::new(data, shift_clock, latch_clock, output_enable)
-            .expect("display shift-register service should build");
-        service.write(shift_service);
-        service
-    };
-    let shift_register = unsafe { (&*shift_service_ptr).client_handle() };
-    unsafe {
-        Pin::new_unchecked(&mut *shift_service_ptr)
-            .spawn::<SHIFT_REGISTER_SERVICE_STACK_BYTES>()
-            .expect("display shift-register service should spawn");
-    }
-    shift_register
-}
-
-fn init_display_service(
-    shift_register: fusion_example_rp2350_on_device::shift_register_74hc595::Rp2350FiberShiftRegister74hc595<2>,
-) -> Rp2350FiberFourDigitSevenSegmentDisplay {
-    let display_service_ptr = unsafe {
-        let service = core::ptr::addr_of_mut!(DISPLAY_SERVICE_STORAGE).cast::<PicoDisplayService>();
-        match PicoDisplayService::new(shift_register, SevenSegmentPolarity::common_cathode()) {
-            Ok(display_service) => service.write(display_service),
-            Err(_) => panic!("display service should build"),
-        }
-        service
-    };
-    let display = unsafe { (&*display_service_ptr).client_handle() };
-    unsafe {
-        match Pin::new_unchecked(&mut *display_service_ptr).spawn::<DISPLAY_SERVICE_STACK_BYTES>() {
-            Ok(()) => {}
-            Err(_) => panic!("display service should spawn"),
-        }
-    }
-    display
-}
-
-#[entry]
+#[fusion_firmware::fusion_firmware_main]
 fn main() -> ! {
+    write_display_main_phase(1);
+    #[cfg(not(debug_assertions))]
     let _ = set_panic_led(false);
-    let shift_register = init_shift_register_service();
-    let display = init_display_service(shift_register);
+    write_display_main_phase(2);
+    let display = Rp2350TimerFourDigitSevenSegmentDisplay::common_cathode(
+        DISPLAY_DATA_PIN,
+        DISPLAY_ENABLE_PIN,
+        DISPLAY_LATCH_PIN,
+        DISPLAY_SHIFT_CLOCK_PIN,
+    )
+    .expect("display timer path should initialize");
+    write_display_main_phase(3);
     display
         .set_hex(DISPLAY_VALUE)
         .expect("display boot value should write");
+    write_display_main_phase(4);
 
     loop {
-        wait_for_runtime_progress();
+        bump_display_main_heartbeat();
+        let _ = system_monotonic_time().sleep_for(Duration::from_millis(250));
     }
 }
 
 #[exception]
 unsafe fn HardFault(_frame: &ExceptionFrame) -> ! {
+    write_display_main_panic_reason(DISPLAY_MAIN_PANIC_REASON_HARDFAULT);
     panic_led_on()
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
+    write_display_main_panic_reason(DISPLAY_MAIN_PANIC_REASON_PANIC);
     panic_led_on()
 }
