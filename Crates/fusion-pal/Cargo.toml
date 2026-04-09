@@ -21,6 +21,7 @@ hosted = ["std"]
 critical-safe = []
 debug-profile = []
 debug-insights = []
+fd-bus-usb = ["dep:fd-bus-usb"]
 sys-cortex-m = [
     "soc",
     "dep:cortex-m",
@@ -44,16 +45,26 @@ workspace = true
 bitflags.workspace = true
 fusion-hal = { workspace = true, default-features = false }
 fusion-kn = { workspace = true, optional = true, features = ["client"] }
+fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, optional = true }
 
 [target.'cfg(target_os = "none")'.dependencies]
 cortex-m = { workspace = true, optional = true }
 cortex-m-rt = { workspace = true, optional = true }
 fd-bus-gpio = { path = "../fusion-hal/drivers/bus/gpio", default-features = false, optional = true }
+fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, optional = true }
 fd-net-chipset-infineon-cyw43439 = { path = "../fusion-hal/drivers/net/chipset/infineon/cyw43439", default-features = false, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, features = ["std"], optional = true }
 libc.workspace = true
 rustix.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, features = ["std"], optional = true }
 libc.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, features = ["std"], optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, features = ["std"], optional = true }

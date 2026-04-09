@@ -21,6 +21,7 @@ hosted = ["std", "fusion-hal/hosted", "fusion-pal/hosted", "fusion-sys/hosted", 
 critical-safe = ["fusion-hal/critical-safe", "fusion-pal/critical-safe", "fusion-sys/critical-safe", "fusion-std/critical-safe"]
 debug-profile = ["fusion-hal/debug-profile", "fusion-pal/debug-profile", "fusion-sys/debug-profile", "fusion-std/debug-profile"]
 debug-insights = ["fusion-hal/debug-insights", "fusion-pal/debug-insights", "fusion-sys/debug-insights", "fusion-std/debug-insights"]
+fd-bus-usb = ["dep:fd-bus-usb", "fusion-pal/fd-bus-usb"]
 sys-cortex-m = ["soc", "fusion-hal/sys-cortex-m", "fusion-pal/sys-cortex-m", "fusion-sys/sys-cortex-m", "fusion-std/sys-cortex-m"]
 soc-rp2350 = [
     "sys-cortex-m",
@@ -57,7 +58,20 @@ fusion-std = { workspace = true, default-features = false }
 
 [target.'cfg(target_os = "none")'.dependencies]
 fd-bus-gpio = { path = "../fusion-hal/drivers/bus/gpio", default-features = false, optional = true }
+fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, optional = true }
 fd-net-chipset-infineon-cyw43439 = { path = "../fusion-hal/drivers/net/chipset/infineon/cyw43439", default-features = false, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, features = ["std"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, features = ["std"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, features = ["std"], optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, features = ["std"], optional = true }
 
 [lints]
 workspace = true

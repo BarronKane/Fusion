@@ -18,6 +18,12 @@ const MODULE_SPECS: &[ModuleSpec] = &[
         selected_by_soc_rp2350: true,
     },
     ModuleSpec {
+        crate_name: "fd-bus-usb",
+        feature_env: "CARGO_FEATURE_FD_BUS_USB",
+        driver_count: 1,
+        selected_by_soc_rp2350: false,
+    },
+    ModuleSpec {
         crate_name: "fd-net-chipset-infineon-cyw43439",
         feature_env: "CARGO_FEATURE_FD_NET_CHIPSET_INFINEON_CYW43439",
         driver_count: 2,
@@ -118,6 +124,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=FUSION_FDXE_REQUESTS");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SOC_RP2350");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FD_BUS_GPIO");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FD_BUS_USB");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FD_NET_CHIPSET_INFINEON_CYW43439");
 
     let body = fs::read_to_string(&shared).expect("read shared FDXE ABI");
