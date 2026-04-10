@@ -7,6 +7,9 @@ use std::process::Command;
 
 const ROOT_TASK_PIPELINE_SKIP_ENV: &str = "FUSION_SKIP_FIBER_TASK_PIPELINE";
 const ROOT_TASK_CONTRACTS_ENV: &str = "FUSION_FIRMWARE_GENERATED_FIBER_TASK_CONTRACTS_RS";
+const GENERATED_FIBER_TASK_METADATA_ENV: &str = "FUSION_FIBER_TASK_METADATA";
+const GENERATED_FIBER_TASK_REPORT_ENV: &str = "FUSION_FIBER_TASK_REPORT";
+const GENERATED_ASYNC_POLL_STACK_METADATA_ENV: &str = "FUSION_ASYNC_POLL_STACK_METADATA";
 
 fn main() {
     emit_rerun_triggers();
@@ -97,6 +100,11 @@ fn emit_root_fiber_contracts_env() {
             "CARGO_TARGET_DIR",
             workspace_root.join("target").join("build-tools"),
         )
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove(GENERATED_FIBER_TASK_METADATA_ENV)
+        .env_remove(GENERATED_FIBER_TASK_REPORT_ENV)
+        .env_remove(GENERATED_ASYNC_POLL_STACK_METADATA_ENV)
         .env(ROOT_TASK_PIPELINE_SKIP_ENV, "1")
         .arg("run")
         .arg("-p")
@@ -301,6 +309,7 @@ fn parse_toml_string_assignment<'a>(line: &'a str, key: &str) -> Option<&'a str>
 }
 
 fn workspace_root(manifest_dir: &Path) -> Result<PathBuf, String> {
+    let mut last_workspace = None::<PathBuf>;
     for ancestor in manifest_dir.ancestors() {
         let cargo_toml = ancestor.join("Cargo.toml");
         let Ok(contents) = fs::read_to_string(&cargo_toml) else {
@@ -311,11 +320,13 @@ fn workspace_root(manifest_dir: &Path) -> Result<PathBuf, String> {
             .map(|line| line.split('#').next().unwrap_or("").trim())
             .any(|line| line == "[workspace]")
         {
-            return Ok(ancestor.to_path_buf());
+            last_workspace = Some(ancestor.to_path_buf());
         }
     }
-    Err(format!(
-        "failed to locate workspace root above {}",
-        manifest_dir.display()
-    ))
+    last_workspace.ok_or_else(|| {
+        format!(
+            "failed to locate workspace root above {}",
+            manifest_dir.display()
+        )
+    })
 }

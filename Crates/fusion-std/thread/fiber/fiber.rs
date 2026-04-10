@@ -1238,20 +1238,27 @@ impl InlineGreenJobStorage {
     where
         F: FnOnce() + Send + 'static,
     {
+        self.store_with_runner(job, run_inline_green_job::<F>)
+    }
+
+    fn store_with_runner<T>(&mut self, job: T, run: unsafe fn(*mut u8)) -> Result<(), FiberError>
+    where
+        T: Send + 'static,
+    {
         if self.occupied {
             return Err(FiberError::state_conflict());
         }
-        if size_of::<F>() > size_of::<InlineGreenJobBytes>()
-            || align_of::<F>() > align_of::<InlineGreenJobBytes>()
+        if size_of::<T>() > size_of::<InlineGreenJobBytes>()
+            || align_of::<T>() > align_of::<InlineGreenJobBytes>()
         {
             return Err(FiberError::unsupported());
         }
 
         unsafe {
-            self.storage.as_mut_ptr().cast::<F>().write(job);
+            self.storage.as_mut_ptr().cast::<T>().write(job);
         }
-        self.run = Some(run_inline_green_job::<F>);
-        self.drop = Some(drop_inline_green_job::<F>);
+        self.run = Some(run);
+        self.drop = Some(drop_inline_green_job::<T>);
         self.occupied = true;
         Ok(())
     }
@@ -1401,6 +1408,44 @@ unsafe fn drop_inline_green_job<F>(ptr: *mut u8) {
     unsafe {
         ptr.cast::<F>().drop_in_place();
     }
+}
+
+struct ExplicitGreenTaskJob<T: ExplicitFiberTask> {
+    task: T,
+    slot_addr: usize,
+}
+
+struct GeneratedGreenTaskJob<T: GeneratedExplicitFiberTask> {
+    task: T,
+    slot_addr: usize,
+}
+
+fn finish_inline_green_task_output<T: 'static>(slot_addr: usize, output: T) {
+    if size_of::<T>() == 0 {
+        return;
+    }
+    let slot = unsafe { &*(slot_addr as *const GreenTaskSlot) };
+    if let Ok(id) = slot.current_id()
+        && slot.store_output(id, output).is_err()
+    {
+        let _ = slot.set_state(id, GreenTaskState::Failed(FiberError::state_conflict()));
+    }
+}
+
+unsafe fn run_explicit_green_task_job<T>(ptr: *mut u8)
+where
+    T: ExplicitFiberTask,
+{
+    let job = unsafe { ptr.cast::<ExplicitGreenTaskJob<T>>().read() };
+    finish_inline_green_task_output(job.slot_addr, job.task.run());
+}
+
+unsafe fn run_generated_green_task_job<T>(ptr: *mut u8)
+where
+    T: GeneratedExplicitFiberTask,
+{
+    let job = unsafe { ptr.cast::<GeneratedGreenTaskJob<T>>().read() };
+    finish_inline_green_task_output(job.slot_addr, job.task.run());
 }
 
 include!("stacks.rs");
@@ -1883,58 +1928,17 @@ fn cleanup_failed_spawn_for(inner: &GreenPoolLease, reservation: &SpawnReservati
     inner.active.fetch_sub(1, Ordering::AcqRel);
 }
 
-fn spawn_on_lease<F, T>(
+fn complete_spawn_reservation<T>(
     inner: &GreenPoolLease,
-    task: FiberTaskAttributes,
-    job: F,
     class: fusion_sys::courier::CourierFiberClass,
+    reservation: SpawnReservation,
+    fiber_id: FiberId,
     signal: bool,
     drive_mode: GreenHandleDriveMode,
-    use_generated_closure_root: bool,
 ) -> Result<GreenHandle<T>, FiberError>
 where
-    F: FnOnce() -> T + Send + 'static,
     T: 'static,
 {
-    if !InlineGreenResultStorage::supports::<T>() {
-        return Err(FiberError::unsupported());
-    }
-
-    let reservation = reserve_spawn_slot_for(inner, task)?;
-    let fiber_id = next_green_fiber_id();
-    let slot_addr = reservation.context as usize;
-    let wrapped = move || {
-        let output = if use_generated_closure_root {
-            generated_closure_task_root(job)
-        } else {
-            job()
-        };
-        if size_of::<T>() == 0 {
-            return;
-        }
-        let slot = unsafe { &*(slot_addr as *const GreenTaskSlot) };
-        if let Ok(id) = slot.current_id()
-            && slot.store_output(id, output).is_err()
-        {
-            let _ = slot.set_state(id, GreenTaskState::Failed(FiberError::state_conflict()));
-        }
-    };
-
-    if let Err(error) = inner.tasks.assign_job(
-        reservation.slot_index,
-        reservation.id,
-        fiber_id,
-        class,
-        reservation.carrier,
-        reservation.lease,
-        task,
-        wrapped,
-    ) {
-        trace_spawn_failure("tasks.assign_job", Some(reservation.slot_index), &error);
-        cleanup_failed_spawn_for(inner, &reservation);
-        return Err(error);
-    }
-
     if let Some(lease) = reservation.lease {
         if let Err(error) = inner.stacks.attach_slot_identity(
             lease.pool_index,
@@ -1999,6 +2003,139 @@ where
         drive_mode,
         _marker: PhantomData,
     })
+}
+
+fn spawn_on_lease<F, T>(
+    inner: &GreenPoolLease,
+    task: FiberTaskAttributes,
+    job: F,
+    class: fusion_sys::courier::CourierFiberClass,
+    signal: bool,
+    drive_mode: GreenHandleDriveMode,
+    use_generated_closure_root: bool,
+) -> Result<GreenHandle<T>, FiberError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: 'static,
+{
+    if !InlineGreenResultStorage::supports::<T>() {
+        return Err(FiberError::unsupported());
+    }
+
+    let reservation = reserve_spawn_slot_for(inner, task)?;
+    let fiber_id = next_green_fiber_id();
+    let slot_addr = reservation.context as usize;
+    let wrapped = move || {
+        let output = if use_generated_closure_root {
+            generated_closure_task_root(job)
+        } else {
+            job()
+        };
+        if size_of::<T>() == 0 {
+            return;
+        }
+        let slot = unsafe { &*(slot_addr as *const GreenTaskSlot) };
+        if let Ok(id) = slot.current_id()
+            && slot.store_output(id, output).is_err()
+        {
+            let _ = slot.set_state(id, GreenTaskState::Failed(FiberError::state_conflict()));
+        }
+    };
+
+    if let Err(error) = inner.tasks.assign_job(
+        reservation.slot_index,
+        reservation.id,
+        fiber_id,
+        class,
+        reservation.carrier,
+        reservation.lease,
+        task,
+        wrapped,
+    ) {
+        trace_spawn_failure("tasks.assign_job", Some(reservation.slot_index), &error);
+        cleanup_failed_spawn_for(inner, &reservation);
+        return Err(error);
+    }
+
+    complete_spawn_reservation(inner, class, reservation, fiber_id, signal, drive_mode)
+}
+
+fn spawn_explicit_task_on_lease<T>(
+    inner: &GreenPoolLease,
+    task: FiberTaskAttributes,
+    explicit: T,
+    class: fusion_sys::courier::CourierFiberClass,
+    signal: bool,
+    drive_mode: GreenHandleDriveMode,
+) -> Result<GreenHandle<T::Output>, FiberError>
+where
+    T: ExplicitFiberTask,
+{
+    if !InlineGreenResultStorage::supports::<T::Output>() {
+        return Err(FiberError::unsupported());
+    }
+
+    let reservation = reserve_spawn_slot_for(inner, task)?;
+    let fiber_id = next_green_fiber_id();
+    if let Err(error) = inner.tasks.assign_explicit_task(
+        reservation.slot_index,
+        reservation.id,
+        fiber_id,
+        class,
+        reservation.carrier,
+        reservation.lease,
+        task,
+        explicit,
+    ) {
+        trace_spawn_failure(
+            "tasks.assign_explicit_task",
+            Some(reservation.slot_index),
+            &error,
+        );
+        cleanup_failed_spawn_for(inner, &reservation);
+        return Err(error);
+    }
+
+    complete_spawn_reservation(inner, class, reservation, fiber_id, signal, drive_mode)
+}
+
+fn spawn_generated_task_on_lease<T>(
+    inner: &GreenPoolLease,
+    task: FiberTaskAttributes,
+    generated: T,
+    class: fusion_sys::courier::CourierFiberClass,
+    signal: bool,
+    drive_mode: GreenHandleDriveMode,
+) -> Result<GreenHandle<T::Output>, FiberError>
+where
+    T: GeneratedExplicitFiberTask,
+{
+    if !InlineGreenResultStorage::supports::<T::Output>() {
+        return Err(FiberError::unsupported());
+    }
+
+    let reservation = reserve_spawn_slot_for(inner, task)?;
+    let fiber_id = next_green_fiber_id();
+    if let Err(error) = inner.tasks.assign_generated_task(
+        reservation.slot_index,
+        reservation.id,
+        fiber_id,
+        class,
+        reservation.carrier,
+        reservation.lease,
+        task,
+        generated,
+    ) {
+        trace_spawn_failure(
+            "tasks.assign_generated_task",
+            Some(reservation.slot_index),
+            &error,
+        );
+        cleanup_failed_spawn_for(inner, &reservation);
+        return Err(error);
+    }
+
+    complete_spawn_reservation(inner, class, reservation, fiber_id, signal, drive_mode)
 }
 
 fn drive_current_pool_once(inner: &GreenPoolLease) -> Result<bool, FiberError> {

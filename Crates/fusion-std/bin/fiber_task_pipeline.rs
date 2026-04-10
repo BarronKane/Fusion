@@ -18,6 +18,7 @@ const DEFAULT_RUST_CONTRACTS_NAME: &str = "fusion-std-fiber-task.contracts.rs";
 const DEFAULT_CONTRACTS_NAME: &str = "fiber-task.contracts";
 const DEFAULT_RED_INLINE_CONTRACTS_NAME: &str = "red-inline.contracts";
 const DEFAULT_RED_INLINE_RUST_NAME: &str = "fusion-std-red-inline.contracts.rs";
+const ROOT_TASK_PIPELINE_SKIP_ENV: &str = "FUSION_SKIP_FIBER_TASK_PIPELINE";
 const GENERATED_CLOSURE_ROOT_SYMBOL_PREFIX: &str =
     "fusion_std::thread::fiber::generated_closure_task_root";
 const GENERATED_ASYNC_POLL_STACK_ROOT_SYMBOL_PREFIX: &str =
@@ -524,9 +525,17 @@ fn build_target_artifact(
     command
         .current_dir(workspace_root)
         .env("CARGO_INCREMENTAL", "0")
+        .env(ROOT_TASK_PIPELINE_SKIP_ENV, "1")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .arg("rustc")
         .arg("--target-dir")
         .arg(target_dir);
+
+    if config.profile == BuildProfile::Release {
+        command
+            .env("CARGO_PROFILE_RELEASE_STRIP", "none")
+            .env("CARGO_PROFILE_RELEASE_LTO", "off");
+    }
 
     if let Some(manifest_path) = config.manifest_path.as_ref() {
         command.arg("--manifest-path").arg(manifest_path);

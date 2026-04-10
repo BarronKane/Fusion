@@ -21,7 +21,7 @@ const MODULE_SPECS: &[ModuleSpec] = &[
         crate_name: "fd-bus-usb",
         feature_env: "CARGO_FEATURE_FD_BUS_USB",
         driver_count: 1,
-        selected_by_soc_rp2350: false,
+        selected_by_soc_rp2350: true,
     },
     ModuleSpec {
         crate_name: "fd-net-chipset-infineon-cyw43439",
@@ -57,6 +57,7 @@ fn requested_fdxe_modules() -> Vec<String> {
 
     if env::var_os("CARGO_FEATURE_SOC_RP2350").is_some() {
         modules.push("fd-bus-gpio".to_owned());
+        modules.push("fd-bus-usb".to_owned());
         modules.push("fd-net-chipset-infineon-cyw43439".to_owned());
     }
 

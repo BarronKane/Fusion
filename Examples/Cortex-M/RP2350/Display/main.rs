@@ -62,39 +62,9 @@ const DISPLAY_VALUE: u16 = 0x1234;
 const PANIC_LED_UNINITIALIZED: u8 = 0;
 const PANIC_LED_READY: u8 = 1;
 const PANIC_LED_FAILED: u8 = 2;
-const DISPLAY_MAIN_PANIC_REASON_NONE: u32 = 0;
-const DISPLAY_MAIN_PANIC_REASON_PANIC: u32 = 1;
-const DISPLAY_MAIN_PANIC_REASON_HARDFAULT: u32 = 2;
 
 static mut PANIC_LED_STORAGE: MaybeUninit<SystemGpioPin> = MaybeUninit::uninit();
 static PANIC_LED_STATE: AtomicU8 = AtomicU8::new(PANIC_LED_UNINITIALIZED);
-#[used]
-#[unsafe(no_mangle)]
-pub static mut DISPLAY_MAIN_PHASE: u32 = 0;
-#[used]
-#[unsafe(no_mangle)]
-pub static mut DISPLAY_MAIN_HEARTBEAT: u32 = 0;
-#[used]
-#[unsafe(no_mangle)]
-pub static mut DISPLAY_MAIN_PANIC_REASON: u32 = DISPLAY_MAIN_PANIC_REASON_NONE;
-
-fn write_display_main_phase(phase: u32) {
-    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(DISPLAY_MAIN_PHASE), phase) };
-}
-
-fn bump_display_main_heartbeat() {
-    unsafe {
-        let slot = core::ptr::addr_of_mut!(DISPLAY_MAIN_HEARTBEAT);
-        let current = core::ptr::read_volatile(slot);
-        core::ptr::write_volatile(slot, current.wrapping_add(1));
-    }
-}
-
-fn write_display_main_panic_reason(reason: u32) {
-    unsafe {
-        core::ptr::write_volatile(core::ptr::addr_of_mut!(DISPLAY_MAIN_PANIC_REASON), reason)
-    };
-}
 
 fn panic_led_on() -> ! {
     let _ = set_panic_led(true);
@@ -136,10 +106,8 @@ fn set_panic_led(high: bool) -> Result<(), ()> {
 
 #[fusion_firmware::fusion_firmware_main]
 fn main() -> ! {
-    write_display_main_phase(1);
     #[cfg(not(debug_assertions))]
     let _ = set_panic_led(false);
-    write_display_main_phase(2);
     let display = Rp2350TimerFourDigitSevenSegmentDisplay::common_cathode(
         DISPLAY_DATA_PIN,
         DISPLAY_ENABLE_PIN,
@@ -147,26 +115,21 @@ fn main() -> ! {
         DISPLAY_SHIFT_CLOCK_PIN,
     )
     .expect("display timer path should initialize");
-    write_display_main_phase(3);
     display
         .set_hex(DISPLAY_VALUE)
         .expect("display boot value should write");
-    write_display_main_phase(4);
 
     loop {
-        bump_display_main_heartbeat();
         let _ = system_monotonic_time().sleep_for(Duration::from_millis(250));
     }
 }
 
 #[exception]
 unsafe fn HardFault(_frame: &ExceptionFrame) -> ! {
-    write_display_main_panic_reason(DISPLAY_MAIN_PANIC_REASON_HARDFAULT);
     panic_led_on()
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    write_display_main_panic_reason(DISPLAY_MAIN_PANIC_REASON_PANIC);
     panic_led_on()
 }

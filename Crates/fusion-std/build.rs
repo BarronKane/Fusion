@@ -866,7 +866,7 @@ fn render_generated_async_poll_stack_entries(entries: &[GeneratedAsyncPollStackE
 }
 
 fn generated_contract_type_is_nameable(type_name: &str) -> bool {
-    !type_name.contains("{{closure}}")
+    !type_name.contains("{{closure}}") && type_name.starts_with("fusion_std::")
 }
 
 fn assert_report_has_no_unresolved_symbols(path: &Path) -> Result<(), String> {

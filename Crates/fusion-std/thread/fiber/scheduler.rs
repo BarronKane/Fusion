@@ -714,6 +714,72 @@ impl GreenTaskSlot {
     where
         F: FnOnce() + Send + 'static,
     {
+        self.prepare_assignment(id, fiber_id, class, carrier, lease, task)?;
+        self.record.with(|record| record.job.store(job))??;
+        Ok(())
+    }
+
+    fn assign_explicit_task<T>(
+        &self,
+        id: u64,
+        fiber_id: FiberId,
+        class: fusion_sys::courier::CourierFiberClass,
+        carrier: usize,
+        lease: Option<FiberStackLease>,
+        task: FiberTaskAttributes,
+        explicit: T,
+    ) -> Result<(), FiberError>
+    where
+        T: ExplicitFiberTask,
+    {
+        self.prepare_assignment(id, fiber_id, class, carrier, lease, task)?;
+        self.record.with(|record| {
+            record.job.store_with_runner(
+                ExplicitGreenTaskJob {
+                    task: explicit,
+                    slot_addr: self.context_ptr() as usize,
+                },
+                run_explicit_green_task_job::<T>,
+            )
+        })??;
+        Ok(())
+    }
+
+    fn assign_generated_task<T>(
+        &self,
+        id: u64,
+        fiber_id: FiberId,
+        class: fusion_sys::courier::CourierFiberClass,
+        carrier: usize,
+        lease: Option<FiberStackLease>,
+        task: FiberTaskAttributes,
+        generated: T,
+    ) -> Result<(), FiberError>
+    where
+        T: GeneratedExplicitFiberTask,
+    {
+        self.prepare_assignment(id, fiber_id, class, carrier, lease, task)?;
+        self.record.with(|record| {
+            record.job.store_with_runner(
+                GeneratedGreenTaskJob {
+                    task: generated,
+                    slot_addr: self.context_ptr() as usize,
+                },
+                run_generated_green_task_job::<T>,
+            )
+        })??;
+        Ok(())
+    }
+
+    fn prepare_assignment(
+        &self,
+        id: u64,
+        fiber_id: FiberId,
+        class: fusion_sys::courier::CourierFiberClass,
+        carrier: usize,
+        lease: Option<FiberStackLease>,
+        task: FiberTaskAttributes,
+    ) -> Result<(), FiberError> {
         self.completed.with_ref(|completed| {
             if let Some(semaphore) = completed.as_ref() {
                 while semaphore.try_acquire().map_err(fiber_error_from_sync)? {}
@@ -728,7 +794,6 @@ impl GreenTaskSlot {
 
             record.job.clear();
             record.result.clear();
-            record.job.store(job)?;
             record.allocated = true;
             record.id = id;
             record.fiber_id = fiber_id;
@@ -1282,6 +1347,42 @@ impl GreenTaskRegistry {
     {
         let slot = &self.slots[slot_index];
         slot.assign(id, fiber_id, class, carrier, lease, task, job)
+    }
+
+    fn assign_explicit_task<T>(
+        &self,
+        slot_index: usize,
+        id: u64,
+        fiber_id: FiberId,
+        class: fusion_sys::courier::CourierFiberClass,
+        carrier: usize,
+        lease: Option<FiberStackLease>,
+        task: FiberTaskAttributes,
+        explicit: T,
+    ) -> Result<(), FiberError>
+    where
+        T: ExplicitFiberTask,
+    {
+        let slot = &self.slots[slot_index];
+        slot.assign_explicit_task(id, fiber_id, class, carrier, lease, task, explicit)
+    }
+
+    fn assign_generated_task<T>(
+        &self,
+        slot_index: usize,
+        id: u64,
+        fiber_id: FiberId,
+        class: fusion_sys::courier::CourierFiberClass,
+        carrier: usize,
+        lease: Option<FiberStackLease>,
+        task: FiberTaskAttributes,
+        generated: T,
+    ) -> Result<(), FiberError>
+    where
+        T: GeneratedExplicitFiberTask,
+    {
+        let slot = &self.slots[slot_index];
+        slot.assign_generated_task(id, fiber_id, class, carrier, lease, task, generated)
     }
 
     fn recycle_slot(&self, slot_index: usize) -> Result<(), FiberError> {

@@ -31,6 +31,8 @@ soc-rp2350 = [
     "fusion-std/soc-rp2350",
     "dep:fd-bus-gpio",
     "fd-bus-gpio/soc-rp2350",
+    "dep:fd-bus-usb",
+    "fd-bus-usb/soc-rp2350",
     "dep:fd-net-chipset-infineon-cyw43439",
     "fd-net-chipset-infineon-cyw43439/soc-rp2350",
 ]

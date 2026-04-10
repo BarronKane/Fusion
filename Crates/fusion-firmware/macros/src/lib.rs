@@ -102,18 +102,14 @@ fn expand_fusion_firmware_main(
     Ok(quote! {
         #(#attrs)*
         #vis #sig #block
-
-        #[cfg(not(fusion_firmware_root_task_bootstrap))]
-        use ::fusion_firmware::__fusion_std as fusion_std;
+        struct #root_task_ident {
+            bootstrap: ::fusion_firmware::FirmwareBootstrapContext,
+        }
 
         #[cfg(not(fusion_firmware_root_task_bootstrap))]
         ::fusion_firmware::__fusion_std::include_generated_fiber_task_contracts!(
             env!("FUSION_FIRMWARE_GENERATED_FIBER_TASK_CONTRACTS_RS")
         );
-
-        struct #root_task_ident {
-            bootstrap: ::fusion_firmware::FirmwareBootstrapContext,
-        }
 
         #[inline(never)]
         fn #root_leaf_ident<T: ::fusion_firmware::__fusion_std::thread::GeneratedExplicitFiberTask>(
@@ -152,6 +148,7 @@ fn expand_fusion_firmware_main(
                 #invocation
             }
 
+            #[allow(unexpected_cfgs)]
             fn task_attributes(
             ) -> ::core::result::Result<
                 ::fusion_firmware::__fusion_std::thread::FiberTaskAttributes,

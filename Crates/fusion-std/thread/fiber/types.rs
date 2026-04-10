@@ -973,6 +973,16 @@ pub fn generated_fiber_task_admitted_stack_bytes_by_type_name(
     ))
 }
 
+/// Returns the generated task attributes for one named task type when runtime metadata is
+/// available.
+///
+/// This is the ordinary-build bridge for downstream generated tasks that are measured honestly
+/// but do not need compile-time contract hardening.
+#[doc(hidden)]
+pub fn generated_fiber_task_attributes<T: 'static>() -> Result<FiberTaskAttributes, FiberError> {
+    generated_task_attributes::<T>()
+}
+
 const fn generated_max_fiber_task_stack_bytes() -> Option<usize> {
     let mut index = 0;
     let mut max = 0usize;

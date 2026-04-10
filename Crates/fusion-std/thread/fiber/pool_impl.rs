@@ -394,10 +394,13 @@ impl GreenPool {
     {
         let attributes = T::task_attributes()?;
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs_class(
+        spawn_explicit_task_on_lease(
+            &self.inner,
             attributes,
-            move || task.run(),
+            task,
             fusion_sys::courier::CourierFiberClass::Planned,
+            true,
+            GreenHandleDriveMode::CarrierPool,
         )
     }
 
@@ -414,10 +417,13 @@ impl GreenPool {
     {
         let attributes = T::task_attributes()?;
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs_class(
+        spawn_generated_task_on_lease(
+            &self.inner,
             attributes,
-            move || task.run(),
+            task,
             fusion_sys::courier::CourierFiberClass::Planned,
+            true,
+            GreenHandleDriveMode::CarrierPool,
         )
     }
 
@@ -438,10 +444,13 @@ impl GreenPool {
         let attributes = generated_explicit_task_contract_attributes::<T>()
             .with_optional_yield_budget(T::YIELD_BUDGET);
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs_class(
+        spawn_generated_task_on_lease(
+            &self.inner,
             attributes,
-            move || task.run(),
+            task,
             fusion_sys::courier::CourierFiberClass::Planned,
+            true,
+            GreenHandleDriveMode::CarrierPool,
         )
     }
 
@@ -461,10 +470,13 @@ impl GreenPool {
         let attributes = generated_explicit_task_contract_attributes::<T>()
             .with_optional_yield_budget(T::YIELD_BUDGET);
         self.validate_task_attributes(attributes)?;
-        self.spawn_with_attrs_class(
+        spawn_generated_task_on_lease(
+            &self.inner,
             attributes,
-            move || task.run(),
+            task,
             fusion_sys::courier::CourierFiberClass::Planned,
+            true,
+            GreenHandleDriveMode::CarrierPool,
         )
     }
 

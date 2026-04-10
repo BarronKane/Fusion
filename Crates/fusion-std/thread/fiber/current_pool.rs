@@ -791,31 +791,6 @@ impl CurrentFiberPool {
         })
     }
 
-    fn spawn_named_task_with_attrs_class<F, T>(
-        &self,
-        task: FiberTaskAttributes,
-        job: F,
-        class: fusion_sys::courier::CourierFiberClass,
-    ) -> Result<CurrentFiberHandle<T>, FiberError>
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: 'static,
-    {
-        let handle = spawn_on_lease(
-            &self.inner,
-            task,
-            job,
-            class,
-            false,
-            GreenHandleDriveMode::CurrentThread,
-            false,
-        )?;
-        Ok(CurrentFiberHandle {
-            inner: handle,
-            _not_send_sync: PhantomData,
-        })
-    }
-
     /// Spawns one explicit fiber task carrying compile-time stack metadata.
     ///
     /// # Errors
@@ -839,11 +814,18 @@ impl CurrentFiberPool {
     {
         let attributes = T::task_attributes()?;
         self.validate_task_attributes(attributes)?;
-        self.spawn_named_task_with_attrs_class(
+        let handle = spawn_explicit_task_on_lease(
+            &self.inner,
             attributes,
-            move || task.run(),
+            task,
             fusion_sys::courier::CourierFiberClass::Planned,
-        )
+            false,
+            GreenHandleDriveMode::CurrentThread,
+        )?;
+        Ok(CurrentFiberHandle {
+            inner: handle,
+            _not_send_sync: PhantomData,
+        })
     }
 
     /// Spawns one explicit fiber task using build-generated stack metadata.
@@ -858,11 +840,18 @@ impl CurrentFiberPool {
     {
         let attributes = T::task_attributes()?;
         self.validate_task_attributes(attributes)?;
-        self.spawn_named_task_with_attrs_class(
+        let handle = spawn_generated_task_on_lease(
+            &self.inner,
             attributes,
-            move || task.run(),
+            task,
             fusion_sys::courier::CourierFiberClass::Planned,
-        )
+            false,
+            GreenHandleDriveMode::CurrentThread,
+        )?;
+        Ok(CurrentFiberHandle {
+            inner: handle,
+            _not_send_sync: PhantomData,
+        })
     }
 
     /// Spawns one explicit fiber task using a compile-time generated contract.
@@ -878,11 +867,18 @@ impl CurrentFiberPool {
         let attributes = generated_explicit_task_contract_attributes::<T>()
             .with_optional_yield_budget(T::YIELD_BUDGET);
         self.validate_task_attributes(attributes)?;
-        self.spawn_named_task_with_attrs_class(
+        let handle = spawn_generated_task_on_lease(
+            &self.inner,
             attributes,
-            move || task.run(),
+            task,
             fusion_sys::courier::CourierFiberClass::Planned,
-        )
+            false,
+            GreenHandleDriveMode::CurrentThread,
+        )?;
+        Ok(CurrentFiberHandle {
+            inner: handle,
+            _not_send_sync: PhantomData,
+        })
     }
 
     /// Spawns one explicit fiber task using a compile-time generated contract directly.
@@ -900,11 +896,18 @@ impl CurrentFiberPool {
         let attributes = generated_explicit_task_contract_attributes::<T>()
             .with_optional_yield_budget(T::YIELD_BUDGET);
         self.validate_task_attributes(attributes)?;
-        self.spawn_named_task_with_attrs_class(
+        let handle = spawn_generated_task_on_lease(
+            &self.inner,
             attributes,
-            move || task.run(),
+            task,
             fusion_sys::courier::CourierFiberClass::Planned,
-        )
+            false,
+            GreenHandleDriveMode::CurrentThread,
+        )?;
+        Ok(CurrentFiberHandle {
+            inner: handle,
+            _not_send_sync: PhantomData,
+        })
     }
 
     /// Pumps at most one ready task segment on the current thread.

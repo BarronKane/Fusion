@@ -48,13 +48,18 @@ use fusion_sys::thread::ThreadErrorKind;
 
 const DISPLAY_TIMER_IRQN: u16 = 2;
 const DISPLAY_TIMER0_BASE: usize = 0x400b_0000;
+const DISPLAY_TIMER1_BASE: usize = 0x400b_8000;
 const DISPLAY_TIMER_ALARM_INDEX: usize = 2;
+const DISPLAY_TIMER_INTR_OFFSET: usize = 0x3c;
 const DISPLAY_TIMER_ALARM0_OFFSET: usize = 0x10;
 const DISPLAY_TIMER_INTE_OFFSET: usize = 0x40;
 const DISPLAY_SLICE_PERIOD_MICROS: u32 = 500;
 const DISPLAY_FRAME_BANKS: usize = 2;
 const DISPLAY_DIGITS: usize = 4;
 const DISPLAY_INTERRUPT_STACK_BYTES: usize = 1024;
+const DISPLAY_TIMER_ALLOWED_ALARM_MASK: u32 = (1_u32 << 2) | (1_u32 << 3);
+const DISPLAY_TIMER_STRAY_ALARM_MASK: u32 = !DISPLAY_TIMER_ALLOWED_ALARM_MASK & 0x0f;
+const DISPLAY_TIMER_ALL_ALARM_MASK: u32 = 0x0f;
 const DISPLAY_STATE_UNINITIALIZED: u8 = 0;
 const DISPLAY_STATE_INITIALIZING: u8 = 1;
 const DISPLAY_STATE_READY: u8 = 2;
@@ -72,6 +77,7 @@ struct DisplayController {
     state: AtomicU8,
     active_bank: AtomicU8,
     next_digit: AtomicU8,
+    last_alarm_deadline: AtomicU32,
     frames: [[AtomicU16; DISPLAY_DIGITS]; DISPLAY_FRAME_BANKS],
     hardware: UnsafeCell<MaybeUninit<DisplayHardware>>,
 }
@@ -82,6 +88,7 @@ impl DisplayController {
             state: AtomicU8::new(DISPLAY_STATE_UNINITIALIZED),
             active_bank: AtomicU8::new(0),
             next_digit: AtomicU8::new(0),
+            last_alarm_deadline: AtomicU32::new(0),
             frames: [
                 [const { AtomicU16::new(DISPLAY_BLANK_FRAME) }; DISPLAY_DIGITS],
                 [const { AtomicU16::new(DISPLAY_BLANK_FRAME) }; DISPLAY_DIGITS],
@@ -127,15 +134,14 @@ impl DisplayController {
                             self.stage_blank_banks();
                             self.active_bank.store(0, Ordering::Release);
                             self.next_digit.store(0, Ordering::Release);
+                            self.last_alarm_deadline.store(0, Ordering::Release);
                             self.state.store(DISPLAY_STATE_READY, Ordering::Release);
                             self.start_refresh()?;
-                            RP2350_TIMER_DISPLAY_INIT_PHASE.store(6, Ordering::Release);
                             return Ok(());
                         }
                         Err(error) => {
                             self.state
                                 .store(DISPLAY_STATE_UNINITIALIZED, Ordering::Release);
-                            RP2350_TIMER_DISPLAY_INIT_PHASE.store(0xff, Ordering::Release);
                             return Err(error);
                         }
                     }
@@ -155,7 +161,9 @@ impl DisplayController {
 
     fn start_refresh(&self) -> Result<(), GpioError> {
         let hardware = unsafe { (*self.hardware.get()).assume_init_mut() };
-        arm_next_display_alarm()?;
+        sanitize_unclaimed_timer0_alarm_state()?;
+        sanitize_unclaimed_timer1_alarm_state()?;
+        arm_next_display_alarm(self)?;
         hardware.interrupt.enable().map_err(gpio_error_from_thread)?;
         Ok(())
     }
@@ -167,7 +175,6 @@ impl DisplayController {
         latch_pin: u8,
         shift_clock_pin: u8,
     ) -> Result<DisplayHardware, GpioError> {
-        RP2350_TIMER_DISPLAY_INIT_PHASE.store(1, Ordering::Release);
         let gpio = system_gpio()?;
         let mut data = gpio.take_pin(data_pin)?;
         let mut output_enable = gpio.take_pin(output_enable_pin)?;
@@ -178,11 +185,9 @@ impl DisplayController {
         output_enable.set_drive_strength(GpioDriveStrength::MilliAmps4)?;
         latch.set_drive_strength(GpioDriveStrength::MilliAmps4)?;
         shift_clock.set_drive_strength(GpioDriveStrength::MilliAmps4)?;
-        RP2350_TIMER_DISPLAY_INIT_PHASE.store(2, Ordering::Release);
 
         let register =
             ShiftRegister74hc595::with_output_enable(data, shift_clock, latch, output_enable)?;
-        RP2350_TIMER_DISPLAY_INIT_PHASE.store(3, Ordering::Release);
 
         let interrupt = RedInterrupt::bind_runtime_owned(
             &RedInterruptConfig::new(DISPLAY_TIMER_IRQN)
@@ -192,8 +197,6 @@ impl DisplayController {
             timer_display_alarm_irq,
         )
         .map_err(gpio_error_from_thread)?;
-        RP2350_TIMER_DISPLAY_INIT_PHASE.store(4, Ordering::Release);
-        RP2350_TIMER_DISPLAY_INIT_PHASE.store(5, Ordering::Release);
 
         Ok(DisplayHardware {
             register,
@@ -216,7 +219,6 @@ impl DisplayController {
                 .store(encode_display_frame(index, glyph, polarity), Ordering::Release);
         }
         self.active_bank.store(next_bank as u8, Ordering::Release);
-        RP2350_TIMER_DISPLAY_STAGED_BANK.store(next_bank as u32, Ordering::Release);
         Ok(())
     }
 
@@ -225,25 +227,10 @@ impl DisplayController {
             return;
         }
 
-        let start = match cortex_m_soc_board::monotonic_raw_now() {
-            Ok(now) => now as u32,
-            Err(_) => {
-                RP2350_TIMER_DISPLAY_LAST_ERROR.store(4, Ordering::Release);
-                return;
-            }
-        };
-        let previous_start = RP2350_TIMER_DISPLAY_LAST_START_TICKS.swap(start, Ordering::AcqRel);
-        if previous_start != 0 {
-            RP2350_TIMER_DISPLAY_LAST_GAP_MICROS
-                .store(start.wrapping_sub(previous_start), Ordering::Release);
-        }
-
         if cortex_m_soc_board::irq_acknowledge(DISPLAY_TIMER_IRQN).is_err() {
-            RP2350_TIMER_DISPLAY_LAST_ERROR.store(1, Ordering::Release);
             return;
         }
-        if arm_next_display_alarm().is_err() {
-            RP2350_TIMER_DISPLAY_LAST_ERROR.store(2, Ordering::Release);
+        if arm_next_display_alarm(self).is_err() {
             return;
         }
 
@@ -253,21 +240,11 @@ impl DisplayController {
 
         let hardware = unsafe { (*self.hardware.get()).assume_init_mut() };
         if hardware.register.write_bytes_msb_first(&frame.to_le_bytes()).is_err() {
-            RP2350_TIMER_DISPLAY_LAST_ERROR.store(3, Ordering::Release);
             return;
         }
 
         self.next_digit
             .store(((digit + 1) % DISPLAY_DIGITS) as u8, Ordering::Release);
-        RP2350_TIMER_DISPLAY_HEARTBEAT.fetch_add(1, Ordering::AcqRel);
-        RP2350_TIMER_DISPLAY_ACTIVE_DIGIT.store(digit as u32, Ordering::Release);
-        RP2350_TIMER_DISPLAY_LAST_FRAME.store(frame as u32, Ordering::Release);
-        if let Ok(end) = cortex_m_soc_board::monotonic_raw_now() {
-            let service = (end as u32).wrapping_sub(start);
-            RP2350_TIMER_DISPLAY_LAST_SERVICE_MICROS.store(service, Ordering::Release);
-            update_max_service_micros(service);
-        }
-        RP2350_TIMER_DISPLAY_LAST_ERROR.store(0, Ordering::Release);
     }
 }
 
@@ -276,29 +253,6 @@ unsafe impl Sync for DisplayController {}
 static DISPLAY_CONTROLLER: DisplayController = DisplayController::new();
 static mut DISPLAY_INTERRUPT_STACK: [u64; DISPLAY_INTERRUPT_STACK_BYTES / 8] =
     [0; DISPLAY_INTERRUPT_STACK_BYTES / 8];
-
-#[unsafe(no_mangle)]
-pub static RP2350_TIMER_DISPLAY_INIT_PHASE: AtomicU32 = AtomicU32::new(0);
-#[unsafe(no_mangle)]
-pub static RP2350_TIMER_DISPLAY_HEARTBEAT: AtomicU32 = AtomicU32::new(0);
-#[unsafe(no_mangle)]
-pub static RP2350_TIMER_DISPLAY_ACTIVE_DIGIT: AtomicU32 = AtomicU32::new(u32::MAX);
-#[unsafe(no_mangle)]
-pub static RP2350_TIMER_DISPLAY_LAST_FRAME: AtomicU32 = AtomicU32::new(DISPLAY_BLANK_FRAME as u32);
-#[unsafe(no_mangle)]
-pub static RP2350_TIMER_DISPLAY_LAST_ALARM_DEADLINE: AtomicU32 = AtomicU32::new(0);
-#[unsafe(no_mangle)]
-pub static RP2350_TIMER_DISPLAY_STAGED_BANK: AtomicU32 = AtomicU32::new(0);
-#[unsafe(no_mangle)]
-pub static RP2350_TIMER_DISPLAY_LAST_ERROR: AtomicU32 = AtomicU32::new(0);
-#[unsafe(no_mangle)]
-pub static RP2350_TIMER_DISPLAY_LAST_SERVICE_MICROS: AtomicU32 = AtomicU32::new(0);
-#[unsafe(no_mangle)]
-pub static RP2350_TIMER_DISPLAY_MAX_SERVICE_MICROS: AtomicU32 = AtomicU32::new(0);
-#[unsafe(no_mangle)]
-pub static RP2350_TIMER_DISPLAY_LAST_GAP_MICROS: AtomicU32 = AtomicU32::new(0);
-#[unsafe(no_mangle)]
-pub static RP2350_TIMER_DISPLAY_LAST_START_TICKS: AtomicU32 = AtomicU32::new(0);
 
 /// One retained RP2350 timer-driven four-digit seven-segment display handle.
 #[derive(Debug, Clone, Copy)]
@@ -390,9 +344,9 @@ fn display_interrupt_stack_policy() -> VectorInlineStackPolicy {
     VectorInlineStackPolicy::DedicatedReserved(VectorInlineReservedStack { base, size_bytes })
 }
 
-fn arm_next_display_alarm() -> Result<(), GpioError> {
+fn arm_next_display_alarm(controller: &DisplayController) -> Result<(), GpioError> {
     let now = cortex_m_soc_board::monotonic_raw_now().map_err(gpio_error_from_hardware)? as u32;
-    let previous_deadline = RP2350_TIMER_DISPLAY_LAST_ALARM_DEADLINE.load(Ordering::Acquire);
+    let previous_deadline = controller.last_alarm_deadline.load(Ordering::Acquire);
     let mut deadline = if previous_deadline == 0 {
         now.wrapping_add(DISPLAY_SLICE_PERIOD_MICROS.max(1))
     } else {
@@ -413,23 +367,39 @@ fn arm_next_display_alarm() -> Result<(), GpioError> {
         ptr::write_volatile(inte, current | alarm_bit);
     }
 
-    RP2350_TIMER_DISPLAY_LAST_ALARM_DEADLINE.store(deadline, Ordering::Release);
+    controller.last_alarm_deadline.store(deadline, Ordering::Release);
     Ok(())
 }
 
-fn update_max_service_micros(observed: u32) {
-    let mut current = RP2350_TIMER_DISPLAY_MAX_SERVICE_MICROS.load(Ordering::Acquire);
-    while observed > current {
-        match RP2350_TIMER_DISPLAY_MAX_SERVICE_MICROS.compare_exchange(
-            current,
-            observed,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => return,
-            Err(next) => current = next,
-        }
+fn sanitize_unclaimed_timer0_alarm_state() -> Result<(), GpioError> {
+    let intr = (DISPLAY_TIMER0_BASE + DISPLAY_TIMER_INTR_OFFSET) as *mut u32;
+    let inte = (DISPLAY_TIMER0_BASE + DISPLAY_TIMER_INTE_OFFSET) as *mut u32;
+
+    unsafe {
+        let enabled = ptr::read_volatile(inte);
+        ptr::write_volatile(inte, enabled & DISPLAY_TIMER_ALLOWED_ALARM_MASK);
+        ptr::write_volatile(intr, DISPLAY_TIMER_STRAY_ALARM_MASK);
     }
+
+    cortex_m_soc_board::irq_clear_pending(0).map_err(gpio_error_from_hardware)?;
+    cortex_m_soc_board::irq_clear_pending(1).map_err(gpio_error_from_hardware)?;
+    Ok(())
+}
+
+fn sanitize_unclaimed_timer1_alarm_state() -> Result<(), GpioError> {
+    let intr = (DISPLAY_TIMER1_BASE + DISPLAY_TIMER_INTR_OFFSET) as *mut u32;
+    let inte = (DISPLAY_TIMER1_BASE + DISPLAY_TIMER_INTE_OFFSET) as *mut u32;
+
+    unsafe {
+        ptr::write_volatile(inte, 0);
+        ptr::write_volatile(intr, DISPLAY_TIMER_ALL_ALARM_MASK);
+    }
+
+    cortex_m_soc_board::irq_clear_pending(4).map_err(gpio_error_from_hardware)?;
+    cortex_m_soc_board::irq_clear_pending(5).map_err(gpio_error_from_hardware)?;
+    cortex_m_soc_board::irq_clear_pending(6).map_err(gpio_error_from_hardware)?;
+    cortex_m_soc_board::irq_clear_pending(7).map_err(gpio_error_from_hardware)?;
+    Ok(())
 }
 
 const fn glyphs_from_hex(value: u16) -> [SevenSegmentGlyph; DISPLAY_DIGITS] {

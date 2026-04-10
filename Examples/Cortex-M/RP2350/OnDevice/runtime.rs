@@ -5,7 +5,6 @@ use core::mem::MaybeUninit;
 use core::num::NonZeroUsize;
 use core::sync::atomic::{
     AtomicU8,
-    AtomicU32,
     Ordering,
 };
 use core::time::Duration;
@@ -48,11 +47,6 @@ const BACKEND_READY: u8 = 2;
 const RP2350_EXAMPLE_FIBER_CAPACITY: usize = 16;
 const RP2350_EXAMPLE_FIBER_GROWTH_CHUNK: usize = 4;
 const RP2350_EXAMPLE_ASYNC_CAPACITY: usize = 8;
-
-#[unsafe(no_mangle)]
-pub static RP2350_RUNTIME_INIT_PHASE: AtomicU32 = AtomicU32::new(0);
-#[unsafe(no_mangle)]
-pub static RP2350_RUNTIME_CARRIER_LOOP_PHASE: AtomicU32 = AtomicU32::new(0);
 
 struct CarrierRuntimeBackend {
     _carrier: ThreadPool,
@@ -118,9 +112,7 @@ unsafe impl Sync for RuntimeBackendSlot {}
 static RP2350_EXAMPLE_BACKEND: RuntimeBackendSlot = RuntimeBackendSlot::new();
 
 fn build_backend() -> Result<CarrierRuntimeBackend, &'static str> {
-    RP2350_RUNTIME_INIT_PHASE.store(1, Ordering::Release);
     firmware_bootstrap_root_execution().map_err(|_| "root execution should bootstrap")?;
-    RP2350_RUNTIME_INIT_PHASE.store(2, Ordering::Release);
 
     let mut carrier_config = ThreadPoolConfig::new()
         .with_spawned_carrier_profile(CarrierWorkloadProfile::GeneralPurpose, true)
@@ -128,7 +120,6 @@ fn build_backend() -> Result<CarrierRuntimeBackend, &'static str> {
     carrier_config.placement = PoolPlacement::PerCore;
     carrier_config.name_prefix = Some("rp2350-example");
     let carrier = ThreadPool::new(&carrier_config).map_err(|_| "carrier pool should build")?;
-    RP2350_RUNTIME_INIT_PHASE.store(3, Ordering::Release);
 
     let fiber_stack_size = NonZeroUsize::new(
         generated_default_fiber_stack_bytes()
@@ -148,12 +139,9 @@ fn build_backend() -> Result<CarrierRuntimeBackend, &'static str> {
         .with_courier_id(MAIN_COURIER_ID)
         .with_context_id(MAIN_CONTEXT_ID);
     let fibers = GreenPool::new(&fiber_config, &carrier).map_err(|_| "fiber pool should build")?;
-    RP2350_RUNTIME_INIT_PHASE.store(4, Ordering::Release);
 
     let (async_runtime, async_slab_owner) =
         build_async_runtime().map_err(|_| "async runtime should build")?;
-    RP2350_RUNTIME_INIT_PHASE.store(5, Ordering::Release);
-    RP2350_RUNTIME_CARRIER_LOOP_PHASE.store(1, Ordering::Release);
 
     Ok(CarrierRuntimeBackend {
         _carrier: carrier,

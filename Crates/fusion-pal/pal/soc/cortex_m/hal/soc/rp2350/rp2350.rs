@@ -1438,6 +1438,38 @@ impl CortexMSocBoard for Rp2350Soc {
             rp2350_service_event_timeout_irq()?;
             return Ok(true);
         }
+        let serviced =
+            crate::pal::soc::cortex_m::hal::soc::rp2350::drivers::bus::usb::service_runtime_irq(
+                irqn,
+            )
+            .map_err(|error| match error.kind() {
+                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Unsupported => {
+                    HardwareError::unsupported()
+                }
+                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Invalid => {
+                    HardwareError::invalid()
+                }
+                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Busy
+                | fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Timeout => {
+                    HardwareError::busy()
+                }
+                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Disconnected
+                | fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Stall
+                | fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Protocol
+                | fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Overcurrent
+                | fusion_hal::contract::drivers::bus::usb::UsbErrorKind::StateConflict => {
+                    HardwareError::state_conflict()
+                }
+                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::ResourceExhausted => {
+                    HardwareError::resource_exhausted()
+                }
+                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Platform(code) => {
+                    HardwareError::platform(code)
+                }
+            })?;
+        if serviced {
+            return Ok(true);
+        }
         Ok(false)
     }
 
