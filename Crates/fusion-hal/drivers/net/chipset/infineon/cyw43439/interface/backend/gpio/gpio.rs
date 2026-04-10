@@ -37,6 +37,13 @@ use fusion_hal::contract::drivers::net::wifi::{
     WifiStationCaps,
     WifiSupport,
 };
+use fusion_hal::contract::drivers::bus::gpio::{
+    GpioCapabilities,
+    GpioImplementationKind,
+    GpioPinDescriptor,
+    GpioProviderCaps,
+    GpioSupport,
+};
 use fd_bus_gpio::{
     GpioDriveStrength,
     GpioFunction,
@@ -84,6 +91,7 @@ use crate::transport::{
         CYW43439_GSPI_BACKPLANE_ADDRESS_MID,
         CYW43439_GSPI_BACKPLANE_READ_PAD_LEN_BYTES,
         CYW43439_GSPI_CHIPCOMMON_BASE_ADDRESS,
+        CYW43439_GSPI_CHIPCOMMON_GPIOIN_OFFSET,
         CYW43439_GSPI_CHIPCOMMON_GPIOCONTROL_OFFSET,
         CYW43439_GSPI_CHIPCOMMON_GPIOOUTEN_OFFSET,
         CYW43439_GSPI_CHIPCOMMON_GPIOOUT_OFFSET,
@@ -107,6 +115,27 @@ const CYW43439_STANDARD_FAMILIES: WifiStandardFamilyCaps = WifiStandardFamilyCap
     WifiStandardFamilyCaps::LEGACY.bits() | WifiStandardFamilyCaps::HT.bits(),
 );
 const CYW43439_SHARED_SPI_HOST_WAKE_IRQ_HIGH: bool = true;
+const CYW43439_WL_GPIO_COUNT: u16 = 3;
+const CYW43439_WL_GPIO_IO_CAPS: GpioCapabilities =
+    GpioCapabilities::INPUT.union(GpioCapabilities::OUTPUT);
+const CYW43439_WL_GPIO_INPUT_ONLY_CAPS: GpioCapabilities = GpioCapabilities::INPUT;
+const CYW43439_WL_GPIO_PINS: [GpioPinDescriptor; CYW43439_WL_GPIO_COUNT as usize] = [
+    GpioPinDescriptor {
+        pin: 0,
+        name: "wl_gpio0",
+        capabilities: CYW43439_WL_GPIO_IO_CAPS,
+    },
+    GpioPinDescriptor {
+        pin: 1,
+        name: "wl_gpio1",
+        capabilities: CYW43439_WL_GPIO_IO_CAPS,
+    },
+    GpioPinDescriptor {
+        pin: 2,
+        name: "wl_gpio2",
+        capabilities: CYW43439_WL_GPIO_INPUT_ONLY_CAPS,
+    },
+];
 // GPIO-driver calls dominate the bit-bang path already, so a large extra
 // half-cycle spin budget just turns firmware download into geology.
 const CYW43439_SHARED_SPI_HALF_CYCLE_SPINS: usize = 8;
@@ -837,6 +866,88 @@ impl<
             gpio_out | activity_mask
         } else {
             gpio_out & !activity_mask
+        };
+        if desired != gpio_out {
+            self.shared_bus_write_backplane_u32(gpio_out_addr, desired)?;
+        }
+        Ok(())
+    }
+
+    fn validate_wl_gpio(&self, wl_gpio: u8) -> Result<GpioCapabilities, Cyw43439Error> {
+        CYW43439_WL_GPIO_PINS
+            .iter()
+            .find(|descriptor| descriptor.pin == wl_gpio)
+            .map(|descriptor| descriptor.capabilities)
+            .ok_or_else(Cyw43439Error::invalid)
+    }
+
+    fn configure_wl_gpio_mode(&mut self, wl_gpio: u8) -> Result<GpioCapabilities, Cyw43439Error> {
+        let capabilities = self.validate_wl_gpio(wl_gpio)?;
+        let gpio_mask = 1_u32 << wl_gpio;
+        let gpio_control_addr =
+            CYW43439_GSPI_CHIPCOMMON_BASE_ADDRESS + CYW43439_GSPI_CHIPCOMMON_GPIOCONTROL_OFFSET;
+        let gpio_control = self.shared_bus_read_backplane_u32(gpio_control_addr)?;
+        self.shared_bus_write_backplane_u32(gpio_control_addr, gpio_control & !gpio_mask)?;
+        Ok(capabilities)
+    }
+
+    fn configure_wl_gpio_input_internal(&mut self, wl_gpio: u8) -> Result<(), Cyw43439Error> {
+        self.configure_wl_gpio_mode(wl_gpio)?;
+        let gpio_mask = 1_u32 << wl_gpio;
+        let gpio_out_en_addr =
+            CYW43439_GSPI_CHIPCOMMON_BASE_ADDRESS + CYW43439_GSPI_CHIPCOMMON_GPIOOUTEN_OFFSET;
+        let gpio_out_en = self.shared_bus_read_backplane_u32(gpio_out_en_addr)?;
+        self.shared_bus_write_backplane_u32(gpio_out_en_addr, gpio_out_en & !gpio_mask)
+    }
+
+    fn read_wl_gpio_internal(&mut self, wl_gpio: u8) -> Result<bool, Cyw43439Error> {
+        self.validate_wl_gpio(wl_gpio)?;
+        let gpio_in_addr =
+            CYW43439_GSPI_CHIPCOMMON_BASE_ADDRESS + CYW43439_GSPI_CHIPCOMMON_GPIOIN_OFFSET;
+        let gpio_in = self.shared_bus_read_backplane_u32(gpio_in_addr)?;
+        Ok((gpio_in & (1_u32 << wl_gpio)) != 0)
+    }
+
+    fn configure_wl_gpio_output_internal(
+        &mut self,
+        wl_gpio: u8,
+        initial_high: bool,
+    ) -> Result<(), Cyw43439Error> {
+        let capabilities = self.configure_wl_gpio_mode(wl_gpio)?;
+        if !capabilities.contains(GpioCapabilities::OUTPUT) {
+            return Err(Cyw43439Error::unsupported());
+        }
+        let gpio_mask = 1_u32 << wl_gpio;
+        let gpio_out_addr =
+            CYW43439_GSPI_CHIPCOMMON_BASE_ADDRESS + CYW43439_GSPI_CHIPCOMMON_GPIOOUT_OFFSET;
+        let gpio_out_en_addr =
+            CYW43439_GSPI_CHIPCOMMON_BASE_ADDRESS + CYW43439_GSPI_CHIPCOMMON_GPIOOUTEN_OFFSET;
+        let gpio_out = self.shared_bus_read_backplane_u32(gpio_out_addr)?;
+        let desired_out = if initial_high {
+            gpio_out | gpio_mask
+        } else {
+            gpio_out & !gpio_mask
+        };
+        if desired_out != gpio_out {
+            self.shared_bus_write_backplane_u32(gpio_out_addr, desired_out)?;
+        }
+        let gpio_out_en = self.shared_bus_read_backplane_u32(gpio_out_en_addr)?;
+        self.shared_bus_write_backplane_u32(gpio_out_en_addr, gpio_out_en | gpio_mask)
+    }
+
+    fn set_wl_gpio_level_internal(&mut self, wl_gpio: u8, high: bool) -> Result<(), Cyw43439Error> {
+        let capabilities = self.validate_wl_gpio(wl_gpio)?;
+        if !capabilities.contains(GpioCapabilities::OUTPUT) {
+            return Err(Cyw43439Error::unsupported());
+        }
+        let gpio_mask = 1_u32 << wl_gpio;
+        let gpio_out_addr =
+            CYW43439_GSPI_CHIPCOMMON_BASE_ADDRESS + CYW43439_GSPI_CHIPCOMMON_GPIOOUT_OFFSET;
+        let gpio_out = self.shared_bus_read_backplane_u32(gpio_out_addr)?;
+        let desired = if high {
+            gpio_out | gpio_mask
+        } else {
+            gpio_out & !gpio_mask
         };
         if desired != gpio_out {
             self.shared_bus_write_backplane_u32(gpio_out_addr, desired)?;
@@ -1802,6 +1913,46 @@ impl<
 
     fn set_driver_activity_indicator(&mut self, active: bool) -> Result<(), Cyw43439Error> {
         self.set_module_activity_indicator_internal(active)
+    }
+
+    fn wl_gpio_support(&self) -> GpioSupport {
+        GpioSupport {
+            caps: GpioProviderCaps::ENUMERATE
+                | GpioProviderCaps::CLAIM
+                | GpioProviderCaps::STATIC_TOPOLOGY
+                | GpioProviderCaps::INPUT
+                | GpioProviderCaps::OUTPUT,
+            implementation: GpioImplementationKind::Native,
+            pin_count: CYW43439_WL_GPIO_COUNT,
+        }
+    }
+
+    fn wl_gpio_pins(&self) -> &'static [GpioPinDescriptor] {
+        &CYW43439_WL_GPIO_PINS
+    }
+
+    fn wl_gpio_capabilities(&self, wl_gpio: u8) -> Result<GpioCapabilities, Cyw43439Error> {
+        self.validate_wl_gpio(wl_gpio)
+    }
+
+    fn configure_wl_gpio_input(&mut self, wl_gpio: u8) -> Result<(), Cyw43439Error> {
+        self.configure_wl_gpio_input_internal(wl_gpio)
+    }
+
+    fn read_wl_gpio(&mut self, wl_gpio: u8) -> Result<bool, Cyw43439Error> {
+        self.read_wl_gpio_internal(wl_gpio)
+    }
+
+    fn configure_wl_gpio_output(
+        &mut self,
+        wl_gpio: u8,
+        initial_high: bool,
+    ) -> Result<(), Cyw43439Error> {
+        self.configure_wl_gpio_output_internal(wl_gpio, initial_high)
+    }
+
+    fn set_wl_gpio_level(&mut self, wl_gpio: u8, high: bool) -> Result<(), Cyw43439Error> {
+        self.set_wl_gpio_level_internal(wl_gpio, high)
     }
 
     fn bootstrap_read_wlan_register_swapped_u32(

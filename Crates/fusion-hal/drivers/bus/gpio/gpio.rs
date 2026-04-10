@@ -60,6 +60,7 @@ const GPIO_DRIVER_METADATA: DriverMetadata = DriverMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GpioBinding {
     pub provider: u8,
+    pub controller_id: &'static str,
 }
 
 /// Registerable universal GPIO driver family marker.
@@ -96,6 +97,7 @@ pub const fn driver_metadata() -> &'static DriverMetadata {
 /// Universal GPIO provider composed over one selected hardware-facing GPIO substrate.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Gpio<H: GpioHardware = unsupported::UnsupportedGpioHardware> {
+    provider: u8,
     _hardware: PhantomData<H>,
 }
 
@@ -109,38 +111,48 @@ impl<H> Gpio<H>
 where
     H: GpioHardware,
 {
-    /// Creates a new universal GPIO provider handle over one selected hardware substrate.
+    /// Creates a new universal GPIO provider handle over one selected controller/provider.
     #[must_use]
-    pub const fn new() -> Self {
+    pub const fn new(provider: u8) -> Self {
         Self {
+            provider,
             _hardware: PhantomData,
         }
     }
 
-    /// Takes one pin exclusively.
+    /// Returns the truthful descriptor for this selected controller/provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest error when the selected provider binding is invalid.
+    pub fn controller(&self) -> Result<&'static GpioControllerDescriptor, GpioError> {
+        H::controller(self.provider).ok_or_else(GpioError::invalid)
+    }
+
+    /// Takes one pin exclusively from this selected provider.
     ///
     /// # Errors
     ///
     /// Returns one honest error when the pin is invalid, unsupported, or already claimed.
-    pub fn take(pin: u8) -> Result<GpioPin<H::Pin>, GpioError> {
+    pub fn take_pin(&self, pin: u8) -> Result<GpioPin<H::Pin>, GpioError> {
         Ok(GpioPin {
-            inner: H::claim_pin(pin)?,
+            inner: H::claim_pin(self.provider, pin)?,
         })
     }
 
-    /// Returns one truthful capability snapshot for one pin number.
+    /// Returns one truthful capability snapshot for one pin number on this selected provider.
     ///
     /// # Errors
     ///
     /// Returns one honest backend error when the pin does not exist.
-    pub fn capabilities(pin: u8) -> Result<GpioCapabilities, GpioError> {
-        GpioBaseContract::capabilities(&Self::new(), pin)
+    pub fn capabilities(&self, pin: u8) -> Result<GpioCapabilities, GpioError> {
+        GpioBaseContract::capabilities(self, pin)
     }
 
-    /// Returns the statically or dynamically surfaced GPIO pin catalog.
+    /// Returns the statically or dynamically surfaced GPIO pin catalog for this provider.
     #[must_use]
-    pub fn pins() -> &'static [GpioPinDescriptor] {
-        H::pins()
+    pub fn pins(&self) -> &'static [GpioPinDescriptor] {
+        H::pins(self.provider)
     }
 }
 
@@ -240,12 +252,16 @@ impl<H> GpioBaseContract for Gpio<H>
 where
     H: GpioHardware,
 {
+    fn controller(&self) -> &'static GpioControllerDescriptor {
+        Gpio::controller(self).unwrap_or_else(|_| panic!("invalid gpio provider {}", self.provider))
+    }
+
     fn support(&self) -> GpioSupport {
-        H::support()
+        H::support(self.provider)
     }
 
     fn pins(&self) -> &'static [GpioPinDescriptor] {
-        H::pins()
+        H::pins(self.provider)
     }
 }
 
@@ -256,7 +272,7 @@ where
     type Pin = GpioPin<H::Pin>;
 
     fn take_pin(&self, pin: u8) -> Result<Self::Pin, GpioError> {
-        Self::take(pin)
+        Gpio::take_pin(self, pin)
     }
 }
 
@@ -264,6 +280,10 @@ impl<P> GpioOwnedPinContract for GpioPin<P>
 where
     P: GpioHardwarePin,
 {
+    fn controller(&self) -> &'static GpioControllerDescriptor {
+        self.inner.controller()
+    }
+
     fn pin(&self) -> u8 {
         self.pin()
     }
@@ -338,17 +358,28 @@ where
     if out.is_empty() {
         return Err(DriverError::resource_exhausted());
     }
-
-    let support = H::support();
-    if support.implementation == GpioImplementationKind::Unsupported
-        || support.caps.is_empty()
-        || support.pin_count == 0
-    {
-        return Ok(0);
+    let mut written = 0;
+    for provider in 0..H::provider_count() {
+        if written == out.len() {
+            return Err(DriverError::resource_exhausted());
+        }
+        let support = H::support(provider);
+        let Some(controller) = H::controller(provider) else {
+            continue;
+        };
+        if support.implementation == GpioImplementationKind::Unsupported
+            || support.caps.is_empty()
+            || support.pin_count == 0
+        {
+            continue;
+        }
+        out[written] = GpioBinding {
+            provider,
+            controller_id: controller.id,
+        };
+        written += 1;
     }
-
-    out[0] = GpioBinding { provider: 0 };
-    Ok(1)
+    Ok(written)
 }
 
 fn activate_gpio_binding<H>(
@@ -360,11 +391,14 @@ where
     H: GpioHardware + 'static,
 {
     let _ = context.downcast_mut::<GpioDriverContext<H>>()?;
-    if binding.provider != 0 {
+    let Some(controller) = H::controller(binding.provider) else {
+        return Err(DriverError::invalid());
+    };
+    if controller.id != binding.controller_id {
         return Err(DriverError::invalid());
     }
 
-    Ok(ActiveDriver::new(binding, Gpio::<H>::new()))
+    Ok(ActiveDriver::new(binding, Gpio::<H>::new(binding.provider)))
 }
 
 impl<H> DriverContract for GpioDriver<H>
@@ -379,5 +413,185 @@ where
             driver_metadata,
             DriverActivation::new(enumerate_gpio_bindings::<H>, activate_gpio_binding::<H>),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interface::contract::{
+        GpioHardware as GpioHardwareContract,
+        GpioHardwarePin as GpioHardwarePinContract,
+    };
+
+    const TEST_CONTROLLER_A: GpioControllerDescriptor = GpioControllerDescriptor {
+        id: "test-gpio-a",
+        name: "Test GPIO A",
+    };
+    const TEST_CONTROLLER_B: GpioControllerDescriptor = GpioControllerDescriptor {
+        id: "test-gpio-b",
+        name: "Test GPIO B",
+    };
+    const TEST_PINS_A: [GpioPinDescriptor; 1] = [GpioPinDescriptor {
+        pin: 1,
+        name: "a1",
+        capabilities: GpioCapabilities::INPUT,
+    }];
+    const TEST_PINS_B: [GpioPinDescriptor; 1] = [GpioPinDescriptor {
+        pin: 2,
+        name: "b2",
+        capabilities: GpioCapabilities::OUTPUT,
+    }];
+    const TEST_SUPPORT: GpioSupport = GpioSupport {
+        caps: GpioProviderCaps::ENUMERATE | GpioProviderCaps::CLAIM,
+        implementation: GpioImplementationKind::Native,
+        pin_count: 1,
+    };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TestPin {
+        provider: u8,
+        pin: u8,
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct TestHardware;
+
+    impl GpioHardwareContract for TestHardware {
+        type Pin = TestPin;
+
+        fn provider_count() -> u8 {
+            2
+        }
+
+        fn controller(provider: u8) -> Option<&'static GpioControllerDescriptor> {
+            match provider {
+                0 => Some(&TEST_CONTROLLER_A),
+                1 => Some(&TEST_CONTROLLER_B),
+                _ => None,
+            }
+        }
+
+        fn support(provider: u8) -> GpioSupport {
+            match provider {
+                0 | 1 => TEST_SUPPORT,
+                _ => GpioSupport::unsupported(),
+            }
+        }
+
+        fn pins(provider: u8) -> &'static [GpioPinDescriptor] {
+            match provider {
+                0 => &TEST_PINS_A,
+                1 => &TEST_PINS_B,
+                _ => &[],
+            }
+        }
+
+        fn claim_pin(provider: u8, pin: u8) -> Result<Self::Pin, GpioError> {
+            if Self::pins(provider)
+                .iter()
+                .any(|descriptor| descriptor.pin == pin)
+            {
+                Ok(TestPin { provider, pin })
+            } else {
+                Err(GpioError::invalid())
+            }
+        }
+    }
+
+    impl GpioHardwarePinContract for TestPin {
+        fn controller(&self) -> &'static GpioControllerDescriptor {
+            match self.provider {
+                0 => &TEST_CONTROLLER_A,
+                1 => &TEST_CONTROLLER_B,
+                _ => panic!("invalid test provider {}", self.provider),
+            }
+        }
+
+        fn pin(&self) -> u8 {
+            self.pin
+        }
+
+        fn capabilities(&self) -> GpioCapabilities {
+            match self.provider {
+                0 => GpioCapabilities::INPUT,
+                1 => GpioCapabilities::OUTPUT,
+                _ => GpioCapabilities::empty(),
+            }
+        }
+
+        fn set_function(&mut self, _function: GpioFunction) -> Result<(), GpioError> {
+            Err(GpioError::unsupported())
+        }
+
+        fn configure_input(&mut self) -> Result<(), GpioError> {
+            Ok(())
+        }
+
+        fn read_level(&self) -> Result<bool, GpioError> {
+            Ok(false)
+        }
+
+        fn configure_output(&mut self, _initial_high: bool) -> Result<(), GpioError> {
+            Ok(())
+        }
+
+        fn set_level(&mut self, _high: bool) -> Result<(), GpioError> {
+            Ok(())
+        }
+
+        fn set_pull(&mut self, _pull: GpioPull) -> Result<(), GpioError> {
+            Err(GpioError::unsupported())
+        }
+
+        fn set_drive_strength(&mut self, _strength: GpioDriveStrength) -> Result<(), GpioError> {
+            Err(GpioError::unsupported())
+        }
+    }
+
+    #[test]
+    fn gpio_driver_enumerates_multiple_controllers_honestly() {
+        let mut registry = DriverRegistry::<1>::new();
+        let registered = registry
+            .register::<GpioDriver<TestHardware>>()
+            .expect("test gpio driver should register");
+        let mut context = GpioDriverContext::<TestHardware>::new();
+        let mut bindings = [GpioBinding {
+            provider: 0,
+            controller_id: "",
+        }; 2];
+        let count = registered
+            .enumerate_bindings(
+                &mut DriverDiscoveryContext::new(&mut context),
+                &mut bindings,
+            )
+            .expect("enumeration should succeed");
+        assert_eq!(count, 2);
+        assert_eq!(bindings[0].controller_id, TEST_CONTROLLER_A.id);
+        assert_eq!(bindings[1].controller_id, TEST_CONTROLLER_B.id);
+    }
+
+    #[test]
+    fn gpio_driver_activation_binds_instance_to_selected_controller() {
+        let mut registry = DriverRegistry::<1>::new();
+        let registered = registry
+            .register::<GpioDriver<TestHardware>>()
+            .expect("test gpio driver should register");
+        let mut context = GpioDriverContext::<TestHardware>::new();
+        let binding = GpioBinding {
+            provider: 1,
+            controller_id: TEST_CONTROLLER_B.id,
+        };
+        let active = registered
+            .activate(&mut DriverActivationContext::new(&mut context), binding)
+            .expect("activation should succeed");
+        let gpio = active.into_instance();
+        assert_eq!(
+            gpio.controller().expect("controller should resolve").id,
+            TEST_CONTROLLER_B.id
+        );
+        assert_eq!(gpio.pins()[0].pin, 2);
+        let pin = gpio.take_pin(2).expect("pin should claim");
+        assert_eq!(pin.controller().id, TEST_CONTROLLER_B.id);
     }
 }

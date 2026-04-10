@@ -4,6 +4,8 @@
 
 use core::time::Duration;
 
+use fusion_hal::contract::drivers::bus::gpio::GpioSignalSource;
+
 use crate::contract::pal::mem::MemTopologyNodeId;
 use crate::contract::pal::mem::{
     CachePolicy,
@@ -273,6 +275,15 @@ pub enum CortexMWifiTransportBinding {
         /// Intended host SDIO clock rate.
         target_clock_hz: Option<u32>,
     },
+}
+
+/// Board-visible USB device-side VBUS-detect source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CortexMUsbDeviceVbusDetectSource {
+    /// The USB controller's native VBUS-detect path is wired honestly to the connector.
+    NativeController,
+    /// One surfaced GPIO controller must be sampled to determine whether VBUS is present.
+    GpioSignal(GpioSignalSource),
 }
 
 /// Board-visible controller reference/sleep clock truth.
@@ -846,6 +857,12 @@ pub trait CortexMSocBoard: Copy {
         &[]
     }
 
+    /// Returns the board-visible USB device-side VBUS-detect source when one exists.
+    #[must_use]
+    fn usb_device_vbus_detect_source(&self) -> Option<CortexMUsbDeviceVbusDetectSource> {
+        None
+    }
+
     /// Returns the named IRQ lines surfaced by this SoC board.
     #[must_use]
     fn irqs(&self) -> &'static [CortexMIrqDescriptor] {
@@ -1197,6 +1214,14 @@ pub fn device_identity<T: CortexMSocBoard>(
 #[must_use]
 pub fn local_critical_section_sync_safe<T: CortexMSocBoard>(soc: T) -> bool {
     soc.local_critical_section_sync_safe()
+}
+
+/// Returns the board-visible USB device-side VBUS-detect source for the selected board.
+#[must_use]
+pub fn usb_device_vbus_detect_source<T: CortexMSocBoard>(
+    soc: T,
+) -> Option<CortexMUsbDeviceVbusDetectSource> {
+    soc.usb_device_vbus_detect_source()
 }
 
 /// Returns the truthful topology summary for the selected Cortex-M SoC.

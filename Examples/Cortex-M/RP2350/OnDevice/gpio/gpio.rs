@@ -9,7 +9,7 @@ use core::sync::atomic::{
 
 use fusion_hal::contract::drivers::bus::gpio::{
     GpioCapabilities,
-    GpioControlContract,
+    GpioControllerDescriptor,
     GpioDriveStrength,
     GpioError,
     GpioErrorKind,
@@ -20,6 +20,7 @@ use fusion_firmware::sys::hal::drivers::bus::gpio::{
     SystemGpioPin,
     system_gpio,
 };
+use fusion_pal::sys::soc::drivers::bus::gpio::primary_gpio_controller;
 use fusion_std::thread::{
     GreenHandle,
     yield_now,
@@ -597,6 +598,10 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
 impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize> GpioOwnedPinContract
     for Rp2350FiberGpioOutputPin<COMMAND_CAPACITY, STATUS_CAPACITY>
 {
+    fn controller(&self) -> &'static GpioControllerDescriptor {
+        primary_gpio_controller()
+    }
+
     fn pin(&self) -> u8 {
         self.pin
     }

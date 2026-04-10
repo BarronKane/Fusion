@@ -58,11 +58,19 @@ use fusion_hal::contract::drivers::bus::usb::{
     UsbSupport,
     UsbTransferCompletion,
     UsbTransferRequest,
+    UsbTransferType,
     UsbEndpointAddress,
+    UsbEndpointDescriptor,
+    UsbEndpointNumber,
     UsbDescriptorType,
 };
 
-use crate::pal::soc::cortex_m::hal::soc::rp2350::ensure_boot_clocks_initialized;
+use crate::pal::soc::cortex_m::hal::soc::rp2350::{
+    CortexMUsbDeviceVbusDetectSource,
+    ensure_boot_clocks_initialized,
+    drivers::bus::gpio::gpio_signal_level,
+    usb_device_vbus_detect_source,
+};
 
 const RP2350_USBCTRL_DPRAM_BASE: usize = 0x5010_0000;
 const RP2350_USBCTRL_REGS_BASE: usize = 0x5011_0000;
@@ -70,6 +78,9 @@ const RP2350_USBCTRL_DPRAM_BYTES: usize = 4096;
 const RP2350_USBCTRL_IRQN: u16 = 14;
 const CORTEX_M_EXTERNAL_EXCEPTION_BASE: i16 = 16;
 const RP2350_USB_EP0_MAX_PACKET_SIZE: usize = 64;
+const RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE: usize = 64;
+const RP2350_USB_DEBUG_ENDPOINT_OUT_DPRAM_OFFSET: usize = 0;
+const RP2350_USB_DEBUG_ENDPOINT_IN_DPRAM_OFFSET: usize = 64;
 
 const RP2350_RESETS_BASE: usize = 0x4002_0000;
 const RP2350_RESETS_RESET_OFFSET: usize = 0x00;
@@ -96,9 +107,12 @@ const USB_SIE_STATUS_BUS_RESET_BITS: u32 = 0x0008_0000;
 const USB_SIE_STATUS_SETUP_REC_BITS: u32 = 0x0002_0000;
 const USB_SIE_STATUS_CONNECTED_BITS: u32 = 0x0001_0000;
 const USB_SIE_STATUS_SUSPENDED_BITS: u32 = 0x0000_0010;
+const USB_SIE_STATUS_VBUS_DETECTED_BITS: u32 = 0x0000_0001;
 
 const USB_BUFF_STATUS_EP0_OUT_BITS: u32 = 0x0000_0002;
 const USB_BUFF_STATUS_EP0_IN_BITS: u32 = 0x0000_0001;
+const USB_BUFF_STATUS_EP1_OUT_BITS: u32 = 0x0000_0008;
+const USB_BUFF_STATUS_EP1_IN_BITS: u32 = 0x0000_0004;
 
 const USB_EP_STALL_ARM_EP0_OUT_BITS: u32 = 0x0000_0002;
 const USB_EP_STALL_ARM_EP0_IN_BITS: u32 = 0x0000_0001;
@@ -121,6 +135,10 @@ const USB_BUF_CTRL_STALL: u32 = 0x0000_0800;
 const USB_BUF_CTRL_AVAIL: u32 = 0x0000_0400;
 const USB_BUF_CTRL_LEN_MASK: u32 = 0x0000_03ff;
 
+const USB_ENDPOINT_CTRL_ENABLE_BITS: u32 = 0x8000_0000;
+const USB_ENDPOINT_CTRL_INTERRUPT_PER_BUFFER_BITS: u32 = 0x2000_0000;
+const USB_ENDPOINT_CTRL_BUFFER_TYPE_LSB: u32 = 26;
+
 const USB_REQUEST_GET_STATUS: u8 = 0x00;
 const USB_REQUEST_CLEAR_FEATURE: u8 = 0x01;
 const USB_REQUEST_SET_FEATURE: u8 = 0x03;
@@ -142,6 +160,13 @@ const RP2350_USB_RUNTIME_UNINITIALIZED: u8 = 0;
 const RP2350_USB_RUNTIME_RUNNING: u8 = 1;
 const RP2350_USB_RUNTIME_READY: u8 = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rp2350UsbVbusObservation {
+    Present,
+    Absent,
+    Unknown,
+}
+
 const RP2350_USB_DEVICE_DESCRIPTOR: UsbDeviceDescriptor = UsbDeviceDescriptor {
     usb_revision: UsbSpecRevision::USB_2_0,
     device_class: 0,
@@ -159,7 +184,7 @@ const RP2350_USB_DEVICE_DESCRIPTOR: UsbDeviceDescriptor = UsbDeviceDescriptor {
 
 const RP2350_USB_CONFIGURATION_DESCRIPTOR: UsbConfigurationDescriptor =
     UsbConfigurationDescriptor {
-        total_length: 18,
+        total_length: 32,
         interface_count: 1,
         configuration_value: 1,
         configuration_string_index: 0,
@@ -170,12 +195,37 @@ const RP2350_USB_CONFIGURATION_DESCRIPTOR: UsbConfigurationDescriptor =
 const RP2350_USB_INTERFACE_DESCRIPTOR: UsbInterfaceDescriptor = UsbInterfaceDescriptor {
     interface_number: 0,
     alternate_setting: 0,
-    endpoint_count: 0,
+    endpoint_count: 2,
     interface_class: 0xff,
     interface_subclass: 0,
     interface_protocol: 0,
     interface_string_index: USB_STRING_INTERFACE_INDEX,
 };
+
+const RP2350_USB_DEBUG_BULK_OUT_ENDPOINT: UsbEndpointDescriptor = UsbEndpointDescriptor {
+    address: UsbEndpointAddress {
+        number: UsbEndpointNumber(1),
+        direction: UsbDirection::Out,
+    },
+    transfer_type: UsbTransferType::Bulk,
+    max_packet_size: RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE as u16,
+    interval: 0,
+};
+
+const RP2350_USB_DEBUG_BULK_IN_ENDPOINT: UsbEndpointDescriptor = UsbEndpointDescriptor {
+    address: UsbEndpointAddress {
+        number: UsbEndpointNumber(1),
+        direction: UsbDirection::In,
+    },
+    transfer_type: UsbTransferType::Bulk,
+    max_packet_size: RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE as u16,
+    interval: 0,
+};
+
+const RP2350_USB_ENDPOINT_DESCRIPTORS: [UsbEndpointDescriptor; 2] = [
+    RP2350_USB_DEBUG_BULK_OUT_ENDPOINT,
+    RP2350_USB_DEBUG_BULK_IN_ENDPOINT,
+];
 
 const RP2350_USB_DEVICE_DESCRIPTOR_BYTES: [u8; 18] = [
     18,
@@ -198,10 +248,10 @@ const RP2350_USB_DEVICE_DESCRIPTOR_BYTES: [u8; 18] = [
     1,
 ];
 
-const RP2350_USB_CONFIGURATION_DESCRIPTOR_BYTES: [u8; 18] = [
+const RP2350_USB_CONFIGURATION_DESCRIPTOR_BYTES: [u8; 32] = [
     9,
     0x02,
-    18,
+    32,
     0,
     1,
     1,
@@ -212,11 +262,25 @@ const RP2350_USB_CONFIGURATION_DESCRIPTOR_BYTES: [u8; 18] = [
     0x04,
     0,
     0,
-    0,
+    2,
     0xff,
     0x00,
     0x00,
     USB_STRING_INTERFACE_INDEX,
+    7,
+    0x05,
+    0x01,
+    0x02,
+    64,
+    0,
+    0,
+    7,
+    0x05,
+    0x81,
+    0x02,
+    64,
+    0,
+    0,
 ];
 
 const RP2350_USB_MANUFACTURER_STRING: &[u8] = b"Fusion";
@@ -247,7 +311,7 @@ const RP2350_USB_CORE_METADATA: UsbCoreMetadata = UsbCoreMetadata {
     },
     capabilities: UsbCoreCapabilities {
         control_transfer: true,
-        bulk_transfer: false,
+        bulk_transfer: true,
         interrupt_transfer: false,
         isochronous_transfer: false,
         bos_descriptor: false,
@@ -329,6 +393,14 @@ struct Rp2350UsbRuntime {
     active_configuration: u8,
     ep0_in_data1: bool,
     ep0_out_data1: bool,
+    ep1_in_configured: bool,
+    ep1_out_configured: bool,
+    ep1_in_busy: bool,
+    ep1_out_armed: bool,
+    ep1_out_ready: bool,
+    ep1_out_ready_len: usize,
+    ep1_in_data1: bool,
+    ep1_out_data1: bool,
     expect_status_out: bool,
     bus_reset_seen: bool,
 }
@@ -341,6 +413,14 @@ impl Rp2350UsbRuntime {
             active_configuration: 0,
             ep0_in_data1: true,
             ep0_out_data1: true,
+            ep1_in_configured: false,
+            ep1_out_configured: false,
+            ep1_in_busy: false,
+            ep1_out_armed: false,
+            ep1_out_ready: false,
+            ep1_out_ready_len: 0,
+            ep1_in_data1: false,
+            ep1_out_data1: false,
             expect_status_out: false,
             bus_reset_seen: false,
         }
@@ -352,6 +432,14 @@ impl Rp2350UsbRuntime {
         self.active_configuration = 0;
         self.ep0_in_data1 = true;
         self.ep0_out_data1 = true;
+        self.ep1_in_configured = false;
+        self.ep1_out_configured = false;
+        self.ep1_in_busy = false;
+        self.ep1_out_armed = false;
+        self.ep1_out_ready = false;
+        self.ep1_out_ready_len = 0;
+        self.ep1_in_data1 = false;
+        self.ep1_out_data1 = false;
         self.expect_status_out = false;
         self.bus_reset_seen = true;
     }
@@ -479,8 +567,16 @@ impl UsbHardwareTopology for UsbHardware {
         }
 
         let state = rp2350_usb_device_state()?;
+        let connected = matches!(
+            state,
+            UsbDeviceState::Attached
+                | UsbDeviceState::Default
+                | UsbDeviceState::Addressed
+                | UsbDeviceState::Configured
+                | UsbDeviceState::Suspended
+        );
         Ok(UsbPortStatus {
-            connected: rp2350_usb_connected(),
+            connected,
             enabled: matches!(
                 state,
                 UsbDeviceState::Default | UsbDeviceState::Addressed | UsbDeviceState::Configured
@@ -490,7 +586,7 @@ impl UsbHardwareTopology for UsbHardware {
             reset_in_progress: false,
             suspended: matches!(state, UsbDeviceState::Suspended),
             connector: UsbConnectorKind::MicroB,
-            negotiated_speed: rp2350_usb_connected().then_some(UsbSpeed::Full),
+            negotiated_speed: connected.then_some(UsbSpeed::Full),
             typec_orientation: None,
             data_role: None,
             power_role: None,
@@ -583,7 +679,7 @@ impl UsbHostDeviceContract for UsbHostDevice {
     fn endpoint_descriptors(
         &self,
     ) -> &[fusion_hal::contract::drivers::bus::usb::UsbEndpointDescriptor] {
-        &[]
+        &RP2350_USB_ENDPOINT_DESCRIPTORS
     }
 
     fn control_transfer<'a>(
@@ -640,11 +736,15 @@ impl UsbDeviceControllerContract for UsbDeviceController {
         slice::from_ref(&RP2350_USB_INTERFACE_DESCRIPTOR)
     }
 
+    fn endpoint_descriptors(&self) -> &[UsbEndpointDescriptor] {
+        &RP2350_USB_ENDPOINT_DESCRIPTORS
+    }
+
     fn configure_endpoint(
         &mut self,
-        _endpoint: UsbDeviceEndpointConfiguration,
+        endpoint: UsbDeviceEndpointConfiguration,
     ) -> Result<(), UsbError> {
-        Err(UsbError::unsupported())
+        RP2350_USB_RUNTIME.with_mut(|runtime| rp2350_usb_configure_endpoint(runtime, endpoint))?
     }
 
     fn queue_in(&mut self, endpoint: UsbEndpointAddress, payload: &[u8]) -> Result<(), UsbError> {
@@ -657,14 +757,22 @@ impl UsbDeviceControllerContract for UsbDeviceController {
             })?;
             return Ok(());
         }
+        if endpoint == RP2350_USB_DEBUG_BULK_IN_ENDPOINT.address {
+            return RP2350_USB_RUNTIME
+                .with_mut(|runtime| rp2350_usb_queue_debug_in(runtime, payload))?;
+        }
         Err(UsbError::unsupported())
     }
 
     fn dequeue_out<'a>(
         &mut self,
-        _endpoint: UsbEndpointAddress,
-        _buffer: &'a mut [u8],
+        endpoint: UsbEndpointAddress,
+        buffer: &'a mut [u8],
     ) -> Result<&'a [u8], UsbError> {
+        if endpoint == RP2350_USB_DEBUG_BULK_OUT_ENDPOINT.address {
+            return RP2350_USB_RUNTIME
+                .with_mut(|runtime| rp2350_usb_dequeue_debug_out(runtime, buffer))?;
+        }
         Err(UsbError::unsupported())
     }
 
@@ -813,6 +921,7 @@ fn rp2350_usb_handle_bus_reset(runtime: &mut Rp2350UsbRuntime) {
     rp2350_usb_write_reg(USB_ADDR_ENDP_OFFSET, 0);
     rp2350_usb_write_reg(USB_BUFF_STATUS_OFFSET, u32::MAX);
     rp2350_usb_reset_ep0(runtime);
+    rp2350_usb_disable_debug_bulk_endpoints(runtime);
 }
 
 fn rp2350_usb_handle_setup_irq(runtime: &mut Rp2350UsbRuntime) -> Result<(), UsbError> {
@@ -912,7 +1021,13 @@ fn rp2350_usb_prepare_setup_response(
             if configuration > 1 {
                 return Ok(SetupResponse::Stall);
             }
-            runtime.active_configuration = configuration;
+            if configuration == 0 {
+                runtime.active_configuration = 0;
+                rp2350_usb_disable_debug_bulk_endpoints(runtime);
+            } else {
+                rp2350_usb_configure_debug_bulk_endpoints(runtime)?;
+                runtime.active_configuration = configuration;
+            }
             Ok(SetupResponse::AckIn)
         }
         (UsbDirection::Out, USB_REQUEST_CLEAR_FEATURE)
@@ -920,6 +1035,183 @@ fn rp2350_usb_prepare_setup_response(
         | (UsbDirection::Out, USB_REQUEST_SET_INTERFACE) => Ok(SetupResponse::AckIn),
         _ => Ok(SetupResponse::Stall),
     }
+}
+
+fn rp2350_usb_configure_endpoint(
+    runtime: &mut Rp2350UsbRuntime,
+    endpoint: UsbDeviceEndpointConfiguration,
+) -> Result<(), UsbError> {
+    if endpoint.max_packet_size as usize > RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE {
+        return Err(UsbError::invalid());
+    }
+
+    if endpoint.address == RP2350_USB_DEBUG_BULK_OUT_ENDPOINT.address
+        && matches!(endpoint.transfer_type, UsbTransferType::Bulk)
+        && endpoint.max_packet_size == RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE as u16
+        && endpoint.interval == 0
+    {
+        rp2350_usb_configure_debug_bulk_out(runtime);
+        return Ok(());
+    }
+
+    if endpoint.address == RP2350_USB_DEBUG_BULK_IN_ENDPOINT.address
+        && matches!(endpoint.transfer_type, UsbTransferType::Bulk)
+        && endpoint.max_packet_size == RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE as u16
+        && endpoint.interval == 0
+    {
+        rp2350_usb_configure_debug_bulk_in(runtime);
+        return Ok(());
+    }
+
+    Err(UsbError::unsupported())
+}
+
+fn rp2350_usb_configure_debug_bulk_endpoints(
+    runtime: &mut Rp2350UsbRuntime,
+) -> Result<(), UsbError> {
+    rp2350_usb_reset_debug_bulk_endpoint_state(runtime);
+    rp2350_usb_configure_debug_bulk_out(runtime);
+    rp2350_usb_configure_debug_bulk_in(runtime);
+    rp2350_usb_arm_debug_out(runtime)?;
+    Ok(())
+}
+
+fn rp2350_usb_configure_debug_bulk_out(runtime: &mut Rp2350UsbRuntime) {
+    unsafe {
+        (*rp2350_usb_dpram()).ep_ctrl[0].out = rp2350_usb_endpoint_control_value(
+            RP2350_USB_DEBUG_BULK_OUT_ENDPOINT.transfer_type,
+            RP2350_USB_DEBUG_ENDPOINT_OUT_DPRAM_OFFSET,
+        );
+        (*rp2350_usb_dpram()).ep_buf_ctrl[1].out = 0;
+    }
+    runtime.ep1_out_configured = true;
+}
+
+fn rp2350_usb_configure_debug_bulk_in(runtime: &mut Rp2350UsbRuntime) {
+    unsafe {
+        (*rp2350_usb_dpram()).ep_ctrl[0].in_ = rp2350_usb_endpoint_control_value(
+            RP2350_USB_DEBUG_BULK_IN_ENDPOINT.transfer_type,
+            RP2350_USB_DEBUG_ENDPOINT_IN_DPRAM_OFFSET,
+        );
+        (*rp2350_usb_dpram()).ep_buf_ctrl[1].in_ = 0;
+    }
+    runtime.ep1_in_configured = true;
+}
+
+fn rp2350_usb_disable_debug_bulk_endpoints(runtime: &mut Rp2350UsbRuntime) {
+    runtime.ep1_in_configured = false;
+    runtime.ep1_out_configured = false;
+    runtime.ep1_in_busy = false;
+    runtime.ep1_out_armed = false;
+    runtime.ep1_out_ready = false;
+    runtime.ep1_out_ready_len = 0;
+    runtime.ep1_in_data1 = false;
+    runtime.ep1_out_data1 = false;
+    unsafe {
+        (*rp2350_usb_dpram()).ep_ctrl[0].in_ = 0;
+        (*rp2350_usb_dpram()).ep_ctrl[0].out = 0;
+        (*rp2350_usb_dpram()).ep_buf_ctrl[1].in_ = 0;
+        (*rp2350_usb_dpram()).ep_buf_ctrl[1].out = 0;
+    }
+}
+
+fn rp2350_usb_reset_debug_bulk_endpoint_state(runtime: &mut Rp2350UsbRuntime) {
+    runtime.ep1_in_busy = false;
+    runtime.ep1_out_armed = false;
+    runtime.ep1_out_ready = false;
+    runtime.ep1_out_ready_len = 0;
+    runtime.ep1_in_data1 = false;
+    runtime.ep1_out_data1 = false;
+}
+
+fn rp2350_usb_endpoint_control_value(transfer_type: UsbTransferType, dpram_offset: usize) -> u32 {
+    USB_ENDPOINT_CTRL_ENABLE_BITS
+        | USB_ENDPOINT_CTRL_INTERRUPT_PER_BUFFER_BITS
+        | (rp2350_usb_transfer_type_bits(transfer_type) << USB_ENDPOINT_CTRL_BUFFER_TYPE_LSB)
+        | dpram_offset as u32
+}
+
+fn rp2350_usb_transfer_type_bits(transfer_type: UsbTransferType) -> u32 {
+    match transfer_type {
+        UsbTransferType::Control => 0,
+        UsbTransferType::Isochronous => 1,
+        UsbTransferType::Bulk => 2,
+        UsbTransferType::Interrupt => 3,
+    }
+}
+
+fn rp2350_usb_queue_debug_in(
+    runtime: &mut Rp2350UsbRuntime,
+    payload: &[u8],
+) -> Result<(), UsbError> {
+    if !runtime.ep1_in_configured || runtime.active_configuration == 0 {
+        return Err(UsbError::state_conflict());
+    }
+    if runtime.ep1_in_busy {
+        return Err(UsbError::busy());
+    }
+    if payload.len() > RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE {
+        return Err(UsbError::resource_exhausted());
+    }
+
+    if !payload.is_empty() {
+        rp2350_usb_byte_copy_to_dpram(rp2350_usb_debug_in_buffer(), payload);
+    }
+
+    let mut value = (payload.len() as u32 & USB_BUF_CTRL_LEN_MASK) | USB_BUF_CTRL_FULL;
+    if runtime.ep1_in_data1 {
+        value |= USB_BUF_CTRL_DATA1_PID;
+    }
+    runtime.ep1_in_data1 = !runtime.ep1_in_data1;
+    runtime.ep1_in_busy = true;
+    rp2350_usb_write_buf_ctrl(
+        unsafe { &mut (*rp2350_usb_dpram()).ep_buf_ctrl[1].in_ },
+        value | USB_BUF_CTRL_AVAIL,
+    );
+    Ok(())
+}
+
+fn rp2350_usb_dequeue_debug_out<'a>(
+    runtime: &mut Rp2350UsbRuntime,
+    buffer: &'a mut [u8],
+) -> Result<&'a [u8], UsbError> {
+    if !runtime.ep1_out_configured || runtime.active_configuration == 0 {
+        return Err(UsbError::state_conflict());
+    }
+    if !runtime.ep1_out_ready {
+        return Err(UsbError::busy());
+    }
+    if buffer.len() < runtime.ep1_out_ready_len {
+        return Err(UsbError::resource_exhausted());
+    }
+
+    let len = runtime.ep1_out_ready_len;
+    rp2350_usb_byte_copy_from_dpram(buffer, rp2350_usb_debug_out_buffer(), len);
+    runtime.ep1_out_ready = false;
+    runtime.ep1_out_ready_len = 0;
+    rp2350_usb_arm_debug_out(runtime)?;
+    Ok(&buffer[..len])
+}
+
+fn rp2350_usb_arm_debug_out(runtime: &mut Rp2350UsbRuntime) -> Result<(), UsbError> {
+    if !runtime.ep1_out_configured {
+        return Err(UsbError::state_conflict());
+    }
+    if runtime.ep1_out_armed || runtime.ep1_out_ready {
+        return Err(UsbError::busy());
+    }
+
+    let mut value = RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE as u32 & USB_BUF_CTRL_LEN_MASK;
+    if runtime.ep1_out_data1 {
+        value |= USB_BUF_CTRL_DATA1_PID;
+    }
+    runtime.ep1_out_data1 = !runtime.ep1_out_data1;
+    runtime.ep1_out_armed = true;
+    rp2350_usb_write_buf_ctrl(
+        unsafe { &mut (*rp2350_usb_dpram()).ep_buf_ctrl[1].out },
+        value | USB_BUF_CTRL_AVAIL,
+    );
+    Ok(())
 }
 
 fn rp2350_usb_write_string_descriptor(
@@ -975,8 +1267,20 @@ fn rp2350_usb_handle_buffer_status(runtime: &mut Rp2350UsbRuntime) {
         rp2350_usb_write_reg(USB_BUFF_STATUS_OFFSET, USB_BUFF_STATUS_EP0_OUT_BITS);
         rp2350_usb_handle_ep0_out_complete(runtime);
     }
+    if (status & USB_BUFF_STATUS_EP1_IN_BITS) != 0 {
+        rp2350_usb_write_reg(USB_BUFF_STATUS_OFFSET, USB_BUFF_STATUS_EP1_IN_BITS);
+        rp2350_usb_handle_ep1_in_complete(runtime);
+    }
+    if (status & USB_BUFF_STATUS_EP1_OUT_BITS) != 0 {
+        rp2350_usb_write_reg(USB_BUFF_STATUS_OFFSET, USB_BUFF_STATUS_EP1_OUT_BITS);
+        rp2350_usb_handle_ep1_out_complete(runtime);
+    }
 
-    let unexpected = status & !(USB_BUFF_STATUS_EP0_IN_BITS | USB_BUFF_STATUS_EP0_OUT_BITS);
+    let unexpected = status
+        & !(USB_BUFF_STATUS_EP0_IN_BITS
+            | USB_BUFF_STATUS_EP0_OUT_BITS
+            | USB_BUFF_STATUS_EP1_IN_BITS
+            | USB_BUFF_STATUS_EP1_OUT_BITS);
     if unexpected != 0 {
         rp2350_usb_write_reg(USB_BUFF_STATUS_OFFSET, unexpected);
     }
@@ -996,6 +1300,17 @@ fn rp2350_usb_handle_ep0_in_complete(runtime: &mut Rp2350UsbRuntime) {
 
 fn rp2350_usb_handle_ep0_out_complete(runtime: &mut Rp2350UsbRuntime) {
     runtime.expect_status_out = false;
+}
+
+fn rp2350_usb_handle_ep1_in_complete(runtime: &mut Rp2350UsbRuntime) {
+    runtime.ep1_in_busy = false;
+}
+
+fn rp2350_usb_handle_ep1_out_complete(runtime: &mut Rp2350UsbRuntime) {
+    let len = unsafe { (*rp2350_usb_dpram()).ep_buf_ctrl[1].out } & USB_BUF_CTRL_LEN_MASK;
+    runtime.ep1_out_armed = false;
+    runtime.ep1_out_ready = true;
+    runtime.ep1_out_ready_len = len as usize;
 }
 
 fn rp2350_usb_start_ep0_in(
@@ -1064,34 +1379,85 @@ fn rp2350_usb_reset_ep0(runtime: &mut Rp2350UsbRuntime) {
 fn rp2350_usb_device_state() -> Result<UsbDeviceState, UsbError> {
     RP2350_USB_RUNTIME.with(|runtime| {
         let sie_status = rp2350_usb_read_reg(USB_SIE_STATUS_OFFSET);
-        if runtime.active_configuration != 0 {
-            return UsbDeviceState::Configured;
-        }
-
-        if runtime.device_address != 0 {
-            return UsbDeviceState::Addressed;
-        }
-
-        if runtime.bus_reset_seen {
-            if (sie_status & USB_SIE_STATUS_SUSPENDED_BITS) != 0 {
-                return UsbDeviceState::Suspended;
-            }
-            return UsbDeviceState::Default;
-        }
-
-        if (sie_status & USB_SIE_STATUS_CONNECTED_BITS) != 0 {
-            UsbDeviceState::Powered
-        } else {
-            UsbDeviceState::Powered
-        }
+        rp2350_usb_device_state_from_snapshot(
+            runtime.active_configuration,
+            runtime.device_address,
+            runtime.bus_reset_seen,
+            sie_status,
+            rp2350_usb_vbus_observation(sie_status),
+        )
     })
 }
 
-fn rp2350_usb_connected() -> bool {
-    if RP2350_USB_RUNTIME.state.load(Ordering::Acquire) != RP2350_USB_RUNTIME_READY {
-        return false;
+fn rp2350_usb_device_state_from_snapshot(
+    active_configuration: u8,
+    device_address: u8,
+    bus_reset_seen: bool,
+    sie_status: u32,
+    vbus: Rp2350UsbVbusObservation,
+) -> UsbDeviceState {
+    if active_configuration != 0 {
+        return UsbDeviceState::Configured;
     }
-    (rp2350_usb_read_reg(USB_SIE_STATUS_OFFSET) & USB_SIE_STATUS_CONNECTED_BITS) != 0
+
+    if device_address != 0 {
+        return UsbDeviceState::Addressed;
+    }
+
+    if bus_reset_seen {
+        if (sie_status & USB_SIE_STATUS_SUSPENDED_BITS) != 0 {
+            return UsbDeviceState::Suspended;
+        }
+        return UsbDeviceState::Default;
+    }
+
+    if (sie_status & USB_SIE_STATUS_CONNECTED_BITS) != 0 {
+        return UsbDeviceState::Attached;
+    }
+
+    match vbus {
+        Rp2350UsbVbusObservation::Present => UsbDeviceState::Powered,
+        // Pico SDK-style device bring-up can force VBUS detect through USB_PWR when the board
+        // does not route native VBUS sense into the USB block. Without one truthful sideband
+        // reader, "powered" would just be policy pretending to be physics.
+        Rp2350UsbVbusObservation::Absent | Rp2350UsbVbusObservation::Unknown => {
+            UsbDeviceState::Detached
+        }
+    }
+}
+
+fn rp2350_usb_vbus_observation(sie_status: u32) -> Rp2350UsbVbusObservation {
+    let usb_pwr = rp2350_usb_read_reg(USB_USB_PWR_OFFSET);
+    let vbus_detect_override = (usb_pwr & USB_USB_PWR_VBUS_DETECT_OVERRIDE_EN_BITS) != 0;
+    let vbus_detected = (sie_status & USB_SIE_STATUS_VBUS_DETECTED_BITS) != 0;
+
+    match usb_device_vbus_detect_source() {
+        Some(CortexMUsbDeviceVbusDetectSource::NativeController) if !vbus_detect_override => {
+            if vbus_detected {
+                Rp2350UsbVbusObservation::Present
+            } else {
+                Rp2350UsbVbusObservation::Absent
+            }
+        }
+        Some(CortexMUsbDeviceVbusDetectSource::NativeController) => {
+            Rp2350UsbVbusObservation::Unknown
+        }
+        Some(CortexMUsbDeviceVbusDetectSource::GpioSignal(source)) => {
+            match gpio_signal_level(source) {
+                Ok(true) => Rp2350UsbVbusObservation::Present,
+                Ok(false) => Rp2350UsbVbusObservation::Absent,
+                Err(_) => Rp2350UsbVbusObservation::Unknown,
+            }
+        }
+        None if !vbus_detect_override => {
+            if vbus_detected {
+                Rp2350UsbVbusObservation::Present
+            } else {
+                Rp2350UsbVbusObservation::Absent
+            }
+        }
+        None => Rp2350UsbVbusObservation::Unknown,
+    }
 }
 
 fn rp2350_usb_parse_setup_packet(bytes: [u8; 8]) -> UsbSetupPacket {
@@ -1125,9 +1491,33 @@ fn rp2350_usb_dpram() -> *mut Rp2350UsbDeviceDpram {
     RP2350_USBCTRL_DPRAM_BASE as *mut Rp2350UsbDeviceDpram
 }
 
+fn rp2350_usb_debug_out_buffer() -> *mut u8 {
+    unsafe {
+        (*rp2350_usb_dpram())
+            .epx_data
+            .as_mut_ptr()
+            .add(RP2350_USB_DEBUG_ENDPOINT_OUT_DPRAM_OFFSET)
+    }
+}
+
+fn rp2350_usb_debug_in_buffer() -> *mut u8 {
+    unsafe {
+        (*rp2350_usb_dpram())
+            .epx_data
+            .as_mut_ptr()
+            .add(RP2350_USB_DEBUG_ENDPOINT_IN_DPRAM_OFFSET)
+    }
+}
+
 fn rp2350_usb_byte_copy_to_dpram(dst: *mut u8, src: &[u8]) {
     for (index, byte) in src.iter().copied().enumerate() {
         unsafe { ptr::write_volatile(dst.add(index), byte) };
+    }
+}
+
+fn rp2350_usb_byte_copy_from_dpram(dst: &mut [u8], src: *const u8, len: usize) {
+    for (index, slot) in dst.iter_mut().take(len).enumerate() {
+        *slot = unsafe { ptr::read_volatile(src.add(index)) };
     }
 }
 
@@ -1155,4 +1545,92 @@ fn rp2350_usb_read_reg(offset: usize) -> u32 {
 
 fn rp2350_usb_write_reg(offset: usize, value: u32) {
     unsafe { ptr::write_volatile((RP2350_USBCTRL_REGS_BASE + offset) as *mut u32, value) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reliable_vbus_without_connection_reports_powered() {
+        assert_eq!(
+            rp2350_usb_device_state_from_snapshot(
+                0,
+                0,
+                false,
+                0,
+                Rp2350UsbVbusObservation::Present,
+            ),
+            UsbDeviceState::Powered
+        );
+    }
+
+    #[test]
+    fn connected_without_reset_reports_attached() {
+        assert_eq!(
+            rp2350_usb_device_state_from_snapshot(
+                0,
+                0,
+                false,
+                USB_SIE_STATUS_CONNECTED_BITS,
+                Rp2350UsbVbusObservation::Unknown,
+            ),
+            UsbDeviceState::Attached
+        );
+    }
+
+    #[test]
+    fn unknown_vbus_without_connection_stays_detached() {
+        assert_eq!(
+            rp2350_usb_device_state_from_snapshot(
+                0,
+                0,
+                false,
+                0,
+                Rp2350UsbVbusObservation::Unknown,
+            ),
+            UsbDeviceState::Detached
+        );
+    }
+
+    #[test]
+    fn bus_reset_and_suspend_report_suspended() {
+        assert_eq!(
+            rp2350_usb_device_state_from_snapshot(
+                0,
+                0,
+                true,
+                USB_SIE_STATUS_SUSPENDED_BITS,
+                Rp2350UsbVbusObservation::Present,
+            ),
+            UsbDeviceState::Suspended
+        );
+    }
+
+    #[test]
+    fn configuration_descriptor_bytes_include_bulk_debug_endpoints() {
+        assert_eq!(
+            RP2350_USB_CONFIGURATION_DESCRIPTOR.total_length as usize,
+            RP2350_USB_CONFIGURATION_DESCRIPTOR_BYTES.len()
+        );
+        assert_eq!(RP2350_USB_INTERFACE_DESCRIPTOR.endpoint_count, 2);
+        assert_eq!(RP2350_USB_ENDPOINT_DESCRIPTORS.len(), 2);
+        assert_eq!(
+            RP2350_USB_ENDPOINT_DESCRIPTORS[0].address,
+            RP2350_USB_DEBUG_BULK_OUT_ENDPOINT.address
+        );
+        assert_eq!(
+            RP2350_USB_ENDPOINT_DESCRIPTORS[1].address,
+            RP2350_USB_DEBUG_BULK_IN_ENDPOINT.address
+        );
+    }
+
+    #[test]
+    fn endpoint_control_value_encodes_bulk_transfer_and_offset() {
+        let value = rp2350_usb_endpoint_control_value(UsbTransferType::Bulk, 0x180);
+        assert_ne!(value & USB_ENDPOINT_CTRL_ENABLE_BITS, 0);
+        assert_ne!(value & USB_ENDPOINT_CTRL_INTERRUPT_PER_BUFFER_BITS, 0);
+        assert_eq!(value & 0x0fff, 0x180);
+        assert_eq!((value >> USB_ENDPOINT_CTRL_BUFFER_TYPE_LSB) & 0x03, 2);
+    }
 }

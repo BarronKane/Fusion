@@ -39,6 +39,9 @@ pub trait UsbDeviceControllerContract: UsbControllerContract {
     /// Returns the surfaced interface descriptors for the active configuration model.
     fn interface_descriptors(&self) -> &[UsbInterfaceDescriptor];
 
+    /// Returns the surfaced endpoint descriptors for the active configuration model.
+    fn endpoint_descriptors(&self) -> &[UsbEndpointDescriptor];
+
     /// Realizes one endpoint configuration.
     ///
     /// # Errors

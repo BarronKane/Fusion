@@ -17,6 +17,8 @@
 //! - `D110` USB device controller ready
 //! - `D120` USB host observed
 //! - `D12F` USB configured
+//! - `D130` bulk loopback armed
+//! - `D13F` bulk loopback observed
 //! - `E1xx` display failure
 //! - `E12x` USB failure
 
@@ -38,13 +40,16 @@ use fusion_firmware::sys::hal::drivers::bus::usb::{
     system_usb_device_controller,
 };
 use fusion_hal::contract::drivers::bus::gpio::{
-    GpioControlContract,
     GpioDriveStrength,
     GpioError,
 };
 use fusion_hal::contract::drivers::bus::usb::{
     UsbDeviceControllerContract,
+    UsbEndpointAddress,
+    UsbEndpointNumber,
+    UsbErrorKind,
     UsbDeviceState,
+    UsbDirection,
 };
 
 fusion_example_rp2350_on_device::fusion_rp2350_export_build_id!();
@@ -61,7 +66,10 @@ const STATUS_USB_BOUND: u16 = 0xD100;
 const STATUS_USB_DEVICE_READY: u16 = 0xD110;
 const STATUS_USB_HOST_OBSERVED: u16 = 0xD120;
 const STATUS_USB_CONFIGURED: u16 = 0xD12F;
+const STATUS_USB_BULK_READY: u16 = 0xD130;
+const STATUS_USB_BULK_ACTIVITY: u16 = 0xD13F;
 const STATUS_ERROR_USB_BIND: u16 = 0xE120;
+const STATUS_ERROR_USB_TRANSFER: u16 = 0xE121;
 
 const PANIC_LED_UNINITIALIZED: u8 = 0;
 const PANIC_LED_READY: u8 = 1;
@@ -69,6 +77,16 @@ const PANIC_LED_FAILED: u8 = 2;
 
 static mut PANIC_LED_STORAGE: MaybeUninit<SystemGpioPin> = MaybeUninit::uninit();
 static PANIC_LED_STATE: AtomicU8 = AtomicU8::new(PANIC_LED_UNINITIALIZED);
+
+const DEBUG_BULK_OUT_ENDPOINT: UsbEndpointAddress = UsbEndpointAddress {
+    number: UsbEndpointNumber(1),
+    direction: UsbDirection::Out,
+};
+
+const DEBUG_BULK_IN_ENDPOINT: UsbEndpointAddress = UsbEndpointAddress {
+    number: UsbEndpointNumber(1),
+    direction: UsbDirection::In,
+};
 
 fn panic_led_on() -> ! {
     #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -177,6 +195,45 @@ fn wait_for_usb_configuration(
     }
 }
 
+fn pump_usb_loopback(
+    usb: &mut impl UsbDeviceControllerContract,
+    display: &Rp2350TimerFourDigitSevenSegmentDisplay,
+    pending: &mut [u8; 64],
+    pending_len: &mut usize,
+    saw_bulk_activity: &mut bool,
+) -> Result<(), ()> {
+    if *pending_len != 0 {
+        match usb.queue_in(DEBUG_BULK_IN_ENDPOINT, &pending[..*pending_len]) {
+            Ok(()) => {
+                *pending_len = 0;
+                *saw_bulk_activity = true;
+            }
+            Err(error) if matches!(error.kind(), UsbErrorKind::Busy) => {}
+            Err(_) => return Err(()),
+        }
+    }
+
+    if *pending_len == 0 {
+        match usb.dequeue_out(DEBUG_BULK_OUT_ENDPOINT, pending) {
+            Ok(payload) => {
+                if !payload.is_empty() {
+                    *pending_len = payload.len();
+                }
+            }
+            Err(error) if matches!(error.kind(), UsbErrorKind::Busy) => {}
+            Err(_) => return Err(()),
+        }
+    }
+
+    if *saw_bulk_activity || *pending_len != 0 {
+        set_status(display, STATUS_USB_BULK_ACTIVITY);
+    } else {
+        set_status(display, STATUS_USB_BULK_READY);
+    }
+
+    Ok(())
+}
+
 #[fusion_firmware::fusion_firmware_main]
 fn main() -> ! {
     let display = match build_display() {
@@ -195,10 +252,35 @@ fn main() -> ! {
     set_status(&display, STATUS_USB_BOUND);
     wait_for_usb_configuration(&mut usb, &display);
 
+    let mut pending_loopback = [0_u8; 64];
+    let mut pending_loopback_len = 0;
+    let mut saw_bulk_activity = false;
+
     loop {
         let state = update_usb_state_status(&mut usb, &display);
-        if matches!(state, UsbDeviceState::Configured) {
-            set_status(&display, STATUS_USB_CONFIGURED);
+        if matches!(state, UsbDeviceState::Configured)
+            && pump_usb_loopback(
+                &mut usb,
+                &display,
+                &mut pending_loopback,
+                &mut pending_loopback_len,
+                &mut saw_bulk_activity,
+            )
+            .is_err()
+        {
+            fatal_status(&display, STATUS_ERROR_USB_TRANSFER);
+        } else if matches!(state, UsbDeviceState::Configured) {
+            set_status(
+                &display,
+                if saw_bulk_activity || pending_loopback_len != 0 {
+                    STATUS_USB_BULK_ACTIVITY
+                } else {
+                    STATUS_USB_BULK_READY
+                },
+            );
+        } else {
+            pending_loopback_len = 0;
+            saw_bulk_activity = false;
         }
         wait_for_runtime_progress();
     }

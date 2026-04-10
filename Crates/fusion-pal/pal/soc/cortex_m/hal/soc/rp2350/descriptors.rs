@@ -1,4 +1,5 @@
 use super::*;
+use fusion_hal::contract::drivers::bus::gpio::GpioSignalSource;
 
 /// Compile-time descriptor for the RP2350 SoC family.
 pub const DESCRIPTOR: CortexMSocDescriptor = CortexMSocDescriptor {
@@ -1708,6 +1709,11 @@ pub(crate) const PAL_POWER_MODES: [PowerModeDescriptor; 2] = [
 
 /// Pico 2 W board-reserved RP2350 GPIO pins consumed by the onboard CYW43439 wiring.
 pub(crate) const RP2350_PICO2W_RESERVED_GPIO_PINS: [u8; 4] = [23, 24, 25, 29];
+pub(crate) const RP2350_PICO2W_USB_DEVICE_VBUS_DETECT_SOURCE: CortexMUsbDeviceVbusDetectSource =
+    CortexMUsbDeviceVbusDetectSource::GpioSignal(GpioSignalSource {
+        controller_id: super::drivers::bus::gpio::CYW43439_WL_GPIO_CONTROLLER_ID,
+        pin: 2,
+    });
 pub(crate) const RP2350_PICO2W_CYW43439_CLOCK: CortexMControllerClockProfile =
     CortexMControllerClockProfile {
         reference_clock_hz: Some(37_400_000),

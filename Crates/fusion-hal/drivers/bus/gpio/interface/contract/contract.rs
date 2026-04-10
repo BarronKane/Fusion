@@ -2,6 +2,7 @@
 
 use fusion_hal::contract::drivers::bus::gpio::{
     GpioCapabilities,
+    GpioControllerDescriptor,
     GpioDriveStrength,
     GpioError,
     GpioFunction,
@@ -15,22 +16,31 @@ pub trait GpioHardware {
     /// Concrete hardware-owned pin handle surfaced by this substrate.
     type Pin: GpioHardwarePin;
 
-    /// Reports the truthful GPIO surface for this substrate.
-    fn support() -> GpioSupport;
+    /// Returns the number of surfaced GPIO controllers/providers.
+    fn provider_count() -> u8;
 
-    /// Returns the statically or dynamically surfaced GPIO pin descriptors.
-    fn pins() -> &'static [GpioPinDescriptor];
+    /// Returns the stable descriptor for one surfaced GPIO controller/provider.
+    fn controller(provider: u8) -> Option<&'static GpioControllerDescriptor>;
 
-    /// Claims one GPIO pin from the underlying substrate.
+    /// Reports the truthful GPIO surface for one controller/provider.
+    fn support(provider: u8) -> GpioSupport;
+
+    /// Returns the statically or dynamically surfaced GPIO pin descriptors for one provider.
+    fn pins(provider: u8) -> &'static [GpioPinDescriptor];
+
+    /// Claims one GPIO pin from the underlying provider.
     ///
     /// # Errors
     ///
     /// Returns one honest error when the pin is invalid, unsupported, or already claimed.
-    fn claim_pin(pin: u8) -> Result<Self::Pin, GpioError>;
+    fn claim_pin(provider: u8, pin: u8) -> Result<Self::Pin, GpioError>;
 }
 
 /// Hardware-facing contract for one owned GPIO pin.
 pub trait GpioHardwarePin {
+    /// Returns the stable controller/provider identity for this owned pin.
+    fn controller(&self) -> &'static GpioControllerDescriptor;
+
     /// Returns the concrete substrate pin number.
     fn pin(&self) -> u8;
 

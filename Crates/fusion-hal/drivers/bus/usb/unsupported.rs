@@ -259,6 +259,12 @@ impl UsbDeviceControllerContract for UnsupportedUsbDeviceController {
         &[]
     }
 
+    fn endpoint_descriptors(
+        &self,
+    ) -> &[fusion_hal::contract::drivers::bus::usb::UsbEndpointDescriptor] {
+        &[]
+    }
+
     fn configure_endpoint(
         &mut self,
         _endpoint: UsbDeviceEndpointConfiguration,

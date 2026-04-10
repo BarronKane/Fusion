@@ -12,6 +12,9 @@ pub use unsupported::*;
 
 /// Capability trait for generic GPIO backends.
 pub trait GpioBaseContract {
+    /// Returns the stable controller/provider identity for this GPIO surface.
+    fn controller(&self) -> &'static GpioControllerDescriptor;
+
     /// Reports the truthful GPIO surface for this backend.
     fn support(&self) -> GpioSupport;
 
@@ -48,6 +51,9 @@ pub trait GpioControlContract: GpioBaseContract {
 
 /// Shared contract for one owned GPIO handle.
 pub trait GpioOwnedPinContract {
+    /// Returns the stable controller/provider identity for this owned pin.
+    fn controller(&self) -> &'static GpioControllerDescriptor;
+
     /// Returns the concrete backend pin number.
     fn pin(&self) -> u8;
 

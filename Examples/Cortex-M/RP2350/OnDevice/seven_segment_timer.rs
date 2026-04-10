@@ -22,7 +22,6 @@ use fusion_firmware::sys::hal::drivers::bus::gpio::{
     system_gpio,
 };
 use fusion_hal::contract::drivers::bus::gpio::{
-    GpioControlContract,
     GpioDriveStrength,
     GpioError,
 };

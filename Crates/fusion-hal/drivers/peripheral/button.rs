@@ -81,7 +81,13 @@ mod tests {
     use super::*;
     use crate::contract::drivers::bus::gpio::{
         GpioCapabilities,
+        GpioControllerDescriptor,
         GpioOwnedPinContract,
+    };
+
+    const TEST_GPIO_CONTROLLER: GpioControllerDescriptor = GpioControllerDescriptor {
+        id: "test-gpio",
+        name: "Test GPIO",
     };
 
     #[derive(Debug)]
@@ -92,6 +98,10 @@ mod tests {
     }
 
     impl GpioOwnedPinContract for FakeInputPin {
+        fn controller(&self) -> &'static GpioControllerDescriptor {
+            &TEST_GPIO_CONTROLLER
+        }
+
         fn pin(&self) -> u8 {
             self.pin
         }

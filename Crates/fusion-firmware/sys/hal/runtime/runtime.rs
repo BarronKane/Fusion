@@ -83,9 +83,7 @@ use fusion_sys::domain::{
     DomainRegistry,
 };
 use fusion_sys::fiber::{
-    ContextErrorKind,
     FiberError,
-    FiberErrorKind,
     FiberId,
     ManagedFiberSnapshot,
 };
@@ -124,32 +122,6 @@ type FirmwareDomainRegistry = DomainRegistry<'static, 3, 3, 2, 4, 8, 32>;
 pub static FIRMWARE_COURIER_TREE_INIT_PHASE: AtomicU32 = AtomicU32::new(0);
 #[unsafe(no_mangle)]
 pub static FIRMWARE_ROOT_BOOTSTRAP_PHASE: AtomicU32 = AtomicU32::new(0);
-#[unsafe(no_mangle)]
-pub static FIRMWARE_RUN_ROOT_FIBER_PHASE: AtomicU32 = AtomicU32::new(0);
-#[unsafe(no_mangle)]
-pub static FIRMWARE_RUN_ROOT_FIBER_ERROR: AtomicU32 = AtomicU32::new(0);
-
-const fn encode_fiber_error(error: FiberError) -> u32 {
-    match error.kind() {
-        FiberErrorKind::Unsupported => 1,
-        FiberErrorKind::Invalid => 2,
-        FiberErrorKind::ResourceExhausted => 3,
-        FiberErrorKind::DeadlineExceeded => 4,
-        FiberErrorKind::StateConflict => 5,
-        FiberErrorKind::Context(kind) => {
-            0x8000_0000
-                | match kind {
-                    ContextErrorKind::Unsupported => 1,
-                    ContextErrorKind::Invalid => 2,
-                    ContextErrorKind::Busy => 3,
-                    ContextErrorKind::PermissionDenied => 4,
-                    ContextErrorKind::StateConflict => 5,
-                    ContextErrorKind::ResourceExhausted => 6,
-                    ContextErrorKind::Platform(code) => 0x10000 | code as u32,
-                }
-        }
-    }
-}
 
 struct FirmwareCourierTree {
     registry: FirmwareDomainRegistry,
@@ -677,23 +649,7 @@ pub fn run_root_generated_fiber<T>(task: T) -> Result<T::Output, fusion_sys::fib
 where
     T: GeneratedExplicitFiberTask,
 {
-    FIRMWARE_RUN_ROOT_FIBER_PHASE.store(1, Ordering::Release);
-    FIRMWARE_RUN_ROOT_FIBER_ERROR.store(0, Ordering::Release);
-    let handle = match root_runtime().spawn_generated_fiber(task) {
-        Ok(handle) => handle,
-        Err(error) => {
-            FIRMWARE_RUN_ROOT_FIBER_ERROR.store(encode_fiber_error(error), Ordering::Release);
-            return Err(error);
-        }
-    };
-    FIRMWARE_RUN_ROOT_FIBER_PHASE.store(2, Ordering::Release);
-    match handle.join() {
-        Ok(output) => Ok(output),
-        Err(error) => {
-            FIRMWARE_RUN_ROOT_FIBER_ERROR.store(encode_fiber_error(error), Ordering::Release);
-            Err(error)
-        }
-    }
+    run_root_generated_fiber_inner(task)
 }
 
 #[cfg(feature = "critical-safe")]
@@ -701,23 +657,25 @@ pub fn run_root_generated_fiber<T>(task: T) -> Result<T::Output, fusion_sys::fib
 where
     T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
 {
-    FIRMWARE_RUN_ROOT_FIBER_PHASE.store(1, Ordering::Release);
-    FIRMWARE_RUN_ROOT_FIBER_ERROR.store(0, Ordering::Release);
-    let handle = match root_runtime().spawn_generated_fiber(task) {
-        Ok(handle) => handle,
-        Err(error) => {
-            FIRMWARE_RUN_ROOT_FIBER_ERROR.store(encode_fiber_error(error), Ordering::Release);
-            return Err(error);
-        }
-    };
-    FIRMWARE_RUN_ROOT_FIBER_PHASE.store(2, Ordering::Release);
-    match handle.join() {
-        Ok(output) => Ok(output),
-        Err(error) => {
-            FIRMWARE_RUN_ROOT_FIBER_ERROR.store(encode_fiber_error(error), Ordering::Release);
-            Err(error)
-        }
-    }
+    run_root_generated_fiber_inner(task)
+}
+
+#[cfg(not(feature = "critical-safe"))]
+fn run_root_generated_fiber_inner<T>(task: T) -> Result<T::Output, FiberError>
+where
+    T: GeneratedExplicitFiberTask,
+{
+    let handle = root_runtime().spawn_generated_fiber(task)?;
+    handle.join()
+}
+
+#[cfg(feature = "critical-safe")]
+fn run_root_generated_fiber_inner<T>(task: T) -> Result<T::Output, FiberError>
+where
+    T: GeneratedExplicitFiberTask + GeneratedExplicitFiberTaskContract,
+{
+    let handle = root_runtime().spawn_generated_fiber(task)?;
+    handle.join()
 }
 
 pub fn courier_pedigree<const MAX_DEPTH: usize>(

@@ -23,7 +23,10 @@ use super::{
     RP2350_EVENT_TIMEOUT_TICK_HZ,
     RP2350_OVERCLOCK_PROFILES,
     RP2350_PICO2W_RESERVED_GPIO_PINS,
+    RP2350_PICO2W_USB_DEVICE_VBUS_DETECT_SOURCE,
     Rp2350PowerModeAction,
+    CortexMUsbDeviceVbusDetectSource,
+    usb_device_vbus_detect_source,
     event_timeout_support,
     rp2350_chip_manufacturer,
     rp2350_chip_part,
@@ -36,6 +39,7 @@ use super::{
     rp2350_spi_base,
 };
 use crate::pal::soc::cortex_m::rp2350::drivers::bus::gpio::claim_board_owned_pin;
+use fusion_hal::contract::drivers::bus::gpio::GpioSignalSource;
 
 #[test]
 fn decodes_sysinfo_chip_id_fields() {
@@ -172,6 +176,24 @@ fn wifi_binding_tracks_pico2w_wiring_truth() {
             target_clock_hz: Some(31_250_000),
         }
     ));
+}
+
+#[test]
+fn usb_vbus_detect_source_tracks_pico2w_wiring_truth() {
+    assert_eq!(
+        RP2350_PICO2W_USB_DEVICE_VBUS_DETECT_SOURCE,
+        CortexMUsbDeviceVbusDetectSource::GpioSignal(GpioSignalSource {
+            controller_id: crate::pal::soc::cortex_m::hal::soc::rp2350::drivers::bus::gpio::CYW43439_WL_GPIO_CONTROLLER_ID,
+            pin: 2,
+        })
+    );
+    assert_eq!(
+        usb_device_vbus_detect_source(),
+        Some(CortexMUsbDeviceVbusDetectSource::GpioSignal(GpioSignalSource {
+            controller_id: crate::pal::soc::cortex_m::hal::soc::rp2350::drivers::bus::gpio::CYW43439_WL_GPIO_CONTROLLER_ID,
+            pin: 2,
+        }))
+    );
 }
 
 #[test]

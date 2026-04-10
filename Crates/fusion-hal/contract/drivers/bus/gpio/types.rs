@@ -1,5 +1,23 @@
 //! Shared generic GPIO identifier and descriptor vocabulary.
 
+/// Stable controller/provider identity for one surfaced GPIO domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpioControllerDescriptor {
+    /// Stable machine-readable controller identifier.
+    pub id: &'static str,
+    /// Human-readable controller/provider name.
+    pub name: &'static str,
+}
+
+/// Board- or contract-visible GPIO signal reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpioSignalSource {
+    /// Stable machine-readable controller identifier.
+    pub controller_id: &'static str,
+    /// Stable pin number within the referenced controller.
+    pub pin: u8,
+}
+
 /// Pull-resistor mode for one GPIO pad.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpioPull {

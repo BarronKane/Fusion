@@ -2,6 +2,7 @@
 
 use fusion_hal::contract::drivers::bus::gpio::{
     GpioCapabilities,
+    GpioControllerDescriptor,
     GpioDriveStrength,
     GpioError,
     GpioFunction,
@@ -27,20 +28,36 @@ pub struct UnsupportedGpioPinHardware {
 impl GpioHardware for UnsupportedGpioHardware {
     type Pin = UnsupportedGpioPinHardware;
 
-    fn support() -> GpioSupport {
+    fn provider_count() -> u8 {
+        0
+    }
+
+    fn controller(_provider: u8) -> Option<&'static GpioControllerDescriptor> {
+        None
+    }
+
+    fn support(_provider: u8) -> GpioSupport {
         GpioSupport::unsupported()
     }
 
-    fn pins() -> &'static [GpioPinDescriptor] {
+    fn pins(_provider: u8) -> &'static [GpioPinDescriptor] {
         &[]
     }
 
-    fn claim_pin(_pin: u8) -> Result<Self::Pin, GpioError> {
+    fn claim_pin(_provider: u8, _pin: u8) -> Result<Self::Pin, GpioError> {
         Err(GpioError::unsupported())
     }
 }
 
 impl GpioHardwarePin for UnsupportedGpioPinHardware {
+    fn controller(&self) -> &'static GpioControllerDescriptor {
+        const CONTROLLER: GpioControllerDescriptor = GpioControllerDescriptor {
+            id: "unsupported-gpio",
+            name: "Unsupported GPIO",
+        };
+        &CONTROLLER
+    }
+
     fn pin(&self) -> u8 {
         self.pin
     }

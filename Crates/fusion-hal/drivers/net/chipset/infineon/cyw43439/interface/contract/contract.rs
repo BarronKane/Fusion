@@ -4,6 +4,11 @@ use core::fmt;
 
 use bitflags::bitflags;
 
+use fusion_hal::contract::drivers::bus::gpio::{
+    GpioCapabilities,
+    GpioPinDescriptor,
+    GpioSupport,
+};
 use fusion_hal::contract::drivers::net::bluetooth::{
     BluetoothAdapterDescriptor,
     BluetoothSupport,
@@ -233,6 +238,49 @@ pub trait Cyw43439HardwareContract {
     /// protocol law.
     fn set_driver_activity_indicator(&mut self, _active: bool) -> Result<(), Cyw43439Error> {
         Ok(())
+    }
+
+    /// Reports the truthful WL GPIO surface exposed by this substrate.
+    fn wl_gpio_support(&self) -> GpioSupport {
+        GpioSupport::unsupported()
+    }
+
+    /// Returns the surfaced WL GPIO pin descriptors.
+    fn wl_gpio_pins(&self) -> &'static [GpioPinDescriptor] {
+        &[]
+    }
+
+    /// Returns the truthful capability snapshot for one WL GPIO line.
+    fn wl_gpio_capabilities(&self, wl_gpio: u8) -> Result<GpioCapabilities, Cyw43439Error> {
+        self.wl_gpio_pins()
+            .iter()
+            .find(|descriptor| descriptor.pin == wl_gpio)
+            .map(|descriptor| descriptor.capabilities)
+            .ok_or_else(Cyw43439Error::invalid)
+    }
+
+    /// Configures one WL GPIO line for input sampling.
+    fn configure_wl_gpio_input(&mut self, _wl_gpio: u8) -> Result<(), Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    /// Reads one WL GPIO input level.
+    fn read_wl_gpio(&mut self, _wl_gpio: u8) -> Result<bool, Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    /// Configures one WL GPIO line for output and drives the initial level.
+    fn configure_wl_gpio_output(
+        &mut self,
+        _wl_gpio: u8,
+        _initial_high: bool,
+    ) -> Result<(), Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
+    }
+
+    /// Drives one WL GPIO line to the requested level.
+    fn set_wl_gpio_level(&mut self, _wl_gpio: u8, _high: bool) -> Result<(), Cyw43439Error> {
+        Err(Cyw43439Error::unsupported())
     }
 
     /// Gives the host one best-effort chance to progress local cooperative runtime work while

@@ -78,6 +78,7 @@ pub use super::board_contract::{
     CortexMSocMonotonicTimeImpact,
     CortexMSocOverclockProfile,
     CortexMSocOverclockSupport,
+    CortexMUsbDeviceVbusDetectSource,
     CortexMWifiControllerAssets,
     CortexMWifiControllerBinding,
     CortexMWifiTransportBinding,
@@ -627,7 +628,7 @@ pub(crate) fn ensure_boot_clocks_initialized() -> Result<(), HardwareError> {
                     return Ok(());
                 }
             }
-            _ => unreachable!(),
+            _ => return Err(HardwareError::state_conflict()),
         }
     }
 }
@@ -1358,6 +1359,10 @@ impl CortexMSocBoard for Rp2350Soc {
         &WIFI_CONTROLLERS
     }
 
+    fn usb_device_vbus_detect_source(&self) -> Option<CortexMUsbDeviceVbusDetectSource> {
+        Some(RP2350_PICO2W_USB_DEVICE_VBUS_DETECT_SOURCE)
+    }
+
     fn irqs(&self) -> &'static [CortexMIrqDescriptor] {
         &IRQS
     }
@@ -1434,6 +1439,8 @@ impl CortexMSocBoard for Rp2350Soc {
     }
 
     fn service_reserved_runtime_irq(&self, irqn: i16) -> Result<bool, HardwareError> {
+        use fusion_hal::contract::drivers::bus::usb::UsbErrorKind;
+
         if irqn == i16::try_from(RP2350_EVENT_TIMEOUT_IRQN).unwrap_or(i16::MAX) {
             rp2350_service_event_timeout_irq()?;
             return Ok(true);
@@ -1443,29 +1450,16 @@ impl CortexMSocBoard for Rp2350Soc {
                 irqn,
             )
             .map_err(|error| match error.kind() {
-                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Unsupported => {
-                    HardwareError::unsupported()
-                }
-                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Invalid => {
-                    HardwareError::invalid()
-                }
-                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Busy
-                | fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Timeout => {
-                    HardwareError::busy()
-                }
-                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Disconnected
-                | fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Stall
-                | fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Protocol
-                | fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Overcurrent
-                | fusion_hal::contract::drivers::bus::usb::UsbErrorKind::StateConflict => {
-                    HardwareError::state_conflict()
-                }
-                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::ResourceExhausted => {
-                    HardwareError::resource_exhausted()
-                }
-                fusion_hal::contract::drivers::bus::usb::UsbErrorKind::Platform(code) => {
-                    HardwareError::platform(code)
-                }
+                UsbErrorKind::Unsupported => HardwareError::unsupported(),
+                UsbErrorKind::Invalid => HardwareError::invalid(),
+                UsbErrorKind::Busy | UsbErrorKind::Timeout => HardwareError::busy(),
+                UsbErrorKind::Disconnected
+                | UsbErrorKind::Stall
+                | UsbErrorKind::Protocol
+                | UsbErrorKind::Overcurrent
+                | UsbErrorKind::StateConflict => HardwareError::state_conflict(),
+                UsbErrorKind::ResourceExhausted => HardwareError::resource_exhausted(),
+                UsbErrorKind::Platform(code) => HardwareError::platform(code),
             })?;
         if serviced {
             return Ok(true);
@@ -2040,6 +2034,12 @@ pub fn bluetooth_controllers() -> &'static [CortexMBluetoothControllerBinding] {
 #[must_use]
 pub fn wifi_controllers() -> &'static [CortexMWifiControllerBinding] {
     board_contract::wifi_controllers(system_soc())
+}
+
+/// Returns the board-visible USB device-side VBUS-detect source for the selected RP2350 board.
+#[must_use]
+pub fn usb_device_vbus_detect_source() -> Option<CortexMUsbDeviceVbusDetectSource> {
+    board_contract::usb_device_vbus_detect_source(system_soc())
 }
 
 /// Returns the selected RP2350 IRQ descriptors.

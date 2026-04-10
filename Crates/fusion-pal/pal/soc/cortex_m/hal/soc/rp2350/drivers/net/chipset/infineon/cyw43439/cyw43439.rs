@@ -7,14 +7,13 @@
 //!
 //! Embedded assets:
 //! - `assets/w43439A0_7_95_49_00_combined.bin`
-//! - `assets/wb43439A0_7_95_49_00_combined.bin`
 //! - `assets/wifi_nvram_43439.bin`
 //! - `assets/cyw43_btfw_43439.bin`
 //!
 //! Provenance:
 //! - derived from `georgerobotics/cyw43-driver` commit
 //!   `dd7568229f3bf7a37737b9e1ef250c26efe75b23`
-//! - the Wi-Fi combined images and Bluetooth patch payload come from the Raspberry Pi CYW43
+//! - the Wi-Fi combined image and Bluetooth patch payload come from the Raspberry Pi CYW43
 //!   support stack for Pico wireless boards
 //! - the NVRAM payload retains upstream Broadcom-origin board configuration content
 //!
@@ -44,16 +43,27 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{
     AtomicBool,
     AtomicU8,
+    AtomicU32,
     Ordering,
 };
 
 use fusion_hal::contract::drivers::bus::gpio::{
     GpioError,
     GpioErrorKind,
+    GpioCapabilities,
+    GpioControllerDescriptor,
+    GpioDriveStrength,
+    GpioFunction,
+    GpioPinDescriptor,
+    GpioProviderCaps,
+    GpioPull,
+    GpioSupport,
+    GpioImplementationKind,
 };
 use fusion_hal::contract::drivers::net::bluetooth::BluetoothSupport;
 use fusion_hal::contract::drivers::net::wifi::WifiSupport;
 use fd_bus_gpio::GpioPin as HalGpioPin;
+use fd_bus_gpio::interface::contract::GpioHardwarePin as GpioHardwarePinContract;
 use fd_net_chipset_infineon_cyw43439::{
     interface::{
         backend::{
@@ -94,17 +104,17 @@ use crate::pal::soc::cortex_m::rp2350::{
     wifi_controllers,
 };
 use crate::pal::soc::cortex_m::rp2350::drivers::bus::gpio::{
-    GpioPinHardware,
+    Rp2350GpioPinHardware,
     claim_board_owned_pin,
 };
 
 type SharedBackend = Cyw43439GpioBackend<
-    GpioPinHardware,
-    GpioPinHardware,
-    GpioPinHardware,
-    GpioPinHardware,
-    GpioPinHardware,
-    GpioPinHardware,
+    Rp2350GpioPinHardware,
+    Rp2350GpioPinHardware,
+    Rp2350GpioPinHardware,
+    Rp2350GpioPinHardware,
+    Rp2350GpioPinHardware,
+    Rp2350GpioPinHardware,
 >;
 
 const INIT_UNINITIALIZED: u8 = 0;
@@ -112,14 +122,41 @@ const INIT_RUNNING: u8 = 1;
 const INIT_READY: u8 = 2;
 const PICO2W_CYW43439_WIFI_ONLY_COMBINED_FW: &[u8] =
     include_bytes!("assets/w43439A0_7_95_49_00_combined.bin");
-const PICO2W_CYW43439_WIFI_BT_COMBINED_FW: &[u8] =
-    include_bytes!("assets/wb43439A0_7_95_49_00_combined.bin");
 const PICO2W_CYW43439_BT_PATCH: &[u8] = include_bytes!("assets/cyw43_btfw_43439.bin");
 const PICO2W_CYW43439_WIFI_NVRAM: &[u8] = include_bytes!("assets/wifi_nvram_43439.bin");
 const PICO2W_CYW43439_WIFI_ONLY_FW_LEN: usize = 224_190;
 const PICO2W_CYW43439_WIFI_ONLY_CLM_LEN: usize = 984;
-const PICO2W_CYW43439_WIFI_BT_FW_LEN: usize = 231_077;
-const PICO2W_CYW43439_WIFI_BT_CLM_LEN: usize = 984;
+const CYW43439_WL_GPIO_CLAIMED_MASK_INIT: u32 = 0;
+const CYW43439_WL_GPIO_CONTROLLER: GpioControllerDescriptor = GpioControllerDescriptor {
+    id: "cyw43439-wl-gpio",
+    name: "CYW43439 WL GPIO",
+};
+const CYW43439_WL_GPIO_PINS: [GpioPinDescriptor; 3] = [
+    GpioPinDescriptor {
+        pin: 0,
+        name: "wl_gpio0",
+        capabilities: GpioCapabilities::INPUT.union(GpioCapabilities::OUTPUT),
+    },
+    GpioPinDescriptor {
+        pin: 1,
+        name: "wl_gpio1",
+        capabilities: GpioCapabilities::INPUT.union(GpioCapabilities::OUTPUT),
+    },
+    GpioPinDescriptor {
+        pin: 2,
+        name: "wl_gpio2",
+        capabilities: GpioCapabilities::INPUT,
+    },
+];
+const CYW43439_WL_GPIO_SUPPORT: GpioSupport = GpioSupport {
+    caps: GpioProviderCaps::ENUMERATE
+        .union(GpioProviderCaps::CLAIM)
+        .union(GpioProviderCaps::STATIC_TOPOLOGY)
+        .union(GpioProviderCaps::INPUT)
+        .union(GpioProviderCaps::OUTPUT),
+    implementation: GpioImplementationKind::Native,
+    pin_count: CYW43439_WL_GPIO_PINS.len() as u16,
+};
 
 fn force_wifi_only_mode() -> bool {
     matches!(
@@ -151,6 +188,12 @@ struct Rp2350Cyw43439Binding {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SelectedCyw43439Hardware;
+
+/// Owned CYW43439 WL GPIO pin handle.
+#[derive(Debug)]
+pub struct Cyw43439WlGpioPinHardware {
+    wl_gpio: u8,
+}
 
 struct SharedCyw43439Slot {
     init: AtomicU8,
@@ -275,6 +318,7 @@ impl SharedCyw43439Slot {
 }
 
 static CYW43439_SLOT: SharedCyw43439Slot = SharedCyw43439Slot::new();
+static CYW43439_WL_GPIO_CLAIMED: AtomicU32 = AtomicU32::new(CYW43439_WL_GPIO_CLAIMED_MASK_INIT);
 
 /// Returns one shared selected CYW43439 hardware handle.
 ///
@@ -285,6 +329,136 @@ static CYW43439_SLOT: SharedCyw43439Slot = SharedCyw43439Slot::new();
 pub fn system_cyw43439() -> Result<SelectedCyw43439Hardware, Cyw43439Error> {
     CYW43439_SLOT.ensure_initialized()?;
     Ok(SelectedCyw43439Hardware)
+}
+
+/// Returns the truthful WL GPIO controller descriptor for the selected CYW43439 binding.
+#[must_use]
+pub const fn cyw43439_wl_gpio_controller() -> &'static GpioControllerDescriptor {
+    &CYW43439_WL_GPIO_CONTROLLER
+}
+
+/// Returns the truthful WL GPIO surface for the selected CYW43439 binding.
+#[must_use]
+pub fn cyw43439_gpio_support() -> GpioSupport {
+    match cyw43439_binding() {
+        Ok(_) => CYW43439_WL_GPIO_SUPPORT,
+        Err(_) => GpioSupport::unsupported(),
+    }
+}
+
+/// Returns the surfaced WL GPIO descriptors for the selected CYW43439 binding.
+#[must_use]
+pub fn cyw43439_wl_gpio_descriptors() -> &'static [GpioPinDescriptor] {
+    match cyw43439_binding() {
+        Ok(_) => &CYW43439_WL_GPIO_PINS,
+        Err(_) => &[],
+    }
+}
+
+/// Reads one CYW43439 WL GPIO signal level without claiming the line.
+///
+/// # Errors
+///
+/// Returns one honest error when the selected board does not expose CYW43439 WL GPIO truth or the
+/// requested line cannot be sampled.
+pub fn cyw43439_gpio_signal_level(wl_gpio: u8) -> Result<bool, GpioError> {
+    let mut hardware = system_cyw43439().map_err(map_cyw_gpio_error)?;
+    hardware.read_wl_gpio(wl_gpio).map_err(map_cyw_gpio_error)
+}
+
+/// Claims one CYW43439 WL GPIO line as a generic GPIO pin.
+///
+/// # Errors
+///
+/// Returns one honest GPIO error when the line is invalid, unsupported, or already claimed.
+pub fn claim_cyw43439_wl_gpio_pin(wl_gpio: u8) -> Result<Cyw43439WlGpioPinHardware, GpioError> {
+    if cyw43439_binding().is_err() {
+        return Err(GpioError::unsupported());
+    }
+    CYW43439_WL_GPIO_PINS
+        .iter()
+        .find(|descriptor| descriptor.pin == wl_gpio)
+        .ok_or_else(GpioError::invalid)?;
+    let mask = 1_u32 << wl_gpio;
+    let mut claimed = CYW43439_WL_GPIO_CLAIMED.load(Ordering::Acquire);
+    loop {
+        if claimed & mask != 0 {
+            return Err(GpioError::state_conflict());
+        }
+        match CYW43439_WL_GPIO_CLAIMED.compare_exchange_weak(
+            claimed,
+            claimed | mask,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Ok(Cyw43439WlGpioPinHardware { wl_gpio }),
+            Err(observed) => claimed = observed,
+        }
+    }
+}
+
+impl GpioHardwarePinContract for Cyw43439WlGpioPinHardware {
+    fn controller(&self) -> &'static GpioControllerDescriptor {
+        cyw43439_wl_gpio_controller()
+    }
+
+    fn pin(&self) -> u8 {
+        self.wl_gpio
+    }
+
+    fn capabilities(&self) -> GpioCapabilities {
+        CYW43439_WL_GPIO_PINS
+            .iter()
+            .find(|descriptor| descriptor.pin == self.wl_gpio)
+            .map(|descriptor| descriptor.capabilities)
+            .unwrap_or_else(GpioCapabilities::empty)
+    }
+
+    fn set_function(&mut self, function: GpioFunction) -> Result<(), GpioError> {
+        match function {
+            GpioFunction::Sio => Ok(()),
+            GpioFunction::Raw(_) => Err(GpioError::unsupported()),
+        }
+    }
+
+    fn configure_input(&mut self) -> Result<(), GpioError> {
+        let mut hardware = system_cyw43439().map_err(map_cyw_gpio_error)?;
+        hardware
+            .configure_wl_gpio_input(self.wl_gpio)
+            .map_err(map_cyw_gpio_error)
+    }
+
+    fn read_level(&self) -> Result<bool, GpioError> {
+        cyw43439_gpio_signal_level(self.wl_gpio)
+    }
+
+    fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {
+        let mut hardware = system_cyw43439().map_err(map_cyw_gpio_error)?;
+        hardware
+            .configure_wl_gpio_output(self.wl_gpio, initial_high)
+            .map_err(map_cyw_gpio_error)
+    }
+
+    fn set_level(&mut self, high: bool) -> Result<(), GpioError> {
+        let mut hardware = system_cyw43439().map_err(map_cyw_gpio_error)?;
+        hardware
+            .set_wl_gpio_level(self.wl_gpio, high)
+            .map_err(map_cyw_gpio_error)
+    }
+
+    fn set_pull(&mut self, _pull: GpioPull) -> Result<(), GpioError> {
+        Err(GpioError::unsupported())
+    }
+
+    fn set_drive_strength(&mut self, _strength: GpioDriveStrength) -> Result<(), GpioError> {
+        Err(GpioError::unsupported())
+    }
+}
+
+impl Drop for Cyw43439WlGpioPinHardware {
+    fn drop(&mut self) {
+        CYW43439_WL_GPIO_CLAIMED.fetch_and(!(1_u32 << self.wl_gpio), Ordering::AcqRel);
+    }
 }
 
 impl Cyw43439HardwareContract for SelectedCyw43439Hardware {
@@ -468,6 +642,44 @@ impl Cyw43439HardwareContract for SelectedCyw43439Hardware {
             .with_backend_mut_result(|backend| backend.set_driver_activity_indicator(active))
     }
 
+    fn wl_gpio_support(&self) -> GpioSupport {
+        CYW43439_SLOT
+            .with_backend(Cyw43439HardwareContract::wl_gpio_support)
+            .unwrap_or_else(|_| GpioSupport::unsupported())
+    }
+
+    fn wl_gpio_pins(&self) -> &'static [GpioPinDescriptor] {
+        CYW43439_SLOT
+            .with_backend(Cyw43439HardwareContract::wl_gpio_pins)
+            .unwrap_or(&[])
+    }
+
+    fn wl_gpio_capabilities(&self, wl_gpio: u8) -> Result<GpioCapabilities, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_result(|backend| backend.wl_gpio_capabilities(wl_gpio))
+    }
+
+    fn configure_wl_gpio_input(&mut self, wl_gpio: u8) -> Result<(), Cyw43439Error> {
+        CYW43439_SLOT.with_backend_mut_result(|backend| backend.configure_wl_gpio_input(wl_gpio))
+    }
+
+    fn read_wl_gpio(&mut self, wl_gpio: u8) -> Result<bool, Cyw43439Error> {
+        CYW43439_SLOT.with_backend_mut_result(|backend| backend.read_wl_gpio(wl_gpio))
+    }
+
+    fn configure_wl_gpio_output(
+        &mut self,
+        wl_gpio: u8,
+        initial_high: bool,
+    ) -> Result<(), Cyw43439Error> {
+        CYW43439_SLOT.with_backend_mut_result(|backend| {
+            backend.configure_wl_gpio_output(wl_gpio, initial_high)
+        })
+    }
+
+    fn set_wl_gpio_level(&mut self, wl_gpio: u8, high: bool) -> Result<(), Cyw43439Error> {
+        CYW43439_SLOT.with_backend_mut_result(|backend| backend.set_wl_gpio_level(wl_gpio, high))
+    }
+
     fn progress_host_runtime(&self) {
         crate::sys::runtime_progress::run_runtime_progress_hook();
     }
@@ -559,7 +771,7 @@ fn build_shared_backend() -> Result<SharedBackend, Cyw43439Error> {
 
 fn claim_optional_pin(
     pin: Option<u8>,
-) -> Result<Option<HalGpioPin<GpioPinHardware>>, Cyw43439Error> {
+) -> Result<Option<HalGpioPin<Rp2350GpioPinHardware>>, Cyw43439Error> {
     pin.map(|pin| claim_board_owned_pin(pin).map(HalGpioPin::from_inner))
         .transpose()
         .map_err(map_gpio_error)
@@ -835,5 +1047,28 @@ fn map_gpio_error(error: GpioError) -> Cyw43439Error {
         GpioErrorKind::ResourceExhausted => Cyw43439Error::resource_exhausted(),
         GpioErrorKind::StateConflict => Cyw43439Error::state_conflict(),
         GpioErrorKind::Platform(code) => Cyw43439Error::platform(code),
+    }
+}
+
+fn map_cyw_gpio_error(error: Cyw43439Error) -> GpioError {
+    match error.kind() {
+        fd_net_chipset_infineon_cyw43439::interface::contract::Cyw43439ErrorKind::Unsupported => {
+            GpioError::unsupported()
+        }
+        fd_net_chipset_infineon_cyw43439::interface::contract::Cyw43439ErrorKind::Invalid => {
+            GpioError::invalid()
+        }
+        fd_net_chipset_infineon_cyw43439::interface::contract::Cyw43439ErrorKind::Busy => {
+            GpioError::busy()
+        }
+        fd_net_chipset_infineon_cyw43439::interface::contract::Cyw43439ErrorKind::ResourceExhausted => {
+            GpioError::resource_exhausted()
+        }
+        fd_net_chipset_infineon_cyw43439::interface::contract::Cyw43439ErrorKind::StateConflict => {
+            GpioError::state_conflict()
+        }
+        fd_net_chipset_infineon_cyw43439::interface::contract::Cyw43439ErrorKind::Platform(code) => {
+            GpioError::platform(code)
+        }
     }
 }

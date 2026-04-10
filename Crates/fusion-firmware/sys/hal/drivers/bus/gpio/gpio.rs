@@ -7,7 +7,10 @@ use fd_bus_gpio::{
     GpioDriverContext,
     GpioPin as UniversalGpioPin,
 };
-use fusion_hal::contract::drivers::bus::gpio::GpioError;
+use fusion_hal::contract::drivers::bus::gpio::{
+    GpioError,
+    GpioSignalSource,
+};
 use fusion_hal::contract::drivers::driver::{
     DriverActivationContext,
     DriverDiscoveryContext,
@@ -18,6 +21,7 @@ use fusion_hal::contract::drivers::driver::{
 use fusion_pal::sys::soc::drivers::bus::gpio::{
     GpioHardware,
     GpioPinHardware,
+    primary_gpio_controller_id,
 };
 
 use crate::module::requested_driver_by_key;
@@ -36,6 +40,15 @@ pub type SystemGpioPin = UniversalGpioPin<GpioPinHardware>;
 /// Returns one honest GPIO error when the selected firmware image did not request the GPIO
 /// driver module or the driver cannot activate for the selected SoC substrate.
 pub fn system_gpio() -> Result<SystemGpio, GpioError> {
+    system_gpio_by_controller_id(primary_gpio_controller_id())
+}
+
+/// Activates one selected GPIO controller by stable controller identifier.
+///
+/// # Errors
+///
+/// Returns one honest GPIO error when the controller is unavailable or activation fails.
+pub fn system_gpio_by_controller_id(controller_id: &str) -> Result<SystemGpio, GpioError> {
     let _ = requested_driver_by_key(GPIO_DRIVER_KEY).map_err(map_driver_gpio)?;
 
     let mut registry = DriverRegistry::<1>::new();
@@ -43,9 +56,11 @@ pub fn system_gpio() -> Result<SystemGpio, GpioError> {
         .register::<GpioDriver<GpioHardware>>()
         .map_err(map_driver_gpio)?;
     let mut driver_context = GpioDriverContext::<GpioHardware>::new();
-    let mut bindings = [GpioBinding { provider: 0 }];
-
-    {
+    let mut bindings = [GpioBinding {
+        provider: 0,
+        controller_id: "",
+    }; 4];
+    let selected_binding = {
         let mut discovery = DriverDiscoveryContext::new(&mut driver_context);
         let count = registered
             .enumerate_bindings(&mut discovery, &mut bindings)
@@ -53,13 +68,27 @@ pub fn system_gpio() -> Result<SystemGpio, GpioError> {
         if count == 0 {
             return Err(GpioError::unsupported());
         }
-    }
+        bindings[..count]
+            .iter()
+            .copied()
+            .find(|binding| binding.controller_id == controller_id)
+            .ok_or_else(GpioError::unsupported)?
+    };
 
     let mut activation = DriverActivationContext::new(&mut driver_context);
     registered
-        .activate(&mut activation, bindings[0])
+        .activate(&mut activation, selected_binding)
         .map_err(map_driver_gpio)
         .map(|driver| driver.into_instance())
+}
+
+/// Activates the GPIO controller referenced by one signal source.
+///
+/// # Errors
+///
+/// Returns one honest GPIO error when the controller cannot be activated.
+pub fn system_gpio_for_signal(source: GpioSignalSource) -> Result<SystemGpio, GpioError> {
+    system_gpio_by_controller_id(source.controller_id)
 }
 
 fn map_driver_gpio(error: DriverError) -> GpioError {

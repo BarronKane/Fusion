@@ -9,12 +9,14 @@ use core::sync::atomic::{
 
 use fusion_hal::contract::drivers::bus::gpio::{
     GpioCapabilities,
+    GpioControllerDescriptor,
     GpioDriveStrength,
     GpioError,
     GpioFunction,
     GpioImplementationKind,
     GpioPinDescriptor,
     GpioProviderCaps,
+    GpioSignalSource,
     GpioPull,
     GpioSupport,
 };
@@ -31,6 +33,14 @@ use crate::pal::soc::cortex_m::hal::soc::rp2350::{
     RP2350_REG_ALIAS_CLR_OFFSET,
     RP2350_SIO_BASE,
     ensure_boot_clocks_initialized,
+};
+use crate::pal::soc::cortex_m::hal::soc::rp2350::drivers::net::chipset::infineon::cyw43439::{
+    Cyw43439WlGpioPinHardware,
+    cyw43439_gpio_signal_level,
+    cyw43439_gpio_support,
+    cyw43439_wl_gpio_controller,
+    cyw43439_wl_gpio_descriptors,
+    claim_cyw43439_wl_gpio_pin,
 };
 
 const RP2350_GPIO_COUNT: u8 = 30 - RP2350_PICO2W_RESERVED_GPIO_PINS.len() as u8;
@@ -86,20 +96,56 @@ static RP2350_GPIO_PINS: [GpioPinDescriptor; RP2350_GPIO_COUNT as usize] = rp235
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 26, 27, 28,
 ];
 
-/// RP2350 hardware-facing GPIO provider.
+const RP2350_GPIO_CONTROLLER: GpioControllerDescriptor = GpioControllerDescriptor {
+    id: "rp2350-gpio",
+    name: "RP2350 GPIO",
+};
+
+/// Stable controller identifier for the RP2350 GPIO provider.
+pub const RP2350_GPIO_CONTROLLER_ID: &str = RP2350_GPIO_CONTROLLER.id;
+
+/// Stable controller identifier for the CYW43439 WL GPIO provider.
+pub const CYW43439_WL_GPIO_CONTROLLER_ID: &str = "cyw43439-wl-gpio";
+
+const RP2350_GPIO_PROVIDER_INDEX: u8 = 0;
+const CYW43439_WL_GPIO_PROVIDER_INDEX: u8 = 1;
+
+/// RP2350 native hardware-facing GPIO provider.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Rp2350GpioHardware;
+
+/// Composite selected GPIO provider family for the RP2350 image.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GpioHardware;
 
-/// RP2350 hardware-owned GPIO pin.
+/// RP2350 native hardware-owned GPIO pin.
 #[derive(Debug)]
-pub struct GpioPinHardware {
+pub struct Rp2350GpioPinHardware {
     pin: u8,
 }
 
-impl GpioHardwareContract for GpioHardware {
-    type Pin = GpioPinHardware;
+/// Composite selected GPIO pin handle.
+#[derive(Debug)]
+pub enum GpioPinHardware {
+    Rp2350(Rp2350GpioPinHardware),
+    Cyw43439Wl(Cyw43439WlGpioPinHardware),
+}
 
-    fn support() -> GpioSupport {
+impl GpioHardwareContract for Rp2350GpioHardware {
+    type Pin = Rp2350GpioPinHardware;
+
+    fn provider_count() -> u8 {
+        1
+    }
+
+    fn controller(provider: u8) -> Option<&'static GpioControllerDescriptor> {
+        (provider == 0).then_some(&RP2350_GPIO_CONTROLLER)
+    }
+
+    fn support(provider: u8) -> GpioSupport {
+        if provider != 0 {
+            return GpioSupport::unsupported();
+        }
         GpioSupport {
             caps: GpioProviderCaps::ENUMERATE
                 | GpioProviderCaps::CLAIM
@@ -115,18 +161,28 @@ impl GpioHardwareContract for GpioHardware {
         }
     }
 
-    fn pins() -> &'static [GpioPinDescriptor] {
+    fn pins(provider: u8) -> &'static [GpioPinDescriptor] {
+        if provider != 0 {
+            return &[];
+        }
         &RP2350_GPIO_PINS
     }
 
-    fn claim_pin(pin: u8) -> Result<Self::Pin, GpioError> {
+    fn claim_pin(provider: u8, pin: u8) -> Result<Self::Pin, GpioError> {
+        if provider != 0 {
+            return Err(GpioError::invalid());
+        }
         ensure_boot_clocks_initialized().map_err(|_| GpioError::unsupported())?;
         claim(pin)?;
         Ok(Self::Pin { pin })
     }
 }
 
-impl GpioHardwarePinContract for GpioPinHardware {
+impl GpioHardwarePinContract for Rp2350GpioPinHardware {
+    fn controller(&self) -> &'static GpioControllerDescriptor {
+        &RP2350_GPIO_CONTROLLER
+    }
+
     fn pin(&self) -> u8 {
         self.pin
     }
@@ -168,10 +224,154 @@ impl GpioHardwarePinContract for GpioPinHardware {
     }
 }
 
-impl Drop for GpioPinHardware {
+impl Drop for Rp2350GpioPinHardware {
     fn drop(&mut self) {
         release(self.pin);
     }
+}
+
+impl GpioHardwareContract for GpioHardware {
+    type Pin = GpioPinHardware;
+
+    fn provider_count() -> u8 {
+        2
+    }
+
+    fn controller(provider: u8) -> Option<&'static GpioControllerDescriptor> {
+        match provider {
+            RP2350_GPIO_PROVIDER_INDEX => Some(&RP2350_GPIO_CONTROLLER),
+            CYW43439_WL_GPIO_PROVIDER_INDEX => Some(cyw43439_wl_gpio_controller()),
+            _ => None,
+        }
+    }
+
+    fn support(provider: u8) -> GpioSupport {
+        match provider {
+            RP2350_GPIO_PROVIDER_INDEX => Rp2350GpioHardware::support(0),
+            CYW43439_WL_GPIO_PROVIDER_INDEX => cyw43439_gpio_support(),
+            _ => GpioSupport::unsupported(),
+        }
+    }
+
+    fn pins(provider: u8) -> &'static [GpioPinDescriptor] {
+        match provider {
+            RP2350_GPIO_PROVIDER_INDEX => Rp2350GpioHardware::pins(0),
+            CYW43439_WL_GPIO_PROVIDER_INDEX => cyw43439_wl_gpio_descriptors(),
+            _ => &[],
+        }
+    }
+
+    fn claim_pin(provider: u8, pin: u8) -> Result<Self::Pin, GpioError> {
+        match provider {
+            RP2350_GPIO_PROVIDER_INDEX => {
+                Rp2350GpioHardware::claim_pin(0, pin).map(GpioPinHardware::Rp2350)
+            }
+            CYW43439_WL_GPIO_PROVIDER_INDEX => {
+                claim_cyw43439_wl_gpio_pin(pin).map(GpioPinHardware::Cyw43439Wl)
+            }
+            _ => Err(GpioError::invalid()),
+        }
+    }
+}
+
+impl GpioHardwarePinContract for GpioPinHardware {
+    fn controller(&self) -> &'static GpioControllerDescriptor {
+        match self {
+            Self::Rp2350(pin) => pin.controller(),
+            Self::Cyw43439Wl(pin) => pin.controller(),
+        }
+    }
+
+    fn pin(&self) -> u8 {
+        match self {
+            Self::Rp2350(pin) => pin.pin(),
+            Self::Cyw43439Wl(pin) => pin.pin(),
+        }
+    }
+
+    fn capabilities(&self) -> GpioCapabilities {
+        match self {
+            Self::Rp2350(pin) => pin.capabilities(),
+            Self::Cyw43439Wl(pin) => pin.capabilities(),
+        }
+    }
+
+    fn set_function(&mut self, function: GpioFunction) -> Result<(), GpioError> {
+        match self {
+            Self::Rp2350(pin) => pin.set_function(function),
+            Self::Cyw43439Wl(pin) => pin.set_function(function),
+        }
+    }
+
+    fn configure_input(&mut self) -> Result<(), GpioError> {
+        match self {
+            Self::Rp2350(pin) => pin.configure_input(),
+            Self::Cyw43439Wl(pin) => pin.configure_input(),
+        }
+    }
+
+    fn read_level(&self) -> Result<bool, GpioError> {
+        match self {
+            Self::Rp2350(pin) => pin.read_level(),
+            Self::Cyw43439Wl(pin) => pin.read_level(),
+        }
+    }
+
+    fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {
+        match self {
+            Self::Rp2350(pin) => pin.configure_output(initial_high),
+            Self::Cyw43439Wl(pin) => pin.configure_output(initial_high),
+        }
+    }
+
+    fn set_level(&mut self, high: bool) -> Result<(), GpioError> {
+        match self {
+            Self::Rp2350(pin) => pin.set_level(high),
+            Self::Cyw43439Wl(pin) => pin.set_level(high),
+        }
+    }
+
+    fn set_pull(&mut self, pull: GpioPull) -> Result<(), GpioError> {
+        match self {
+            Self::Rp2350(pin) => pin.set_pull(pull),
+            Self::Cyw43439Wl(pin) => pin.set_pull(pull),
+        }
+    }
+
+    fn set_drive_strength(&mut self, strength: GpioDriveStrength) -> Result<(), GpioError> {
+        match self {
+            Self::Rp2350(pin) => pin.set_drive_strength(strength),
+            Self::Cyw43439Wl(pin) => pin.set_drive_strength(strength),
+        }
+    }
+}
+
+/// Returns the primary selected GPIO controller identifier for the current RP2350 image.
+#[must_use]
+pub const fn primary_gpio_controller_id() -> &'static str {
+    RP2350_GPIO_CONTROLLER_ID
+}
+
+/// Returns the primary selected GPIO controller descriptor for the current RP2350 image.
+#[must_use]
+pub const fn primary_gpio_controller() -> &'static GpioControllerDescriptor {
+    &RP2350_GPIO_CONTROLLER
+}
+
+/// Reads one board- or contract-visible GPIO signal through the selected GPIO providers.
+///
+/// # Errors
+///
+/// Returns one honest error when the signal references an unknown controller or cannot be read.
+pub fn gpio_signal_level(source: GpioSignalSource) -> Result<bool, GpioError> {
+    if source.controller_id == RP2350_GPIO_CONTROLLER_ID {
+        ensure_boot_clocks_initialized().map_err(|_| GpioError::unsupported())?;
+        return read_pin_level_direct(source.pin);
+    }
+    if source.controller_id == CYW43439_WL_GPIO_CONTROLLER_ID {
+        return cyw43439_gpio_signal_level(source.pin);
+    }
+    Err(GpioError::invalid())
 }
 
 fn validate_pin(pin: u8) -> Result<(), GpioError> {
@@ -247,11 +447,11 @@ fn claim_any(pin: u8) -> Result<(), GpioError> {
 ///
 /// Returns an error when the pin is not part of the board-reserved radio wiring or is already
 /// claimed.
-pub(crate) fn claim_board_owned_pin(pin: u8) -> Result<GpioPinHardware, GpioError> {
+pub(crate) fn claim_board_owned_pin(pin: u8) -> Result<Rp2350GpioPinHardware, GpioError> {
     ensure_boot_clocks_initialized().map_err(|_| GpioError::unsupported())?;
     validate_board_owned_pin(pin)?;
     claim_any(pin)?;
-    Ok(GpioPinHardware { pin })
+    Ok(Rp2350GpioPinHardware { pin })
 }
 
 fn release(pin: u8) {
@@ -311,11 +511,6 @@ fn ensure_bank0_ready() -> Result<(), GpioError> {
     }
 }
 
-fn set_function(pin: u8, function: GpioFunction) -> Result<(), GpioError> {
-    validate_pin(pin)?;
-    set_function_claimed(pin, function)
-}
-
 fn set_function_claimed(pin: u8, function: GpioFunction) -> Result<(), GpioError> {
     ensure_bank0_ready()?;
     let value = match function {
@@ -326,11 +521,6 @@ fn set_function_claimed(pin: u8, function: GpioFunction) -> Result<(), GpioError
     // SAFETY: this writes one selected-SoC GPIO control register.
     unsafe { ptr::write_volatile(register, value) };
     Ok(())
-}
-
-fn configure_input(pin: u8) -> Result<(), GpioError> {
-    validate_pin(pin)?;
-    configure_input_claimed(pin)
 }
 
 fn configure_input_claimed(pin: u8) -> Result<(), GpioError> {
@@ -387,9 +577,14 @@ fn read_claimed(pin: u8) -> Result<bool, GpioError> {
     Ok(unsafe { ptr::read_volatile(sio_in) } & (1_u32 << pin) != 0)
 }
 
-fn set_pull(pin: u8, pull: GpioPull) -> Result<(), GpioError> {
-    validate_pin(pin)?;
-    set_pull_claimed(pin, pull)
+fn read_pin_level_direct(pin: u8) -> Result<bool, GpioError> {
+    if !pin_is_public(pin) && !pin_is_reserved(pin) {
+        return Err(GpioError::invalid());
+    }
+    ensure_bank0_ready()?;
+    let sio_in = sio_register(RP2350_SIO_GPIO_IN_OFFSET);
+    // SAFETY: board signal reads still target one validated RP2350 GPIO input register.
+    Ok(unsafe { ptr::read_volatile(sio_in) } & (1_u32 << pin) != 0)
 }
 
 fn set_pull_claimed(pin: u8, pull: GpioPull) -> Result<(), GpioError> {
@@ -407,11 +602,6 @@ fn set_pull_claimed(pin: u8, pull: GpioPull) -> Result<(), GpioError> {
         ptr::write_volatile(pad, value);
     }
     Ok(())
-}
-
-fn set_drive_strength(pin: u8, strength: GpioDriveStrength) -> Result<(), GpioError> {
-    validate_pin(pin)?;
-    set_drive_strength_claimed(pin, strength)
 }
 
 fn set_drive_strength_claimed(pin: u8, strength: GpioDriveStrength) -> Result<(), GpioError> {

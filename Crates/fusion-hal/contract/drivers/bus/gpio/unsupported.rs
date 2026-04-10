@@ -146,6 +146,14 @@ impl UnsupportedGpioPin {
 }
 
 impl GpioBaseContract for UnsupportedGpio {
+    fn controller(&self) -> &'static super::GpioControllerDescriptor {
+        const CONTROLLER: super::GpioControllerDescriptor = super::GpioControllerDescriptor {
+            id: "unsupported-gpio",
+            name: "Unsupported GPIO",
+        };
+        &CONTROLLER
+    }
+
     fn support(&self) -> GpioSupport {
         GpioSupport::unsupported()
     }
@@ -164,6 +172,14 @@ impl GpioControlContract for UnsupportedGpio {
 }
 
 impl super::GpioOwnedPinContract for UnsupportedGpioPin {
+    fn controller(&self) -> &'static super::GpioControllerDescriptor {
+        const CONTROLLER: super::GpioControllerDescriptor = super::GpioControllerDescriptor {
+            id: "unsupported-gpio",
+            name: "Unsupported GPIO",
+        };
+        &CONTROLLER
+    }
+
     fn pin(&self) -> u8 {
         self.pin()
     }
