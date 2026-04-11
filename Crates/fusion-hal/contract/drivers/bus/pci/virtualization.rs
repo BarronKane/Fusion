@@ -1,4 +1,9 @@
 //! PCI virtualization vocabulary.
+//!
+//! This lane intentionally keeps SR-IOV truth sparse until a real backend needs more. In
+//! particular, `PciSriovProfile` does not derive `Default`: the optional VF device id is a real
+//! piece of typed truth, and inventing a zero/default device id would be a lie dressed up as
+//! ergonomics.
 
 use super::core::*;
 

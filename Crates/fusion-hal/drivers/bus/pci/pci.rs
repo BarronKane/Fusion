@@ -35,6 +35,9 @@ use self::interface::contract::{
 };
 
 const PCI_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("bus.pci")];
+// The universal PCI family declares the full binding-source taxonomy up front even though only
+// manual attachment is practically usable today. That keeps future ACPI/DT/platform attachers from
+// forcing a contract metadata rewrite just because the discovery side finally grew up.
 const PCI_DRIVER_BINDING_SOURCES: [DriverBindingSource; 5] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -208,6 +211,9 @@ where
     }
 }
 
+// The forwarding impls below are intentionally boring. They make the wrapper boundary explicit and
+// keep failures readable in backtraces and compile errors; a macro would save lines and cost
+// clarity, which is a bad trade for contract glue that should almost never change shape.
 impl<F> PciFunctionContract for PciFunction<F>
 where
     F: PciHardwareFunction,
@@ -413,6 +419,24 @@ where
 mod tests {
     use super::*;
 
+    // These tests live inline for now because the crate is still tiny. If the backend matrix or
+    // capability coverage grows substantially, split them into sibling modules instead of turning
+    // this file into a standards-body landfill.
+
+    const fn test_pci_device(value: u8) -> fusion_hal::contract::drivers::bus::pci::PciDevice {
+        match fusion_hal::contract::drivers::bus::pci::PciDevice::from_u8(value) {
+            Some(device) => device,
+            None => panic!("invalid test pci device"),
+        }
+    }
+
+    const fn test_pci_function(value: u8) -> fusion_hal::contract::drivers::bus::pci::PciFunction {
+        match fusion_hal::contract::drivers::bus::pci::PciFunction::from_u8(value) {
+            Some(function) => function,
+            None => panic!("invalid test pci function"),
+        }
+    }
+
     const TEST_CONTROLLER_A: PciControllerDescriptor = PciControllerDescriptor {
         id: "test-pci-a",
         name: "Test PCI A",
@@ -463,14 +487,14 @@ mod tests {
     const TEST_ADDR_A: PciFunctionAddress = PciFunctionAddress {
         segment: PciSegment(0),
         bus: PciBus(0),
-        device: PciDevice(1),
-        function: PciFunction(0),
+        device: test_pci_device(1),
+        function: test_pci_function(0),
     };
     const TEST_ADDR_B: PciFunctionAddress = PciFunctionAddress {
         segment: PciSegment(4),
         bus: PciBus(64),
-        device: PciDevice(2),
-        function: PciFunction(0),
+        device: test_pci_device(2),
+        function: test_pci_function(0),
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,4 +1,8 @@
 //! PCI hot-plug and slot vocabulary.
+//!
+//! This is intentionally snapshot-only. Event delivery, debounce, supervision, and hot-plug
+//! reaction belong to courier/runtime surfaces later; the contract layer just tells the truth it
+//! can currently see.
 
 /// Slot and hot-plug capability truth for one function/path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

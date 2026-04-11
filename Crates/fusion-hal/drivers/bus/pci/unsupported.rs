@@ -50,8 +50,10 @@ impl Default for UnsupportedPciHardwareFunction {
             address: PciFunctionAddress {
                 segment: fusion_hal::contract::drivers::bus::pci::PciSegment(0),
                 bus: fusion_hal::contract::drivers::bus::pci::PciBus(0),
-                device: fusion_hal::contract::drivers::bus::pci::PciDevice(0),
-                function: fusion_hal::contract::drivers::bus::pci::PciFunction(0),
+                device: fusion_hal::contract::drivers::bus::pci::PciDevice::from_u8(0)
+                    .expect("pci device 0 should be valid"),
+                function: fusion_hal::contract::drivers::bus::pci::PciFunction::from_u8(0)
+                    .expect("pci function 0 should be valid"),
             },
         }
     }

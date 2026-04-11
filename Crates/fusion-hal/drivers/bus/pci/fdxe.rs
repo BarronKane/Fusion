@@ -1,5 +1,8 @@
 //! FDXE module export for the generic PCI driver family.
 
+// This module reuses the same staged ABI include pattern as other driver crates. `dead_code` is
+// allowed here because some imports are only exercised under `cfg(test)` while the generated ABI
+// body still wants the namespace to exist in normal builds.
 #[allow(dead_code)]
 mod abi {
     use fusion_hal::contract::drivers::driver::{

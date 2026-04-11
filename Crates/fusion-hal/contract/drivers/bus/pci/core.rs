@@ -1,4 +1,9 @@
 //! Shared PCI and config-space vocabulary.
+//!
+//! This lane owns the nouns every PCI consumer should be able to rely on without dragging in
+//! platform discovery or PCIe-specific link theology. It also deliberately avoids one fake global
+//! `PciVersion`: transport family, configuration model, PCIe capability version, link generation,
+//! and optional capabilities are different axes and stay different here.
 
 use super::error::*;
 
@@ -82,11 +87,53 @@ pub struct PciBus(pub u8);
 
 /// PCI device/slot number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PciDevice(pub u8);
+pub struct PciDevice(u8);
+
+impl PciDevice {
+    /// Maximum representable PCI device/slot number.
+    pub const MAX: u8 = 31;
+
+    /// Builds one PCI device/slot number when the raw value fits the 5-bit field.
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        if value <= Self::MAX {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the raw slot number.
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
 
 /// PCI function number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PciFunction(pub u8);
+pub struct PciFunction(u8);
+
+impl PciFunction {
+    /// Maximum representable PCI function number.
+    pub const MAX: u8 = 7;
+
+    /// Builds one PCI function number when the raw value fits the 3-bit field.
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        if value <= Self::MAX {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the raw function number.
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
 
 /// Conventional Requester ID within one segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -106,7 +153,9 @@ impl PciFunctionAddress {
     #[must_use]
     pub const fn requester_id(self) -> PciRequesterId {
         PciRequesterId(
-            ((self.bus.0 as u16) << 8) | ((self.device.0 as u16) << 3) | (self.function.0 as u16),
+            ((self.bus.0 as u16) << 8)
+                | ((self.device.get() as u16) << 3)
+                | (self.function.get() as u16),
         )
     }
 }
@@ -175,6 +224,7 @@ pub enum PciFunctionKind {
     RootComplexEventCollector,
     CardBusBridge,
     Other(&'static str),
+    /// Real backends are allowed to say "not yet classifiable" without lying.
     Unknown,
 }
 
@@ -267,6 +317,7 @@ pub enum PciCapabilityId {
     AdvancedFeatures,
     EnhancedAllocation,
     FlatteningPortalBridge,
+    /// Unknown/unsupported capability ids must survive discovery intact.
     Other(u8),
 }
 
@@ -354,6 +405,7 @@ pub enum PciExtendedCapabilityId {
     ProcessAddressSpaceId,
     DownstreamPortContainment,
     DataObjectExchange,
+    /// Unknown/unsupported extended capability ids must survive discovery intact.
     Other(u16),
 }
 
