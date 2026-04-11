@@ -5,6 +5,7 @@ members = [
     "Crates/fusion-firmware/macros",
     "Crates/fusion-firmware",
     "Crates/fusion-hal",
+    "Crates/fusion-hal/drivers/bus/pci",
     "Crates/fusion-pal",
     "Crates/fusion-pcu",
     "Crates/fusion-sys",
