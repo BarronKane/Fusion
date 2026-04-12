@@ -3,6 +3,9 @@
 #[path = "driver/driver.rs"]
 pub mod driver;
 
+#[path = "acpi/acpi.rs"]
+pub mod acpi;
+
 #[path = "bus/bus.rs"]
 pub mod bus;
 

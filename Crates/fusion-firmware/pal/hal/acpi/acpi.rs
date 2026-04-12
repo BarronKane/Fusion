@@ -108,6 +108,7 @@ mod fadt;
 mod header;
 mod madt;
 mod mcfg;
+mod realize;
 mod xsdt;
 
 use core::mem::MaybeUninit;
@@ -121,6 +122,7 @@ pub use fadt::*;
 pub use header::*;
 pub use madt::*;
 pub use mcfg::*;
+pub use realize::*;
 pub use xsdt::*;
 
 pub(crate) fn read_unaligned_copy<T: Copy>(bytes: &[u8]) -> Result<T, AcpiError> {
