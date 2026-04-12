@@ -67,6 +67,7 @@ libc.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, features = ["std"], optional = true }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, features = ["std"], optional = true }

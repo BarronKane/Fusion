@@ -8,16 +8,65 @@ pub mod dma;
 pub mod identity {
     use std::sync::OnceLock;
 
+    use windows::core::PWSTR;
+    use windows::Win32::System::SystemInformation::{
+        ComputerNamePhysicalDnsHostname,
+        GetComputerNameExW,
+    };
+
     static DOMAIN_NAME: OnceLock<String> = OnceLock::new();
 
     /// Returns the canonical local-domain name for the current hosted machine.
     #[must_use]
     pub fn system_domain_name() -> &'static str {
         DOMAIN_NAME.get_or_init(|| {
-            std::env::var("COMPUTERNAME")
-                .ok()
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| "windows".to_owned())
+            const FALLBACK: &str = "windows";
+
+            let mut stack = [0u16; 256];
+            let mut len = stack.len() as u32;
+
+            if unsafe {
+                GetComputerNameExW(
+                    ComputerNamePhysicalDnsHostname,
+                    Some(PWSTR(stack.as_mut_ptr())),
+                    &mut len,
+                )
+            }
+            .is_ok()
+            {
+                let name = String::from_utf16_lossy(&stack[..len as usize])
+                    .trim()
+                    .to_owned();
+                return if name.is_empty() {
+                    FALLBACK.to_owned()
+                } else {
+                    name
+                };
+            }
+
+            if len == 0 {
+                return FALLBACK.to_owned();
+            }
+
+            let mut heap = vec![0u16; len as usize];
+            if unsafe {
+                GetComputerNameExW(
+                    ComputerNamePhysicalDnsHostname,
+                    Some(PWSTR(heap.as_mut_ptr())),
+                    &mut len,
+                )
+            }
+            .is_ok()
+            {
+                let name = String::from_utf16_lossy(&heap[..len as usize])
+                    .trim()
+                    .to_owned();
+                if !name.is_empty() {
+                    return name;
+                }
+            }
+
+            FALLBACK.to_owned()
         })
     }
 }
@@ -51,45 +100,15 @@ pub mod entry {
         PlatformEntry::new()
     }
 }
-/// Windows atomic surface remains unsupported for now.
-pub mod atomic {
-    pub use crate::contract::pal::runtime::atomic::{
-        AtomicImplementationKind,
-        UnsupportedAtomic as PlatformAtomic,
-        UnsupportedAtomicWord32 as PlatformAtomicWord32,
-    };
-
-    /// Backend truth for the selected 32-bit atomic-word implementation on Windows.
-    pub const PLATFORM_ATOMIC_WORD32_IMPLEMENTATION: AtomicImplementationKind =
-        AtomicImplementationKind::Unsupported;
-
-    /// Backend truth for the selected 32-bit atomic wait/wake implementation on Windows.
-    pub const PLATFORM_ATOMIC_WAIT_WORD32_IMPLEMENTATION: AtomicImplementationKind =
-        AtomicImplementationKind::Unsupported;
-
-    /// Returns the unsupported atomic provider for the selected backend.
-    #[must_use]
-    pub const fn system_atomic() -> PlatformAtomic {
-        PlatformAtomic::new()
-    }
-}
+#[path = "atomic/atomic.rs"]
+/// Windows fusion-pal atomic backend implementation.
+pub mod atomic;
 #[path = "event/event.rs"]
 /// Windows fusion-pal event backend implementation.
 pub mod event;
-/// Windows hosted-fiber helper surface remains unsupported for now.
-pub mod fiber {
-    pub use crate::contract::pal::runtime::fiber::{
-        UnsupportedFiberHost as PlatformFiberHost,
-        UnsupportedFiberSignalStack as PlatformFiberSignalStack,
-        UnsupportedFiberWakeSignal as PlatformFiberWakeSignal,
-    };
-
-    /// Returns the unsupported hosted-fiber helper provider for the selected backend.
-    #[must_use]
-    pub const fn system_fiber_host() -> PlatformFiberHost {
-        PlatformFiberHost::new()
-    }
-}
+#[path = "fiber/fiber.rs"]
+/// Windows hosted-fiber helper backend implementation.
+pub mod fiber;
 #[path = "hal/hal.rs"]
 /// Windows fusion-pal hardware backend implementation.
 pub mod hal;
