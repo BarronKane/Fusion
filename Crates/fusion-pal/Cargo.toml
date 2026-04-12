@@ -46,6 +46,7 @@ workspace = true
 [dependencies]
 bitflags.workspace = true
 fusion-hal = { workspace = true, default-features = false }
+fusion-pcu = { workspace = true, default-features = false }
 fusion-kn = { workspace = true, optional = true, features = ["client"] }
 fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, optional = true }
 

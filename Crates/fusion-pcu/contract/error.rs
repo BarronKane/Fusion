@@ -5,17 +5,11 @@ use core::fmt;
 /// Kind of failure returned by a generic PCU backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PcuErrorKind {
-    /// The requested capability is unsupported.
     Unsupported,
-    /// The request was structurally invalid.
     Invalid,
-    /// The backend or resource is currently busy.
     Busy,
-    /// The system could not provide the required runtime resources.
     ResourceExhausted,
-    /// The request conflicted with current backend state.
     StateConflict,
-    /// Backend-specific failure code.
     Platform(i32),
 }
 
@@ -26,7 +20,6 @@ pub struct PcuError {
 }
 
 impl PcuError {
-    /// Creates an unsupported-operation error.
     #[must_use]
     pub const fn unsupported() -> Self {
         Self {
@@ -34,7 +27,6 @@ impl PcuError {
         }
     }
 
-    /// Creates an invalid-request error.
     #[must_use]
     pub const fn invalid() -> Self {
         Self {
@@ -42,7 +34,6 @@ impl PcuError {
         }
     }
 
-    /// Creates a busy-backend error.
     #[must_use]
     pub const fn busy() -> Self {
         Self {
@@ -50,7 +41,6 @@ impl PcuError {
         }
     }
 
-    /// Creates a resource-exhausted error.
     #[must_use]
     pub const fn resource_exhausted() -> Self {
         Self {
@@ -58,7 +48,6 @@ impl PcuError {
         }
     }
 
-    /// Creates a state-conflict error.
     #[must_use]
     pub const fn state_conflict() -> Self {
         Self {
@@ -66,7 +55,6 @@ impl PcuError {
         }
     }
 
-    /// Creates a platform-specific error.
     #[must_use]
     pub const fn platform(code: i32) -> Self {
         Self {
@@ -74,7 +62,6 @@ impl PcuError {
         }
     }
 
-    /// Returns the concrete PCU error kind.
     #[must_use]
     pub const fn kind(self) -> PcuErrorKind {
         self.kind

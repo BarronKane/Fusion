@@ -48,17 +48,17 @@ use super::board_contract::{
     CortexMSocBoard,
 };
 use super::pio::{
-    PioEngineClaim as PcuEngineClaim,
-    PioEngineDescriptor as PcuEngineDescriptor,
-    PioEngineId as PcuEngineId,
-    PioError as PcuError,
-    PioLaneClaim as PcuLaneClaim,
-    PioLaneDescriptor as PcuLaneDescriptor,
-    PioLaneId as PcuLaneId,
-    PioLaneMask as PcuLaneMask,
-    PioProgramImage as PcuProgramImage,
-    PioProgramLease as PcuProgramLease,
-    PioSupport as PcuSupport,
+    PioEngineClaim,
+    PioEngineDescriptor,
+    PioEngineId,
+    PioError,
+    PioLaneClaim,
+    PioLaneDescriptor,
+    PioLaneId,
+    PioLaneMask,
+    PioProgramImage,
+    PioProgramLease,
+    PioSupport,
 };
 
 const DESCRIPTOR: CortexMSocDescriptor = CortexMSocDescriptor {
@@ -556,97 +556,97 @@ pub fn flash_regions() -> &'static [CortexMFlashRegionDescriptor] {
 
 /// Returns the selected generic Cortex-M programmable-IO support surface.
 #[must_use]
-pub const fn pcu_support() -> PcuSupport {
-    PcuSupport::unsupported()
+pub const fn pio_support() -> PioSupport {
+    PioSupport::unsupported()
 }
 
 /// Returns the selected generic Cortex-M programmable-IO engine descriptors.
 #[must_use]
-pub fn pcu_engines() -> &'static [PcuEngineDescriptor] {
+pub fn pio_engines() -> &'static [PioEngineDescriptor] {
     &[]
 }
 
 /// Returns the selected generic Cortex-M programmable-IO lane descriptors for one engine.
 #[must_use]
-pub fn pcu_lanes(_engine: PcuEngineId) -> &'static [PcuLaneDescriptor] {
+pub fn pio_lanes(_engine: PioEngineId) -> &'static [PioLaneDescriptor] {
     &[]
 }
 
 /// Claims one programmable-IO engine on the selected generic Cortex-M target.
-pub fn claim_pcu_engine(_engine: PcuEngineId) -> Result<PcuEngineClaim, PcuError> {
-    Err(PcuError::unsupported())
+pub fn claim_pio_engine(_engine: PioEngineId) -> Result<PioEngineClaim, PioError> {
+    Err(PioError::unsupported())
 }
 
 /// Releases one programmable-IO engine claim on the selected generic Cortex-M target.
-pub fn release_pcu_engine(_claim: PcuEngineClaim) -> Result<(), PcuError> {
-    Err(PcuError::unsupported())
+pub fn release_pio_engine(_claim: PioEngineClaim) -> Result<(), PioError> {
+    Err(PioError::unsupported())
 }
 
 /// Claims one programmable-IO lane set on the selected generic Cortex-M target.
-pub fn claim_pcu_lanes(
-    _engine: PcuEngineId,
-    _lanes: PcuLaneMask,
-) -> Result<PcuLaneClaim, PcuError> {
-    Err(PcuError::unsupported())
+pub fn claim_pio_lanes(
+    _engine: PioEngineId,
+    _lanes: PioLaneMask,
+) -> Result<PioLaneClaim, PioError> {
+    Err(PioError::unsupported())
 }
 
 /// Releases one programmable-IO lane claim on the selected generic Cortex-M target.
-pub fn release_pcu_lanes(_claim: PcuLaneClaim) -> Result<(), PcuError> {
-    Err(PcuError::unsupported())
+pub fn release_pio_lanes(_claim: PioLaneClaim) -> Result<(), PioError> {
+    Err(PioError::unsupported())
 }
 
 /// Loads one programmable-IO program image on the selected generic Cortex-M target.
-pub fn load_pcu_program(
-    _claim: &PcuEngineClaim,
-    _image: &PcuProgramImage<'_>,
-) -> Result<PcuProgramLease, PcuError> {
-    Err(PcuError::unsupported())
+pub fn load_pio_program(
+    _claim: &PioEngineClaim,
+    _image: &PioProgramImage<'_>,
+) -> Result<PioProgramLease, PioError> {
+    Err(PioError::unsupported())
 }
 
 /// Unloads one programmable-IO program image on the selected generic Cortex-M target.
-pub fn unload_pcu_program(
-    _claim: &PcuEngineClaim,
-    _lease: PcuProgramLease,
-) -> Result<(), PcuError> {
-    Err(PcuError::unsupported())
+pub fn unload_pio_program(
+    _claim: &PioEngineClaim,
+    _lease: PioProgramLease,
+) -> Result<(), PioError> {
+    Err(PioError::unsupported())
 }
 
 /// Starts one programmable-IO lane set on the selected generic Cortex-M target.
-pub fn start_pcu_lanes(_claim: &PcuLaneClaim) -> Result<(), PcuError> {
-    Err(PcuError::unsupported())
+pub fn start_pio_lanes(_claim: &PioLaneClaim) -> Result<(), PioError> {
+    Err(PioError::unsupported())
 }
 
 /// Stops one programmable-IO lane set on the selected generic Cortex-M target.
-pub fn stop_pcu_lanes(_claim: &PcuLaneClaim) -> Result<(), PcuError> {
-    Err(PcuError::unsupported())
+pub fn stop_pio_lanes(_claim: &PioLaneClaim) -> Result<(), PioError> {
+    Err(PioError::unsupported())
 }
 
 /// Restarts one programmable-IO lane set on the selected generic Cortex-M target.
-pub fn restart_pcu_lanes(_claim: &PcuLaneClaim) -> Result<(), PcuError> {
-    Err(PcuError::unsupported())
+pub fn restart_pio_lanes(_claim: &PioLaneClaim) -> Result<(), PioError> {
+    Err(PioError::unsupported())
 }
 
 /// Writes one word to one programmable-IO TX FIFO on the selected generic Cortex-M target.
-pub fn write_pcu_tx_fifo(
-    _claim: &PcuLaneClaim,
-    _lane: PcuLaneId,
+pub fn write_pio_tx_fifo(
+    _claim: &PioLaneClaim,
+    _lane: PioLaneId,
     _word: u32,
-) -> Result<(), PcuError> {
-    Err(PcuError::unsupported())
+) -> Result<(), PioError> {
+    Err(PioError::unsupported())
 }
 
 /// Reads one word from one programmable-IO RX FIFO on the selected generic Cortex-M target.
-pub fn read_pcu_rx_fifo(_claim: &PcuLaneClaim, _lane: PcuLaneId) -> Result<u32, PcuError> {
-    Err(PcuError::unsupported())
+pub fn read_pio_rx_fifo(_claim: &PioLaneClaim, _lane: PioLaneId) -> Result<u32, PioError> {
+    Err(PioError::unsupported())
 }
 
 /// Applies one programmable-IO execution-state bundle on the selected generic Cortex-M target.
-pub fn apply_pcu_execution_config(
-    _claim: &PcuLaneClaim,
+pub fn apply_pio_execution_config(
+    _claim: &PioLaneClaim,
     _clkdiv: u32,
     _execctrl: u32,
     _shiftctrl: u32,
     _pinctrl: u32,
-) -> Result<(), PcuError> {
-    Err(PcuError::unsupported())
+) -> Result<(), PioError> {
+    Err(PioError::unsupported())
 }

@@ -1,24 +1,24 @@
 //! Portable deterministic programmable-IO kernel and execution-state vocabulary.
 
-use super::PcuProgramId;
+use super::PioProgramId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum PcuIrShiftDirection {
+pub enum PioIrShiftDirection {
     Left,
     #[default]
     Right,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct PcuIrShiftConfig {
-    pub in_direction: Option<PcuIrShiftDirection>,
-    pub out_direction: Option<PcuIrShiftDirection>,
+pub struct PioIrShiftConfig {
+    pub in_direction: Option<PioIrShiftDirection>,
+    pub out_direction: Option<PioIrShiftDirection>,
     pub autopush_threshold: Option<u8>,
     pub autopull_threshold: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct PcuIrPinConfig {
+pub struct PioIrPinConfig {
     pub input_base: Option<u8>,
     pub input_count: Option<u8>,
     pub output_base: Option<u8>,
@@ -32,28 +32,28 @@ pub struct PcuIrPinConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct PcuIrClockConfig {
+pub struct PioIrClockConfig {
     pub divider_integer: Option<u16>,
     pub divider_fractional: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct PcuIrExecutionConfig {
-    pub clocking: PcuIrClockConfig,
-    pub pins: PcuIrPinConfig,
-    pub shift: PcuIrShiftConfig,
+pub struct PioIrExecutionConfig {
+    pub clocking: PioIrClockConfig,
+    pub pins: PioIrPinConfig,
+    pub shift: PioIrShiftConfig,
     pub wrap_target: Option<u8>,
     pub wrap_source: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct PcuIrInstructionTiming {
+pub struct PioIrInstructionTiming {
     pub stall_cycles: u8,
     pub sideset_bits: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PcuIrWaitCondition {
+pub enum PioIrWaitCondition {
     GpioLow {
         pin: u8,
     },
@@ -76,7 +76,7 @@ pub enum PcuIrWaitCondition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PcuIrJumpCondition {
+pub enum PioIrJumpCondition {
     Always,
     XZero,
     XDecNonZero,
@@ -88,7 +88,7 @@ pub enum PcuIrJumpCondition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PcuIrInSource {
+pub enum PioIrInSource {
     Pins,
     X,
     Y,
@@ -99,7 +99,7 @@ pub enum PcuIrInSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PcuIrOutDestination {
+pub enum PioIrOutDestination {
     Pins,
     X,
     Y,
@@ -111,7 +111,7 @@ pub enum PcuIrOutDestination {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PcuIrSetDestination {
+pub enum PioIrSetDestination {
     Pins,
     X,
     Y,
@@ -119,7 +119,7 @@ pub enum PcuIrSetDestination {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PcuIrMovDestination {
+pub enum PioIrMovDestination {
     Pins,
     X,
     Y,
@@ -130,7 +130,7 @@ pub enum PcuIrMovDestination {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PcuIrMovSource {
+pub enum PioIrMovSource {
     Pins,
     X,
     Y,
@@ -141,7 +141,7 @@ pub enum PcuIrMovSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum PcuIrMovOperation {
+pub enum PioIrMovOperation {
     #[default]
     None,
     Invert,
@@ -149,29 +149,29 @@ pub enum PcuIrMovOperation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PcuIrIrqAction {
+pub enum PioIrIrqAction {
     Set,
     Wait,
     Clear,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PcuIrInstruction {
+pub enum PioIrInstruction {
     Nop,
     Delay {
         cycles: u8,
     },
-    Wait(PcuIrWaitCondition),
+    Wait(PioIrWaitCondition),
     Jump {
-        condition: PcuIrJumpCondition,
+        condition: PioIrJumpCondition,
         target: u8,
     },
     In {
-        source: PcuIrInSource,
+        source: PioIrInSource,
         bit_count: u8,
     },
     Out {
-        destination: PcuIrOutDestination,
+        destination: PioIrOutDestination,
         bit_count: u8,
     },
     Push {
@@ -183,42 +183,42 @@ pub enum PcuIrInstruction {
         blocking: bool,
     },
     Mov {
-        destination: PcuIrMovDestination,
-        operation: PcuIrMovOperation,
-        source: PcuIrMovSource,
+        destination: PioIrMovDestination,
+        operation: PioIrMovOperation,
+        source: PioIrMovSource,
     },
     Irq {
-        action: PcuIrIrqAction,
+        action: PioIrIrqAction,
         relative: bool,
         index: u8,
     },
     Set {
-        destination: PcuIrSetDestination,
+        destination: PioIrSetDestination,
         value: u8,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuIrProgram<'a> {
-    pub id: PcuProgramId,
-    pub instructions: &'a [PcuIrInstruction],
-    pub timing: Option<&'a [PcuIrInstructionTiming]>,
-    pub execution: PcuIrExecutionConfig,
+pub struct PioIrProgram<'a> {
+    pub id: PioProgramId,
+    pub instructions: &'a [PioIrInstruction],
+    pub timing: Option<&'a [PioIrInstructionTiming]>,
+    pub execution: PioIrExecutionConfig,
 }
 
-impl<'a> PcuIrProgram<'a> {
+impl<'a> PioIrProgram<'a> {
     #[must_use]
-    pub const fn new(id: PcuProgramId, instructions: &'a [PcuIrInstruction]) -> Self {
+    pub const fn new(id: PioProgramId, instructions: &'a [PioIrInstruction]) -> Self {
         Self {
             id,
             instructions,
             timing: None,
-            execution: PcuIrExecutionConfig {
-                clocking: PcuIrClockConfig {
+            execution: PioIrExecutionConfig {
+                clocking: PioIrClockConfig {
                     divider_integer: None,
                     divider_fractional: None,
                 },
-                pins: PcuIrPinConfig {
+                pins: PioIrPinConfig {
                     input_base: None,
                     input_count: None,
                     output_base: None,
@@ -230,7 +230,7 @@ impl<'a> PcuIrProgram<'a> {
                     sideset_optional: false,
                     jmp_pin: None,
                 },
-                shift: PcuIrShiftConfig {
+                shift: PioIrShiftConfig {
                     in_direction: None,
                     out_direction: None,
                     autopush_threshold: None,
@@ -243,13 +243,13 @@ impl<'a> PcuIrProgram<'a> {
     }
 
     #[must_use]
-    pub const fn with_execution(mut self, execution: PcuIrExecutionConfig) -> Self {
+    pub const fn with_execution(mut self, execution: PioIrExecutionConfig) -> Self {
         self.execution = execution;
         self
     }
 
     #[must_use]
-    pub const fn with_timing(mut self, timing: &'a [PcuIrInstructionTiming]) -> Self {
+    pub const fn with_timing(mut self, timing: &'a [PioIrInstructionTiming]) -> Self {
         self.timing = Some(timing);
         self
     }

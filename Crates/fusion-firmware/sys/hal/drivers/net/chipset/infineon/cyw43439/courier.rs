@@ -517,6 +517,7 @@ fn firmware_runtime() -> &'static CurrentFiberAsyncSingleton {
                     .with_obligation_capacity(16)
                     .with_recent_dead_depth(8),
             )
+            .with_initial_fiber_capacity(1)
             .with_fiber_capacity(4)
             .with_courier_id(FIRMWARE_COURIER_ID)
             .with_context_id(FIRMWARE_CONTEXT_ID)
@@ -539,6 +540,7 @@ fn driver_runtime() -> &'static CurrentFiberAsyncSingleton {
                     .with_obligation_capacity(16)
                     .with_recent_dead_depth(8),
             )
+            .with_initial_fiber_capacity(1)
             .with_fiber_capacity(4)
             .with_courier_id(CYW43439_BLUETOOTH_DRIVER_COURIER_ID)
             .with_context_id(CYW43439_BLUETOOTH_DRIVER_CONTEXT_ID)

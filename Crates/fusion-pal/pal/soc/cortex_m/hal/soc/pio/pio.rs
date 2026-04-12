@@ -1,9 +1,7 @@
 //! Cortex-M SoC-layer programmable-IO vocabulary and backend contract.
 
-use crate::contract::drivers::pcu::PcuError;
-
 mod error {
-    pub use crate::contract::drivers::pcu::PcuError;
+    pub use crate::contract::drivers::pcu::PcuError as PioError;
 }
 
 mod caps;
@@ -18,63 +16,79 @@ pub use crate::contract::drivers::pcu::{
     PcuErrorKind as PioErrorKind,
 };
 #[doc(hidden)]
+pub use crate::contract::drivers::pcu::PcuError;
+#[doc(hidden)]
 pub use caps::{
-    PcuCaps,
-    PcuImplementationKind,
-    PcuSupport,
-};
-pub use caps::{
-    PcuCaps as PioCaps,
-    PcuImplementationKind as PioImplementationKind,
-    PcuSupport as PioSupport,
+    PioCaps,
+    PioImplementationKind,
+    PioSupport,
 };
 pub use ir::*;
 pub use kernels::*;
 pub use lowering::*;
 #[doc(hidden)]
 pub use types::{
-    PcuClockDescriptor,
-    PcuEngineClaim,
-    PcuEngineDescriptor,
-    PcuEngineId,
-    PcuFifoDescriptor,
-    PcuFifoDirection,
-    PcuFifoId,
-    PcuInstructionMemoryDescriptor,
-    PcuLaneClaim,
-    PcuLaneDescriptor,
-    PcuLaneId,
-    PcuLaneMask,
-    PcuPinMappingCaps,
-    PcuProgramId,
-    PcuProgramImage,
-    PcuProgramLease,
-};
-pub use types::{
-    PcuClockDescriptor as PioClockDescriptor,
-    PcuEngineClaim as PioEngineClaim,
-    PcuEngineDescriptor as PioEngineDescriptor,
-    PcuEngineId as PioEngineId,
-    PcuFifoDescriptor as PioFifoDescriptor,
-    PcuFifoDirection as PioFifoDirection,
-    PcuFifoId as PioFifoId,
-    PcuInstructionMemoryDescriptor as PioInstructionMemoryDescriptor,
-    PcuLaneClaim as PioLaneClaim,
-    PcuLaneDescriptor as PioLaneDescriptor,
-    PcuLaneId as PioLaneId,
-    PcuLaneMask as PioLaneMask,
-    PcuPinMappingCaps as PioPinMappingCaps,
-    PcuProgramId as PioProgramId,
-    PcuProgramImage as PioProgramImage,
-    PcuProgramLease as PioProgramLease,
+    PioClockDescriptor as PcuClockDescriptor,
+    PioEngineClaim as PcuEngineClaim,
+    PioEngineDescriptor as PcuEngineDescriptor,
+    PioEngineId as PcuEngineId,
+    PioFifoDescriptor as PcuFifoDescriptor,
+    PioFifoDirection as PcuFifoDirection,
+    PioFifoId as PcuFifoId,
+    PioInstructionMemoryDescriptor as PcuInstructionMemoryDescriptor,
+    PioLaneClaim as PcuLaneClaim,
+    PioLaneDescriptor as PcuLaneDescriptor,
+    PioLaneId as PcuLaneId,
+    PioLaneMask as PcuLaneMask,
+    PioPinMappingCaps as PcuPinMappingCaps,
+    PioProgramId as PcuProgramId,
+    PioProgramImage as PcuProgramImage,
+    PioProgramLease as PcuProgramLease,
 };
 #[doc(hidden)]
-pub use unsupported::UnsupportedPcu;
-pub use unsupported::UnsupportedPcu as UnsupportedPio;
+pub use ir::{
+    PioIrClockConfig as PcuIrClockConfig,
+    PioIrExecutionConfig as PcuIrExecutionConfig,
+    PioIrInSource as PcuIrInSource,
+    PioIrInstruction as PcuIrInstruction,
+    PioIrInstructionTiming as PcuIrInstructionTiming,
+    PioIrIrqAction as PcuIrIrqAction,
+    PioIrJumpCondition as PcuIrJumpCondition,
+    PioIrMovDestination as PcuIrMovDestination,
+    PioIrMovOperation as PcuIrMovOperation,
+    PioIrMovSource as PcuIrMovSource,
+    PioIrOutDestination as PcuIrOutDestination,
+    PioIrPinConfig as PcuIrPinConfig,
+    PioIrProgram as PcuIrProgram,
+    PioIrSetDestination as PcuIrSetDestination,
+    PioIrShiftConfig as PcuIrShiftConfig,
+    PioIrShiftDirection as PcuIrShiftDirection,
+    PioIrWaitCondition as PcuIrWaitCondition,
+};
+pub use types::{
+    PioClockDescriptor,
+    PioEngineClaim,
+    PioEngineDescriptor,
+    PioEngineId,
+    PioFifoDescriptor,
+    PioFifoDirection,
+    PioFifoId,
+    PioInstructionMemoryDescriptor,
+    PioLaneClaim,
+    PioLaneDescriptor,
+    PioLaneId,
+    PioLaneMask,
+    PioPinMappingCaps,
+    PioProgramId,
+    PioProgramImage,
+    PioProgramLease,
+};
+#[doc(hidden)]
+pub use unsupported::UnsupportedPio;
 
 /// Capability trait for Cortex-M programmable-IO backends.
 #[doc(hidden)]
-pub trait PcuBaseContract {
+pub trait PioBaseContract {
     /// Reports the truthful programmable-IO surface for this backend.
     fn support(&self) -> PioSupport;
 
@@ -90,20 +104,20 @@ pub trait PcuBaseContract {
 
 /// Control contract for Cortex-M programmable-IO backends.
 #[doc(hidden)]
-pub trait PcuControlContract: PcuBaseContract {
+pub trait PioControlContract: PioBaseContract {
     /// Claims one engine exclusively.
     ///
     /// # Errors
     ///
     /// Returns an honest error when the engine is unknown, unsupported, or already claimed.
-    fn claim_engine(&self, engine: PioEngineId) -> Result<PioEngineClaim, PcuError>;
+    fn claim_engine(&self, engine: PioEngineId) -> Result<PioEngineClaim, PioError>;
 
     /// Releases one previously claimed engine.
     ///
     /// # Errors
     ///
     /// Returns an honest error when the claim no longer matches backend state.
-    fn release_engine(&self, claim: PioEngineClaim) -> Result<(), PcuError>;
+    fn release_engine(&self, claim: PioEngineClaim) -> Result<(), PioError>;
 
     /// Claims one or more lanes within one engine.
     ///
@@ -115,14 +129,14 @@ pub trait PcuControlContract: PcuBaseContract {
         &self,
         engine: PioEngineId,
         lanes: PioLaneMask,
-    ) -> Result<PioLaneClaim, PcuError>;
+    ) -> Result<PioLaneClaim, PioError>;
 
     /// Releases one previously claimed lane mask.
     ///
     /// # Errors
     ///
     /// Returns an honest error when the claim no longer matches backend state.
-    fn release_lanes(&self, claim: PioLaneClaim) -> Result<(), PcuError>;
+    fn release_lanes(&self, claim: PioLaneClaim) -> Result<(), PioError>;
 
     /// Loads one native program image into one claimed engine.
     ///
@@ -133,7 +147,7 @@ pub trait PcuControlContract: PcuBaseContract {
         &self,
         claim: &PioEngineClaim,
         image: &PioProgramImage<'_>,
-    ) -> Result<PioProgramLease, PcuError>;
+    ) -> Result<PioProgramLease, PioError>;
 
     /// Unloads one previously loaded native program image from one claimed engine.
     ///
@@ -144,28 +158,28 @@ pub trait PcuControlContract: PcuBaseContract {
         &self,
         claim: &PioEngineClaim,
         lease: PioProgramLease,
-    ) -> Result<(), PcuError>;
+    ) -> Result<(), PioError>;
 
     /// Starts one claimed lane set.
     ///
     /// # Errors
     ///
     /// Returns an honest error when the backend cannot start the requested lanes.
-    fn start_lanes(&self, claim: &PioLaneClaim) -> Result<(), PcuError>;
+    fn start_lanes(&self, claim: &PioLaneClaim) -> Result<(), PioError>;
 
     /// Stops one claimed lane set.
     ///
     /// # Errors
     ///
     /// Returns an honest error when the backend cannot stop the requested lanes.
-    fn stop_lanes(&self, claim: &PioLaneClaim) -> Result<(), PcuError>;
+    fn stop_lanes(&self, claim: &PioLaneClaim) -> Result<(), PioError>;
 
     /// Restarts one claimed lane set.
     ///
     /// # Errors
     ///
     /// Returns an honest error when the backend cannot restart the requested lanes.
-    fn restart_lanes(&self, claim: &PioLaneClaim) -> Result<(), PcuError>;
+    fn restart_lanes(&self, claim: &PioLaneClaim) -> Result<(), PioError>;
 
     /// Writes one word into one claimed TX FIFO.
     ///
@@ -178,7 +192,7 @@ pub trait PcuControlContract: PcuBaseContract {
         claim: &PioLaneClaim,
         lane: PioLaneId,
         word: u32,
-    ) -> Result<(), PcuError>;
+    ) -> Result<(), PioError>;
 
     /// Reads one word from one claimed RX FIFO.
     ///
@@ -186,11 +200,11 @@ pub trait PcuControlContract: PcuBaseContract {
     ///
     /// Returns an honest error when the lane is not part of the claim, the FIFO is empty, or the
     /// backend cannot perform the read.
-    fn read_rx_fifo(&self, claim: &PioLaneClaim, lane: PioLaneId) -> Result<u32, PcuError>;
+    fn read_rx_fifo(&self, claim: &PioLaneClaim, lane: PioLaneId) -> Result<u32, PioError>;
 }
 
-pub use PcuBaseContract as PioBase;
-pub use PcuControlContract as PioControl;
+pub use PioBaseContract as PioBase;
+pub use PioControlContract as PioControl;
 
 /// Cortex-M SoC-local programmable-IO provider type.
 #[derive(Debug, Clone, Copy, Default)]
@@ -215,25 +229,25 @@ impl CortexMSocPio {
 
 impl PioBase for CortexMSocPio {
     fn support(&self) -> PioSupport {
-        super::board::pcu_support()
+        super::board::pio_support()
     }
 
     fn engines(&self) -> &'static [PioEngineDescriptor] {
-        super::board::pcu_engines()
+        super::board::pio_engines()
     }
 
     fn lanes(&self, engine: PioEngineId) -> &'static [PioLaneDescriptor] {
-        super::board::pcu_lanes(engine)
+        super::board::pio_lanes(engine)
     }
 }
 
 impl PioControl for CortexMSocPio {
     fn claim_engine(&self, engine: PioEngineId) -> Result<PioEngineClaim, PioError> {
-        super::board::claim_pcu_engine(engine)
+        super::board::claim_pio_engine(engine)
     }
 
     fn release_engine(&self, claim: PioEngineClaim) -> Result<(), PioError> {
-        super::board::release_pcu_engine(claim)
+        super::board::release_pio_engine(claim)
     }
 
     fn claim_lanes(
@@ -241,11 +255,11 @@ impl PioControl for CortexMSocPio {
         engine: PioEngineId,
         lanes: PioLaneMask,
     ) -> Result<PioLaneClaim, PioError> {
-        super::board::claim_pcu_lanes(engine, lanes)
+        super::board::claim_pio_lanes(engine, lanes)
     }
 
     fn release_lanes(&self, claim: PioLaneClaim) -> Result<(), PioError> {
-        super::board::release_pcu_lanes(claim)
+        super::board::release_pio_lanes(claim)
     }
 
     fn load_program(
@@ -253,7 +267,7 @@ impl PioControl for CortexMSocPio {
         claim: &PioEngineClaim,
         image: &PioProgramImage<'_>,
     ) -> Result<PioProgramLease, PioError> {
-        super::board::load_pcu_program(claim, image)
+        super::board::load_pio_program(claim, image)
     }
 
     fn unload_program(
@@ -261,19 +275,19 @@ impl PioControl for CortexMSocPio {
         claim: &PioEngineClaim,
         lease: PioProgramLease,
     ) -> Result<(), PioError> {
-        super::board::unload_pcu_program(claim, lease)
+        super::board::unload_pio_program(claim, lease)
     }
 
     fn start_lanes(&self, claim: &PioLaneClaim) -> Result<(), PioError> {
-        super::board::start_pcu_lanes(claim)
+        super::board::start_pio_lanes(claim)
     }
 
     fn stop_lanes(&self, claim: &PioLaneClaim) -> Result<(), PioError> {
-        super::board::stop_pcu_lanes(claim)
+        super::board::stop_pio_lanes(claim)
     }
 
     fn restart_lanes(&self, claim: &PioLaneClaim) -> Result<(), PioError> {
-        super::board::restart_pcu_lanes(claim)
+        super::board::restart_pio_lanes(claim)
     }
 
     fn write_tx_fifo(
@@ -282,10 +296,10 @@ impl PioControl for CortexMSocPio {
         lane: PioLaneId,
         word: u32,
     ) -> Result<(), PioError> {
-        super::board::write_pcu_tx_fifo(claim, lane, word)
+        super::board::write_pio_tx_fifo(claim, lane, word)
     }
 
     fn read_rx_fifo(&self, claim: &PioLaneClaim, lane: PioLaneId) -> Result<u32, PioError> {
-        super::board::read_pcu_rx_fifo(claim, lane)
+        super::board::read_pio_rx_fifo(claim, lane)
     }
 }

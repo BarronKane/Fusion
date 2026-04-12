@@ -1159,7 +1159,9 @@ impl GreenPoolInner {
             }
         }
         if !signal {
-            self.request_runtime_dispatch();
+            if !is_in_green_context() {
+                self.request_runtime_dispatch();
+            }
             return Ok(());
         }
         if matches!(self.scheduling, GreenScheduling::WorkStealing) {

@@ -294,22 +294,22 @@ fn pio_shared_summary_helpers_split_internal_and_fifo_causes() {
 
 #[test]
 fn pio_surface_tracks_rp2350_engine_and_lane_shape() {
-    assert_eq!(pcu_support().engine_count, 3);
+    assert_eq!(pio_support().engine_count, 3);
     assert!(
-        pcu_support()
+        pio_support()
             .caps
-            .contains(PcuCaps::SHARED_INSTRUCTION_MEMORY)
+            .contains(PioCaps::SHARED_INSTRUCTION_MEMORY)
     );
-    assert_eq!(pcu_engines().len(), 3);
-    assert_eq!(pcu_engines()[0].instruction_memory.word_count, 32);
-    assert_eq!(pcu_engines()[1].tx_dreq_base, Some(8));
-    assert_eq!(pcu_engines()[2].rx_dreq_base, Some(20));
-    assert_eq!(pcu_lanes(PcuEngineId(0)).len(), 4);
-    assert_eq!(pcu_lanes(PcuEngineId(2))[3].name, "pio2-sm3");
+    assert_eq!(pio_engines().len(), 3);
+    assert_eq!(pio_engines()[0].instruction_memory.word_count, 32);
+    assert_eq!(pio_engines()[1].tx_dreq_base, Some(8));
+    assert_eq!(pio_engines()[2].rx_dreq_base, Some(20));
+    assert_eq!(pio_lanes(PioEngineId(0)).len(), 4);
+    assert_eq!(pio_lanes(PioEngineId(2))[3].name, "pio2-sm3");
     assert!(
-        pcu_lanes(PcuEngineId(1))[0]
+        pio_lanes(PioEngineId(1))[0]
             .pin_mapping
-            .contains(PcuPinMappingCaps::SIDESET_BASE)
+            .contains(PioPinMappingCaps::SIDESET_BASE)
     );
 }
 

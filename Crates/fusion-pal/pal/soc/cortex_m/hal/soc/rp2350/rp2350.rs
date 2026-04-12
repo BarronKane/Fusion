@@ -88,25 +88,25 @@ use super::board_contract::{
     CortexMSocBoard,
 };
 use super::pio::{
-    PioCaps as PcuCaps,
-    PioClockDescriptor as PcuClockDescriptor,
-    PioEngineClaim as PcuEngineClaim,
-    PioEngineDescriptor as PcuEngineDescriptor,
-    PioEngineId as PcuEngineId,
-    PioError as PcuError,
-    PioFifoDescriptor as PcuFifoDescriptor,
-    PioFifoDirection as PcuFifoDirection,
-    PioFifoId as PcuFifoId,
-    PioImplementationKind as PcuImplementationKind,
-    PioInstructionMemoryDescriptor as PcuInstructionMemoryDescriptor,
-    PioLaneClaim as PcuLaneClaim,
-    PioLaneDescriptor as PcuLaneDescriptor,
-    PioLaneId as PcuLaneId,
-    PioLaneMask as PcuLaneMask,
-    PioPinMappingCaps as PcuPinMappingCaps,
-    PioProgramImage as PcuProgramImage,
-    PioProgramLease as PcuProgramLease,
-    PioSupport as PcuSupport,
+    PioCaps,
+    PioClockDescriptor,
+    PioEngineClaim,
+    PioEngineDescriptor,
+    PioEngineId,
+    PioError,
+    PioFifoDescriptor,
+    PioFifoDirection,
+    PioFifoId,
+    PioImplementationKind,
+    PioInstructionMemoryDescriptor,
+    PioLaneClaim,
+    PioLaneDescriptor,
+    PioLaneId,
+    PioLaneMask,
+    PioPinMappingCaps,
+    PioProgramImage,
+    PioProgramLease,
+    PioSupport,
 };
 
 mod descriptors;
@@ -848,7 +848,7 @@ fn rp2350_pio_irq_clear_internal_flags(irqn: u16, flags: u8) -> Result<(), Hardw
     Ok(())
 }
 
-const fn rp2350_pio_base(engine: PcuEngineId) -> Option<usize> {
+const fn rp2350_pio_base(engine: PioEngineId) -> Option<usize> {
     match engine.0 {
         0 => Some(RP2350_PIO0_BASE),
         1 => Some(RP2350_PIO1_BASE),
@@ -857,7 +857,7 @@ const fn rp2350_pio_base(engine: PcuEngineId) -> Option<usize> {
     }
 }
 
-const fn rp2350_pio_reset_bit(engine: PcuEngineId) -> Option<u32> {
+const fn rp2350_pio_reset_bit(engine: PioEngineId) -> Option<u32> {
     match engine.0 {
         0 => Some(RP2350_RESETS_PIO0_BIT),
         1 => Some(RP2350_RESETS_PIO1_BIT),
@@ -866,8 +866,8 @@ const fn rp2350_pio_reset_bit(engine: PcuEngineId) -> Option<u32> {
     }
 }
 
-fn rp2350_unreset_pio_engine(engine: PcuEngineId) -> Result<(), PcuError> {
-    let bit = rp2350_pio_reset_bit(engine).ok_or_else(PcuError::invalid)?;
+fn rp2350_unreset_pio_engine(engine: PioEngineId) -> Result<(), PioError> {
+    let bit = rp2350_pio_reset_bit(engine).ok_or_else(PioError::invalid)?;
     let reset_register = RP2350_RESETS_BASE + RP2350_RESETS_RESET_OFFSET;
     let reset_done_register = (RP2350_RESETS_BASE + RP2350_RESETS_RESET_DONE_OFFSET) as *const u32;
     rp2350_atomic_register_clear(reset_register, bit);
@@ -879,10 +879,10 @@ fn rp2350_unreset_pio_engine(engine: PcuEngineId) -> Result<(), PcuError> {
         }
         compiler_fence(Ordering::SeqCst);
     }
-    Err(PcuError::busy())
+    Err(PioError::busy())
 }
 
-const fn rp2350_pio_lane_descriptors(engine: PcuEngineId) -> &'static [PcuLaneDescriptor] {
+const fn rp2350_pio_lane_descriptors(engine: PioEngineId) -> &'static [PioLaneDescriptor] {
     match engine.0 {
         0 => &PIO0_LANES,
         1 => &PIO1_LANES,
@@ -891,31 +891,31 @@ const fn rp2350_pio_lane_descriptors(engine: PcuEngineId) -> &'static [PcuLaneDe
     }
 }
 
-const fn rp2350_valid_lane_mask(mask: PcuLaneMask) -> bool {
+const fn rp2350_valid_lane_mask(mask: PioLaneMask) -> bool {
     let bits = mask.bits();
     bits != 0 && (bits & !RP2350_PIO_VALID_LANE_MASK) == 0
 }
 
-fn rp2350_validate_engine_claim(claim: &PcuEngineClaim) -> Result<usize, PcuError> {
+fn rp2350_validate_engine_claim(claim: &PioEngineClaim) -> Result<usize, PioError> {
     let engine_index = usize::from(claim.engine().0);
     if engine_index >= RP2350_PIO_ENGINE_COUNT {
-        return Err(PcuError::invalid());
+        return Err(PioError::invalid());
     }
     if !RP2350_PIO_ENGINE_CLAIMS[engine_index].load(Ordering::Acquire) {
-        return Err(PcuError::state_conflict());
+        return Err(PioError::state_conflict());
     }
     Ok(engine_index)
 }
 
-fn rp2350_validate_lane_claim(claim: &PcuLaneClaim) -> Result<(usize, u8), PcuError> {
+fn rp2350_validate_lane_claim(claim: &PioLaneClaim) -> Result<(usize, u8), PioError> {
     let engine_index = usize::from(claim.engine().0);
     let bits = claim.lanes().bits();
     if engine_index >= RP2350_PIO_ENGINE_COUNT || !rp2350_valid_lane_mask(claim.lanes()) {
-        return Err(PcuError::invalid());
+        return Err(PioError::invalid());
     }
     let claimed = RP2350_PIO_LANE_CLAIMS[engine_index].load(Ordering::Acquire);
     if claimed & bits != bits {
-        return Err(PcuError::state_conflict());
+        return Err(PioError::state_conflict());
     }
     Ok((engine_index, bits))
 }
@@ -1534,82 +1534,82 @@ impl CortexMSocBoard for Rp2350Soc {
 
 /// Returns the RP2350 programmable-IO support surface.
 #[must_use]
-pub const fn pcu_support() -> PcuSupport {
+pub const fn pio_support() -> PioSupport {
     RP2350_PIO_SUPPORT
 }
 
 /// Returns the RP2350 programmable-IO engine descriptors.
 #[must_use]
-pub fn pcu_engines() -> &'static [PcuEngineDescriptor] {
+pub fn pio_engines() -> &'static [PioEngineDescriptor] {
     &PIO_ENGINES
 }
 
 /// Returns the RP2350 programmable-IO lane descriptors for one engine.
 #[must_use]
-pub fn pcu_lanes(engine: PcuEngineId) -> &'static [PcuLaneDescriptor] {
+pub fn pio_lanes(engine: PioEngineId) -> &'static [PioLaneDescriptor] {
     rp2350_pio_lane_descriptors(engine)
 }
 
 /// Claims one RP2350 PIO engine exclusively.
-pub fn claim_pcu_engine(engine: PcuEngineId) -> Result<PcuEngineClaim, PcuError> {
+pub fn claim_pio_engine(engine: PioEngineId) -> Result<PioEngineClaim, PioError> {
     let engine_index = usize::from(engine.0);
     if engine_index >= RP2350_PIO_ENGINE_COUNT {
-        return Err(PcuError::invalid());
+        return Err(PioError::invalid());
     }
     RP2350_PIO_ENGINE_CLAIMS[engine_index]
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .map_err(|_| PcuError::busy())?;
+        .map_err(|_| PioError::busy())?;
     if let Err(error) = rp2350_unreset_pio_engine(engine) {
         RP2350_PIO_ENGINE_CLAIMS[engine_index].store(false, Ordering::Release);
         return Err(error);
     }
-    Ok(PcuEngineClaim { engine })
+    Ok(PioEngineClaim { engine })
 }
 
 /// Releases one RP2350 PIO engine claim.
-pub fn release_pcu_engine(claim: PcuEngineClaim) -> Result<(), PcuError> {
+pub fn release_pio_engine(claim: PioEngineClaim) -> Result<(), PioError> {
     let engine_index = usize::from(claim.engine().0);
     if engine_index >= RP2350_PIO_ENGINE_COUNT {
-        return Err(PcuError::invalid());
+        return Err(PioError::invalid());
     }
     if !RP2350_PIO_ENGINE_CLAIMS[engine_index].swap(false, Ordering::AcqRel) {
-        return Err(PcuError::state_conflict());
+        return Err(PioError::state_conflict());
     }
     Ok(())
 }
 
 /// Claims one or more RP2350 PIO lanes.
-pub fn claim_pcu_lanes(engine: PcuEngineId, lanes: PcuLaneMask) -> Result<PcuLaneClaim, PcuError> {
+pub fn claim_pio_lanes(engine: PioEngineId, lanes: PioLaneMask) -> Result<PioLaneClaim, PioError> {
     let engine_index = usize::from(engine.0);
     let bits = lanes.bits();
     if engine_index >= RP2350_PIO_ENGINE_COUNT || !rp2350_valid_lane_mask(lanes) {
-        return Err(PcuError::invalid());
+        return Err(PioError::invalid());
     }
 
     let claims = &RP2350_PIO_LANE_CLAIMS[engine_index];
     loop {
         let current = claims.load(Ordering::Acquire);
         if current & bits != 0 {
-            return Err(PcuError::busy());
+            return Err(PioError::busy());
         }
         let next = current | bits;
         if claims
             .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            return Ok(PcuLaneClaim { engine, lanes });
+            return Ok(PioLaneClaim { engine, lanes });
         }
     }
 }
 
 /// Releases one RP2350 PIO lane claim.
-pub fn release_pcu_lanes(claim: PcuLaneClaim) -> Result<(), PcuError> {
+pub fn release_pio_lanes(claim: PioLaneClaim) -> Result<(), PioError> {
     let (engine_index, bits) = rp2350_validate_lane_claim(&claim)?;
     let claims = &RP2350_PIO_LANE_CLAIMS[engine_index];
     loop {
         let current = claims.load(Ordering::Acquire);
         if current & bits != bits {
-            return Err(PcuError::state_conflict());
+            return Err(PioError::state_conflict());
         }
         let next = current & !bits;
         if claims
@@ -1622,17 +1622,17 @@ pub fn release_pcu_lanes(claim: PcuLaneClaim) -> Result<(), PcuError> {
 }
 
 /// Loads one native RP2350 PIO program image into a claimed engine.
-pub fn load_pcu_program(
-    claim: &PcuEngineClaim,
-    image: &PcuProgramImage<'_>,
-) -> Result<PcuProgramLease, PcuError> {
+pub fn load_pio_program(
+    claim: &PioEngineClaim,
+    image: &PioProgramImage<'_>,
+) -> Result<PioProgramLease, PioError> {
     let _engine_index = rp2350_validate_engine_claim(claim)?;
-    let base = rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)?;
+    let base = rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)?;
     if image.words.is_empty() {
-        return Err(PcuError::invalid());
+        return Err(PioError::invalid());
     }
     if image.words.len() > usize::from(RP2350_PIO_INSTRUCTION_WORDS) {
-        return Err(PcuError::resource_exhausted());
+        return Err(PioError::resource_exhausted());
     }
 
     for (index, word) in image.words.iter().enumerate() {
@@ -1650,7 +1650,7 @@ pub fn load_pcu_program(
         unsafe { ptr::write_volatile(register, 0) };
     }
 
-    Ok(PcuProgramLease {
+    Ok(PioProgramLease {
         engine: claim.engine(),
         program: image.id,
         word_count: image.words.len() as u16,
@@ -1658,12 +1658,12 @@ pub fn load_pcu_program(
 }
 
 /// Unloads one native RP2350 PIO program image from a claimed engine.
-pub fn unload_pcu_program(claim: &PcuEngineClaim, lease: PcuProgramLease) -> Result<(), PcuError> {
+pub fn unload_pio_program(claim: &PioEngineClaim, lease: PioProgramLease) -> Result<(), PioError> {
     let _engine_index = rp2350_validate_engine_claim(claim)?;
     if claim.engine().0 != lease.engine().0 {
-        return Err(PcuError::invalid());
+        return Err(PioError::invalid());
     }
-    let base = rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)?;
+    let base = rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)?;
     for index in 0..usize::from(RP2350_PIO_INSTRUCTION_WORDS) {
         let register = (base + RP2350_PIO_INSTR_MEM0_OFFSET + (index * core::mem::size_of::<u32>()))
             as *mut u32;
@@ -1675,28 +1675,28 @@ pub fn unload_pcu_program(claim: &PcuEngineClaim, lease: PcuProgramLease) -> Res
 }
 
 /// Starts one claimed RP2350 PIO lane set.
-pub fn start_pcu_lanes(claim: &PcuLaneClaim) -> Result<(), PcuError> {
+pub fn start_pio_lanes(claim: &PioLaneClaim) -> Result<(), PioError> {
     let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
     let register =
-        rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)? + RP2350_PIO_CTRL_OFFSET;
+        rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)? + RP2350_PIO_CTRL_OFFSET;
     rp2350_atomic_register_set(register, u32::from(bits) & RP2350_PIO_CTRL_SM_ENABLE_MASK);
     Ok(())
 }
 
 /// Stops one claimed RP2350 PIO lane set.
-pub fn stop_pcu_lanes(claim: &PcuLaneClaim) -> Result<(), PcuError> {
+pub fn stop_pio_lanes(claim: &PioLaneClaim) -> Result<(), PioError> {
     let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
     let register =
-        rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)? + RP2350_PIO_CTRL_OFFSET;
+        rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)? + RP2350_PIO_CTRL_OFFSET;
     rp2350_atomic_register_clear(register, u32::from(bits) & RP2350_PIO_CTRL_SM_ENABLE_MASK);
     Ok(())
 }
 
 /// Restarts one claimed RP2350 PIO lane set.
-pub fn restart_pcu_lanes(claim: &PcuLaneClaim) -> Result<(), PcuError> {
+pub fn restart_pio_lanes(claim: &PioLaneClaim) -> Result<(), PioError> {
     let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
     let register =
-        rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)? + RP2350_PIO_CTRL_OFFSET;
+        rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)? + RP2350_PIO_CTRL_OFFSET;
     let bits = u32::from(bits) & RP2350_PIO_CTRL_SM_ENABLE_MASK;
     rp2350_atomic_register_set(
         register,
@@ -1706,17 +1706,17 @@ pub fn restart_pcu_lanes(claim: &PcuLaneClaim) -> Result<(), PcuError> {
 }
 
 /// Writes one word to one claimed RP2350 PIO TX FIFO.
-pub fn write_pcu_tx_fifo(claim: &PcuLaneClaim, lane: PcuLaneId, word: u32) -> Result<(), PcuError> {
+pub fn write_pio_tx_fifo(claim: &PioLaneClaim, lane: PioLaneId, word: u32) -> Result<(), PioError> {
     let (_engine_index, _) = rp2350_validate_lane_claim(claim)?;
     if !claim.contains_lane(lane) {
-        return Err(PcuError::invalid());
+        return Err(PioError::invalid());
     }
-    let base = rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)?;
+    let base = rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)?;
     let fstat = (base + RP2350_PIO_FSTAT_OFFSET) as *const u32;
     // SAFETY: FSTAT is a read-only summary register for lane FIFO occupancy.
     let state = unsafe { ptr::read_volatile(fstat) };
     if state & (1_u32 << (RP2350_PIO_FSTAT_TXFULL_SHIFT + u32::from(lane.index))) != 0 {
-        return Err(PcuError::busy());
+        return Err(PioError::busy());
     }
     let register = (base
         + RP2350_PIO_TXF0_OFFSET
@@ -1727,17 +1727,17 @@ pub fn write_pcu_tx_fifo(claim: &PcuLaneClaim, lane: PcuLaneId, word: u32) -> Re
 }
 
 /// Reads one word from one claimed RP2350 PIO RX FIFO.
-pub fn read_pcu_rx_fifo(claim: &PcuLaneClaim, lane: PcuLaneId) -> Result<u32, PcuError> {
+pub fn read_pio_rx_fifo(claim: &PioLaneClaim, lane: PioLaneId) -> Result<u32, PioError> {
     let (_engine_index, _) = rp2350_validate_lane_claim(claim)?;
     if !claim.contains_lane(lane) {
-        return Err(PcuError::invalid());
+        return Err(PioError::invalid());
     }
-    let base = rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)?;
+    let base = rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)?;
     let fstat = (base + RP2350_PIO_FSTAT_OFFSET) as *const u32;
     // SAFETY: FSTAT is a read-only summary register for lane FIFO occupancy.
     let state = unsafe { ptr::read_volatile(fstat) };
     if state & (1_u32 << (RP2350_PIO_FSTAT_RXEMPTY_SHIFT + u32::from(lane.index))) != 0 {
-        return Err(PcuError::busy());
+        return Err(PioError::busy());
     }
     let register = (base
         + RP2350_PIO_RXF0_OFFSET
@@ -1750,11 +1750,11 @@ const fn rp2350_pio_sm_register(base: usize, lane_index: u8, offset: usize) -> u
     base + offset + (lane_index as usize * RP2350_PIO_SM_STRIDE)
 }
 
-const fn rp2350_encode_pcu_jmp(target: u8) -> u16 {
+const fn rp2350_encode_pio_jmp(target: u8) -> u16 {
     target as u16
 }
 
-fn rp2350_clear_pcu_fifos(base: usize, bits: u8) {
+fn rp2350_clear_pio_fifos(base: usize, bits: u8) {
     for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE as u8 {
         if bits & (1u8 << lane_index) == 0 {
             continue;
@@ -1775,7 +1775,7 @@ fn rp2350_clear_pcu_fifos(base: usize, bits: u8) {
     }
 }
 
-fn rp2350_clear_pcu_fifo_debug(base: usize, bits: u8) {
+fn rp2350_clear_pio_fifo_debug(base: usize, bits: u8) {
     let register = (base + RP2350_PIO_FDEBUG_OFFSET) as *mut u32;
     let bit_mask = u32::from(bits);
     let clear_mask = (bit_mask << RP2350_PIO_FDEBUG_TXSTALL_SHIFT)
@@ -1787,8 +1787,8 @@ fn rp2350_clear_pcu_fifo_debug(base: usize, bits: u8) {
     unsafe { ptr::write_volatile(register, clear_mask) };
 }
 
-fn rp2350_prime_pcu_program_counter(base: usize, bits: u8, initial_pc: u8) {
-    let jmp = u32::from(rp2350_encode_pcu_jmp(initial_pc));
+fn rp2350_prime_pio_program_counter(base: usize, bits: u8, initial_pc: u8) {
+    let jmp = u32::from(rp2350_encode_pio_jmp(initial_pc));
     for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE as u8 {
         if bits & (1u8 << lane_index) == 0 {
             continue;
@@ -1802,30 +1802,30 @@ fn rp2350_prime_pcu_program_counter(base: usize, bits: u8, initial_pc: u8) {
 }
 
 /// Applies the RP2350-equivalent `pio_sm_init()` sequence to one claimed lane set.
-pub fn initialize_pcu_lanes(claim: &PcuLaneClaim, initial_pc: u8) -> Result<(), PcuError> {
+pub fn initialize_pio_lanes(claim: &PioLaneClaim, initial_pc: u8) -> Result<(), PioError> {
     if initial_pc >= RP2350_PIO_INSTRUCTION_WORDS as u8 {
-        return Err(PcuError::invalid());
+        return Err(PioError::invalid());
     }
     let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
-    let base = rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)?;
-    stop_pcu_lanes(claim)?;
-    rp2350_clear_pcu_fifos(base, bits);
-    rp2350_clear_pcu_fifo_debug(base, bits);
-    restart_pcu_lanes(claim)?;
-    rp2350_prime_pcu_program_counter(base, bits, initial_pc);
+    let base = rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)?;
+    stop_pio_lanes(claim)?;
+    rp2350_clear_pio_fifos(base, bits);
+    rp2350_clear_pio_fifo_debug(base, bits);
+    restart_pio_lanes(claim)?;
+    rp2350_prime_pio_program_counter(base, bits, initial_pc);
     Ok(())
 }
 
 /// Applies one RP2350 PIO execution-state bundle to all lanes in the supplied claim.
-pub fn apply_pcu_execution_config(
-    claim: &PcuLaneClaim,
+pub fn apply_pio_execution_config(
+    claim: &PioLaneClaim,
     clkdiv: u32,
     execctrl: u32,
     shiftctrl: u32,
     pinctrl: u32,
-) -> Result<(), PcuError> {
+) -> Result<(), PioError> {
     let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
-    let base = rp2350_pio_base(claim.engine()).ok_or_else(PcuError::invalid)?;
+    let base = rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)?;
 
     for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE as u8 {
         if bits & (1u8 << lane_index) == 0 {

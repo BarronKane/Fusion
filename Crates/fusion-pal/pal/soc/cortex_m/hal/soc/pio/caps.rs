@@ -3,12 +3,12 @@
 use bitflags::bitflags;
 
 /// Shared implementation-category vocabulary specialized for PCU support.
-pub use crate::contract::pal::caps::ImplementationKind as PcuImplementationKind;
+pub use crate::contract::pal::caps::ImplementationKind as PioImplementationKind;
 
 bitflags! {
     /// Programmable-IO features the backend can honestly surface.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct PcuCaps: u32 {
+    pub struct PioCaps: u32 {
         /// The backend can enumerate programmable-IO engines and lanes.
         const ENUMERATE                    = 1 << 0;
         /// Engines can be claimed explicitly.
@@ -52,22 +52,22 @@ bitflags! {
 
 /// Full capability surface for one programmable-IO backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuSupport {
+pub struct PioSupport {
     /// Backend-supported programmable-IO features.
-    pub caps: PcuCaps,
+    pub caps: PioCaps,
     /// Native, lowered-with-restrictions, or unsupported implementation category.
-    pub implementation: PcuImplementationKind,
+    pub implementation: PioImplementationKind,
     /// Number of surfaced engine blocks.
     pub engine_count: u8,
 }
 
-impl PcuSupport {
+impl PioSupport {
     /// Returns a fully unsupported programmable-IO surface.
     #[must_use]
     pub const fn unsupported() -> Self {
         Self {
-            caps: PcuCaps::empty(),
-            implementation: PcuImplementationKind::Unsupported,
+            caps: PioCaps::empty(),
+            implementation: PioImplementationKind::Unsupported,
             engine_count: 0,
         }
     }

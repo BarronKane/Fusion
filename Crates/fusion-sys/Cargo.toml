@@ -14,22 +14,21 @@ path = "fusion-sys.rs"
 
 [features]
 default = ["std", "hosted"]
-std = ["fusion-pal/std", "fusion-pcu/std"]
-soc = ["fusion-pal/soc", "fusion-pcu/soc"]
-hosted = ["std", "fusion-pal/hosted", "fusion-pcu/hosted"]
-critical-safe = ["fusion-pal/critical-safe", "fusion-pcu/critical-safe"]
-debug-profile = ["fusion-pal/debug-profile", "fusion-pcu/debug-profile"]
-debug-insights = ["fusion-pal/debug-insights", "fusion-pcu/debug-insights"]
-sys-cortex-m = ["soc", "fusion-pal/sys-cortex-m", "fusion-pcu/sys-cortex-m"]
-soc-rp2350 = ["sys-cortex-m", "fusion-pal/soc-rp2350", "fusion-pcu/soc-rp2350"]
-sys-fusion-kn = ["hosted", "fusion-pal/sys-fusion-kn", "fusion-pcu/sys-fusion-kn"]
-cortex-m-vector-secure-world = ["fusion-pal/cortex-m-vector-secure-world", "fusion-pcu/cortex-m-vector-secure-world"]
-cortex-m-vector-nonsecure-world = ["fusion-pal/cortex-m-vector-nonsecure-world", "fusion-pcu/cortex-m-vector-nonsecure-world"]
+std = ["fusion-pal/std"]
+soc = ["fusion-pal/soc"]
+hosted = ["std", "fusion-pal/hosted"]
+critical-safe = ["fusion-pal/critical-safe"]
+debug-profile = ["fusion-pal/debug-profile"]
+debug-insights = ["fusion-pal/debug-insights"]
+sys-cortex-m = ["soc", "fusion-pal/sys-cortex-m"]
+soc-rp2350 = ["sys-cortex-m", "fusion-pal/soc-rp2350"]
+sys-fusion-kn = ["hosted", "fusion-pal/sys-fusion-kn"]
+cortex-m-vector-secure-world = ["fusion-pal/cortex-m-vector-secure-world"]
+cortex-m-vector-nonsecure-world = ["fusion-pal/cortex-m-vector-nonsecure-world"]
 
 [dependencies]
 fusion-hal = { workspace = true }
 fusion-pal = { workspace = true }
-fusion-pcu = { workspace = true }
 bitflags.workspace = true
 
 [dev-dependencies]

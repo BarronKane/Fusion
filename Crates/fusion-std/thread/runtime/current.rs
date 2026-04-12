@@ -136,6 +136,7 @@ pub struct CurrentFiberAsyncSingleton {
     launch_control: Option<CourierLaunchControl<'static>>,
     launch_request: Option<CourierChildLaunchRequest<'static>>,
     courier_plan: Option<CourierPlan>,
+    initial_fiber_capacity: Option<usize>,
     fiber_capacity_limit: Option<usize>,
     async_capacity_limit: Option<usize>,
     stack_floor_bytes: Option<usize>,
@@ -167,6 +168,7 @@ impl CurrentFiberAsyncSingleton {
             launch_control: None,
             launch_request: None,
             courier_plan: None,
+            initial_fiber_capacity: None,
             fiber_capacity_limit: None,
             async_capacity_limit: None,
             stack_floor_bytes: None,
@@ -229,13 +231,23 @@ impl CurrentFiberAsyncSingleton {
         self
     }
 
+    /// Installs one explicit first-realization current-thread fiber capacity.
+    ///
+    /// This is the initial reservation only. The runtime may still grow up to its configured
+    /// fiber-capacity limit when later admissions require it.
+    #[must_use]
+    pub const fn with_initial_fiber_capacity(mut self, fiber_capacity: usize) -> Self {
+        self.initial_fiber_capacity = Some(if fiber_capacity == 0 {
+            1
+        } else {
+            fiber_capacity
+        });
+        self
+    }
+
     /// Installs one explicit current-thread fiber capacity cap.
     ///
     /// This is runtime policy only. It does not describe backend structural minimums.
-    ///
-    /// When the singleton realizes its fiber runtime lazily for the first time, this value also
-    /// becomes the initial pool capacity unless the caller explicitly requests a different startup
-    /// size through a lower-level runtime path.
     #[must_use]
     pub const fn with_fiber_capacity(mut self, fiber_capacity: usize) -> Self {
         self.fiber_capacity_limit = Some(if fiber_capacity == 0 {
@@ -364,6 +376,28 @@ impl CurrentFiberAsyncSingleton {
         self.request_runtime_dispatch_best_effort();
     }
 
+    /// Runs one bounded autonomous-dispatch batch immediately on the current caller thread.
+    ///
+    /// This is the explicit escape hatch for implementation sites that intentionally pipeline a
+    /// current-thread courier runtime locally instead of relying on deferred backend wake delivery.
+    pub fn pump_autonomous_best_effort(&'static self) {
+        self.autonomous_dispatch_once();
+    }
+
+    /// Returns whether this singleton has already realized one current-thread fiber runtime.
+    #[must_use]
+    pub fn fiber_runtime_realized(&'static self) -> bool {
+        self.fiber_runtime_if_initialized()
+            .map(|runtime| runtime.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Returns the most recent coarse spawn phase marker for current-thread fiber admission.
+    #[must_use]
+    pub fn debug_last_spawn_phase() -> u32 {
+        CURRENT_SINGLETON_FIBER_SPAWN_PHASE.load(Ordering::Acquire)
+    }
+
     fn autonomous_dispatch_once(&'static self) {
         // One current-thread dispatch request must stay bounded. Unlike a real carrier, this path
         // still runs on the caller's thread. Re-arming forever here lets one perpetually runnable
@@ -408,6 +442,10 @@ impl CurrentFiberAsyncSingleton {
                 }
             }),
         }
+    }
+
+    fn effective_initial_fiber_capacity(&self) -> Option<usize> {
+        self.initial_fiber_capacity
     }
 
     fn effective_async_capacity_limit(&self) -> Option<usize> {
@@ -563,9 +601,11 @@ impl CurrentFiberAsyncSingleton {
         let state = unsafe { &mut *self.fibers.state.get() };
         if state.runtime.is_none() {
             CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x22, Ordering::Release);
-            state.configured_capacity =
-                initial_runtime_capacity(self.effective_fiber_capacity_limit(), requested_capacity)
-                    .ok_or_else(FiberError::resource_exhausted)?;
+            state.configured_capacity = initial_runtime_capacity(
+                self.effective_fiber_capacity_limit(),
+                requested_capacity.or(self.effective_initial_fiber_capacity()),
+            )
+            .ok_or_else(FiberError::resource_exhausted)?;
             state.effective_stack_floor_bytes = self
                 .stack_floor_bytes
                 .unwrap_or(0)
@@ -652,7 +692,7 @@ impl CurrentFiberAsyncSingleton {
             }
             _ if state.runtime.is_none() => initial_runtime_capacity(
                 self.effective_fiber_capacity_limit(),
-                requested_fiber_capacity,
+                requested_fiber_capacity.or(self.effective_initial_fiber_capacity()),
             )
             .ok_or_else(FiberError::resource_exhausted)?,
             _ => state.configured_capacity,

@@ -23,6 +23,9 @@ use fusion_std::thread::GeneratedExplicitFiberTask;
 use fusion_std::thread::GeneratedExplicitFiberTaskContract;
 use fusion_sys::claims::{
     ClaimAwareness,
+};
+#[cfg(all(target_os = "none", feature = "soc-rp2350"))]
+use fusion_sys::claims::{
     ClaimsDigest,
     ImageSealId,
     LocalAdmissionSeal,
@@ -108,15 +111,19 @@ pub const FIRMWARE_COURIER_ID: fusion_sys::domain::CourierId =
     fusion_sys::domain::CourierId::new(0x1100);
 pub const CYW43439_BLUETOOTH_DRIVER_COURIER_ID: fusion_sys::domain::CourierId =
     fusion_sys::domain::CourierId::new(0x1200);
+pub const PIO_DRIVER_COURIER_ID: fusion_sys::domain::CourierId =
+    fusion_sys::domain::CourierId::new(0x1300);
 
 pub const MAIN_CONTEXT_ID: ContextId = ContextId::new(0x1000);
 pub const FIRMWARE_CONTEXT_ID: ContextId = ContextId::new(0x1100);
 pub const CYW43439_BLUETOOTH_DRIVER_CONTEXT_ID: ContextId = ContextId::new(0x1200);
+pub const PIO_DRIVER_CONTEXT_ID: ContextId = ContextId::new(0x1300);
 
 const ROOT_LAUNCH_EPOCH: u64 = 1;
+#[cfg(all(target_os = "none", feature = "soc-rp2350"))]
 const DRIVER_LAUNCH_EPOCH: u64 = 2;
 
-type FirmwareDomainRegistry = DomainRegistry<'static, 3, 3, 2, 4, 8, 32>;
+type FirmwareDomainRegistry = DomainRegistry<'static, 4, 4, 4, 4, 8, 32>;
 
 #[unsafe(no_mangle)]
 pub static FIRMWARE_COURIER_TREE_INIT_PHASE: AtomicU32 = AtomicU32::new(0);
@@ -358,6 +365,16 @@ const fn cyw43439_bluetooth_driver_context_descriptor() -> ContextDescriptor<'st
     }
 }
 
+const fn pio_driver_context_descriptor() -> ContextDescriptor<'static> {
+    ContextDescriptor {
+        id: PIO_DRIVER_CONTEXT_ID,
+        name: "pio",
+        kind: ContextKind::DeviceEndpoint,
+        caps: ContextCaps::CONTROL_ENDPOINT,
+        claim_context: None,
+    }
+}
+
 fn ensure_registered_context(
     registry: &mut FirmwareDomainRegistry,
     owner: fusion_sys::domain::CourierId,
@@ -389,6 +406,11 @@ fn ensure_known_runtime_context_registered(
                 cyw43439_bluetooth_driver_context_descriptor(),
             )
         }
+        (PIO_DRIVER_COURIER_ID, PIO_DRIVER_CONTEXT_ID) => ensure_registered_context(
+            registry,
+            PIO_DRIVER_COURIER_ID,
+            pio_driver_context_descriptor(),
+        ),
         _ => Err(DomainError::not_found()),
     }
 }
@@ -423,6 +445,22 @@ fn cyw43439_bluetooth_driver_launch_descriptor() -> CourierLaunchDescriptor<'sta
     }
 }
 
+fn pio_driver_launch_descriptor() -> CourierLaunchDescriptor<'static> {
+    CourierLaunchDescriptor {
+        id: PIO_DRIVER_COURIER_ID,
+        name: "pio",
+        scope_role: CourierScopeRole::Leaf,
+        caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS
+            | CourierCaps::SPAWN_SUB_FIBERS
+            | CourierCaps::DEBUG_CHANNEL,
+        visibility: CourierVisibility::Scoped,
+        claim_awareness: ClaimAwareness::Blind,
+        claim_context: None,
+        plan: driver_courier_plan(),
+    }
+}
+
+#[cfg(all(target_os = "none", feature = "soc-rp2350"))]
 const fn local_runtime_seal(id: u64) -> LocalAdmissionSeal {
     LocalAdmissionSeal::new(
         ImageSealId::new(id),
@@ -442,6 +480,8 @@ pub fn ensure_root_courier() -> Result<(), DomainError> {
 fn build_root_runtime() -> CurrentFiberAsyncSingleton {
     CurrentFiberAsyncSingleton::new()
         .with_courier_plan(root_courier_plan())
+        .with_initial_fiber_capacity(2)
+        .with_fiber_capacity(2)
         .with_courier_id(MAIN_COURIER_ID)
         .with_context_id(MAIN_CONTEXT_ID)
         .with_runtime_sink(runtime_sink())
@@ -710,6 +750,7 @@ pub fn resolve_fusion_surface_ref<const MAX_CHAIN: usize>(
     })
 }
 
+#[cfg(all(target_os = "none", feature = "soc-rp2350"))]
 pub(crate) fn upsert_courier_metadata(
     courier: fusion_sys::domain::CourierId,
     key: &'static str,
@@ -719,6 +760,7 @@ pub(crate) fn upsert_courier_metadata(
     with_registry_mut(|registry| registry.upsert_courier_metadata(courier, key, value, tick))
 }
 
+#[cfg(all(target_os = "none", feature = "soc-rp2350"))]
 pub(crate) fn firmware_child_launch_request() -> CourierChildLaunchRequest<'static> {
     CourierChildLaunchRequest {
         parent: MAIN_COURIER_ID,
@@ -730,6 +772,7 @@ pub(crate) fn firmware_child_launch_request() -> CourierChildLaunchRequest<'stat
     }
 }
 
+#[cfg(all(target_os = "none", feature = "soc-rp2350"))]
 pub(crate) fn cyw43439_bluetooth_driver_launch_request() -> CourierChildLaunchRequest<'static> {
     CourierChildLaunchRequest {
         parent: FIRMWARE_COURIER_ID,
@@ -847,6 +890,15 @@ fn known_qualified_courier_name(
                 .map_err(|_| DomainError::invalid())?;
             Ok(name)
         }
+        PIO_DRIVER_COURIER_ID => {
+            let mut name =
+                QualifiedCourierName::new("pio", domain).map_err(|_| DomainError::invalid())?;
+            name.push_context_root("firmware")
+                .map_err(|_| DomainError::invalid())?;
+            name.push_context_root("root-courier")
+                .map_err(|_| DomainError::invalid())?;
+            Ok(name)
+        }
         _ => Err(DomainError::not_found()),
     }
 }
@@ -900,6 +952,30 @@ fn known_courier_snapshot_parts(
         }
         CYW43439_BLUETOOTH_DRIVER_COURIER_ID => {
             let launch = cyw43439_bluetooth_driver_launch_descriptor();
+            Some((
+                CourierDescriptor {
+                    id: launch.id,
+                    name: launch.name,
+                    scope_role: launch.scope_role,
+                    caps: launch.caps,
+                    visibility: launch.visibility,
+                    claim_awareness: launch.claim_awareness,
+                    claim_context: launch.claim_context,
+                    plan: launch.plan,
+                },
+                CourierSupport {
+                    caps: launch.caps,
+                    implementation: CourierImplementationKind::Native,
+                    domain: FIRMWARE_DOMAIN_ID,
+                    visibility: launch.visibility,
+                    claim_awareness: launch.claim_awareness,
+                    claim_context: launch.claim_context,
+                },
+                Some(FIRMWARE_COURIER_ID),
+            ))
+        }
+        PIO_DRIVER_COURIER_ID => {
+            let launch = pio_driver_launch_descriptor();
             Some((
                 CourierDescriptor {
                     id: launch.id,
@@ -982,6 +1058,22 @@ fn known_context_snapshot_parts(
                 CYW43439_BLUETOOTH_DRIVER_COURIER_ID,
             ))
         }
+        PIO_DRIVER_CONTEXT_ID => {
+            let descriptor = pio_driver_context_descriptor();
+            Some((
+                descriptor,
+                ContextSupport {
+                    caps: descriptor.caps,
+                    implementation: ContextImplementationKind::Native,
+                    domain: FIRMWARE_DOMAIN_ID,
+                    owner: PIO_DRIVER_COURIER_ID,
+                    kind: descriptor.kind,
+                    projection: ContextProjectionKind::Owned,
+                    claim_context: descriptor.claim_context,
+                },
+                PIO_DRIVER_COURIER_ID,
+            ))
+        }
         _ => None,
     }
 }
@@ -1020,6 +1112,29 @@ fn known_courier_pedigree(
             pedigree.push(fusion_sys::courier::CourierPedigreeRecord::new(
                 CYW43439_BLUETOOTH_DRIVER_COURIER_ID,
                 "cyw43439",
+                CourierScopeRole::Leaf,
+                Some(FIRMWARE_COURIER_ID),
+                None,
+            ))?;
+            pedigree.push(fusion_sys::courier::CourierPedigreeRecord::new(
+                FIRMWARE_COURIER_ID,
+                "firmware",
+                CourierScopeRole::ContextRoot,
+                Some(MAIN_COURIER_ID),
+                None,
+            ))?;
+            pedigree.push(fusion_sys::courier::CourierPedigreeRecord::new(
+                MAIN_COURIER_ID,
+                "root-courier",
+                CourierScopeRole::ContextRoot,
+                None,
+                None,
+            ))?;
+        }
+        PIO_DRIVER_COURIER_ID => {
+            pedigree.push(fusion_sys::courier::CourierPedigreeRecord::new(
+                PIO_DRIVER_COURIER_ID,
+                "pio",
                 CourierScopeRole::Leaf,
                 Some(FIRMWARE_COURIER_ID),
                 None,

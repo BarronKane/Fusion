@@ -714,6 +714,28 @@ fn current_runtime_singleton_realizes_fiber_capacity_limit_up_front() {
 }
 
 #[test]
+fn current_runtime_singleton_can_start_below_fiber_capacity_limit() {
+    let _guard = crate::thread::runtime_test_guard();
+    static RUNTIME: CurrentFiberAsyncSingleton = CurrentFiberAsyncSingleton::new()
+        .with_initial_fiber_capacity(1)
+        .with_fiber_capacity(2);
+
+    let runtime = RUNTIME
+        .fiber_runtime_borrow(None, None)
+        .expect("singleton runtime should realize");
+    assert_eq!(
+        runtime.configured_capacity(),
+        1,
+        "initial reservation should stay below the configured cap when requested",
+    );
+    drop(runtime);
+
+    RUNTIME
+        .shutdown_fibers()
+        .expect("singleton fibers should shut down cleanly");
+}
+
+#[test]
 fn current_runtime_singleton_respects_async_capacity_cap() {
     let _guard = crate::thread::runtime_test_guard();
     static RUNTIME: CurrentFiberAsyncSingleton =

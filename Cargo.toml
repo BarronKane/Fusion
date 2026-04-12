@@ -9,7 +9,6 @@ members = [
     "Crates/fusion-pal",
     "Crates/fusion-pcu",
     "Crates/fusion-sys",
-    "Crates/fusion-std/pcu/macros",
     "Crates/fusion-std",
     "Crates/fusion-kn",
 
@@ -33,7 +32,6 @@ fusion-hal = { path = "Crates/fusion-hal", default-features = false }
 fusion-pal = { path = "Crates/fusion-pal", default-features = false }
 fusion-pcu = { path = "Crates/fusion-pcu", default-features = false }
 fusion-sys = { path = "Crates/fusion-sys", default-features = false }
-fusion-std-pcu-macros = { path = "Crates/fusion-std/pcu/macros" }
 fusion-std = { path = "Crates/fusion-std", default-features = false }
 fusion-kn = { path = "Crates/fusion-kn" }
 

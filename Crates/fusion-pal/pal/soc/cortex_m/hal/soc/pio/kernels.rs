@@ -122,6 +122,40 @@ fn streaming_increment_word_transform(
     PcuIrProgram::new(id, &instructions[..]).with_wrap(0, 7)
 }
 
+fn streaming_decrement_word_transform(
+    id: PcuProgramId,
+    instructions: &mut [PcuIrInstruction; 6],
+) -> PcuIrProgram<'_> {
+    instructions[0] = Pull {
+        if_empty: false,
+        blocking: true,
+    };
+    instructions[1] = Mov {
+        destination: PcuIrMovDestination::X,
+        operation: PcuIrMovOperation::None,
+        source: PcuIrMovSource::Osr,
+    };
+    instructions[2] = Jump {
+        condition: PcuIrJumpCondition::XDecNonZero,
+        target: 3,
+    };
+    instructions[3] = Mov {
+        destination: PcuIrMovDestination::Isr,
+        operation: PcuIrMovOperation::None,
+        source: PcuIrMovSource::X,
+    };
+    instructions[4] = Push {
+        if_full: false,
+        blocking: true,
+    };
+    instructions[5] = Jump {
+        condition: PcuIrJumpCondition::Always,
+        target: 0,
+    };
+
+    PcuIrProgram::new(id, &instructions[..]).with_wrap(0, 5)
+}
+
 fn streaming_shifted_word_transform(
     id: PcuProgramId,
     bit_count: u8,
@@ -304,6 +338,14 @@ pub fn increment_stream_transform(
     instructions: &mut [PcuIrInstruction; 8],
 ) -> PcuIrProgram<'_> {
     streaming_increment_word_transform(id, instructions)
+}
+
+#[must_use]
+pub fn decrement_stream_transform(
+    id: PcuProgramId,
+    instructions: &mut [PcuIrInstruction; 6],
+) -> PcuIrProgram<'_> {
+    streaming_decrement_word_transform(id, instructions)
 }
 
 pub fn shift_left_stream_transform(

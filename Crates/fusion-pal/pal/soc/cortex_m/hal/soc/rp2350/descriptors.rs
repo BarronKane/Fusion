@@ -265,33 +265,33 @@ pub(crate) const RP2350_DEEP_SLEEP_GATED_DOMAINS: &[&str] =
 pub(crate) const RP2350_FLASH_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const RP2350_FLASH_ERASE_BLOCK_BYTES: usize = 4 * 1024;
 pub(crate) const RP2350_FLASH_PROGRAM_GRANULE_BYTES: usize = 256;
-pub(crate) const RP2350_PIO_PIN_MAPPING: PcuPinMappingCaps = PcuPinMappingCaps::INPUT_BASE
-    .union(PcuPinMappingCaps::OUTPUT_BASE)
-    .union(PcuPinMappingCaps::SET_BASE)
-    .union(PcuPinMappingCaps::SIDESET_BASE)
-    .union(PcuPinMappingCaps::JMP_PIN);
-pub(crate) const RP2350_PIO_ENGINE_CAPS: PcuCaps = PcuCaps::SHARED_INSTRUCTION_MEMORY
-    .union(PcuCaps::PER_LANE_PROGRAM_COUNTER)
-    .union(PcuCaps::LANE_SIDESET)
-    .union(PcuCaps::WAIT_ON_PIN)
-    .union(PcuCaps::IRQ_SIGNAL)
-    .union(PcuCaps::BIDIRECTIONAL_SHIFT)
-    .union(PcuCaps::AUTOPULL)
-    .union(PcuCaps::AUTOPUSH)
-    .union(PcuCaps::DMA_FEED)
-    .union(PcuCaps::PROGRAM_SWAP_REQUIRES_STOP)
-    .union(PcuCaps::MULTI_LANE_COOPERATIVE_START)
-    .union(PcuCaps::PIN_MAPPING_FLEXIBLE);
-pub(crate) const RP2350_PIO_SYSTEM_CAPS: PcuCaps = PcuCaps::ENUMERATE
-    .union(PcuCaps::CLAIM_ENGINE)
-    .union(PcuCaps::CLAIM_LANES)
-    .union(PcuCaps::LOAD_PROGRAM)
-    .union(PcuCaps::CONTROL)
-    .union(PcuCaps::FIFO_IO)
+pub(crate) const RP2350_PIO_PIN_MAPPING: PioPinMappingCaps = PioPinMappingCaps::INPUT_BASE
+    .union(PioPinMappingCaps::OUTPUT_BASE)
+    .union(PioPinMappingCaps::SET_BASE)
+    .union(PioPinMappingCaps::SIDESET_BASE)
+    .union(PioPinMappingCaps::JMP_PIN);
+pub(crate) const RP2350_PIO_ENGINE_CAPS: PioCaps = PioCaps::SHARED_INSTRUCTION_MEMORY
+    .union(PioCaps::PER_LANE_PROGRAM_COUNTER)
+    .union(PioCaps::LANE_SIDESET)
+    .union(PioCaps::WAIT_ON_PIN)
+    .union(PioCaps::IRQ_SIGNAL)
+    .union(PioCaps::BIDIRECTIONAL_SHIFT)
+    .union(PioCaps::AUTOPULL)
+    .union(PioCaps::AUTOPUSH)
+    .union(PioCaps::DMA_FEED)
+    .union(PioCaps::PROGRAM_SWAP_REQUIRES_STOP)
+    .union(PioCaps::MULTI_LANE_COOPERATIVE_START)
+    .union(PioCaps::PIN_MAPPING_FLEXIBLE);
+pub(crate) const RP2350_PIO_SYSTEM_CAPS: PioCaps = PioCaps::ENUMERATE
+    .union(PioCaps::CLAIM_ENGINE)
+    .union(PioCaps::CLAIM_LANES)
+    .union(PioCaps::LOAD_PROGRAM)
+    .union(PioCaps::CONTROL)
+    .union(PioCaps::FIFO_IO)
     .union(RP2350_PIO_ENGINE_CAPS);
-pub(crate) const RP2350_PIO_SUPPORT: PcuSupport = PcuSupport {
+pub(crate) const RP2350_PIO_SUPPORT: PioSupport = PioSupport {
     caps: RP2350_PIO_SYSTEM_CAPS,
-    implementation: PcuImplementationKind::Native,
+    implementation: PioImplementationKind::Native,
     engine_count: RP2350_PIO_ENGINE_COUNT as u8,
 };
 
@@ -311,11 +311,11 @@ pub(crate) const RP2350_PIO1_IRQ_LINES: [u16; 2] = [17, 18];
 pub(crate) const RP2350_PIO2_IRQ_LINES: [u16; 2] = [19, 20];
 
 pub(crate) const fn rp2350_pio_fifo(
-    lane: PcuLaneId,
-    direction: PcuFifoDirection,
-) -> PcuFifoDescriptor {
-    PcuFifoDescriptor {
-        id: PcuFifoId { lane, direction },
+    lane: PioLaneId,
+    direction: PioFifoDirection,
+) -> PioFifoDescriptor {
+    PioFifoDescriptor {
+        id: PioFifoId { lane, direction },
         depth_words: RP2350_PIO_FIFO_DEPTH_WORDS,
         word_bits: 32,
     }
@@ -325,16 +325,16 @@ pub(crate) const fn rp2350_pio_lane(
     engine: u8,
     index: u8,
     name: &'static str,
-) -> PcuLaneDescriptor {
-    let lane = PcuLaneId {
-        engine: PcuEngineId(engine),
+) -> PioLaneDescriptor {
+    let lane = PioLaneId {
+        engine: PioEngineId(engine),
         index,
     };
-    PcuLaneDescriptor {
+    PioLaneDescriptor {
         id: lane,
         name,
-        tx_fifo: rp2350_pio_fifo(lane, PcuFifoDirection::Tx),
-        rx_fifo: rp2350_pio_fifo(lane, PcuFifoDirection::Rx),
+        tx_fifo: rp2350_pio_fifo(lane, PioFifoDirection::Tx),
+        rx_fifo: rp2350_pio_fifo(lane, PioFifoDirection::Rx),
         pin_mapping: RP2350_PIO_PIN_MAPPING,
     }
 }
@@ -345,17 +345,17 @@ pub(crate) const fn rp2350_pio_engine(
     irq_lines: &'static [u16],
     tx_dreq_base: u16,
     rx_dreq_base: u16,
-) -> PcuEngineDescriptor {
-    PcuEngineDescriptor {
-        id: PcuEngineId(engine),
+) -> PioEngineDescriptor {
+    PioEngineDescriptor {
+        id: PioEngineId(engine),
         name,
         lane_count: RP2350_PIO_LANES_PER_ENGINE as u8,
-        instruction_memory: PcuInstructionMemoryDescriptor {
+        instruction_memory: PioInstructionMemoryDescriptor {
             word_count: RP2350_PIO_INSTRUCTION_WORDS,
             word_bits: 16,
             shared_across_lanes: true,
         },
-        clocking: PcuClockDescriptor {
+        clocking: PioClockDescriptor {
             uses_system_clock: true,
             fractional_divider: true,
         },
@@ -366,25 +366,25 @@ pub(crate) const fn rp2350_pio_engine(
     }
 }
 
-pub(crate) const PIO_ENGINES: [PcuEngineDescriptor; RP2350_PIO_ENGINE_COUNT] = [
+pub(crate) const PIO_ENGINES: [PioEngineDescriptor; RP2350_PIO_ENGINE_COUNT] = [
     rp2350_pio_engine(0, "pio0", &RP2350_PIO0_IRQ_LINES, 0, 4),
     rp2350_pio_engine(1, "pio1", &RP2350_PIO1_IRQ_LINES, 8, 12),
     rp2350_pio_engine(2, "pio2", &RP2350_PIO2_IRQ_LINES, 16, 20),
 ];
 
-pub(crate) const PIO0_LANES: [PcuLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
+pub(crate) const PIO0_LANES: [PioLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
     rp2350_pio_lane(0, 0, "pio0-sm0"),
     rp2350_pio_lane(0, 1, "pio0-sm1"),
     rp2350_pio_lane(0, 2, "pio0-sm2"),
     rp2350_pio_lane(0, 3, "pio0-sm3"),
 ];
-pub(crate) const PIO1_LANES: [PcuLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
+pub(crate) const PIO1_LANES: [PioLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
     rp2350_pio_lane(1, 0, "pio1-sm0"),
     rp2350_pio_lane(1, 1, "pio1-sm1"),
     rp2350_pio_lane(1, 2, "pio1-sm2"),
     rp2350_pio_lane(1, 3, "pio1-sm3"),
 ];
-pub(crate) const PIO2_LANES: [PcuLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
+pub(crate) const PIO2_LANES: [PioLaneDescriptor; RP2350_PIO_LANES_PER_ENGINE] = [
     rp2350_pio_lane(2, 0, "pio2-sm0"),
     rp2350_pio_lane(2, 1, "pio2-sm1"),
     rp2350_pio_lane(2, 2, "pio2-sm2"),

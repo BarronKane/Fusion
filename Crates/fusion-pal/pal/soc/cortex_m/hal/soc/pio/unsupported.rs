@@ -1,25 +1,25 @@
 //! Cortex-M unsupported programmable-IO implementation.
 
 use super::{
-    PcuBaseContract,
-    PcuControlContract,
-    PcuEngineClaim,
-    PcuEngineDescriptor,
-    PcuEngineId,
-    PcuError,
-    PcuLaneClaim,
-    PcuLaneDescriptor,
-    PcuLaneMask,
-    PcuProgramImage,
-    PcuProgramLease,
-    PcuSupport,
+    PioBaseContract,
+    PioControlContract,
+    PioEngineClaim,
+    PioEngineDescriptor,
+    PioEngineId,
+    PioError,
+    PioLaneClaim,
+    PioLaneDescriptor,
+    PioLaneMask,
+    PioProgramImage,
+    PioProgramLease,
+    PioSupport,
 };
 
 /// Unsupported programmable-IO provider placeholder.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct UnsupportedPcu;
+pub struct UnsupportedPio;
 
-impl UnsupportedPcu {
+impl UnsupportedPio {
     /// Creates a new unsupported programmable-IO provider placeholder.
     #[must_use]
     pub const fn new() -> Self {
@@ -27,83 +27,83 @@ impl UnsupportedPcu {
     }
 }
 
-impl PcuBaseContract for UnsupportedPcu {
-    fn support(&self) -> PcuSupport {
-        PcuSupport::unsupported()
+impl PioBaseContract for UnsupportedPio {
+    fn support(&self) -> PioSupport {
+        PioSupport::unsupported()
     }
 
-    fn engines(&self) -> &'static [PcuEngineDescriptor] {
+    fn engines(&self) -> &'static [PioEngineDescriptor] {
         &[]
     }
 
-    fn lanes(&self, _engine: PcuEngineId) -> &'static [PcuLaneDescriptor] {
+    fn lanes(&self, _engine: PioEngineId) -> &'static [PioLaneDescriptor] {
         &[]
     }
 }
 
-impl PcuControlContract for UnsupportedPcu {
-    fn claim_engine(&self, _engine: PcuEngineId) -> Result<PcuEngineClaim, PcuError> {
-        Err(PcuError::unsupported())
+impl PioControlContract for UnsupportedPio {
+    fn claim_engine(&self, _engine: PioEngineId) -> Result<PioEngineClaim, PioError> {
+        Err(PioError::unsupported())
     }
 
-    fn release_engine(&self, _claim: PcuEngineClaim) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
+    fn release_engine(&self, _claim: PioEngineClaim) -> Result<(), PioError> {
+        Err(PioError::unsupported())
     }
 
     fn claim_lanes(
         &self,
-        _engine: PcuEngineId,
-        _lanes: PcuLaneMask,
-    ) -> Result<PcuLaneClaim, PcuError> {
-        Err(PcuError::unsupported())
+        _engine: PioEngineId,
+        _lanes: PioLaneMask,
+    ) -> Result<PioLaneClaim, PioError> {
+        Err(PioError::unsupported())
     }
 
-    fn release_lanes(&self, _claim: PcuLaneClaim) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
+    fn release_lanes(&self, _claim: PioLaneClaim) -> Result<(), PioError> {
+        Err(PioError::unsupported())
     }
 
     fn load_program(
         &self,
-        _claim: &PcuEngineClaim,
-        _image: &PcuProgramImage<'_>,
-    ) -> Result<PcuProgramLease, PcuError> {
-        Err(PcuError::unsupported())
+        _claim: &PioEngineClaim,
+        _image: &PioProgramImage<'_>,
+    ) -> Result<PioProgramLease, PioError> {
+        Err(PioError::unsupported())
     }
 
     fn unload_program(
         &self,
-        _claim: &PcuEngineClaim,
-        _lease: PcuProgramLease,
-    ) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
+        _claim: &PioEngineClaim,
+        _lease: PioProgramLease,
+    ) -> Result<(), PioError> {
+        Err(PioError::unsupported())
     }
 
-    fn start_lanes(&self, _claim: &PcuLaneClaim) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
+    fn start_lanes(&self, _claim: &PioLaneClaim) -> Result<(), PioError> {
+        Err(PioError::unsupported())
     }
 
-    fn stop_lanes(&self, _claim: &PcuLaneClaim) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
+    fn stop_lanes(&self, _claim: &PioLaneClaim) -> Result<(), PioError> {
+        Err(PioError::unsupported())
     }
 
-    fn restart_lanes(&self, _claim: &PcuLaneClaim) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
+    fn restart_lanes(&self, _claim: &PioLaneClaim) -> Result<(), PioError> {
+        Err(PioError::unsupported())
     }
 
     fn write_tx_fifo(
         &self,
-        _claim: &PcuLaneClaim,
-        _lane: super::PcuLaneId,
+        _claim: &PioLaneClaim,
+        _lane: super::PioLaneId,
         _word: u32,
-    ) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
+    ) -> Result<(), PioError> {
+        Err(PioError::unsupported())
     }
 
     fn read_rx_fifo(
         &self,
-        _claim: &PcuLaneClaim,
-        _lane: super::PcuLaneId,
-    ) -> Result<u32, PcuError> {
-        Err(PcuError::unsupported())
+        _claim: &PioLaneClaim,
+        _lane: super::PioLaneId,
+    ) -> Result<u32, PioError> {
+        Err(PioError::unsupported())
     }
 }

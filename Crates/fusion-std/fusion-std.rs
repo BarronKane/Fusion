@@ -20,9 +20,6 @@ pub use fusion_sys::channel::insight;
 #[path = "claims/claims.rs"]
 /// Public claims parsing, matching, and inspection rendering sugar.
 pub mod claims;
-/// Public coprocessor sugar layered over `fusion-pcu` semantics and `fusion-sys` composition.
-#[path = "pcu/pcu.rs"]
-pub mod pcu;
 /// Public synchronization facade layered over the canonical `fusion-sys` primitives.
 #[path = "sync/sync.rs"]
 pub mod sync;

@@ -1,12 +1,12 @@
 //! Shared Cortex-M programmable-IO identifiers and descriptor vocabulary.
 
-use super::caps::PcuCaps;
-use super::error::PcuError;
+use super::caps::PioCaps;
+use super::error::PioError;
 
 bitflags::bitflags! {
     /// Coarse pin-mapping features supported by one lane.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct PcuPinMappingCaps: u32 {
+    pub struct PioPinMappingCaps: u32 {
         /// Input pins can be remapped.
         const INPUT_BASE   = 1 << 0;
         /// Output pins can be remapped.
@@ -22,26 +22,26 @@ bitflags::bitflags! {
 
 /// Opaque engine identifier surfaced by a programmable-IO backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuEngineId(pub u8);
+pub struct PioEngineId(pub u8);
 
 /// Opaque program identifier supplied by higher layers when loading one native image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuProgramId(pub u32);
+pub struct PioProgramId(pub u32);
 
 /// One lane or state-machine identifier within one engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuLaneId {
+pub struct PioLaneId {
     /// Owning engine block.
-    pub engine: PcuEngineId,
+    pub engine: PioEngineId,
     /// Zero-based lane index inside the engine.
     pub index: u8,
 }
 
 /// One programmable-IO lane mask within one engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuLaneMask(u8);
+pub struct PioLaneMask(u8);
 
-impl PcuLaneMask {
+impl PioLaneMask {
     /// Empty lane mask.
     pub const EMPTY: Self = Self(0);
 
@@ -50,9 +50,9 @@ impl PcuLaneMask {
     /// # Errors
     ///
     /// Returns an error when the mask is empty.
-    pub const fn new(bits: u8) -> Result<Self, PcuError> {
+    pub const fn new(bits: u8) -> Result<Self, PioError> {
         if bits == 0 {
-            Err(PcuError::invalid())
+            Err(PioError::invalid())
         } else {
             Ok(Self(bits))
         }
@@ -79,7 +79,7 @@ impl PcuLaneMask {
 
 /// FIFO direction for one lane-local endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PcuFifoDirection {
+pub enum PioFifoDirection {
     /// Transmit-side FIFO.
     Tx,
     /// Receive-side FIFO.
@@ -88,16 +88,16 @@ pub enum PcuFifoDirection {
 
 /// FIFO identifier for one lane-local endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuFifoId {
+pub struct PioFifoId {
     /// Owning lane.
-    pub lane: PcuLaneId,
+    pub lane: PioLaneId,
     /// FIFO direction.
-    pub direction: PcuFifoDirection,
+    pub direction: PioFifoDirection,
 }
 
 /// Instruction-memory descriptor for one engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuInstructionMemoryDescriptor {
+pub struct PioInstructionMemoryDescriptor {
     /// Number of instruction words surfaced by this engine.
     pub word_count: u16,
     /// Width of one instruction word in bits.
@@ -108,9 +108,9 @@ pub struct PcuInstructionMemoryDescriptor {
 
 /// FIFO descriptor for one lane-local endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuFifoDescriptor {
+pub struct PioFifoDescriptor {
     /// Stable FIFO identifier.
-    pub id: PcuFifoId,
+    pub id: PioFifoId,
     /// FIFO depth in words.
     pub depth_words: u8,
     /// Width of each FIFO word in bits.
@@ -119,7 +119,7 @@ pub struct PcuFifoDescriptor {
 
 /// Clocking descriptor for one programmable-IO engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuClockDescriptor {
+pub struct PioClockDescriptor {
     /// Whether the engine is clocked from the main system fabric clock.
     pub uses_system_clock: bool,
     /// Whether the engine supports fractional clock dividers.
@@ -128,34 +128,34 @@ pub struct PcuClockDescriptor {
 
 /// Static descriptor for one programmable-IO lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuLaneDescriptor {
+pub struct PioLaneDescriptor {
     /// Stable lane identifier.
-    pub id: PcuLaneId,
+    pub id: PioLaneId,
     /// Human-readable lane name.
     pub name: &'static str,
     /// Lane-local TX FIFO.
-    pub tx_fifo: PcuFifoDescriptor,
+    pub tx_fifo: PioFifoDescriptor,
     /// Lane-local RX FIFO.
-    pub rx_fifo: PcuFifoDescriptor,
+    pub rx_fifo: PioFifoDescriptor,
     /// Coarse pin-mapping capabilities for this lane.
-    pub pin_mapping: PcuPinMappingCaps,
+    pub pin_mapping: PioPinMappingCaps,
 }
 
 /// Static descriptor for one programmable-IO engine block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuEngineDescriptor {
+pub struct PioEngineDescriptor {
     /// Stable engine identifier.
-    pub id: PcuEngineId,
+    pub id: PioEngineId,
     /// Human-readable engine name.
     pub name: &'static str,
     /// Number of surfaced lanes or state machines.
     pub lane_count: u8,
     /// Instruction-memory description for this engine.
-    pub instruction_memory: PcuInstructionMemoryDescriptor,
+    pub instruction_memory: PioInstructionMemoryDescriptor,
     /// Clocking description for this engine.
-    pub clocking: PcuClockDescriptor,
+    pub clocking: PioClockDescriptor,
     /// Engine-local capability refinement.
-    pub caps: PcuCaps,
+    pub caps: PioCaps,
     /// Engine-visible IRQ lines, if any.
     pub irq_lines: &'static [u16],
     /// Base TX DMA request selector, if the engine exposes one per lane.
@@ -166,72 +166,72 @@ pub struct PcuEngineDescriptor {
 
 /// Opaque native program image ready to load into one engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuProgramImage<'a> {
+pub struct PioProgramImage<'a> {
     /// Stable program identifier chosen by the caller.
-    pub id: PcuProgramId,
+    pub id: PioProgramId,
     /// Native instruction words in backend-defined encoding.
     pub words: &'a [u16],
 }
 
 /// Exclusive engine claim returned by one backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuEngineClaim {
-    pub(crate) engine: PcuEngineId,
+pub struct PioEngineClaim {
+    pub(crate) engine: PioEngineId,
 }
 
-impl PcuEngineClaim {
+impl PioEngineClaim {
     /// Returns the claimed engine identifier.
     #[must_use]
-    pub const fn engine(self) -> PcuEngineId {
+    pub const fn engine(self) -> PioEngineId {
         self.engine
     }
 }
 
 /// Lane claim returned by one backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuLaneClaim {
-    pub(crate) engine: PcuEngineId,
-    pub(crate) lanes: PcuLaneMask,
+pub struct PioLaneClaim {
+    pub(crate) engine: PioEngineId,
+    pub(crate) lanes: PioLaneMask,
 }
 
-impl PcuLaneClaim {
+impl PioLaneClaim {
     /// Returns the claimed engine identifier.
     #[must_use]
-    pub const fn engine(self) -> PcuEngineId {
+    pub const fn engine(self) -> PioEngineId {
         self.engine
     }
 
     /// Returns the claimed lane bitmask.
     #[must_use]
-    pub const fn lanes(self) -> PcuLaneMask {
+    pub const fn lanes(self) -> PioLaneMask {
         self.lanes
     }
 
     /// Returns whether this claim contains one specific lane.
     #[must_use]
-    pub const fn contains_lane(self, lane: PcuLaneId) -> bool {
+    pub const fn contains_lane(self, lane: PioLaneId) -> bool {
         self.engine.0 == lane.engine.0 && self.lanes.contains_lane(lane.index)
     }
 }
 
 /// Loaded program lease returned by one backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PcuProgramLease {
-    pub(crate) engine: PcuEngineId,
-    pub(crate) program: PcuProgramId,
+pub struct PioProgramLease {
+    pub(crate) engine: PioEngineId,
+    pub(crate) program: PioProgramId,
     pub(crate) word_count: u16,
 }
 
-impl PcuProgramLease {
+impl PioProgramLease {
     /// Returns the engine containing this loaded program.
     #[must_use]
-    pub const fn engine(self) -> PcuEngineId {
+    pub const fn engine(self) -> PioEngineId {
         self.engine
     }
 
     /// Returns the caller-supplied program identifier.
     #[must_use]
-    pub const fn program(self) -> PcuProgramId {
+    pub const fn program(self) -> PioProgramId {
         self.program
     }
 

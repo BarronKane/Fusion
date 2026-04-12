@@ -20,6 +20,7 @@ fusion-firmware = { path = "../../../Crates/fusion-firmware", default-features =
 fusion-example-rp2350-on-device = { path = "OnDevice" }
 fusion-hal = { path = "../../../Crates/fusion-hal", default-features = false }
 fusion-pal = { path = "../../../Crates/fusion-pal", default-features = false }
+fusion-pcu = { path = "../../../Crates/fusion-pcu", default-features = false }
 fusion-std = { path = "../../../Crates/fusion-std", default-features = false }
 fusion-sys = { path = "../../../Crates/fusion-sys", default-features = false }
 cortex-m = { version = "0.7.7", default-features = false }

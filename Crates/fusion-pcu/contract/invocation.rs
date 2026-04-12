@@ -1,12 +1,13 @@
-//! DriverContract-facing PCU invocation shape and typed binding vocabulary.
+//! Driver-facing PCU invocation shape and typed binding vocabulary.
 //!
 //! This stays intentionally below orchestration policy. Backend choice, fallback preference, and
-//! prepared-dispatch state belong to `fusion-sys`; the contract layer only describes what one PCU
-//! kernel invocation looks like in the abstract.
+//! prepared-dispatch state belong to implementation/composition crates; the core contract layer
+//! only describes what one PCU profile invocation looks like in the abstract.
 
 use core::num::NonZeroU32;
 
 use super::{
+    PcuBindingRef,
     PcuKernel,
     PcuParameter,
     PcuParameterBinding,
@@ -14,7 +15,7 @@ use super::{
     PcuParameterValue,
 };
 
-/// Invocation geometry for one kernel dispatch.
+/// Invocation geometry for one profile dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PcuInvocationShape {
     threads: NonZeroU32,
@@ -34,14 +35,14 @@ impl PcuInvocationShape {
     }
 }
 
-/// One abstract kernel invocation descriptor without backend-selection policy.
+/// One abstract invocation descriptor without backend-selection policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PcuInvocation<'a> {
     pub kernel: &'a PcuKernel<'a>,
     pub shape: PcuInvocationShape,
 }
 
-/// Caller-provided runtime-parameter bindings for one prepared PCU kernel.
+/// Caller-provided runtime-parameter bindings for one prepared PCU program unit.
 #[derive(Debug, Clone, Copy)]
 pub struct PcuInvocationParameters<'a> {
     pub bindings: &'a [PcuParameterBinding],
@@ -75,8 +76,8 @@ impl PcuInvocationParameters<'_> {
         self.binding(slot).map(|binding| binding.value)
     }
 
-    /// Returns whether these submit-time runtime parameters satisfy one kernel parameter
-    /// declaration list exactly.
+    /// Returns whether these submit-time runtime parameters satisfy one declared parameter list
+    /// exactly.
     #[must_use]
     pub fn validate_against(self, parameters: &[PcuParameter<'_>]) -> bool {
         for (index, parameter) in parameters.iter().enumerate() {
@@ -113,62 +114,59 @@ impl PcuInvocationParameters<'_> {
     }
 }
 
-/// Caller-provided input/output bindings for one `u8` stream transform.
-#[derive(Debug)]
-pub struct PcuByteStreamBindings<'a> {
-    pub input: &'a [u8],
-    pub output: &'a mut [u8],
+/// Runtime-visible target for one invocation-time binding payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PcuInvocationTarget<'a> {
+    Binding(PcuBindingRef),
+    Port(&'a str),
 }
 
-/// Caller-provided input/output bindings for one `u16` stream transform.
+/// Typed invocation-time data payload bound to one target.
 #[derive(Debug)]
-pub struct PcuHalfWordStreamBindings<'a> {
-    pub input: &'a [u16],
-    pub output: &'a mut [u16],
+pub enum PcuInvocationBuffer<'a> {
+    BytesIn(&'a [u8]),
+    BytesOut(&'a mut [u8]),
+    BytesInOut {
+        input: &'a [u8],
+        output: &'a mut [u8],
+    },
+    HalfWordsIn(&'a [u16]),
+    HalfWordsOut(&'a mut [u16]),
+    HalfWordsInOut {
+        input: &'a [u16],
+        output: &'a mut [u16],
+    },
+    WordsIn(&'a [u32]),
+    WordsOut(&'a mut [u32]),
+    WordsInOut {
+        input: &'a [u32],
+        output: &'a mut [u32],
+    },
 }
 
-/// Caller-provided input/output bindings for one `u32` stream transform.
+/// One invocation-time binding payload attached to one runtime target.
 #[derive(Debug)]
-pub struct PcuWordStreamBindings<'a> {
-    pub input: &'a [u32],
-    pub output: &'a mut [u32],
+pub struct PcuInvocationBinding<'a> {
+    pub target: PcuInvocationTarget<'a>,
+    pub buffer: PcuInvocationBuffer<'a>,
 }
 
-/// Typed invocation bindings for one prepared PCU kernel.
-#[derive(Debug)]
-pub enum PcuInvocationBindings<'a> {
-    StreamBytes(PcuByteStreamBindings<'a>),
-    StreamHalfWords(PcuHalfWordStreamBindings<'a>),
-    StreamWords(PcuWordStreamBindings<'a>),
+/// Runtime binding table for one prepared PCU program unit.
+#[derive(Debug, Clone, Copy)]
+pub struct PcuInvocationBindings<'a> {
+    pub bindings: &'a [PcuInvocationBinding<'a>],
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::contract::drivers::pcu::PcuValueType;
+impl<'a> PcuInvocationBindings<'a> {
+    /// Returns one empty invocation binding table.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self { bindings: &[] }
+    }
 
-    #[test]
-    fn invocation_parameters_validate_exact_slot_and_type_matches() {
-        let parameters = [PcuParameter::named(
-            PcuParameterSlot(0),
-            "amount",
-            PcuValueType::u32(),
-        )];
-        let good = PcuInvocationParameters {
-            bindings: &[PcuParameterBinding::new(
-                PcuParameterSlot(0),
-                PcuParameterValue::U32(9),
-            )],
-        };
-        let bad = PcuInvocationParameters {
-            bindings: &[PcuParameterBinding::new(
-                PcuParameterSlot(0),
-                PcuParameterValue::U16(9),
-            )],
-        };
-
-        assert!(good.validate_against(&parameters));
-        assert!(!bad.validate_against(&parameters));
-        assert!(PcuInvocationParameters::empty().is_empty());
+    /// Returns whether no runtime binding payloads are supplied.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.bindings.is_empty()
     }
 }
