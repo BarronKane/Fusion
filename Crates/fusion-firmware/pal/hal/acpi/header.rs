@@ -33,6 +33,10 @@ pub struct AcpiSignature([u8; 4]);
 impl AcpiSignature {
     /// DSDT signature.
     pub const DSDT: Self = Self(*b"DSDT");
+    /// SSDT signature.
+    pub const SSDT: Self = Self(*b"SSDT");
+    /// PSDT signature.
+    pub const PSDT: Self = Self(*b"PSDT");
     /// FADT signature (`FACP` on the wire).
     pub const FADT: Self = Self(*b"FACP");
     /// FACS signature.

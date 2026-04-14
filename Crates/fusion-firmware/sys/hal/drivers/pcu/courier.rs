@@ -456,9 +456,10 @@ impl PioServiceSlot {
                         Err(error) => {
                             PIO_SERVICE_ERROR_KIND
                                 .store(encode_error_kind(error.kind()), Ordering::Release);
-                            PIO_COURIER_DEBUG_STATE
-                                .error_kind
-                                .store(u32::from(encode_error_kind(error.kind())), Ordering::Release);
+                            PIO_COURIER_DEBUG_STATE.error_kind.store(
+                                u32::from(encode_error_kind(error.kind())),
+                                Ordering::Release,
+                            );
                             self.state.store(SERVICE_FAILED, Ordering::Release);
                             PIO_COURIER_DEBUG_STATE
                                 .service_phase

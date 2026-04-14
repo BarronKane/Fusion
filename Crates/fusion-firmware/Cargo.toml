@@ -55,6 +55,7 @@ bitflags.workspace = true
 fusion-firmware-macros = { workspace = true }
 fusion-hal = { workspace = true, default-features = false }
 fusion-pal = { workspace = true, default-features = false }
+fusion-pcu = { workspace = true, default-features = false }
 fusion-sys = { workspace = true, default-features = false }
 fusion-std = { workspace = true, default-features = false }
 

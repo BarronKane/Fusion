@@ -11,6 +11,8 @@ pub use sys::hal::runtime::{
     RootCourierSecurityPolicy,
 };
 
+#[path = "aml/aml.rs"]
+pub mod aml;
 #[path = "contract/contract.rs"]
 pub mod contract;
 #[path = "module/module.rs"]

@@ -15,7 +15,17 @@ pub mod thermal;
 
 use crate::contract::drivers::acpi::AcpiProviderDescriptor;
 
+use crate::drivers::acpi::public::interface::backend::{
+    AcpiAmlAddressSpaceKind,
+    AcpiAmlBackend,
+    AcpiAmlFieldDescriptor,
+    AcpiAmlLoweringKind,
+    AcpiAmlMethodDescriptor,
+    AcpiAmlNamespaceDescriptor,
+    AcpiAmlOpRegionDescriptor,
+};
 use crate::drivers::acpi::public::interface::contract::AcpiHardware;
+use crate::contract::drivers::acpi::AcpiError;
 
 /// Dell Latitude E6430 ACPI backend surfaced from the captured AML namespace.
 #[derive(Debug, Clone, Copy, Default)]
@@ -32,6 +42,106 @@ pub(crate) const fn provider_valid(provider: u8) -> bool {
     provider == 0
 }
 
+const DELL_LATITUDE_E6430_AML_NAMESPACE: AcpiAmlNamespaceDescriptor = AcpiAmlNamespaceDescriptor {
+    root: "\\_SB",
+    description: "Dell Latitude E6430 primary AML namespace root",
+};
+
+const DELL_LATITUDE_E6430_AML_METHODS: [AcpiAmlMethodDescriptor; 12] = [
+    AcpiAmlMethodDescriptor {
+        path: "\\_SB.AC._PSR",
+        lowering: AcpiAmlLoweringKind::Command,
+        description: "AC adapter online-state method",
+    },
+    AcpiAmlMethodDescriptor {
+        path: "\\_SB.BAT0._BIF",
+        lowering: AcpiAmlLoweringKind::Command,
+        description: "Primary battery information method",
+    },
+    AcpiAmlMethodDescriptor {
+        path: "\\_SB.BAT0._BST",
+        lowering: AcpiAmlLoweringKind::Command,
+        description: "Primary battery status method",
+    },
+    AcpiAmlMethodDescriptor {
+        path: "\\_SB.BAT1._BIF",
+        lowering: AcpiAmlLoweringKind::Command,
+        description: "Secondary battery information method",
+    },
+    AcpiAmlMethodDescriptor {
+        path: "\\_SB.BAT1._BST",
+        lowering: AcpiAmlLoweringKind::Command,
+        description: "Secondary battery status method",
+    },
+    AcpiAmlMethodDescriptor {
+        path: "\\_SB.BAT2._BIF",
+        lowering: AcpiAmlLoweringKind::Command,
+        description: "Tertiary battery information method",
+    },
+    AcpiAmlMethodDescriptor {
+        path: "\\_SB.BAT2._BST",
+        lowering: AcpiAmlLoweringKind::Command,
+        description: "Tertiary battery status method",
+    },
+    AcpiAmlMethodDescriptor {
+        path: "\\_SB.LID0._LID",
+        lowering: AcpiAmlLoweringKind::Command,
+        description: "Lid state method",
+    },
+    AcpiAmlMethodDescriptor {
+        path: "\\_TZ.THM._TMP",
+        lowering: AcpiAmlLoweringKind::Command,
+        description: "Thermal zone current temperature method",
+    },
+    AcpiAmlMethodDescriptor {
+        path: "\\_SB.RBTN._STA",
+        lowering: AcpiAmlLoweringKind::Command,
+        description: "Dell airplane-mode switch status method",
+    },
+    AcpiAmlMethodDescriptor {
+        path: "\\_SB.PCI0.LPCB.ECDV._REG",
+        lowering: AcpiAmlLoweringKind::Command,
+        description: "Embedded-controller region registration method",
+    },
+    AcpiAmlMethodDescriptor {
+        path: "\\_SB.PCI0.LPCB.ECDV._Q66",
+        lowering: AcpiAmlLoweringKind::Signal,
+        description: "Embedded-controller query handler proving target",
+    },
+];
+
+const DELL_LATITUDE_E6430_AML_FIELDS: [AcpiAmlFieldDescriptor; 4] = [
+    AcpiAmlFieldDescriptor {
+        path: "\\_SB.PCI0.LPCB.ECDV.EC00",
+        description: "Dell EC status byte used by lid-state helpers",
+    },
+    AcpiAmlFieldDescriptor {
+        path: "\\_SB.PCI0.LPCB.ECDV.EC06",
+        description: "Dell EC power-source and battery-presence byte",
+    },
+    AcpiAmlFieldDescriptor {
+        path: "\\_SB.PCI0.LPCB.ECDV.EC22",
+        description: "Dell EC thermal sample byte",
+    },
+    AcpiAmlFieldDescriptor {
+        path: "\\_SB.PCI0.LPCB.ECDV.EC29",
+        description: "Dell EC battery metadata byte",
+    },
+];
+
+const DELL_LATITUDE_E6430_AML_OPREGIONS: [AcpiAmlOpRegionDescriptor; 2] = [
+    AcpiAmlOpRegionDescriptor {
+        path: "\\_SB.PCI0.LPCB.ECDV.ECOR",
+        space: AcpiAmlAddressSpaceKind::EmbeddedControl,
+        description: "Dell EC operation region",
+    },
+    AcpiAmlOpRegionDescriptor {
+        path: "\\_SB.PCI0.HBUS",
+        space: AcpiAmlAddressSpaceKind::PciConfig,
+        description: "Dell PCI host-bridge config-space access region",
+    },
+];
+
 impl AcpiHardware for DellLatitudeE6430AcpiHardware {
     fn provider_count() -> u8 {
         1
@@ -45,9 +155,44 @@ impl AcpiHardware for DellLatitudeE6430AcpiHardware {
     }
 }
 
+impl AcpiAmlBackend for DellLatitudeE6430AcpiHardware {
+    fn aml_namespace(provider: u8) -> Result<AcpiAmlNamespaceDescriptor, AcpiError> {
+        if !provider_valid(provider) {
+            return Err(AcpiError::invalid());
+        }
+
+        Ok(DELL_LATITUDE_E6430_AML_NAMESPACE)
+    }
+
+    fn aml_methods(provider: u8) -> &'static [AcpiAmlMethodDescriptor] {
+        if provider_valid(provider) {
+            &DELL_LATITUDE_E6430_AML_METHODS
+        } else {
+            &[]
+        }
+    }
+
+    fn aml_fields(provider: u8) -> &'static [AcpiAmlFieldDescriptor] {
+        if provider_valid(provider) {
+            &DELL_LATITUDE_E6430_AML_FIELDS
+        } else {
+            &[]
+        }
+    }
+
+    fn aml_opregions(provider: u8) -> &'static [AcpiAmlOpRegionDescriptor] {
+        if provider_valid(provider) {
+            &DELL_LATITUDE_E6430_AML_OPREGIONS
+        } else {
+            &[]
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drivers::acpi::public::interface::backend::AcpiAmlBackend;
     use crate::drivers::acpi::public::interface::contract::{
         AcpiBatteryHardware,
         AcpiButtonHardware,
@@ -101,5 +246,22 @@ mod tests {
         let lids = DellLatitudeE6430AcpiHardware::lids(0);
         assert_eq!(lids.len(), 1);
         assert_eq!(lids[0].object.path, "\\_SB.LID0");
+    }
+
+    #[test]
+    fn dell_e6430_aml_backend_surfaces_runtime_targets() {
+        let namespace = DellLatitudeE6430AcpiHardware::aml_namespace(0).unwrap();
+        assert_eq!(namespace.root, "\\_SB");
+
+        let methods = DellLatitudeE6430AcpiHardware::aml_methods(0);
+        assert!(methods.iter().any(|method| method.path == "\\_SB.AC._PSR"));
+        assert!(methods.iter().any(|method| method.path == "\\_TZ.THM._TMP"));
+
+        let opregions = DellLatitudeE6430AcpiHardware::aml_opregions(0);
+        assert!(
+            opregions
+                .iter()
+                .any(|region| region.path == "\\_SB.PCI0.LPCB.ECDV.ECOR")
+        );
     }
 }
