@@ -216,7 +216,7 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
         let opcode = *bytes.first().ok_or_else(AmlError::truncated)?;
         match opcode {
             0x06 => self.parse_alias_op(bytes, current_scope_path),
-            0x08 => self.parse_name_op(bytes, current_scope_path),
+            0x08 => self.parse_name_op(bytes, absolute_offset, block_index, current_scope_path),
             0x10 => self.parse_scope_op(bytes, absolute_offset, block_index, current_scope_path),
             0x14 => self.parse_method_op(bytes, absolute_offset, block_index, current_scope_path),
             0x15 => self.parse_external_op(bytes, current_scope_path),
@@ -265,6 +265,8 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
     fn parse_name_op(
         &mut self,
         bytes: &[u8],
+        absolute_offset: u32,
+        block_index: u16,
         current_scope_path: AmlResolvedNamePath,
     ) -> AmlResult<usize> {
         let name = AmlEncodedNameString::parse(&bytes[1..])?;
@@ -276,7 +278,13 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
             path,
             parent_id,
             AmlObjectKind::Name,
-            None,
+            Some(AmlCodeLocation {
+                block_index,
+                span: AmlBytecodeSpan {
+                    offset: absolute_offset + data_offset as u32,
+                    length: data_consumed as u32,
+                },
+            }),
             match name_value {
                 Some(value) => AmlNamespaceNodePayload::NameInteger(value),
                 None => AmlNamespaceNodePayload::None,

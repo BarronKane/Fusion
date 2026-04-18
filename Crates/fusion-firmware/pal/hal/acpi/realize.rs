@@ -13,9 +13,33 @@
 //! - expose the realized surfaces upward to later firmware/sys layers through stable contract
 //!   traits rather than vendor-specific types.
 
+use core::mem::MaybeUninit;
+use core::slice;
+
+use crate::aml::{
+    verify_acpi_backend,
+    AmlDefinitionBlock,
+    AmlDefinitionBlockSet,
+    AmlBackendVerificationIssue,
+    AmlBackendVerificationReport,
+    AmlError,
+    AmlErrorKind,
+    AmlLoadedNamespace,
+    AmlNamespaceLoadPlan,
+    AmlNamespaceLoadRecord,
+    AmlRegionAccessHost,
+    AmlRuntimeState,
+    AmlVm,
+    AmlVmLifecycleReport,
+    AmlVmState,
+};
 use crate::contract::firmware::topology::{
     AcpiTopologyContract,
     AcpiTopologySupport,
+};
+use crate::pal::hal::acpi::{
+    AcpiTableView,
+    Dsdt,
 };
 use fusion_hal::contract::drivers::acpi::{
     AcpiBatteryContract,
@@ -82,6 +106,7 @@ use fusion_hal::drivers::acpi::public::thermal::{
     AcpiThermalDriver,
     AcpiThermalDriverContext,
 };
+use fusion_hal::drivers::acpi::public::interface::backend::AcpiAmlBackend;
 use fusion_hal::drivers::acpi::vendor::dell::DellLatitudeE6430AcpiHardware;
 
 /// Stable firmware-side fingerprint used to match one ACPI-backed platform realization.
@@ -218,6 +243,49 @@ pub struct RealizedAcpiPlatform {
     processor: Option<AcpiProcessor<DellLatitudeE6430AcpiHardware>>,
 }
 
+/// Firmware-side AML activation report for one realized ACPI platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcpiAmlActivationReport<'a> {
+    pub verification: AmlBackendVerificationReport<'a>,
+    pub register_regions: AmlVmLifecycleReport,
+    pub initialize_devices: AmlVmLifecycleReport,
+    pub vm_state: AmlVmState,
+}
+
+impl<'a> AcpiAmlActivationReport<'a> {
+    #[must_use]
+    pub fn is_clean(self) -> bool {
+        self.verification.is_clean()
+            && self.register_regions.is_clean()
+            && self.initialize_devices.is_clean()
+            && self.vm_state == AmlVmState::Ready
+    }
+}
+
+/// Realized ACPI platform plus firmware-side AML activation results.
+#[derive(Debug)]
+pub struct RealizedAcpiPlatformWithAml<'a> {
+    platform: RealizedAcpiPlatform,
+    aml: AcpiAmlActivationReport<'a>,
+}
+
+impl<'a> RealizedAcpiPlatformWithAml<'a> {
+    #[must_use]
+    pub const fn platform(&self) -> &RealizedAcpiPlatform {
+        &self.platform
+    }
+
+    #[must_use]
+    pub const fn aml(&self) -> AcpiAmlActivationReport<'a> {
+        self.aml
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (RealizedAcpiPlatform, AcpiAmlActivationReport<'a>) {
+        (self.platform, self.aml)
+    }
+}
+
 impl RealizedAcpiPlatform {
     /// Returns the matched backend record for this realized platform.
     #[must_use]
@@ -313,6 +381,78 @@ pub fn realize_platform(
     }
 }
 
+/// Matches, realizes, verifies, and activates AML for one platform from the supplied fingerprint.
+///
+/// # Errors
+///
+/// Returns one honest error when:
+/// - no supported backend matches,
+/// - public ACPI driver activation fails,
+/// - the declared backend AML surface does not match the supplied namespace,
+/// - or AML lifecycle activation fails.
+pub fn realize_platform_with_aml<'records, 'blocks, 'issues>(
+    fingerprint: &AcpiPlatformFingerprint,
+    namespace: AmlLoadedNamespace<'records, 'blocks>,
+    host: &dyn AmlRegionAccessHost,
+    runtime: &AmlRuntimeState<'_>,
+    issue_storage: &'issues mut [MaybeUninit<AmlBackendVerificationIssue>],
+) -> Result<RealizedAcpiPlatformWithAml<'issues>, AcpiRealizationError> {
+    let matched =
+        match_platform_backend(fingerprint).ok_or_else(AcpiRealizationError::unsupported)?;
+
+    match matched.backend {
+        AcpiPlatformBackendKind::DellLatitudeE6430 => {
+            let platform = realize_dell_latitude_e6430(matched)?;
+            let aml = activate_backend_aml::<DellLatitudeE6430AcpiHardware>(
+                namespace,
+                host,
+                runtime,
+                issue_storage,
+            )?;
+            Ok(RealizedAcpiPlatformWithAml { platform, aml })
+        }
+    }
+}
+
+/// Loads one AML namespace from validated ACPI definition tables with caller-provided storage.
+///
+/// `definition_storage` is only used for the secondary definition blocks (`SSDT`/`PSDT`). The
+/// `DSDT` block is carried directly by value.
+pub fn load_namespace_from_definition_tables<'records, 'tables>(
+    dsdt: Dsdt<'tables>,
+    secondary_definition_tables: &'tables [AcpiTableView<'tables>],
+    definition_storage: &'tables mut [MaybeUninit<AmlDefinitionBlock<'tables>>],
+    namespace_storage: &'records mut [MaybeUninit<AmlNamespaceLoadRecord>],
+) -> Result<AmlLoadedNamespace<'records, 'tables>, AcpiRealizationError> {
+    let dsdt = AmlDefinitionBlock::from_dsdt(dsdt).map_err(map_aml_error)?;
+    let secondary =
+        load_secondary_definition_blocks(secondary_definition_tables, definition_storage)?;
+    AmlNamespaceLoadPlan::from_definition_blocks(AmlDefinitionBlockSet::new(dsdt, secondary))
+        .load_into(namespace_storage)
+        .map_err(map_aml_error)
+}
+
+/// Loads AML from one validated `DSDT` plus any secondary definition tables, then realizes the
+/// matched ACPI backend and activates its AML lifecycle.
+pub fn realize_platform_from_definition_tables_with_aml<'records, 'tables, 'issues>(
+    fingerprint: &AcpiPlatformFingerprint,
+    dsdt: Dsdt<'tables>,
+    secondary_definition_tables: &'tables [AcpiTableView<'tables>],
+    definition_storage: &'tables mut [MaybeUninit<AmlDefinitionBlock<'tables>>],
+    namespace_storage: &'records mut [MaybeUninit<AmlNamespaceLoadRecord>],
+    host: &dyn AmlRegionAccessHost,
+    runtime: &AmlRuntimeState<'_>,
+    issue_storage: &'issues mut [MaybeUninit<AmlBackendVerificationIssue>],
+) -> Result<RealizedAcpiPlatformWithAml<'issues>, AcpiRealizationError> {
+    let namespace = load_namespace_from_definition_tables(
+        dsdt,
+        secondary_definition_tables,
+        definition_storage,
+        namespace_storage,
+    )?;
+    realize_platform_with_aml(fingerprint, namespace, host, runtime, issue_storage)
+}
+
 /// Realizes the Dell Latitude E6430 proving platform directly from the captured fingerprint.
 ///
 /// # Errors
@@ -321,6 +461,56 @@ pub fn realize_platform(
 pub fn realize_dell_latitude_e6430_platform() -> Result<RealizedAcpiPlatform, AcpiRealizationError>
 {
     realize_platform(&dell_latitude_e6430_fingerprint())
+}
+
+/// Realizes the Dell Latitude E6430 proving platform and activates AML against one loaded
+/// namespace and host/runtime surface.
+///
+/// # Errors
+///
+/// Returns one honest error when:
+/// - public driver activation fails,
+/// - the Dell AML surface does not verify cleanly,
+/// - or AML lifecycle activation does not complete cleanly.
+pub fn realize_dell_latitude_e6430_platform_with_aml<'records, 'blocks, 'issues>(
+    namespace: AmlLoadedNamespace<'records, 'blocks>,
+    host: &dyn AmlRegionAccessHost,
+    runtime: &AmlRuntimeState<'_>,
+    issue_storage: &'issues mut [MaybeUninit<AmlBackendVerificationIssue>],
+) -> Result<RealizedAcpiPlatformWithAml<'issues>, AcpiRealizationError> {
+    realize_platform_with_aml(
+        &dell_latitude_e6430_fingerprint(),
+        namespace,
+        host,
+        runtime,
+        issue_storage,
+    )
+}
+
+/// Dell proving-path wrapper over [`realize_platform_from_definition_tables_with_aml`].
+pub fn realize_dell_latitude_e6430_platform_from_definition_tables_with_aml<
+    'records,
+    'tables,
+    'issues,
+>(
+    dsdt: Dsdt<'tables>,
+    secondary_definition_tables: &'tables [AcpiTableView<'tables>],
+    definition_storage: &'tables mut [MaybeUninit<AmlDefinitionBlock<'tables>>],
+    namespace_storage: &'records mut [MaybeUninit<AmlNamespaceLoadRecord>],
+    host: &dyn AmlRegionAccessHost,
+    runtime: &AmlRuntimeState<'_>,
+    issue_storage: &'issues mut [MaybeUninit<AmlBackendVerificationIssue>],
+) -> Result<RealizedAcpiPlatformWithAml<'issues>, AcpiRealizationError> {
+    realize_platform_from_definition_tables_with_aml(
+        &dell_latitude_e6430_fingerprint(),
+        dsdt,
+        secondary_definition_tables,
+        definition_storage,
+        namespace_storage,
+        host,
+        runtime,
+        issue_storage,
+    )
 }
 
 fn realize_dell_latitude_e6430(
@@ -592,6 +782,30 @@ where
         .map_err(map_driver_error)
 }
 
+fn load_secondary_definition_blocks<'tables>(
+    secondary_definition_tables: &'tables [AcpiTableView<'tables>],
+    definition_storage: &'tables mut [MaybeUninit<AmlDefinitionBlock<'tables>>],
+) -> Result<&'tables [AmlDefinitionBlock<'tables>], AcpiRealizationError> {
+    if definition_storage.len() < secondary_definition_tables.len() {
+        return Err(AcpiRealizationError::resource_exhausted());
+    }
+
+    for (index, table) in secondary_definition_tables.iter().copied().enumerate() {
+        let block = AmlDefinitionBlock::from_acpi_table(table).map_err(map_aml_error)?;
+        definition_storage[index].write(block);
+    }
+
+    let secondary = unsafe {
+        slice::from_raw_parts(
+            definition_storage
+                .as_ptr()
+                .cast::<AmlDefinitionBlock<'tables>>(),
+            secondary_definition_tables.len(),
+        )
+    };
+    Ok(secondary)
+}
+
 fn map_driver_error(error: DriverError) -> AcpiRealizationError {
     match error.kind() {
         DriverErrorKind::Unsupported => AcpiRealizationError::unsupported(),
@@ -606,9 +820,81 @@ fn map_driver_error(error: DriverError) -> AcpiRealizationError {
     }
 }
 
+fn activate_backend_aml<'records, 'blocks, 'issues, B: AcpiAmlBackend>(
+    namespace: AmlLoadedNamespace<'records, 'blocks>,
+    host: &dyn AmlRegionAccessHost,
+    runtime: &AmlRuntimeState<'_>,
+    issue_storage: &'issues mut [MaybeUninit<AmlBackendVerificationIssue>],
+) -> Result<AcpiAmlActivationReport<'issues>, AcpiRealizationError> {
+    let verification =
+        verify_acpi_backend::<B>(namespace, 0, issue_storage).map_err(map_aml_error)?;
+    if !verification.is_clean() {
+        return Err(AcpiRealizationError::invalid());
+    }
+
+    let mut vm = AmlVm::default();
+    let register_regions = vm
+        .register_regions(namespace, host, runtime)
+        .map_err(map_aml_error)?;
+    if !register_regions.is_clean() {
+        return Err(AcpiRealizationError::busy());
+    }
+
+    let initialize_devices = vm
+        .initialize_devices(namespace, host, runtime)
+        .map_err(map_aml_error)?;
+    if !initialize_devices.is_clean() {
+        return Err(AcpiRealizationError::busy());
+    }
+
+    Ok(AcpiAmlActivationReport {
+        verification,
+        register_regions,
+        initialize_devices,
+        vm_state: vm.state,
+    })
+}
+
+fn map_aml_error(error: AmlError) -> AcpiRealizationError {
+    match error.kind {
+        AmlErrorKind::Unsupported => AcpiRealizationError::unsupported(),
+        AmlErrorKind::Overflow => AcpiRealizationError::resource_exhausted(),
+        AmlErrorKind::NamespaceConflict | AmlErrorKind::InvalidState => {
+            AcpiRealizationError::state_conflict()
+        }
+        AmlErrorKind::HostFailure => AcpiRealizationError::platform(-1),
+        AmlErrorKind::Truncated
+        | AmlErrorKind::InvalidBytecode
+        | AmlErrorKind::InvalidDefinitionBlock
+        | AmlErrorKind::InvalidName
+        | AmlErrorKind::InvalidNamespace
+        | AmlErrorKind::UndefinedObject => AcpiRealizationError::invalid(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pal::hal::acpi::Dsdt;
+    use std::boxed::Box;
+    use std::vec::Vec;
+
+    fn definition_block(payload: &'static [u8]) -> Dsdt<'static> {
+        let bytes = {
+            let mut table = Vec::from([0_u8; 36]);
+            table[0..4].copy_from_slice(b"DSDT");
+            table[4..8].copy_from_slice(&((36 + payload.len()) as u32).to_le_bytes());
+            table[8] = 2;
+            table[10..16].copy_from_slice(b"FUSION");
+            table[16..24].copy_from_slice(b"ACPIREAL");
+            table.extend_from_slice(payload);
+            let checksum =
+                (!table.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte))).wrapping_add(1);
+            table[9] = checksum;
+            Box::leak(table.into_boxed_slice())
+        };
+        Dsdt::parse(bytes).expect("synthetic dsdt should parse")
+    }
 
     #[test]
     fn dell_platform_matches_exactly() {
@@ -635,5 +921,44 @@ mod tests {
         assert!(realized.embedded_controller().is_some());
         assert!(realized.fan().is_none());
         assert!(realized.processor().is_none());
+    }
+
+    #[test]
+    fn namespace_loads_from_validated_definition_tables() {
+        let dsdt = definition_block(&[
+            0x10, 0x33, b'\\', b'_', b'S', b'B', b'_', // Scope(\_SB)
+            0x08, b'F', b'O', b'O', b'0', 0x0a, 0x01, // Name(FOO0, 1)
+            0x14, 0x08, b'_', b'S', b'T', b'A', 0x00, 0xa4, 0x01, // Method(_STA)
+            0x5b, 0x80, b'E', b'C', b'O', b'R', 0x03, 0x0a, 0x10, 0x0a, 0x20, // OpRegion
+            0x5b, 0x81, 0x10, b'E', b'C', b'O', b'R', 0x01, b'S', b'T', b'0', b'0', 0x08, b'S',
+            b'T', b'0', b'1', 0x08, // Field
+        ]);
+        let mut definition_storage = [];
+        let mut namespace_storage = [MaybeUninit::<AmlNamespaceLoadRecord>::uninit(); 16];
+
+        let loaded = load_namespace_from_definition_tables(
+            dsdt,
+            &[],
+            &mut definition_storage,
+            &mut namespace_storage,
+        )
+        .expect("definition-table namespace load should work");
+
+        let foo = crate::aml::AmlResolvedNamePath::parse_text("\\_SB.FOO0")
+            .expect("foo path should parse");
+        let sta = crate::aml::AmlResolvedNamePath::parse_text("\\_SB._STA")
+            .expect("sta path should parse");
+        assert!(
+            loaded
+                .records
+                .iter()
+                .any(|record| { record.descriptor.path == foo })
+        );
+        assert!(
+            loaded
+                .records
+                .iter()
+                .any(|record| { record.descriptor.path == sta })
+        );
     }
 }

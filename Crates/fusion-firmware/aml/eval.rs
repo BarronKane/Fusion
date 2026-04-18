@@ -4,14 +4,17 @@ use core::array;
 
 use crate::aml::{
     AmlAccessWidth,
+    AmlAddressSpaceId,
     AmlEncodedNameString,
     AmlError,
+    AmlFieldAccessKind,
     AmlFieldDescriptor,
     AmlFieldUpdateKind,
     AmlExecutionPhase,
     AmlLoadedNamespace,
     AmlIntegerWidth,
     AmlMethodDescriptor,
+    AmlNameSeg,
     AmlNamespaceNodePayload,
     AmlOpRegionDescriptor,
     AmlPkgLength,
@@ -54,7 +57,10 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
     pub fn evaluate<'a>(
         &self,
         invocation: AmlMethodInvocation<'a>,
-    ) -> AmlResult<AmlEvaluationOutcome<'a>> {
+    ) -> AmlResult<AmlEvaluationOutcome<'a>>
+    where
+        'blocks: 'a,
+    {
         self.evaluate_internal(None, None, invocation)
     }
 
@@ -62,7 +68,10 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         &self,
         state: &AmlRuntimeState<'_>,
         invocation: AmlMethodInvocation<'a>,
-    ) -> AmlResult<AmlEvaluationOutcome<'a>> {
+    ) -> AmlResult<AmlEvaluationOutcome<'a>>
+    where
+        'blocks: 'a,
+    {
         self.evaluate_internal(None, Some(state), invocation)
     }
 
@@ -70,7 +79,10 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         &self,
         host: &dyn AmlRegionAccessHost,
         invocation: AmlMethodInvocation<'a>,
-    ) -> AmlResult<AmlEvaluationOutcome<'a>> {
+    ) -> AmlResult<AmlEvaluationOutcome<'a>>
+    where
+        'blocks: 'a,
+    {
         self.evaluate_internal(Some(host), None, invocation)
     }
 
@@ -79,7 +91,10 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         host: &dyn AmlRegionAccessHost,
         state: &AmlRuntimeState<'_>,
         invocation: AmlMethodInvocation<'a>,
-    ) -> AmlResult<AmlEvaluationOutcome<'a>> {
+    ) -> AmlResult<AmlEvaluationOutcome<'a>>
+    where
+        'blocks: 'a,
+    {
         self.evaluate_internal(Some(host), Some(state), invocation)
     }
 
@@ -88,7 +103,10 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         invocation: AmlMethodInvocation<'a>,
-    ) -> AmlResult<AmlEvaluationOutcome<'a>> {
+    ) -> AmlResult<AmlEvaluationOutcome<'a>>
+    where
+        'blocks: 'a,
+    {
         let record = self
             .namespace
             .record(invocation.method)
@@ -121,6 +139,7 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
                 return_value: None,
                 blocked: true,
             }),
+            AmlControl::Break => Err(AmlError::invalid_state()),
             AmlControl::Return(value) => Ok(AmlEvaluationOutcome {
                 return_value: Some(value),
                 blocked: false,
@@ -130,12 +149,15 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
 
     fn eval_term_list<'a>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         phase: AmlExecutionPhase,
         frame: &mut AmlEvalFrame<'a>,
-    ) -> AmlResult<AmlControl<'a>> {
+    ) -> AmlResult<AmlControl<'a>>
+    where
+        'blocks: 'a,
+    {
         let mut offset = 0_usize;
         while offset < bytes.len() {
             let (consumed, control) =
@@ -153,14 +175,20 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
 
     fn eval_statement<'a>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         phase: AmlExecutionPhase,
         frame: &mut AmlEvalFrame<'a>,
-    ) -> AmlResult<(usize, AmlControl<'a>)> {
+    ) -> AmlResult<(usize, AmlControl<'a>)>
+    where
+        'blocks: 'a,
+    {
         let opcode = *bytes.first().ok_or_else(AmlError::truncated)?;
         match opcode {
+            0x08 => self.eval_name_statement(bytes, host, state, phase, frame),
+            0xA2 => self.eval_while(bytes, host, state, phase, frame),
+            0xA3 => Ok((1, AmlControl::Continue)),
             0x70 => {
                 let (value, value_consumed) =
                     self.eval_term_arg(&bytes[1..], host, state, phase, frame)?;
@@ -168,6 +196,7 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
                     &bytes[1 + value_consumed..],
                     host,
                     state,
+                    phase,
                     frame,
                     value.clone(),
                 )?;
@@ -175,6 +204,7 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
             }
             0x5b => self.eval_ext_statement(bytes, host, state, phase, frame),
             0xA0 => self.eval_if(bytes, host, state, phase, frame),
+            0xA5 => Ok((1, AmlControl::Break)),
             0xA4 => {
                 let (value, consumed) =
                     self.eval_term_arg(&bytes[1..], host, state, phase, frame)?;
@@ -189,14 +219,33 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
 
     fn eval_ext_statement<'a>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         phase: AmlExecutionPhase,
         frame: &mut AmlEvalFrame<'a>,
-    ) -> AmlResult<(usize, AmlControl<'a>)> {
+    ) -> AmlResult<(usize, AmlControl<'a>)>
+    where
+        'blocks: 'a,
+    {
         let sub = *bytes.get(1).ok_or_else(AmlError::truncated)?;
         match sub {
+            0x80 => self.eval_dynamic_opregion_statement(bytes, host, state, phase, frame),
+            0x81 => self.eval_dynamic_field_statement(bytes, host, state, phase, frame),
+            0x21 => {
+                let host = host.ok_or_else(AmlError::unsupported)?;
+                let (microseconds, consumed) =
+                    self.eval_term_arg(&bytes[2..], Some(host), state, phase, frame)?;
+                host.stall_us(microseconds.as_integer()? as u32)?;
+                Ok((2 + consumed, AmlControl::Continue))
+            }
+            0x22 => {
+                let host = host.ok_or_else(AmlError::unsupported)?;
+                let (milliseconds, consumed) =
+                    self.eval_term_arg(&bytes[2..], Some(host), state, phase, frame)?;
+                host.sleep_ms(milliseconds.as_integer()? as u32)?;
+                Ok((2 + consumed, AmlControl::Continue))
+            }
             0x23 => {
                 let (target, target_consumed) = self.resolve_super_name(&bytes[2..], frame)?;
                 let _timeout = bytes
@@ -237,12 +286,15 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
 
     fn eval_if<'a>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         phase: AmlExecutionPhase,
         frame: &mut AmlEvalFrame<'a>,
-    ) -> AmlResult<(usize, AmlControl<'a>)> {
+    ) -> AmlResult<(usize, AmlControl<'a>)>
+    where
+        'blocks: 'a,
+    {
         let pkg = AmlPkgLength::parse(&bytes[1..])?;
         let object_end = 1 + pkg.value as usize;
         let object_bytes = bytes.get(..object_end).ok_or_else(AmlError::truncated)?;
@@ -278,14 +330,70 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         Ok((consumed, control))
     }
 
-    fn eval_term_arg<'a>(
+    fn eval_name_statement<'a>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         phase: AmlExecutionPhase,
         frame: &mut AmlEvalFrame<'a>,
-    ) -> AmlResult<(AmlValue<'a>, usize)> {
+    ) -> AmlResult<(usize, AmlControl<'a>)>
+    where
+        'blocks: 'a,
+    {
+        let encoded = AmlEncodedNameString::parse(&bytes[1..])?;
+        let initializer_offset = 1 + usize::from(encoded.consumed_bytes);
+        let (value, initializer_consumed) =
+            self.eval_name_initializer(&bytes[initializer_offset..], host, state, phase, frame)?;
+        let name = local_single_segment(encoded)?;
+        frame.bind_named_value(name, value)?;
+        Ok((
+            initializer_offset + initializer_consumed,
+            AmlControl::Continue,
+        ))
+    }
+
+    fn eval_while<'a>(
+        &self,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(usize, AmlControl<'a>)>
+    where
+        'blocks: 'a,
+    {
+        let pkg = AmlPkgLength::parse(&bytes[1..])?;
+        let object_end = 1 + pkg.value as usize;
+        let object_bytes = bytes.get(..object_end).ok_or_else(AmlError::truncated)?;
+        let predicate_offset = 1 + usize::from(pkg.encoded_bytes);
+        loop {
+            let (predicate, predicate_consumed) =
+                self.eval_term_arg(&object_bytes[predicate_offset..], host, state, phase, frame)?;
+            if !predicate.as_logic() {
+                return Ok((object_end, AmlControl::Continue));
+            }
+            let body_start = predicate_offset + predicate_consumed;
+            match self.eval_term_list(&object_bytes[body_start..], host, state, phase, frame)? {
+                AmlControl::Continue => {}
+                AmlControl::Break => return Ok((object_end, AmlControl::Continue)),
+                control => return Ok((object_end, control)),
+            }
+        }
+    }
+
+    fn eval_term_arg<'a>(
+        &self,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
         let opcode = *bytes.first().ok_or_else(AmlError::truncated)?;
         match opcode {
             0x00 => Ok((AmlValue::integer(0, frame.integer_width), 1)),
@@ -330,6 +438,14 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
                     9,
                 ))
             }
+            0x0d => {
+                let Some(length) = bytes[1..].iter().position(|byte| *byte == 0) else {
+                    return Err(AmlError::truncated());
+                };
+                let raw = bytes.get(1..1 + length).ok_or_else(AmlError::truncated)?;
+                let value = core::str::from_utf8(raw).map_err(|_| AmlError::invalid_bytecode())?;
+                Ok((AmlValue::String(value), 2 + length))
+            }
             0x60..=0x67 => {
                 let index = usize::from(opcode - 0x60);
                 let value = frame.locals[index]
@@ -351,6 +467,7 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
                     &bytes[1 + value_consumed..],
                     host,
                     state,
+                    phase,
                     frame,
                     value.clone(),
                 )?;
@@ -362,6 +479,10 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
             0x74 => self.eval_binary_op(bytes, host, state, phase, frame, |lhs, rhs, width| {
                 AmlValue::integer(lhs.wrapping_sub(rhs), width)
             }),
+            0x77 => self.eval_binary_op(bytes, host, state, phase, frame, |lhs, rhs, width| {
+                AmlValue::integer(lhs.wrapping_mul(rhs), width)
+            }),
+            0x78 => self.eval_divide(bytes, host, state, phase, frame),
             0x75 => self.eval_update_op(bytes, host, state, frame, |value, width| {
                 AmlValue::integer(value.wrapping_add(1), width)
             }),
@@ -391,6 +512,10 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
                     1 + consumed,
                 ))
             }
+            0x83 => self.eval_deref(bytes, host, state, phase, frame),
+            0x87 => self.eval_size_of(bytes, host, state, phase, frame),
+            0x88 => self.eval_index(bytes, host, state, phase, frame),
+            0x8e => self.eval_object_type(bytes, host, state, phase, frame),
             0x92 => {
                 let (value, consumed) =
                     self.eval_term_arg(&bytes[1..], host, state, phase, frame)?;
@@ -413,30 +538,54 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
 
     fn eval_update_op<'a, F>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         frame: &mut AmlEvalFrame<'a>,
         op: F,
     ) -> AmlResult<(AmlValue<'a>, usize)>
     where
+        'blocks: 'a,
         F: FnOnce(u64, AmlIntegerWidth) -> AmlValue<'a>,
     {
         let (value, target_consumed) = self.read_target_value(&bytes[1..], host, state, frame)?;
         let result = op(value.as_integer()?, frame.integer_width);
-        self.assign_target(&bytes[1..], host, state, frame, result.clone())?;
+        self.assign_target(
+            &bytes[1..],
+            host,
+            state,
+            AmlExecutionPhase::Runtime,
+            frame,
+            result.clone(),
+        )?;
         Ok((result, 1 + target_consumed))
     }
 
     fn eval_named_term<'a>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         phase: AmlExecutionPhase,
         frame: &mut AmlEvalFrame<'a>,
-    ) -> AmlResult<(AmlValue<'a>, usize)> {
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
         let encoded = AmlEncodedNameString::parse(bytes)?;
+        if let Some(name) = local_single_segment_if_present(encoded) {
+            if let Some(value) = frame.named_value(name) {
+                return Ok((value.clone(), usize::from(encoded.consumed_bytes)));
+            }
+            if let Some(field) = frame.named_field(name) {
+                let host = host.ok_or_else(AmlError::unsupported)?;
+                let value = self.read_dynamic_field_value(host, field)?;
+                return Ok((
+                    AmlValue::integer(value, frame.integer_width),
+                    usize::from(encoded.consumed_bytes),
+                ));
+            }
+        }
         let path = self
             .namespace
             .resolve_lookup_path(frame.current_scope_path, encoded)?;
@@ -454,6 +603,13 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
                 ),
                 usize::from(encoded.consumed_bytes),
             )),
+            AmlNamespaceNodePayload::None
+                if record.descriptor.kind == crate::aml::AmlObjectKind::Name =>
+            {
+                let body = record.body.ok_or_else(AmlError::invalid_state)?;
+                let (value, _) = self.eval_static_name_value(body, host, state, phase, frame)?;
+                Ok((value, usize::from(encoded.consumed_bytes)))
+            }
             AmlNamespaceNodePayload::Field(field) => {
                 let host = host.ok_or_else(AmlError::unsupported)?;
                 let value = self.read_field_value(host, field)?;
@@ -479,7 +635,7 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
 
     fn eval_binary_op<'a, F>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         phase: AmlExecutionPhase,
@@ -487,6 +643,7 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         op: F,
     ) -> AmlResult<(AmlValue<'a>, usize)>
     where
+        'blocks: 'a,
         F: FnOnce(u64, u64, AmlIntegerWidth) -> AmlValue<'a>,
     {
         let (lhs, lhs_consumed) = self.eval_term_arg(&bytes[1..], host, state, phase, frame)?;
@@ -497,6 +654,7 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
             &bytes[1 + lhs_consumed + rhs_consumed..],
             host,
             state,
+            phase,
             frame,
             result.clone(),
         )?;
@@ -505,7 +663,7 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
 
     fn eval_logic_compare<'a, F>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         phase: AmlExecutionPhase,
@@ -513,6 +671,7 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         predicate: F,
     ) -> AmlResult<(AmlValue<'a>, usize)>
     where
+        'blocks: 'a,
         F: FnOnce(u64, u64) -> bool,
     {
         let (lhs, lhs_consumed) = self.eval_term_arg(&bytes[1..], host, state, phase, frame)?;
@@ -527,15 +686,134 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         ))
     }
 
-    fn invoke_method_from_term<'a>(
+    fn eval_divide<'a>(
         &self,
-        method: AmlMethodDescriptor,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         phase: AmlExecutionPhase,
         frame: &mut AmlEvalFrame<'a>,
-    ) -> AmlResult<(AmlValue<'a>, usize)> {
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
+        let (lhs, lhs_consumed) = self.eval_term_arg(&bytes[1..], host, state, phase, frame)?;
+        let (rhs, rhs_consumed) =
+            self.eval_term_arg(&bytes[1 + lhs_consumed..], host, state, phase, frame)?;
+        let divisor = rhs.as_integer()?;
+        if divisor == 0 {
+            return Err(AmlError::invalid_state());
+        }
+        let dividend = lhs.as_integer()?;
+        let remainder = AmlValue::integer(dividend % divisor, frame.integer_width);
+        let quotient = AmlValue::integer(dividend / divisor, frame.integer_width);
+        let remainder_target_consumed = self.assign_target(
+            &bytes[1 + lhs_consumed + rhs_consumed..],
+            host,
+            state,
+            phase,
+            frame,
+            remainder.clone(),
+        )?;
+        let quotient_target_consumed = self.assign_target(
+            &bytes[1 + lhs_consumed + rhs_consumed + remainder_target_consumed..],
+            host,
+            state,
+            phase,
+            frame,
+            quotient.clone(),
+        )?;
+        Ok((
+            quotient,
+            1 + lhs_consumed + rhs_consumed + remainder_target_consumed + quotient_target_consumed,
+        ))
+    }
+
+    fn eval_deref<'a>(
+        &self,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
+        let (value, consumed) = self.eval_term_arg(&bytes[1..], host, state, phase, frame)?;
+        Ok((value, 1 + consumed))
+    }
+
+    fn eval_size_of<'a>(
+        &self,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
+        let (value, consumed) = self.eval_term_arg(&bytes[1..], host, state, phase, frame)?;
+        let len = self.value_size(value, state)? as u64;
+        Ok((AmlValue::integer(len, frame.integer_width), 1 + consumed))
+    }
+
+    fn eval_object_type<'a>(
+        &self,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
+        let (value, consumed) = self.eval_term_arg(&bytes[1..], host, state, phase, frame)?;
+        let kind = self.object_type_id(value);
+        Ok((AmlValue::integer(kind, frame.integer_width), 1 + consumed))
+    }
+
+    fn eval_index<'a>(
+        &self,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
+        let (base, base_consumed) = self.eval_term_arg(&bytes[1..], host, state, phase, frame)?;
+        let (index, index_consumed) =
+            self.eval_term_arg(&bytes[1 + base_consumed..], host, state, phase, frame)?;
+        let value = self.index_value(base, index.as_integer()?, host, state, phase, frame)?;
+        let target_consumed = self.assign_target(
+            &bytes[1 + base_consumed + index_consumed..],
+            host,
+            state,
+            phase,
+            frame,
+            value.clone(),
+        )?;
+        Ok((value, 1 + base_consumed + index_consumed + target_consumed))
+    }
+
+    fn invoke_method_from_term<'a>(
+        &self,
+        method: AmlMethodDescriptor,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
         if frame.recursion_depth >= Self::MAX_RECURSION_DEPTH {
             return Err(AmlError::invalid_state());
         }
@@ -581,7 +859,10 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         state: Option<&AmlRuntimeState<'_>>,
         phase: AmlExecutionPhase,
         recursion_depth: u16,
-    ) -> AmlResult<Option<AmlValue<'a>>> {
+    ) -> AmlResult<Option<AmlValue<'a>>>
+    where
+        'blocks: 'a,
+    {
         let record = self
             .namespace
             .record(method.node)
@@ -607,18 +888,23 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         match self.eval_term_list(body, host, state, phase, &mut frame)? {
             AmlControl::Continue => Ok(None),
             AmlControl::Blocked => Err(AmlError::unsupported()),
+            AmlControl::Break => Err(AmlError::invalid_state()),
             AmlControl::Return(value) => Ok(Some(value.clone())),
         }
     }
 
     fn assign_target<'a>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
         frame: &mut AmlEvalFrame<'a>,
         value: AmlValue<'a>,
-    ) -> AmlResult<usize> {
+    ) -> AmlResult<usize>
+    where
+        'blocks: 'a,
+    {
         let opcode = *bytes.first().ok_or_else(AmlError::truncated)?;
         match opcode {
             0x00 => Ok(1),
@@ -626,9 +912,28 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
                 frame.locals[usize::from(opcode - 0x60)] = Some(value);
                 Ok(1)
             }
-            0x68..=0x6e => Err(AmlError::unsupported()),
+            0x88 => self.assign_index_target(bytes, host, state, phase, frame, value),
+            0x68..=0x6e => {
+                frame.args[usize::from(opcode - 0x68)] = Some(value);
+                Ok(1)
+            }
             b'\\' | b'^' | b'_' | b'A'..=b'Z' => {
                 let encoded = AmlEncodedNameString::parse(bytes)?;
+                if let Some(name) = local_single_segment_if_present(encoded) {
+                    if let Some(AmlValue::BufferHandle(handle)) = frame.named_value(name).cloned() {
+                        let state = state.ok_or_else(AmlError::unsupported)?;
+                        self.copy_value_into_buffer(state, handle, value.clone())?;
+                        return Ok(usize::from(encoded.consumed_bytes));
+                    }
+                    if let Some(field) = frame.named_field(name) {
+                        let host = host.ok_or_else(AmlError::unsupported)?;
+                        self.write_dynamic_field_value(host, field, value.as_integer()?)?;
+                        return Ok(usize::from(encoded.consumed_bytes));
+                    }
+                    if frame.write_named_value(name, value.clone()) {
+                        return Ok(usize::from(encoded.consumed_bytes));
+                    }
+                }
                 let path = self
                     .namespace
                     .resolve_lookup_path(frame.current_scope_path, encoded)?;
@@ -641,15 +946,24 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
 
     fn read_target_value<'a>(
         &self,
-        bytes: &[u8],
+        bytes: &'a [u8],
         host: Option<&dyn AmlRegionAccessHost>,
         state: Option<&AmlRuntimeState<'_>>,
         frame: &mut AmlEvalFrame<'a>,
-    ) -> AmlResult<(AmlValue<'a>, usize)> {
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
         let opcode = *bytes.first().ok_or_else(AmlError::truncated)?;
         match opcode {
             0x60..=0x67 => {
                 let value = frame.locals[usize::from(opcode - 0x60)]
+                    .clone()
+                    .ok_or_else(AmlError::invalid_state)?;
+                Ok((value, 1))
+            }
+            0x68..=0x6e => {
+                let value = frame.args[usize::from(opcode - 0x68)]
                     .clone()
                     .ok_or_else(AmlError::invalid_state)?;
                 Ok((value, 1))
@@ -718,18 +1032,462 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         }
     }
 
+    fn assign_index_target<'a>(
+        &self,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+        value: AmlValue<'a>,
+    ) -> AmlResult<usize>
+    where
+        'blocks: 'a,
+    {
+        let state = state.ok_or_else(AmlError::unsupported)?;
+        let (base, base_consumed) =
+            self.eval_term_arg(&bytes[1..], host, Some(state), phase, frame)?;
+        let (index, index_consumed) =
+            self.eval_term_arg(&bytes[1 + base_consumed..], host, Some(state), phase, frame)?;
+        let target_consumed = self.assign_target(
+            &bytes[1 + base_consumed + index_consumed..],
+            host,
+            Some(state),
+            phase,
+            frame,
+            AmlValue::None,
+        )?;
+        let index = u8::try_from(index.as_integer()?).map_err(|_| AmlError::overflow())?;
+        match base {
+            AmlValue::PackageHandle(handle) => {
+                state.write_package_value(handle, index, self.runtime_aggregate_value(value)?)?;
+            }
+            AmlValue::BufferHandle(handle) => {
+                state.write_buffer_byte(handle, index, value.as_integer()? as u8)?;
+            }
+            _ => return Err(AmlError::unsupported()),
+        }
+        Ok(1 + base_consumed + index_consumed + target_consumed)
+    }
+
+    fn eval_name_initializer<'a>(
+        &self,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
+        let opcode = *bytes.first().ok_or_else(AmlError::truncated)?;
+        match opcode {
+            0x0d => self.eval_term_arg(bytes, host, state, phase, frame),
+            0x11 => self.eval_buffer_initializer(bytes, host, state, phase, frame),
+            0x12 => self.eval_package_initializer(bytes, host, state, phase, frame),
+            _ => Err(AmlError::unsupported()),
+        }
+    }
+
+    fn eval_package_initializer<'a>(
+        &self,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
+        let state = state.ok_or_else(AmlError::unsupported)?;
+        let pkg = AmlPkgLength::parse(&bytes[1..])?;
+        let object_end = 1 + pkg.value as usize;
+        let object_bytes = bytes.get(..object_end).ok_or_else(AmlError::truncated)?;
+        let count_offset = 1 + usize::from(pkg.encoded_bytes);
+        let element_count = *object_bytes
+            .get(count_offset)
+            .ok_or_else(AmlError::truncated)?;
+        let handle = state.create_package(element_count)?;
+        let mut cursor = count_offset + 1;
+        let mut index = 0_u8;
+        while index < element_count {
+            if cursor >= object_end {
+                break;
+            }
+            let (value, consumed) =
+                self.eval_term_arg(&object_bytes[cursor..], host, Some(state), phase, frame)?;
+            state.write_package_value(handle, index, self.runtime_aggregate_value(value)?)?;
+            cursor += consumed;
+            index += 1;
+        }
+        Ok((AmlValue::PackageHandle(handle), object_end))
+    }
+
+    fn eval_buffer_initializer<'a>(
+        &self,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
+        let state = state.ok_or_else(AmlError::unsupported)?;
+        let pkg = AmlPkgLength::parse(&bytes[1..])?;
+        let object_end = 1 + pkg.value as usize;
+        let object_bytes = bytes.get(..object_end).ok_or_else(AmlError::truncated)?;
+        let size_offset = 1 + usize::from(pkg.encoded_bytes);
+        let (len, len_consumed) = self.eval_term_arg(
+            &object_bytes[size_offset..],
+            host,
+            Some(state),
+            phase,
+            frame,
+        )?;
+        let len = u8::try_from(len.as_integer()?).map_err(|_| AmlError::overflow())?;
+        let handle = state.create_buffer(len)?;
+        let init_start = size_offset + len_consumed;
+        let init_bytes = object_bytes
+            .get(init_start..object_end)
+            .ok_or_else(AmlError::truncated)?;
+        state.copy_bytes_into_buffer(handle, init_bytes)?;
+        Ok((AmlValue::BufferHandle(handle), object_end))
+    }
+
+    fn eval_static_name_value<'a>(
+        &self,
+        location: crate::aml::AmlCodeLocation,
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(AmlValue<'a>, usize)>
+    where
+        'blocks: 'a,
+    {
+        let bytes = self
+            .namespace
+            .code_bytes(location)
+            .ok_or_else(AmlError::invalid_state)?;
+        let opcode = *bytes.first().ok_or_else(AmlError::truncated)?;
+        match opcode {
+            0x00 => Ok((AmlValue::integer(0, frame.integer_width), 1)),
+            0x01 => Ok((AmlValue::integer(1, frame.integer_width), 1)),
+            0xff => Ok((AmlValue::integer(u64::MAX, frame.integer_width), 1)),
+            0x0a => Ok((
+                AmlValue::integer(
+                    u64::from(*bytes.get(1).ok_or_else(AmlError::truncated)?),
+                    frame.integer_width,
+                ),
+                2,
+            )),
+            0x0b => {
+                let raw = bytes.get(1..3).ok_or_else(AmlError::truncated)?;
+                Ok((
+                    AmlValue::integer(
+                        u64::from(u16::from_le_bytes([raw[0], raw[1]])),
+                        frame.integer_width,
+                    ),
+                    3,
+                ))
+            }
+            0x0c => {
+                let raw = bytes.get(1..5).ok_or_else(AmlError::truncated)?;
+                Ok((
+                    AmlValue::integer(
+                        u64::from(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])),
+                        frame.integer_width,
+                    ),
+                    5,
+                ))
+            }
+            0x0e => {
+                let raw = bytes.get(1..9).ok_or_else(AmlError::truncated)?;
+                Ok((
+                    AmlValue::integer(
+                        u64::from_le_bytes([
+                            raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                        ]),
+                        frame.integer_width,
+                    ),
+                    9,
+                ))
+            }
+            0x0d => {
+                let Some(length) = bytes[1..].iter().position(|byte| *byte == 0) else {
+                    return Err(AmlError::truncated());
+                };
+                Ok((
+                    AmlValue::StaticString(crate::aml::AmlCodeLocation {
+                        block_index: location.block_index,
+                        span: crate::aml::AmlBytecodeSpan {
+                            offset: location.span.offset + 1,
+                            length: length as u32,
+                        },
+                    }),
+                    2 + length,
+                ))
+            }
+            0x11 => {
+                let pkg = AmlPkgLength::parse(&bytes[1..])?;
+                let object_end = 1 + pkg.value as usize;
+                let object_bytes = bytes.get(..object_end).ok_or_else(AmlError::truncated)?;
+                let size_offset = 1 + usize::from(pkg.encoded_bytes);
+                let (len, len_consumed) =
+                    self.eval_term_arg(&object_bytes[size_offset..], host, state, phase, frame)?;
+                let len = usize::try_from(len.as_integer()?).map_err(|_| AmlError::overflow())?;
+                let data_start = size_offset + len_consumed;
+                let raw = object_bytes
+                    .get(data_start..object_end)
+                    .ok_or_else(AmlError::truncated)?;
+                let len = core::cmp::min(len, raw.len());
+                Ok((AmlValue::Buffer(&raw[..len]), object_end))
+            }
+            0x12 => {
+                let pkg = AmlPkgLength::parse(&bytes[1..])?;
+                let object_end = 1 + pkg.value as usize;
+                Ok((
+                    AmlValue::StaticPackage(crate::aml::AmlCodeLocation {
+                        block_index: location.block_index,
+                        span: crate::aml::AmlBytecodeSpan {
+                            offset: location.span.offset,
+                            length: object_end as u32,
+                        },
+                    }),
+                    object_end,
+                ))
+            }
+            _ => Err(AmlError::unsupported()),
+        }
+    }
+
+    fn runtime_aggregate_value<'a>(
+        &self,
+        value: AmlValue<'a>,
+    ) -> AmlResult<crate::aml::AmlRuntimeAggregateValue> {
+        match value {
+            AmlValue::Integer(value) => Ok(crate::aml::AmlRuntimeAggregateValue::Integer(value)),
+            AmlValue::BufferHandle(handle) => {
+                Ok(crate::aml::AmlRuntimeAggregateValue::Buffer(handle))
+            }
+            _ => Err(AmlError::unsupported()),
+        }
+    }
+
+    fn copy_value_into_buffer<'a>(
+        &self,
+        state: &AmlRuntimeState<'_>,
+        handle: crate::aml::AmlRuntimeBufferHandle,
+        value: AmlValue<'a>,
+    ) -> AmlResult<()> {
+        match value {
+            AmlValue::String(value) => state.copy_bytes_into_buffer(handle, value.as_bytes()),
+            AmlValue::StaticString(location) => {
+                let bytes = self
+                    .namespace
+                    .code_bytes(location)
+                    .ok_or_else(AmlError::invalid_state)?;
+                state.copy_bytes_into_buffer(handle, bytes)
+            }
+            AmlValue::Buffer(value) => state.copy_bytes_into_buffer(handle, value),
+            AmlValue::BufferHandle(source) => {
+                let len = state
+                    .read_buffer_len(source)
+                    .ok_or_else(AmlError::invalid_state)?;
+                let mut bytes = [0_u8; crate::aml::AML_MAX_BUFFER_BYTES];
+                let mut index = 0_u8;
+                while index < len {
+                    bytes[usize::from(index)] = state
+                        .read_buffer_byte(source, index)
+                        .ok_or_else(AmlError::invalid_state)?;
+                    index += 1;
+                }
+                state.copy_bytes_into_buffer(handle, &bytes[..usize::from(len)])
+            }
+            _ => Err(AmlError::unsupported()),
+        }
+    }
+
+    fn value_size(
+        &self,
+        value: AmlValue<'_>,
+        state: Option<&AmlRuntimeState<'_>>,
+    ) -> AmlResult<usize> {
+        match value {
+            AmlValue::String(value) => Ok(value.len()),
+            AmlValue::StaticString(location) => self
+                .namespace
+                .code_bytes(location)
+                .map(|bytes| bytes.len())
+                .ok_or_else(AmlError::invalid_state),
+            AmlValue::Buffer(value) => Ok(value.len()),
+            AmlValue::BufferHandle(handle) => state
+                .and_then(|state| state.read_buffer_len(handle))
+                .map(usize::from)
+                .ok_or_else(AmlError::unsupported),
+            AmlValue::Package(value) => Ok(value.len()),
+            AmlValue::StaticPackage(location) => Ok(usize::from(static_package_element_count(
+                self.namespace
+                    .code_bytes(location)
+                    .ok_or_else(AmlError::invalid_state)?,
+            )?)),
+            AmlValue::PackageHandle(handle) => state
+                .and_then(|state| state.read_package_len(handle))
+                .map(usize::from)
+                .ok_or_else(AmlError::unsupported),
+            _ => Err(AmlError::unsupported()),
+        }
+    }
+
+    fn object_type_id(&self, value: AmlValue<'_>) -> u64 {
+        match value {
+            AmlValue::Integer(_) => 0x01,
+            AmlValue::String(_) | AmlValue::StaticString(_) => 0x02,
+            AmlValue::Buffer(_) | AmlValue::BufferHandle(_) => 0x03,
+            AmlValue::Package(_) | AmlValue::StaticPackage(_) | AmlValue::PackageHandle(_) => 0x04,
+            AmlValue::DebugObject => 0x10,
+            AmlValue::None => 0,
+        }
+    }
+
+    fn index_value<'a>(
+        &self,
+        base: AmlValue<'a>,
+        index: u64,
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<AmlValue<'a>>
+    where
+        'blocks: 'a,
+    {
+        let index = u8::try_from(index).map_err(|_| AmlError::overflow())?;
+        match base {
+            AmlValue::PackageHandle(handle) => {
+                let state = state.ok_or_else(AmlError::unsupported)?;
+                match state
+                    .read_package_value(handle, index)
+                    .ok_or_else(AmlError::invalid_state)?
+                {
+                    crate::aml::AmlRuntimeAggregateValue::Integer(value) => {
+                        Ok(AmlValue::integer(value, frame.integer_width))
+                    }
+                    crate::aml::AmlRuntimeAggregateValue::Buffer(handle) => {
+                        Ok(AmlValue::BufferHandle(handle))
+                    }
+                    crate::aml::AmlRuntimeAggregateValue::None => Ok(AmlValue::None),
+                }
+            }
+            AmlValue::StaticPackage(location) => {
+                self.static_package_element_value(location, index, host, state, phase, frame)
+            }
+            AmlValue::BufferHandle(handle) => {
+                let state = state.ok_or_else(AmlError::unsupported)?;
+                let value = state
+                    .read_buffer_byte(handle, index)
+                    .ok_or_else(AmlError::invalid_state)?;
+                Ok(AmlValue::integer(u64::from(value), frame.integer_width))
+            }
+            AmlValue::Buffer(bytes) => {
+                let value = *bytes
+                    .get(usize::from(index))
+                    .ok_or_else(AmlError::invalid_state)?;
+                Ok(AmlValue::integer(u64::from(value), frame.integer_width))
+            }
+            _ => Err(AmlError::unsupported()),
+        }
+    }
+
+    fn static_package_element_value<'a>(
+        &self,
+        location: crate::aml::AmlCodeLocation,
+        index: u8,
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<AmlValue<'a>>
+    where
+        'blocks: 'a,
+    {
+        let bytes = self
+            .namespace
+            .code_bytes(location)
+            .ok_or_else(AmlError::invalid_state)?;
+        let pkg = AmlPkgLength::parse(&bytes[1..])?;
+        let object_end = 1 + pkg.value as usize;
+        let object_bytes = bytes.get(..object_end).ok_or_else(AmlError::truncated)?;
+        let count_offset = 1 + usize::from(pkg.encoded_bytes);
+        let element_count = *object_bytes
+            .get(count_offset)
+            .ok_or_else(AmlError::truncated)?;
+        if index >= element_count {
+            return Err(AmlError::invalid_state());
+        }
+        let mut cursor = count_offset + 1;
+        let mut current = 0_u8;
+        while current < element_count {
+            let (value, consumed) = self.eval_static_name_value(
+                crate::aml::AmlCodeLocation {
+                    block_index: location.block_index,
+                    span: crate::aml::AmlBytecodeSpan {
+                        offset: location.span.offset + cursor as u32,
+                        length: (object_end - cursor) as u32,
+                    },
+                },
+                host,
+                state,
+                phase,
+                frame,
+            )?;
+            if current == index {
+                return Ok(value);
+            }
+            cursor += consumed;
+            current += 1;
+        }
+        Err(AmlError::truncated())
+    }
+
     fn read_field_value(
         &self,
         host: &dyn AmlRegionAccessHost,
         field: AmlFieldDescriptor,
     ) -> AmlResult<u64> {
         let region = self.resolve_region(field)?;
-        if field.bit_width == 0 || field.bit_width > 64 {
+        self.read_field_bits(host, region, u64::from(field.bit_offset), field.bit_width)
+    }
+
+    fn read_dynamic_field_value(
+        &self,
+        host: &dyn AmlRegionAccessHost,
+        field: AmlDynamicFieldBinding,
+    ) -> AmlResult<u64> {
+        self.read_field_bits(
+            host,
+            field.region,
+            u64::from(field.bit_offset),
+            field.bit_width,
+        )
+    }
+
+    fn read_field_bits(
+        &self,
+        host: &dyn AmlRegionAccessHost,
+        region: AmlOpRegionDescriptor,
+        start_bit: u64,
+        bit_width: u32,
+    ) -> AmlResult<u64> {
+        if bit_width == 0 || bit_width > 64 {
             return Err(AmlError::unsupported());
         }
-        let start_bit = u64::from(field.bit_offset);
         let end_bit = start_bit
-            .checked_add(u64::from(field.bit_width))
+            .checked_add(u64::from(bit_width))
             .ok_or_else(AmlError::overflow)?;
         let first_byte = start_bit / 8;
         let last_byte = end_bit.saturating_sub(1) / 8;
@@ -748,7 +1506,7 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         }
 
         let shift = start_bit % 8;
-        Ok((aggregate >> shift) & width_mask(field.bit_width))
+        Ok((aggregate >> shift) & width_mask(bit_width))
     }
 
     fn write_field_value(
@@ -758,18 +1516,52 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
         value: u64,
     ) -> AmlResult<()> {
         let region = self.resolve_region(field)?;
-        if field.bit_width == 0 || field.bit_width > 64 {
+        self.write_field_bits(
+            host,
+            region,
+            u64::from(field.bit_offset),
+            field.bit_width,
+            field.update,
+            value,
+        )
+    }
+
+    fn write_dynamic_field_value(
+        &self,
+        host: &dyn AmlRegionAccessHost,
+        field: AmlDynamicFieldBinding,
+        value: u64,
+    ) -> AmlResult<()> {
+        self.write_field_bits(
+            host,
+            field.region,
+            u64::from(field.bit_offset),
+            field.bit_width,
+            field.update,
+            value,
+        )
+    }
+
+    fn write_field_bits(
+        &self,
+        host: &dyn AmlRegionAccessHost,
+        region: AmlOpRegionDescriptor,
+        start_bit: u64,
+        bit_width: u32,
+        update: AmlFieldUpdateKind,
+        value: u64,
+    ) -> AmlResult<()> {
+        if bit_width == 0 || bit_width > 64 {
             return Err(AmlError::unsupported());
         }
-        let start_bit = u64::from(field.bit_offset);
         let end_bit = start_bit
-            .checked_add(u64::from(field.bit_width))
+            .checked_add(u64::from(bit_width))
             .ok_or_else(AmlError::overflow)?;
         let first_byte = start_bit / 8;
         let last_byte = end_bit.saturating_sub(1) / 8;
         self.ensure_region_byte_range(region, first_byte, last_byte)?;
 
-        let masked_value = value & width_mask(field.bit_width);
+        let masked_value = value & width_mask(bit_width);
         let shifted_value = masked_value
             .checked_shl((start_bit % 8) as u32)
             .unwrap_or(0);
@@ -782,7 +1574,7 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
             let byte_bit_start = (first_byte + index) * 8;
             let mask = byte_cover_mask(start_bit, end_bit, byte_bit_start);
             if mask != 0 {
-                let preserve_base = match field.update {
+                let preserve_base = match update {
                     AmlFieldUpdateKind::Preserve => {
                         self.read_region_byte(host, region, first_byte + index)?
                     }
@@ -794,6 +1586,154 @@ impl<'records, 'blocks> AmlPureEvaluator<'records, 'blocks> {
                 self.write_region_byte(host, region, first_byte + index, merged)?;
             }
             index += 1;
+        }
+        Ok(())
+    }
+
+    fn eval_dynamic_opregion_statement<'a>(
+        &self,
+        bytes: &'a [u8],
+        host: Option<&dyn AmlRegionAccessHost>,
+        state: Option<&AmlRuntimeState<'_>>,
+        phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(usize, AmlControl<'a>)>
+    where
+        'blocks: 'a,
+    {
+        let encoded = AmlEncodedNameString::parse(&bytes[2..])?;
+        let name = local_single_segment(encoded)?;
+        let space_index = 2 + usize::from(encoded.consumed_bytes);
+        let space = *bytes.get(space_index).ok_or_else(AmlError::truncated)?;
+        let (offset, offset_consumed) =
+            self.eval_term_arg(&bytes[space_index + 1..], host, state, phase, frame)?;
+        let length_index = space_index + 1 + offset_consumed;
+        let (length, length_consumed) =
+            self.eval_term_arg(&bytes[length_index..], host, state, phase, frame)?;
+        frame.bind_named_region(
+            name,
+            AmlOpRegionDescriptor {
+                node: crate::aml::AmlNamespaceNodeId(u32::MAX),
+                space: map_dynamic_address_space(space),
+                offset: Some(offset.as_integer()?),
+                length: Some(length.as_integer()?),
+            },
+        )?;
+        Ok((length_index + length_consumed, AmlControl::Continue))
+    }
+
+    fn eval_dynamic_field_statement<'a>(
+        &self,
+        bytes: &'a [u8],
+        _host: Option<&dyn AmlRegionAccessHost>,
+        _state: Option<&AmlRuntimeState<'_>>,
+        _phase: AmlExecutionPhase,
+        frame: &mut AmlEvalFrame<'a>,
+    ) -> AmlResult<(usize, AmlControl<'a>)>
+    where
+        'blocks: 'a,
+    {
+        let pkg = AmlPkgLength::parse(&bytes[2..])?;
+        let object_end = 2 + pkg.value as usize;
+        let object_bytes = bytes.get(..object_end).ok_or_else(AmlError::truncated)?;
+        let region_name_offset = 2 + usize::from(pkg.encoded_bytes);
+        let region_name = AmlEncodedNameString::parse(&object_bytes[region_name_offset..])?;
+        let region = self.resolve_dynamic_region_binding(region_name, frame)?;
+        let flags_index = region_name_offset + usize::from(region_name.consumed_bytes);
+        let flags = *object_bytes
+            .get(flags_index)
+            .ok_or_else(AmlError::truncated)?;
+        self.bind_dynamic_field_entries(
+            &object_bytes[..object_end],
+            flags_index + 1,
+            object_end,
+            region,
+            flags,
+            frame,
+        )?;
+        Ok((object_end, AmlControl::Continue))
+    }
+
+    fn resolve_dynamic_region_binding(
+        &self,
+        encoded: AmlEncodedNameString<'_>,
+        frame: &AmlEvalFrame<'_>,
+    ) -> AmlResult<AmlOpRegionDescriptor> {
+        if let Some(name) = local_single_segment_if_present(encoded) {
+            if let Some(region) = frame.named_region(name) {
+                return Ok(region);
+            }
+        }
+        let path = self
+            .namespace
+            .resolve_lookup_path(frame.current_scope_path, encoded)?;
+        let record = self
+            .namespace
+            .record_by_path(path)
+            .ok_or_else(AmlError::undefined_object)?;
+        match record.payload {
+            AmlNamespaceNodePayload::OpRegion(region) => Ok(region),
+            _ => Err(AmlError::unsupported()),
+        }
+    }
+
+    fn bind_dynamic_field_entries(
+        &self,
+        object_bytes: &[u8],
+        start_cursor: usize,
+        object_end: usize,
+        region: AmlOpRegionDescriptor,
+        flags: u8,
+        frame: &mut AmlEvalFrame<'_>,
+    ) -> AmlResult<()> {
+        let mut current_bit_offset = 0_u32;
+        let mut cursor = start_cursor;
+        while cursor < object_end {
+            let opcode = object_bytes[cursor];
+            match opcode {
+                0x00 => {
+                    let skip = AmlPkgLength::parse(&object_bytes[cursor + 1..])?;
+                    current_bit_offset = current_bit_offset.saturating_add(skip.value);
+                    cursor += 1 + usize::from(skip.encoded_bytes);
+                }
+                0x01 => {
+                    cursor += 3;
+                }
+                0x02 => {
+                    let name = AmlEncodedNameString::parse(&object_bytes[cursor + 1..])?;
+                    cursor += 1 + usize::from(name.consumed_bytes);
+                }
+                0x03 => {
+                    cursor += 4;
+                }
+                _ => {
+                    let seg = AmlNameSeg::from_bytes([
+                        object_bytes[cursor],
+                        *object_bytes
+                            .get(cursor + 1)
+                            .ok_or_else(AmlError::truncated)?,
+                        *object_bytes
+                            .get(cursor + 2)
+                            .ok_or_else(AmlError::truncated)?,
+                        *object_bytes
+                            .get(cursor + 3)
+                            .ok_or_else(AmlError::truncated)?,
+                    ])?;
+                    let width = AmlPkgLength::parse(&object_bytes[cursor + 4..])?;
+                    frame.bind_named_field(
+                        seg,
+                        AmlDynamicFieldBinding {
+                            region,
+                            bit_offset: current_bit_offset,
+                            bit_width: width.value,
+                            access: decode_dynamic_field_access(flags),
+                            update: decode_dynamic_field_update(flags),
+                        },
+                    )?;
+                    current_bit_offset = current_bit_offset.saturating_add(width.value);
+                    cursor += 4 + usize::from(width.encoded_bytes);
+                }
+            }
         }
         Ok(())
     }
@@ -910,7 +1850,30 @@ fn byte_cover_mask(start_bit: u64, end_bit: u64, byte_bit_start: u64) -> u8 {
 enum AmlControl<'a> {
     Continue,
     Blocked,
+    Break,
     Return(AmlValue<'a>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AmlNamedValueBinding<'a> {
+    name: AmlNameSeg,
+    binding: AmlNamedBinding<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AmlNamedBinding<'a> {
+    Value(AmlValue<'a>),
+    OpRegion(AmlOpRegionDescriptor),
+    Field(AmlDynamicFieldBinding),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AmlDynamicFieldBinding {
+    region: AmlOpRegionDescriptor,
+    bit_offset: u32,
+    bit_width: u32,
+    access: AmlFieldAccessKind,
+    update: AmlFieldUpdateKind,
 }
 
 struct AmlEvalFrame<'a> {
@@ -918,6 +1881,7 @@ struct AmlEvalFrame<'a> {
     current_scope_path: AmlResolvedNamePath,
     args: [Option<AmlValue<'a>>; 7],
     locals: [Option<AmlValue<'a>>; 8],
+    named_values: [Option<AmlNamedValueBinding<'a>>; 8],
     recursion_depth: u16,
 }
 
@@ -942,9 +1906,186 @@ impl<'a> AmlEvalFrame<'a> {
             current_scope_path,
             args: slots,
             locals: array::from_fn(|_| None),
+            named_values: array::from_fn(|_| None),
             recursion_depth,
         })
     }
+
+    fn bind_named_value(&mut self, name: AmlNameSeg, value: AmlValue<'a>) -> AmlResult<()> {
+        let mut empty_index = None;
+        let mut index = 0_usize;
+        while index < self.named_values.len() {
+            match &mut self.named_values[index] {
+                Some(binding) if binding.name == name => {
+                    binding.binding = AmlNamedBinding::Value(value);
+                    return Ok(());
+                }
+                None if empty_index.is_none() => empty_index = Some(index),
+                _ => {}
+            }
+            index += 1;
+        }
+        let Some(index) = empty_index else {
+            return Err(AmlError::overflow());
+        };
+        self.named_values[index] = Some(AmlNamedValueBinding {
+            name,
+            binding: AmlNamedBinding::Value(value),
+        });
+        Ok(())
+    }
+
+    fn bind_named_region(
+        &mut self,
+        name: AmlNameSeg,
+        region: AmlOpRegionDescriptor,
+    ) -> AmlResult<()> {
+        self.bind_named_binding(name, AmlNamedBinding::OpRegion(region))
+    }
+
+    fn bind_named_field(
+        &mut self,
+        name: AmlNameSeg,
+        field: AmlDynamicFieldBinding,
+    ) -> AmlResult<()> {
+        self.bind_named_binding(name, AmlNamedBinding::Field(field))
+    }
+
+    fn bind_named_binding(
+        &mut self,
+        name: AmlNameSeg,
+        binding: AmlNamedBinding<'a>,
+    ) -> AmlResult<()> {
+        let mut empty_index = None;
+        let mut index = 0_usize;
+        while index < self.named_values.len() {
+            match &mut self.named_values[index] {
+                Some(existing) if existing.name == name => {
+                    existing.binding = binding;
+                    return Ok(());
+                }
+                None if empty_index.is_none() => empty_index = Some(index),
+                _ => {}
+            }
+            index += 1;
+        }
+        let Some(index) = empty_index else {
+            return Err(AmlError::overflow());
+        };
+        self.named_values[index] = Some(AmlNamedValueBinding { name, binding });
+        Ok(())
+    }
+
+    fn named_value(&self, name: AmlNameSeg) -> Option<&AmlValue<'a>> {
+        self.named_values
+            .iter()
+            .flatten()
+            .find(|binding| binding.name == name)
+            .and_then(|binding| match &binding.binding {
+                AmlNamedBinding::Value(value) => Some(value),
+                _ => None,
+            })
+    }
+
+    fn named_region(&self, name: AmlNameSeg) -> Option<AmlOpRegionDescriptor> {
+        self.named_values
+            .iter()
+            .flatten()
+            .find(|binding| binding.name == name)
+            .and_then(|binding| match binding.binding {
+                AmlNamedBinding::OpRegion(region) => Some(region),
+                _ => None,
+            })
+    }
+
+    fn named_field(&self, name: AmlNameSeg) -> Option<AmlDynamicFieldBinding> {
+        self.named_values
+            .iter()
+            .flatten()
+            .find(|binding| binding.name == name)
+            .and_then(|binding| match binding.binding {
+                AmlNamedBinding::Field(field) => Some(field),
+                _ => None,
+            })
+    }
+
+    fn write_named_value(&mut self, name: AmlNameSeg, value: AmlValue<'a>) -> bool {
+        let mut index = 0_usize;
+        while index < self.named_values.len() {
+            if let Some(binding) = &mut self.named_values[index] {
+                if binding.name == name && matches!(binding.binding, AmlNamedBinding::Value(_)) {
+                    binding.binding = AmlNamedBinding::Value(value);
+                    return true;
+                }
+            }
+            index += 1;
+        }
+        false
+    }
+}
+
+fn local_single_segment(encoded: AmlEncodedNameString<'_>) -> AmlResult<AmlNameSeg> {
+    local_single_segment_if_present(encoded).ok_or_else(AmlError::unsupported)
+}
+
+fn local_single_segment_if_present(encoded: AmlEncodedNameString<'_>) -> Option<AmlNameSeg> {
+    if encoded.is_null
+        || encoded.anchor != crate::aml::AmlNameAnchor::Local
+        || encoded.parent_prefixes != 0
+        || encoded.segment_count != 1
+    {
+        return None;
+    }
+    encoded.segment(0)
+}
+
+fn map_dynamic_address_space(value: u8) -> AmlAddressSpaceId {
+    match value {
+        0x00 => AmlAddressSpaceId::SystemMemory,
+        0x01 => AmlAddressSpaceId::SystemIo,
+        0x02 => AmlAddressSpaceId::PciConfig,
+        0x03 => AmlAddressSpaceId::EmbeddedControl,
+        0x04 => AmlAddressSpaceId::SmBus,
+        0x05 => AmlAddressSpaceId::Cmos,
+        0x06 => AmlAddressSpaceId::PciBarTarget,
+        0x07 => AmlAddressSpaceId::Ipmi,
+        0x08 => AmlAddressSpaceId::Gpio,
+        0x09 => AmlAddressSpaceId::GenericSerialBus,
+        0x0a => AmlAddressSpaceId::PlatformCommChannel,
+        0x7f => AmlAddressSpaceId::FunctionalFixedHardware,
+        other => AmlAddressSpaceId::Oem(other),
+    }
+}
+
+fn decode_dynamic_field_access(flags: u8) -> AmlFieldAccessKind {
+    match flags & 0x0f {
+        0x00 => AmlFieldAccessKind::Any,
+        0x01 => AmlFieldAccessKind::Byte,
+        0x02 => AmlFieldAccessKind::Word,
+        0x03 => AmlFieldAccessKind::DWord,
+        0x04 => AmlFieldAccessKind::QWord,
+        0x05 => AmlFieldAccessKind::Buffer,
+        _ => AmlFieldAccessKind::Any,
+    }
+}
+
+fn decode_dynamic_field_update(flags: u8) -> AmlFieldUpdateKind {
+    match (flags >> 5) & 0b11 {
+        0b01 => AmlFieldUpdateKind::WriteAsOnes,
+        0b10 => AmlFieldUpdateKind::WriteAsZeros,
+        _ => AmlFieldUpdateKind::Preserve,
+    }
+}
+
+fn static_package_element_count(bytes: &[u8]) -> AmlResult<u8> {
+    let pkg = AmlPkgLength::parse(&bytes[1..])?;
+    let object_end = 1 + pkg.value as usize;
+    let object_bytes = bytes.get(..object_end).ok_or_else(AmlError::truncated)?;
+    let count_offset = 1 + usize::from(pkg.encoded_bytes);
+    object_bytes
+        .get(count_offset)
+        .copied()
+        .ok_or_else(AmlError::truncated)
 }
 
 #[cfg(test)]
@@ -1061,6 +2202,13 @@ mod tests {
         let else_pkg = pkg(0xA1, else_body);
         bytes.extend_from_slice(&else_pkg);
         bytes
+    }
+
+    fn while_loop(predicate: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(predicate);
+        payload.extend_from_slice(body);
+        pkg(0xA2, &payload)
     }
 
     fn definition_block(payload: &[u8]) -> AmlDefinitionBlock<'static> {
@@ -1400,6 +2548,81 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outcome.return_value, Some(AmlValue::Integer(2)));
+    }
+
+    #[test]
+    fn evaluator_handles_multiply_divide_while_and_break() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x08, b'C', b'N', b'T', b'0', 0x0A, 0x00]);
+        body.extend_from_slice(&method(
+            *b"MATH",
+            0,
+            &[
+                0x77, 0x0A, 0x6B, 0x0A, 0x0A, 0x60, // Multiply(0x6B, 0x0A, Local0)
+                0x72, 0x60, 0x0B, 0xAC, 0x0A, 0x60, // Add(Local0, 0x0AAC, Local0)
+                0x78, 0x60, 0x0A, 0x0A, 0x61, 0x62, // Divide(Local0, 10, Local1, Local2)
+                0x70, 0x00, b'C', b'N', b'T', b'0', // Store(Zero, CNT0)
+            ],
+        ));
+        body.extend_from_slice(&method(*b"LOOP", 0, &{
+            let mut bytes = Vec::new();
+            let if_break = pkg(0xA0, &[0x93, b'C', b'N', b'T', b'0', 0x0A, 0x03, 0xA5]);
+            bytes.extend_from_slice(&while_loop(
+                &[0x95, b'C', b'N', b'T', b'0', 0x0A, 0x05], // LLess(CNT0, 5)
+                &{
+                    let mut body = Vec::new();
+                    body.extend_from_slice(&[
+                        0x75, b'C', b'N', b'T', b'0', // Increment(CNT0)
+                    ]);
+                    body.extend_from_slice(&if_break);
+                    body
+                },
+            ));
+            bytes.extend_from_slice(&[0xA4, b'C', b'N', b'T', b'0']);
+            bytes
+        }));
+        let payload = scope(b"\\_SB_", &body);
+        let namespace = load_namespace(&payload);
+        let evaluator = AmlPureEvaluator::new(namespace);
+        let state_slots: [Cell<Option<AmlRuntimeIntegerSlot>>; 4] =
+            array::from_fn(|_| Cell::new(None));
+        let mutex_slots: [Cell<Option<AmlRuntimeMutexSlot>>; 2] =
+            array::from_fn(|_| Cell::new(None));
+        let state = AmlRuntimeState::new(&state_slots).with_mutexes(&mutex_slots);
+
+        let mut math_path = root_sb_path();
+        math_path
+            .push(crate::aml::AmlNameSeg::from_bytes(*b"MATH").unwrap())
+            .unwrap();
+        let math_node = namespace.record_by_path(math_path).unwrap().descriptor.id;
+        let math_outcome = evaluator
+            .evaluate_with_state(
+                &state,
+                AmlMethodInvocation {
+                    method: math_node,
+                    phase: AmlExecutionPhase::Runtime,
+                    args: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(math_outcome.return_value, None);
+
+        let mut loop_path = root_sb_path();
+        loop_path
+            .push(crate::aml::AmlNameSeg::from_bytes(*b"LOOP").unwrap())
+            .unwrap();
+        let loop_node = namespace.record_by_path(loop_path).unwrap().descriptor.id;
+        let loop_outcome = evaluator
+            .evaluate_with_state(
+                &state,
+                AmlMethodInvocation {
+                    method: loop_node,
+                    phase: AmlExecutionPhase::Runtime,
+                    args: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(loop_outcome.return_value, Some(AmlValue::Integer(3)));
     }
 
     #[test]

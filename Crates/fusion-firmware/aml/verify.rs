@@ -250,6 +250,7 @@ mod tests {
 
     use super::*;
     use crate::aml::{
+        dispatch_backend_notification_query,
         AmlAccessWidth,
         AmlDefinitionBlock,
         AmlDefinitionBlockSet,
@@ -260,12 +261,16 @@ mod tests {
         AmlNotifySink,
         AmlOspmInterface,
         AmlPureEvaluator,
+        AmlRuntimeAggregateValue,
+        AmlRuntimeBufferSlot,
+        AmlRuntimePackageSlot,
         AmlRuntimeIntegerSlot,
         AmlRuntimeMutexSlot,
         AmlRuntimeState,
         AmlSleepHost,
         AmlSystemIoHost,
         AmlSystemMemoryHost,
+        AmlVm,
         AmlValue,
         AmlEmbeddedControllerHost,
         AmlPciConfigHost,
@@ -281,6 +286,11 @@ mod tests {
 
     struct DellRegionHost {
         ec: RefCell<[u8; 256]>,
+        ec_stream_command: Cell<u8>,
+        ec_stream_index: Cell<u8>,
+        ec_streams: RefCell<Vec<(u8, Vec<u8>)>>,
+        memory: RefCell<Vec<(u64, u8)>>,
+        system_io_writes: RefCell<Vec<(u64, AmlAccessWidth, u64)>>,
         notifications: RefCell<Vec<AmlNotifyEvent>>,
     }
 
@@ -288,8 +298,61 @@ mod tests {
         fn default() -> Self {
             Self {
                 ec: RefCell::new([0; 256]),
+                ec_stream_command: Cell::new(0),
+                ec_stream_index: Cell::new(0),
+                ec_streams: RefCell::new(Vec::new()),
+                memory: RefCell::new(Vec::new()),
+                system_io_writes: RefCell::new(Vec::new()),
                 notifications: RefCell::new(Vec::new()),
             }
+        }
+    }
+
+    impl DellRegionHost {
+        fn read_memory_byte(&self, address: u64) -> u8 {
+            self.memory
+                .borrow()
+                .iter()
+                .find_map(|(entry_address, value)| (*entry_address == address).then_some(*value))
+                .unwrap_or(0)
+        }
+
+        fn write_memory_byte(&self, address: u64, value: u8) {
+            let mut memory = self.memory.borrow_mut();
+            if let Some((_, entry_value)) = memory
+                .iter_mut()
+                .find(|(entry_address, _)| *entry_address == address)
+            {
+                *entry_value = value;
+            } else {
+                memory.push((address, value));
+            }
+        }
+
+        fn set_ec_stream(&self, command: u8, bytes: &[u8]) {
+            let mut streams = self.ec_streams.borrow_mut();
+            if let Some((_, existing)) = streams
+                .iter_mut()
+                .find(|(stream_command, _)| *stream_command == command)
+            {
+                existing.clear();
+                existing.extend_from_slice(bytes);
+                return;
+            }
+            streams.push((command, bytes.to_vec()));
+        }
+
+        fn read_ec_stream_byte(&self) -> Option<u8> {
+            let command = self.ec_stream_command.get();
+            let index = usize::from(self.ec_stream_index.get());
+            let streams = self.ec_streams.borrow();
+            let (_, bytes) = streams
+                .iter()
+                .find(|(stream_command, _)| *stream_command == command)?;
+            let value = bytes.get(index).copied().unwrap_or(0);
+            self.ec_stream_index
+                .set(self.ec_stream_index.get().saturating_add(1));
+            Some(value)
         }
     }
 
@@ -323,31 +386,58 @@ mod tests {
     }
 
     impl AmlSystemMemoryHost for DellRegionHost {
-        fn read_system_memory(&self, _address: u64, _width: AmlAccessWidth) -> AmlResult<u64> {
-            Err(AmlError::unsupported())
+        fn read_system_memory(&self, address: u64, width: AmlAccessWidth) -> AmlResult<u64> {
+            let byte_count = match width {
+                AmlAccessWidth::Bits8 => 1_u64,
+                AmlAccessWidth::Bits16 => 2_u64,
+                AmlAccessWidth::Bits32 => 4_u64,
+                AmlAccessWidth::Bits64 => 8_u64,
+            };
+            let mut value = 0_u64;
+            let mut index = 0_u64;
+            while index < byte_count {
+                value |= u64::from(self.read_memory_byte(address + index)) << (index * 8);
+                index += 1;
+            }
+            Ok(value)
         }
 
         fn write_system_memory(
             &self,
-            _address: u64,
-            _width: AmlAccessWidth,
-            _value: u64,
+            address: u64,
+            width: AmlAccessWidth,
+            value: u64,
         ) -> AmlResult<()> {
-            Err(AmlError::unsupported())
+            let byte_count = match width {
+                AmlAccessWidth::Bits8 => 1_u64,
+                AmlAccessWidth::Bits16 => 2_u64,
+                AmlAccessWidth::Bits32 => 4_u64,
+                AmlAccessWidth::Bits64 => 8_u64,
+            };
+            let mut index = 0_u64;
+            while index < byte_count {
+                self.write_memory_byte(address + index, ((value >> (index * 8)) & 0xff) as u8);
+                index += 1;
+            }
+            Ok(())
         }
     }
 
     impl AmlSystemIoHost for DellRegionHost {
-        fn read_system_io(&self, _port: u64, _width: AmlAccessWidth) -> AmlResult<u64> {
+        fn read_system_io(&self, port: u64, _width: AmlAccessWidth) -> AmlResult<u64> {
+            if port == 0xB2 {
+                return Ok(0);
+            }
             Err(AmlError::unsupported())
         }
 
-        fn write_system_io(
-            &self,
-            _port: u64,
-            _width: AmlAccessWidth,
-            _value: u64,
-        ) -> AmlResult<()> {
+        fn write_system_io(&self, port: u64, width: AmlAccessWidth, value: u64) -> AmlResult<()> {
+            if port == 0xB2 {
+                self.system_io_writes
+                    .borrow_mut()
+                    .push((port, width, value));
+                return Ok(());
+            }
             Err(AmlError::unsupported())
         }
     }
@@ -369,10 +459,19 @@ mod tests {
 
     impl AmlEmbeddedControllerHost for DellRegionHost {
         fn read_embedded_controller(&self, register: u8) -> AmlResult<u8> {
+            if register == 0x2A {
+                if let Some(value) = self.read_ec_stream_byte() {
+                    return Ok(value);
+                }
+            }
             Ok(self.ec.borrow()[usize::from(register)])
         }
 
         fn write_embedded_controller(&self, register: u8, value: u8) -> AmlResult<()> {
+            if register == 0x04 {
+                self.ec_stream_command.set(value);
+                self.ec_stream_index.set(0);
+            }
             self.ec.borrow_mut()[usize::from(register)] = value;
             Ok(())
         }
@@ -401,6 +500,20 @@ mod tests {
         storage.resize_with(8192, MaybeUninit::uninit);
         let leaked_storage = Box::leak(storage.into_boxed_slice());
         plan.load_into(leaked_storage)
+    }
+
+    fn buffer_bytes(
+        state: &AmlRuntimeState<'_>,
+        handle: crate::aml::AmlRuntimeBufferHandle,
+    ) -> Vec<u8> {
+        let len = state.read_buffer_len(handle).unwrap_or(0);
+        let mut bytes = Vec::with_capacity(usize::from(len));
+        let mut index = 0_u8;
+        while index < len {
+            bytes.push(state.read_buffer_byte(handle, index).unwrap());
+            index += 1;
+        }
+        bytes
     }
 
     fn skipped_if_missing_dump() -> bool {
@@ -480,9 +593,13 @@ mod tests {
 
         let integer_slots: [Cell<Option<AmlRuntimeIntegerSlot>>; 16] =
             core::array::from_fn(|_| Cell::new(None));
+        let package_slots: [Cell<Option<AmlRuntimePackageSlot>>; 8] =
+            core::array::from_fn(|_| Cell::new(None));
         let mutex_slots: [Cell<Option<AmlRuntimeMutexSlot>>; 8] =
             core::array::from_fn(|_| Cell::new(None));
-        let state = AmlRuntimeState::new(&integer_slots).with_mutexes(&mutex_slots);
+        let state = AmlRuntimeState::new(&integer_slots)
+            .with_packages(&package_slots)
+            .with_mutexes(&mutex_slots);
         let host = DellRegionHost::default();
         host.ec.borrow_mut()[0] = 0x10;
         state.write_integer(ecrd_node, 1).unwrap();
@@ -500,5 +617,303 @@ mod tests {
             .unwrap();
         assert_eq!(lid_outcome.return_value, Some(AmlValue::Integer(1)));
         assert!(!lid_outcome.blocked);
+    }
+
+    #[test]
+    fn dell_captured_namespace_executes_psr_from_real_dsdt() {
+        if skipped_if_missing_dump() {
+            return;
+        }
+
+        const GNVS_BASE: u64 = 0xDA7FDE18;
+        const PWRS_OFFSET: u64 = 16;
+
+        let namespace = load_dell_namespace().expect("captured Dell namespace should load");
+        let evaluator = AmlPureEvaluator::new(namespace);
+        let psr_path = AmlResolvedNamePath::parse_text("\\_SB.AC._PSR").unwrap();
+        let ecrd_path = AmlResolvedNamePath::parse_text("\\ECRD").unwrap();
+        let psr_method = namespace.record_by_path(psr_path).unwrap().descriptor.id;
+        let ecrd_node = namespace.record_by_path(ecrd_path).unwrap().descriptor.id;
+
+        let integer_slots: [Cell<Option<AmlRuntimeIntegerSlot>>; 16] =
+            core::array::from_fn(|_| Cell::new(None));
+        let package_slots: [Cell<Option<AmlRuntimePackageSlot>>; 8] =
+            core::array::from_fn(|_| Cell::new(None));
+        let mutex_slots: [Cell<Option<AmlRuntimeMutexSlot>>; 8] =
+            core::array::from_fn(|_| Cell::new(None));
+        let state = AmlRuntimeState::new(&integer_slots)
+            .with_packages(&package_slots)
+            .with_mutexes(&mutex_slots);
+        let host = DellRegionHost::default();
+        state.write_integer(ecrd_node, 1).unwrap();
+        host.ec.borrow_mut()[6] = 1;
+        host.write_system_memory(GNVS_BASE + PWRS_OFFSET, AmlAccessWidth::Bits8, 1)
+            .unwrap();
+
+        let psr_outcome = evaluator
+            .evaluate_with_host_and_state(
+                &host,
+                &state,
+                AmlMethodInvocation {
+                    method: psr_method,
+                    phase: AmlExecutionPhase::Runtime,
+                    args: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(psr_outcome.return_value, Some(AmlValue::Integer(1)));
+        assert!(!psr_outcome.blocked);
+        assert!(host.notifications.borrow().is_empty());
+    }
+
+    #[test]
+    fn dell_captured_namespace_executes_bst_from_real_dsdt() {
+        if skipped_if_missing_dump() {
+            return;
+        }
+
+        let namespace = load_dell_namespace().expect("captured Dell namespace should load");
+        let evaluator = AmlPureEvaluator::new(namespace);
+        let bst_path = AmlResolvedNamePath::parse_text("\\_SB.BAT0._BST").unwrap();
+        let ecrd_path = AmlResolvedNamePath::parse_text("\\ECRD").unwrap();
+        let bst_method = namespace.record_by_path(bst_path).unwrap().descriptor.id;
+        let ecrd_node = namespace.record_by_path(ecrd_path).unwrap().descriptor.id;
+
+        let integer_slots: [Cell<Option<AmlRuntimeIntegerSlot>>; 16] =
+            core::array::from_fn(|_| Cell::new(None));
+        let package_slots: [Cell<Option<AmlRuntimePackageSlot>>; 8] =
+            core::array::from_fn(|_| Cell::new(None));
+        let mutex_slots: [Cell<Option<AmlRuntimeMutexSlot>>; 8] =
+            core::array::from_fn(|_| Cell::new(None));
+        let state = AmlRuntimeState::new(&integer_slots)
+            .with_packages(&package_slots)
+            .with_mutexes(&mutex_slots);
+        let host = DellRegionHost::default();
+        state.write_integer(ecrd_node, 1).unwrap();
+        host.ec.borrow_mut()[0] = 1;
+        host.ec.borrow_mut()[0x10] = 0x55;
+        host.ec.borrow_mut()[0x12] = 0x34;
+        host.ec.borrow_mut()[0x13] = 0x12;
+        host.ec.borrow_mut()[0x14] = 0xbc;
+        host.ec.borrow_mut()[0x15] = 0x9a;
+        host.ec.borrow_mut()[0x16] = 0x78;
+        host.ec.borrow_mut()[0x17] = 0x56;
+
+        let bst_outcome = evaluator
+            .evaluate_with_host_and_state(
+                &host,
+                &state,
+                AmlMethodInvocation {
+                    method: bst_method,
+                    phase: AmlExecutionPhase::Runtime,
+                    args: &[],
+                },
+            )
+            .unwrap();
+        let handle = match bst_outcome.return_value {
+            Some(AmlValue::PackageHandle(handle)) => handle,
+            other => panic!("expected package handle, got {other:?}"),
+        };
+        assert_eq!(state.read_package_len(handle), Some(4));
+        assert_eq!(state.read_package_integer(handle, 0), Some(0x55));
+        assert_eq!(state.read_package_integer(handle, 1), Some(0x1234));
+        assert_eq!(state.read_package_integer(handle, 2), Some(0x5678));
+        assert_eq!(state.read_package_integer(handle, 3), Some(0x9abc));
+        assert!(!bst_outcome.blocked);
+    }
+
+    #[test]
+    fn dell_captured_namespace_executes_bif_from_real_dsdt() {
+        if skipped_if_missing_dump() {
+            return;
+        }
+
+        let namespace = load_dell_namespace().expect("captured Dell namespace should load");
+        let evaluator = AmlPureEvaluator::new(namespace);
+        let bif_path = AmlResolvedNamePath::parse_text("\\_SB.BAT0._BIF").unwrap();
+        let ecrd_path = AmlResolvedNamePath::parse_text("\\ECRD").unwrap();
+        let bif_method = namespace.record_by_path(bif_path).unwrap().descriptor.id;
+        let ecrd_node = namespace.record_by_path(ecrd_path).unwrap().descriptor.id;
+
+        let integer_slots: [Cell<Option<AmlRuntimeIntegerSlot>>; 16] =
+            core::array::from_fn(|_| Cell::new(None));
+        let package_slots: [Cell<Option<AmlRuntimePackageSlot>>; 8] =
+            core::array::from_fn(|_| Cell::new(None));
+        let buffer_slots: [Cell<Option<AmlRuntimeBufferSlot>>; 16] =
+            core::array::from_fn(|_| Cell::new(None));
+        let mutex_slots: [Cell<Option<AmlRuntimeMutexSlot>>; 8] =
+            core::array::from_fn(|_| Cell::new(None));
+        let state = AmlRuntimeState::new(&integer_slots)
+            .with_packages(&package_slots)
+            .with_buffers(&buffer_slots)
+            .with_mutexes(&mutex_slots);
+        let host = DellRegionHost::default();
+        state.write_integer(ecrd_node, 1).unwrap();
+        host.ec.borrow_mut()[0x1E] = 0x78;
+        host.ec.borrow_mut()[0x1F] = 0x56;
+        host.ec.borrow_mut()[0x20] = 0x34;
+        host.ec.borrow_mut()[0x21] = 0x12;
+        host.ec.borrow_mut()[0x22] = 0xbc;
+        host.ec.borrow_mut()[0x23] = 0x9a;
+        host.ec.borrow_mut()[0x26] = 0x39;
+        host.ec.borrow_mut()[0x27] = 0x30;
+        host.ec.borrow_mut()[0x28] = 0x03;
+        host.ec.borrow_mut()[0x29] = 0x02;
+        host.set_ec_stream(1, b"Primary\0");
+
+        let bif_outcome = evaluator
+            .evaluate_with_host_and_state(
+                &host,
+                &state,
+                AmlMethodInvocation {
+                    method: bif_method,
+                    phase: AmlExecutionPhase::Runtime,
+                    args: &[],
+                },
+            )
+            .unwrap();
+        let handle = match bif_outcome.return_value {
+            Some(AmlValue::PackageHandle(handle)) => handle,
+            other => panic!("expected package handle, got {other:?}"),
+        };
+        assert_eq!(state.read_package_len(handle), Some(13));
+        assert_eq!(state.read_package_integer(handle, 0), Some(1));
+        assert_eq!(state.read_package_integer(handle, 1), Some(0x1234));
+        assert_eq!(state.read_package_integer(handle, 2), Some(0x5678));
+        assert_eq!(state.read_package_integer(handle, 3), Some(1));
+        assert_eq!(state.read_package_integer(handle, 4), Some(0x9abc));
+        assert_eq!(state.read_package_integer(handle, 5), Some(0x1234 / 0x0A));
+        assert_eq!(state.read_package_integer(handle, 6), Some(0x1234 / 0x21));
+        assert_eq!(state.read_package_integer(handle, 7), Some(0x1234 / 0x64));
+        assert_eq!(state.read_package_integer(handle, 8), Some(0x1234 / 0x64));
+
+        let model_handle = match state.read_package_value(handle, 9) {
+            Some(AmlRuntimeAggregateValue::Buffer(handle)) => handle,
+            other => panic!("expected model buffer handle, got {other:?}"),
+        };
+        let serial_handle = match state.read_package_value(handle, 10) {
+            Some(AmlRuntimeAggregateValue::Buffer(handle)) => handle,
+            other => panic!("expected serial buffer handle, got {other:?}"),
+        };
+        let chemistry_handle = match state.read_package_value(handle, 11) {
+            Some(AmlRuntimeAggregateValue::Buffer(handle)) => handle,
+            other => panic!("expected chemistry buffer handle, got {other:?}"),
+        };
+        let vendor_handle = match state.read_package_value(handle, 12) {
+            Some(AmlRuntimeAggregateValue::Buffer(handle)) => handle,
+            other => panic!("expected vendor buffer handle, got {other:?}"),
+        };
+
+        assert_eq!(buffer_bytes(&state, model_handle), b"Primary\0");
+        assert_eq!(buffer_bytes(&state, serial_handle), b"12345\0");
+        assert_eq!(buffer_bytes(&state, chemistry_handle), b"LION\0");
+        assert_eq!(buffer_bytes(&state, vendor_handle), b"Sanyo\0");
+        assert!(!bif_outcome.blocked);
+    }
+
+    #[test]
+    fn dell_captured_namespace_executes_crt_from_real_dsdt() {
+        if skipped_if_missing_dump() {
+            return;
+        }
+
+        let namespace = load_dell_namespace().expect("captured Dell namespace should load");
+        let evaluator = AmlPureEvaluator::new(namespace);
+        let crt_path = AmlResolvedNamePath::parse_text("\\_TZ.THM._CRT").unwrap();
+        let crt_method = namespace.record_by_path(crt_path).unwrap().descriptor.id;
+
+        let crt_outcome = evaluator
+            .evaluate(AmlMethodInvocation {
+                method: crt_method,
+                phase: AmlExecutionPhase::Runtime,
+                args: &[],
+            })
+            .unwrap();
+        assert_eq!(crt_outcome.return_value, Some(AmlValue::Integer(3802)));
+        assert!(!crt_outcome.blocked);
+    }
+
+    #[test]
+    fn dell_captured_namespace_executes_tmp_from_real_dsdt() {
+        if skipped_if_missing_dump() {
+            return;
+        }
+
+        const SMIB_BASE: u64 = 0xDA7D6000;
+
+        let namespace = load_dell_namespace().expect("captured Dell namespace should load");
+        let evaluator = AmlPureEvaluator::new(namespace);
+        let tmp_path = AmlResolvedNamePath::parse_text("\\_TZ.THM._TMP").unwrap();
+        let tmp_method = namespace.record_by_path(tmp_path).unwrap().descriptor.id;
+
+        let integer_slots: [Cell<Option<AmlRuntimeIntegerSlot>>; 16] =
+            core::array::from_fn(|_| Cell::new(None));
+        let package_slots: [Cell<Option<AmlRuntimePackageSlot>>; 8] =
+            core::array::from_fn(|_| Cell::new(None));
+        let mutex_slots: [Cell<Option<AmlRuntimeMutexSlot>>; 8] =
+            core::array::from_fn(|_| Cell::new(None));
+        let state = AmlRuntimeState::new(&integer_slots)
+            .with_packages(&package_slots)
+            .with_mutexes(&mutex_slots);
+        let host = DellRegionHost::default();
+
+        host.write_system_memory(SMIB_BASE + 0x04, AmlAccessWidth::Bits32, 0x0B90)
+            .unwrap();
+
+        let tmp_outcome = evaluator
+            .evaluate_with_host_and_state(
+                &host,
+                &state,
+                AmlMethodInvocation {
+                    method: tmp_method,
+                    phase: AmlExecutionPhase::Runtime,
+                    args: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(tmp_outcome.return_value, Some(AmlValue::Integer(0x0BA6)));
+        assert!(!tmp_outcome.blocked);
+        assert!(
+            host.system_io_writes
+                .borrow()
+                .iter()
+                .any(|(port, width, value)| *port == 0xB2
+                    && *width == AmlAccessWidth::Bits8
+                    && *value == 0x04)
+        );
+    }
+
+    #[test]
+    fn dell_captured_namespace_dispatches_q66_from_real_dsdt() {
+        if skipped_if_missing_dump() {
+            return;
+        }
+
+        let namespace = load_dell_namespace().expect("captured Dell namespace should load");
+        let ecrd_path = AmlResolvedNamePath::parse_text("\\ECRD").unwrap();
+        let ecrd_node = namespace.record_by_path(ecrd_path).unwrap().descriptor.id;
+
+        let integer_slots: [Cell<Option<AmlRuntimeIntegerSlot>>; 16] =
+            core::array::from_fn(|_| Cell::new(None));
+        let package_slots: [Cell<Option<AmlRuntimePackageSlot>>; 8] =
+            core::array::from_fn(|_| Cell::new(None));
+        let mutex_slots: [Cell<Option<AmlRuntimeMutexSlot>>; 8] =
+            core::array::from_fn(|_| Cell::new(None));
+        let state = AmlRuntimeState::new(&integer_slots)
+            .with_packages(&package_slots)
+            .with_mutexes(&mutex_slots);
+        let host = DellRegionHost::default();
+        let mut vm = AmlVm::default();
+
+        state.write_integer(ecrd_node, 1).unwrap();
+
+        let report = dispatch_backend_notification_query::<DellLatitudeE6430AcpiHardware>(
+            0, &mut vm, namespace, &host, &state, 0x66,
+        )
+        .unwrap();
+        assert_eq!(report.invoked, 1);
+        assert_eq!(report.blocked, 0);
+        assert_eq!(report.missing, 0);
+        assert!(host.notifications.borrow().is_empty());
     }
 }
