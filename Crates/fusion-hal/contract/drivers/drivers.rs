@@ -9,6 +9,9 @@ pub mod acpi;
 #[path = "bus/bus.rs"]
 pub mod bus;
 
+#[path = "display/display.rs"]
+pub mod display;
+
 #[path = "net/net.rs"]
 pub mod net;
 
