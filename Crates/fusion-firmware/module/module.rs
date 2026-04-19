@@ -92,6 +92,21 @@ impl RequestedFdxeRegistryCache {
 
                     let modules = unsafe { &mut *self.modules.get() };
                     let drivers = unsafe { &mut *self.drivers.get() };
+                    let inventory = match inventory_requested_static_modules() {
+                        Ok(inventory) => inventory,
+                        Err(error) => {
+                            self.state
+                                .store(REQUESTED_FDXE_REGISTRY_UNINITIALIZED, Ordering::Release);
+                            return Err(error.into());
+                        }
+                    };
+                    if inventory.module_count > modules.len()
+                        || inventory.driver_count > drivers.len()
+                    {
+                        self.state
+                            .store(REQUESTED_FDXE_REGISTRY_UNINITIALIZED, Ordering::Release);
+                        return Err(DriverError::resource_exhausted());
+                    }
                     let mut registry = FdxeRegistry::new(modules, drivers);
 
                     match register_requested_static_modules(&mut registry) {
@@ -135,6 +150,12 @@ static REQUESTED_FDXE_REGISTRY: RequestedFdxeRegistryCache = RequestedFdxeRegist
 #[cfg(target_os = "none")]
 pub fn register_static_modules(registry: &mut FdxeRegistry<'_>) -> Result<(), FdxeModuleError> {
     let modules = static_modules()?;
+    let inventory = inventory_static_modules(modules)?;
+    if inventory.module_count > registry.module_capacity()
+        || inventory.driver_count > registry.driver_capacity()
+    {
+        return Err(FdxeModuleError::capacity_exhausted());
+    }
     registry.register_static_modules(modules)
 }
 
@@ -150,16 +171,15 @@ pub fn register_requested_static_modules(
 ) -> Result<(), FdxeModuleError> {
     let modules = static_modules()?;
     let requested = requested_module_crate_names();
+    let inventory = inventory_requested_static_modules()?;
+    if inventory.module_count > registry.module_capacity()
+        || inventory.driver_count > registry.driver_capacity()
+    {
+        return Err(FdxeModuleError::capacity_exhausted());
+    }
 
     for entry in modules {
-        if entry.struct_size != core::mem::size_of::<FdxeStaticModuleV1>() {
-            return Err(FdxeModuleError::layout_mismatch());
-        }
-
-        let Some(module) = (unsafe { entry.module.as_ref() }) else {
-            return Err(FdxeModuleError::layout_mismatch());
-        };
-
+        let module = resolve_static_module(entry)?;
         let module_name = module.module_name()?;
         if requested.is_empty() || requested.iter().any(|requested| *requested == module_name) {
             registry.register_module(module)?;
@@ -167,6 +187,31 @@ pub fn register_requested_static_modules(
     }
 
     Ok(())
+}
+
+/// Inventories the statically embedded module set selected for this firmware image.
+///
+/// # Errors
+///
+/// Returns an error if the linker section layout is invalid or any selected module fails normal
+/// FDXE validation.
+#[cfg(target_os = "none")]
+pub fn inventory_requested_static_modules() -> Result<FdxeModuleInventory, FdxeModuleError> {
+    let modules = static_modules()?;
+    let requested = requested_module_crate_names();
+    let mut inventory = FdxeModuleInventory::default();
+
+    for entry in modules {
+        let module = resolve_static_module(entry)?;
+        let module_name = module.module_name()?;
+        if requested.is_empty() || requested.iter().any(|requested| *requested == module_name) {
+            let exported = module.drivers()?;
+            inventory.module_count += 1;
+            inventory.driver_count += exported.len();
+        }
+    }
+
+    Ok(inventory)
 }
 
 /// Returns the build-selected FDXE module crate names requested for this firmware image.
@@ -245,6 +290,12 @@ impl RequestedFdxeRegistryStorage {
     /// Returns one truthful driver error when module validation fails or the generated capacities
     /// are no longer honest for the selected firmware image.
     pub fn build_registry(&mut self) -> Result<FdxeRegistry<'_>, DriverError> {
+        let inventory = inventory_requested_static_modules()?;
+        if inventory.module_count > self.modules.len()
+            || inventory.driver_count > self.drivers.len()
+        {
+            return Err(DriverError::resource_exhausted());
+        }
         let mut registry = FdxeRegistry::new(&mut self.modules, &mut self.drivers);
         register_requested_static_modules(&mut registry)?;
         Ok(registry)

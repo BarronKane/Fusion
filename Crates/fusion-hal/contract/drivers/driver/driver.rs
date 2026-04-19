@@ -3,6 +3,8 @@
 use core::any::Any;
 use core::fmt;
 use core::marker::PhantomData;
+use core::mem::MaybeUninit;
+use core::slice;
 
 /// Canonical marketed identity for one driver family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -431,11 +433,17 @@ impl<D: DriverContract> ActiveDriver<D> {
     }
 }
 
+/// One densely stored registered driver slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DriverSlot {
+    key: &'static str,
+    metadata: &'static DriverMetadata,
+    state: DriverAvailability,
+}
+
 /// Fixed-capacity driver registry that mints registration proof tokens.
 pub struct DriverRegistry<const CAPACITY: usize> {
-    keys: [Option<&'static str>; CAPACITY],
-    metadata: [Option<&'static DriverMetadata>; CAPACITY],
-    states: [DriverAvailability; CAPACITY],
+    slots: [MaybeUninit<DriverSlot>; CAPACITY],
     len: usize,
 }
 
@@ -444,11 +452,30 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            keys: [None; CAPACITY],
-            metadata: [None; CAPACITY],
-            states: [DriverAvailability::Unknown; CAPACITY],
+            slots: [const { MaybeUninit::uninit() }; CAPACITY],
             len: 0,
         }
+    }
+
+    #[must_use]
+    fn slots(&self) -> &[DriverSlot] {
+        // SAFETY: the prefix `[0..len)` is initialized by `register`.
+        unsafe { slice::from_raw_parts(self.slots.as_ptr().cast(), self.len) }
+    }
+
+    #[must_use]
+    fn slots_mut(&mut self) -> &mut [DriverSlot] {
+        // SAFETY: the prefix `[0..len)` is initialized by `register`.
+        unsafe { slice::from_raw_parts_mut(self.slots.as_mut_ptr().cast(), self.len) }
+    }
+
+    #[must_use]
+    fn availability_snapshot(&self) -> [DriverAvailability; CAPACITY] {
+        let mut states = [DriverAvailability::Unknown; CAPACITY];
+        for (index, slot) in self.slots().iter().enumerate() {
+            states[index] = slot.state;
+        }
+        states
     }
 
     /// Returns the number of registered drivers currently tracked.
@@ -466,34 +493,30 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
     /// Returns whether one canonical driver key is already registered.
     #[must_use]
     pub fn contains_key(&self, key: &'static str) -> bool {
-        self.keys[..self.len]
-            .iter()
-            .flatten()
-            .any(|registered| *registered == key)
+        self.slots().iter().any(|registered| registered.key == key)
     }
 
     /// Returns whether one contract key is exported by any registered driver family.
     #[must_use]
     pub fn contains_contract(&self, contract: DriverContractKey) -> bool {
-        self.metadata[..self.len]
+        self.slots()
             .iter()
-            .flatten()
-            .any(|metadata| metadata.contracts.contains(&contract))
+            .any(|slot| slot.metadata.contracts.contains(&contract))
     }
 
     /// Returns the validated availability state for one registered driver proof token.
     #[must_use]
     pub fn state<D: DriverContract>(&self, registered: &RegisteredDriver<D>) -> DriverAvailability {
-        self.states[registered.slot()]
+        self.slots()[registered.slot()].state
     }
 
     /// Returns the validated availability state for one driver key when registered.
     #[must_use]
     pub fn state_for_key(&self, key: &'static str) -> Option<DriverAvailability> {
-        self.keys[..self.len]
+        self.slots()
             .iter()
-            .position(|registered| registered.is_some_and(|registered| registered == key))
-            .map(|slot| self.states[slot])
+            .find(|slot| slot.key == key)
+            .map(|slot| slot.state)
     }
 
     /// Recomputes validated driver readiness across all registered families.
@@ -502,28 +525,30 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
     /// - `Ready` when their requirements are satisfied, they do not violate singleton authority,
     ///   and they are either intrinsically useful or consumed by another ready driver.
     /// - `Inop(...)` otherwise.
-    pub fn validate(&mut self) {
-        for state in &mut self.states[..self.len] {
-            *state = DriverAvailability::Ready;
+    pub fn validate(&mut self) -> Result<(), DriverError> {
+        for slot in self.slots_mut() {
+            slot.state = DriverAvailability::Ready;
         }
 
-        loop {
-            let previous = self.states;
+        for _pass in 0..=self.len {
+            let previous = self.availability_snapshot();
             let mut changed = false;
 
             for slot in 0..self.len {
-                let metadata = self.metadata[slot].expect("registered metadata");
+                let metadata = self.slots()[slot].metadata;
                 let desired = self.compute_state(slot, &previous, metadata);
-                if self.states[slot] != desired {
-                    self.states[slot] = desired;
+                if self.slots()[slot].state != desired {
+                    self.slots_mut()[slot].state = desired;
                     changed = true;
                 }
             }
 
             if !changed {
-                break;
+                return Ok(());
             }
         }
+
+        Err(DriverError::state_conflict())
     }
 
     fn compute_state(
@@ -556,11 +581,10 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
     }
 
     fn has_prior_singleton_conflict(&self, slot: usize, singleton_class: &'static str) -> bool {
-        self.metadata[..self.len]
+        self.slots()
             .iter()
             .take(slot)
-            .flatten()
-            .any(|metadata| metadata.singleton_class == Some(singleton_class))
+            .any(|driver| driver.metadata.singleton_class == Some(singleton_class))
     }
 
     fn has_ready_contract_provider(
@@ -569,13 +593,13 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
         states: &[DriverAvailability; CAPACITY],
         required: DriverContractKey,
     ) -> bool {
-        self.metadata[..self.len]
+        self.slots()
             .iter()
             .enumerate()
             .filter(|(index, _)| *index != slot)
-            .filter_map(|(index, metadata)| metadata.map(|metadata| (index, metadata)))
-            .any(|(index, metadata)| {
-                states[index] == DriverAvailability::Ready && metadata.contracts.contains(&required)
+            .any(|(index, driver)| {
+                states[index] == DriverAvailability::Ready
+                    && driver.metadata.contracts.contains(&required)
             })
     }
 
@@ -585,14 +609,14 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
         states: &[DriverAvailability; CAPACITY],
         exported_contracts: &'static [DriverContractKey],
     ) -> bool {
-        self.metadata[..self.len]
+        self.slots()
             .iter()
             .enumerate()
             .filter(|(index, _)| *index != slot)
-            .filter_map(|(index, metadata)| metadata.map(|metadata| (index, metadata)))
-            .any(|(index, metadata)| {
+            .any(|(index, driver)| {
                 states[index] == DriverAvailability::Ready
-                    && metadata
+                    && driver
+                        .metadata
                         .required_contracts
                         .iter()
                         .any(|required| exported_contracts.contains(required))
@@ -617,9 +641,11 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
         }
 
         let slot = self.len;
-        self.keys[slot] = Some(metadata.key);
-        self.metadata[slot] = Some(metadata);
-        self.states[slot] = DriverAvailability::Unknown;
+        self.slots[slot].write(DriverSlot {
+            key: metadata.key,
+            metadata,
+            state: DriverAvailability::Unknown,
+        });
         self.len += 1;
 
         Ok(RegisteredDriver { slot, registration })
@@ -1038,7 +1064,9 @@ mod tests {
             .register::<LeafDriver>()
             .expect("leaf driver should register");
 
-        registry.validate();
+        registry
+            .validate()
+            .expect("validation should classify missing dependency");
 
         assert_eq!(
             registry.state(&leaf),
@@ -1058,7 +1086,9 @@ mod tests {
             .register::<LeafDriver>()
             .expect("leaf driver should register");
 
-        registry.validate();
+        registry
+            .validate()
+            .expect("validation should classify satisfied dependency");
 
         assert_eq!(registry.state(&root), DriverAvailability::Ready);
         assert_eq!(registry.state(&leaf), DriverAvailability::Ready);
@@ -1074,7 +1104,9 @@ mod tests {
             .register::<TopDriver>()
             .expect("top driver should register");
 
-        registry.validate();
+        registry
+            .validate()
+            .expect("validation should classify dependency cascade");
 
         assert_eq!(
             registry.state(&middle),
@@ -1100,7 +1132,9 @@ mod tests {
             .register::<PortDriver>()
             .expect("port driver should register");
 
-        registry.validate();
+        registry
+            .validate()
+            .expect("validation should classify consumed layout");
 
         assert_eq!(registry.state(&layout), DriverAvailability::Ready);
         assert_eq!(registry.state(&port), DriverAvailability::Ready);
@@ -1113,7 +1147,9 @@ mod tests {
             .register::<LayoutDriver>()
             .expect("layout driver should register");
 
-        registry.validate();
+        registry
+            .validate()
+            .expect("validation should classify unconsumed transient root");
 
         assert_eq!(
             registry.state(&layout),
@@ -1134,7 +1170,9 @@ mod tests {
             .register::<OtherLayoutDriver>()
             .expect("second layout driver should register");
 
-        registry.validate();
+        registry
+            .validate()
+            .expect("validation should classify singleton conflict");
 
         assert_eq!(registry.state(&layout), DriverAvailability::Ready);
         assert_eq!(registry.state(&port), DriverAvailability::Ready);

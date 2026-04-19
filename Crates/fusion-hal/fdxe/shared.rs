@@ -347,6 +347,46 @@ pub enum FdxeModuleErrorKind {
     CapacityExhausted,
 }
 
+/// Counted inventory for one validated FDXE module set before registry population.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct FdxeModuleInventory {
+    pub module_count: usize,
+    pub driver_count: usize,
+}
+
+fn resolve_static_module(entry: &FdxeStaticModuleV1) -> Result<&'static FdxeModuleV1, FdxeModuleError> {
+    if entry.struct_size != size_of::<FdxeStaticModuleV1>() {
+        return Err(FdxeModuleError::layout_mismatch());
+    }
+
+    let Some(module) = (unsafe { entry.module.as_ref() }) else {
+        return Err(FdxeModuleError::layout_mismatch());
+    };
+
+    Ok(module)
+}
+
+/// Inventories one caller-supplied slice of statically embedded module records.
+///
+/// # Errors
+///
+/// Returns an error if any record is malformed or any embedded module fails normal FDXE
+/// validation.
+pub fn inventory_static_modules(
+    modules: &[FdxeStaticModuleV1],
+) -> Result<FdxeModuleInventory, FdxeModuleError> {
+    let mut inventory = FdxeModuleInventory::default();
+
+    for entry in modules {
+        let module = resolve_static_module(entry)?;
+        let exported_drivers = module.drivers()?;
+        inventory.module_count += 1;
+        inventory.driver_count += exported_drivers.len();
+    }
+
+    Ok(inventory)
+}
+
 /// No-alloc runtime registry for discovered FDXE modules and exported drivers.
 pub struct FdxeRegistry<'a> {
     modules: &'a mut [MaybeUninit<&'static FdxeModuleV1>],
@@ -370,6 +410,18 @@ impl<'a> FdxeRegistry<'a> {
             driver_count: 0,
             marker: PhantomData,
         }
+    }
+
+    /// Returns the maximum number of module headers this registry can hold.
+    #[must_use]
+    pub const fn module_capacity(&self) -> usize {
+        self.modules.len()
+    }
+
+    /// Returns the maximum number of exported driver entries this registry can hold.
+    #[must_use]
+    pub const fn driver_capacity(&self) -> usize {
+        self.drivers.len()
     }
 
     /// Registers one validated module header and all of its exported driver families.
@@ -421,14 +473,7 @@ impl<'a> FdxeRegistry<'a> {
         modules: &[FdxeStaticModuleV1],
     ) -> Result<(), FdxeModuleError> {
         for entry in modules {
-            if entry.struct_size != size_of::<FdxeStaticModuleV1>() {
-                return Err(FdxeModuleError::layout_mismatch());
-            }
-
-            let Some(module) = (unsafe { entry.module.as_ref() }) else {
-                return Err(FdxeModuleError::layout_mismatch());
-            };
-
+            let module = resolve_static_module(entry)?;
             self.register_module(module)?;
         }
 
@@ -459,6 +504,7 @@ mod tests {
         DriverClass,
         DriverContractKey,
         DriverIdentity,
+        FdxeModuleInventory,
         DriverMetadata,
         DriverUsefulness,
         FDXE_MODULE_V1_ABI_VERSION,
@@ -468,6 +514,7 @@ mod tests {
         FdxeModuleV1,
         FdxeRegistry,
         FdxeStaticModuleV1,
+        inventory_static_modules,
     };
 
     const CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("test.driver")];
@@ -551,5 +598,19 @@ mod tests {
 
         assert_eq!(registry.modules().len(), 1);
         assert_eq!(registry.drivers().len(), 1);
+    }
+
+    #[test]
+    fn inventory_counts_static_modules_and_drivers() {
+        let modules = [FdxeStaticModuleV1::new(&MODULE)];
+        let inventory = inventory_static_modules(&modules).expect("inventory should succeed");
+
+        assert_eq!(
+            inventory,
+            FdxeModuleInventory {
+                module_count: 1,
+                driver_count: 1,
+            }
+        );
     }
 }
