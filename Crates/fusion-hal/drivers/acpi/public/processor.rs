@@ -23,6 +23,7 @@ use crate::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
@@ -30,6 +31,7 @@ use crate::drivers::acpi::public::interface::contract::AcpiProcessorHardware;
 use crate::drivers::acpi::public::unsupported;
 
 const PROCESSOR_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("acpi.processor")];
+const PROCESSOR_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const PROCESSOR_DRIVER_BINDING_SOURCES: [DriverBindingSource; 2] =
     [DriverBindingSource::Acpi, DriverBindingSource::Manual];
 const PROCESSOR_DRIVER_METADATA: DriverMetadata = DriverMetadata {
@@ -43,6 +45,9 @@ const PROCESSOR_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         advertised_interface: "ACPI processor",
     },
     contracts: &PROCESSOR_DRIVER_CONTRACTS,
+    required_contracts: &PROCESSOR_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
     binding_sources: &PROCESSOR_DRIVER_BINDING_SOURCES,
     description: "Canonical ACPI processor driver layered over one selected ACPI backend",
 };

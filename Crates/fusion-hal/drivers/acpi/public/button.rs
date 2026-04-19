@@ -23,6 +23,7 @@ use crate::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
@@ -30,6 +31,7 @@ use crate::drivers::acpi::public::interface::contract::AcpiButtonHardware;
 use crate::drivers::acpi::public::unsupported;
 
 const BUTTON_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("acpi.button")];
+const BUTTON_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const BUTTON_DRIVER_BINDING_SOURCES: [DriverBindingSource; 2] =
     [DriverBindingSource::Acpi, DriverBindingSource::Manual];
 const BUTTON_DRIVER_METADATA: DriverMetadata = DriverMetadata {
@@ -43,6 +45,9 @@ const BUTTON_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         advertised_interface: "ACPI button",
     },
     contracts: &BUTTON_DRIVER_CONTRACTS,
+    required_contracts: &BUTTON_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
     binding_sources: &BUTTON_DRIVER_BINDING_SOURCES,
     description: "Canonical ACPI button/switch driver layered over one selected ACPI backend",
 };

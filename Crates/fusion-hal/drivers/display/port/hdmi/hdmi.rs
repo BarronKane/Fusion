@@ -1,8 +1,10 @@
-//! DVI display endpoint driver family.
+//! HDMI display endpoint driver family.
+
+#![cfg_attr(not(feature = "std"), no_std)]
 
 use core::marker::PhantomData;
 
-use super::edid::{
+use fusion_hal::drivers::display::shared::edid::{
     contains_mode,
     matches_requested_color_space,
     matches_requested_quantization,
@@ -13,11 +15,11 @@ use super::edid::{
     select_quantization,
     ParsedEdidSink,
 };
-use super::support::{
+use fusion_hal::drivers::display::shared::support::{
     map_config_error,
     map_display_error,
 };
-use crate::contract::drivers::display::{
+use fusion_hal::contract::drivers::display::{
     DisplayActiveConfig,
     DisplayConfigError,
     DisplayConnectorKind,
@@ -50,7 +52,7 @@ use crate::contract::drivers::display::{
     DisplayTiming,
     DisplayUploadReport,
 };
-use crate::contract::drivers::driver::{
+use fusion_hal::contract::drivers::driver::{
     ActiveDriver,
     DriverActivation,
     DriverActivationContext,
@@ -63,13 +65,20 @@ use crate::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
+#[cfg(any(target_os = "none", feature = "fdxe-module"))]
+mod fdxe;
+#[path = "interface/interface.rs"]
+pub mod interface;
+mod unsupported;
+
 #[cfg(test)]
-use super::edid::EDID_BLOCK_BYTES;
+use fusion_hal::drivers::display::shared::edid::EDID_BLOCK_BYTES;
 #[cfg(test)]
-use crate::contract::drivers::display::{
+use fusion_hal::contract::drivers::display::{
     DisplayColorSpace,
     DisplayColorSpaceSupport,
     DisplayPixelFormat,
@@ -77,12 +86,16 @@ use crate::contract::drivers::display::{
     DisplayQuantizationSupport,
     DisplayRawDescriptorKind,
 };
+#[cfg(test)]
+use fusion_hal::drivers::display::shared::edid::lookup_cea_mode;
 
-const DVI_DRIVER_CONTRACTS: [DriverContractKey; 2] = [
+const HDMI_DRIVER_CONTRACTS: [DriverContractKey; 2] = [
     DriverContractKey("display.control"),
     DriverContractKey("display.port"),
 ];
-const DVI_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
+const HDMI_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 1] =
+    [DriverContractKey("display.layout")];
+const HDMI_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
     DriverBindingSource::Acpi,
@@ -90,40 +103,43 @@ const DVI_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::Pci,
     DriverBindingSource::Manual,
 ];
-const DVI_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "display.port.dvi",
+const HDMI_DRIVER_METADATA: DriverMetadata = DriverMetadata {
+    key: "display.port.hdmi",
     class: DriverClass::Display,
     identity: DriverIdentity {
         vendor: "Fusion",
         family: Some("Display"),
         package: None,
-        product: "DVI driver",
-        advertised_interface: "DVI endpoint",
+        product: "HDMI driver",
+        advertised_interface: "HDMI endpoint",
     },
-    contracts: &DVI_DRIVER_CONTRACTS,
-    binding_sources: &DVI_DRIVER_BINDING_SOURCES,
-    description: "DVI display endpoint driver layered over one selected DVI hardware substrate",
+    contracts: &HDMI_DRIVER_CONTRACTS,
+    required_contracts: &HDMI_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
+    binding_sources: &HDMI_DRIVER_BINDING_SOURCES,
+    description: "HDMI display endpoint driver layered over one selected HDMI hardware substrate",
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DviBinding {
+pub struct HdmiBinding {
     pub provider: u8,
     pub output_name: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct DviRuntimeState {
+pub struct HdmiRuntimeState {
     pub enabled: bool,
     pub blanked: bool,
     pub active_config: Option<DisplayActiveConfig>,
 }
 
-/// Hardware-facing DVI seam consumed by the DVI driver family.
+/// Hardware-facing HDMI seam consumed by the HDMI driver family.
 ///
-/// The public DVI driver owns EDID parsing, sink identity, capability derivation, negotiation,
+/// The public HDMI driver owns EDID parsing, sink identity, capability derivation, negotiation,
 /// and config validation. The backend only needs to surface raw descriptors, connector truth, and
 /// the actual output programming/presentation operations.
-pub trait DviHardware {
+pub trait HdmiHardware {
     fn provider_count() -> u8;
     fn output_descriptor(provider: u8) -> Option<&'static DisplayOutputDescriptor>;
 
@@ -160,7 +176,7 @@ pub trait DviHardware {
 
     fn port_descriptor(provider: u8) -> DisplayResult<DisplayPortDescriptor>;
     fn port_capabilities(provider: u8) -> DisplayResult<DisplayPortCapabilities>;
-    fn runtime_state(provider: u8) -> DisplayResult<DviRuntimeState>;
+    fn runtime_state(provider: u8) -> DisplayResult<HdmiRuntimeState>;
     fn set_config(provider: u8, config: &DisplayActiveConfig) -> DisplayResult<()>;
     fn enable(provider: u8) -> DisplayResult<()>;
     fn disable(provider: u8) -> DisplayResult<()>;
@@ -185,9 +201,9 @@ pub trait DviHardware {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct UnsupportedDviHardware;
+pub struct UnsupportedHdmiHardware;
 
-impl DviHardware for UnsupportedDviHardware {
+impl HdmiHardware for UnsupportedHdmiHardware {
     fn provider_count() -> u8 {
         0
     }
@@ -212,7 +228,7 @@ impl DviHardware for UnsupportedDviHardware {
         Err(DisplayError::unsupported())
     }
 
-    fn runtime_state(_provider: u8) -> DisplayResult<DviRuntimeState> {
+    fn runtime_state(_provider: u8) -> DisplayResult<HdmiRuntimeState> {
         Err(DisplayError::unsupported())
     }
 
@@ -272,18 +288,18 @@ impl DviHardware for UnsupportedDviHardware {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DviDriver<H: DviHardware = UnsupportedDviHardware> {
+pub struct HdmiDriver<H: HdmiHardware = unsupported::UnsupportedHdmiHardware> {
     marker: PhantomData<fn() -> H>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DviDriverContext<H: DviHardware = UnsupportedDviHardware> {
+pub struct HdmiDriverContext<H: HdmiHardware = unsupported::UnsupportedHdmiHardware> {
     marker: PhantomData<fn() -> H>,
 }
 
-impl<H> DviDriverContext<H>
+impl<H> HdmiDriverContext<H>
 where
-    H: DviHardware,
+    H: HdmiHardware,
 {
     #[must_use]
     pub const fn new() -> Self {
@@ -295,25 +311,24 @@ where
 
 #[must_use]
 pub const fn driver_metadata() -> &'static DriverMetadata {
-    &DVI_DRIVER_METADATA
+    &HDMI_DRIVER_METADATA
 }
 
-type DviSinkCache = ParsedEdidSink;
+type HdmiSinkCache = ParsedEdidSink;
 
 #[derive(Debug, Clone)]
-pub struct Dvi<H: DviHardware = UnsupportedDviHardware> {
+pub struct Hdmi<H: HdmiHardware = unsupported::UnsupportedHdmiHardware> {
     provider: u8,
-    sink: DviSinkCache,
+    sink: HdmiSinkCache,
     _hardware: PhantomData<H>,
 }
 
-impl<H> Dvi<H>
+impl<H> Hdmi<H>
 where
-    H: DviHardware,
+    H: HdmiHardware,
 {
     fn try_new(provider: u8) -> DisplayResult<Self> {
-        let mut sink = parse_edid_sink(DisplayConnectorKind::Dvi, H::raw_descriptors(provider)?);
-        sink.constrain_for_rgb_only();
+        let sink = parse_edid_sink(DisplayConnectorKind::Hdmi, H::raw_descriptors(provider)?);
         Ok(Self {
             provider,
             sink,
@@ -323,10 +338,9 @@ where
 
     fn refresh_sink(&mut self) -> DisplayResult<()> {
         self.sink = parse_edid_sink(
-            DisplayConnectorKind::Dvi,
+            DisplayConnectorKind::Hdmi,
             H::raw_descriptors(self.provider)?,
         );
-        self.sink.constrain_for_rgb_only();
         Ok(())
     }
 
@@ -334,7 +348,7 @@ where
         &self,
         request: &DisplayNegotiationRequest<'_>,
     ) -> DisplayResult<DisplayNegotiationResult> {
-        if self.sink.mode_count == 0 || request.require_audio || request.prefer_hdr {
+        if self.sink.mode_count == 0 {
             return Err(DisplayError::negotiation_failed());
         }
 
@@ -355,9 +369,26 @@ where
         let quantization =
             select_quantization(request.preferred_quantization, self.sink.quantization);
 
+        let audio_enabled = if request.require_audio {
+            if self.sink.audio.basic_pcm || self.sink.audio.max_channels > 0 {
+                true
+            } else {
+                return Err(DisplayError::negotiation_failed());
+            }
+        } else {
+            false
+        };
+
+        let hdr_enabled = request.prefer_hdr
+            && (self.sink.hdr.hdr_static_metadata
+                || self.sink.hdr.hdr10
+                || self.sink.hdr.hybrid_log_gamma);
+        let vrr_enabled = request.prefer_vrr && self.sink.vrr.adaptive_sync;
+
         let reason = if contains_mode(request.preferred_modes, selected_mode)
             && matches_requested_color_space(request.preferred_color_spaces, color_space)
             && matches_requested_quantization(request.preferred_quantization, quantization)
+            && (!request.require_audio || audio_enabled)
         {
             DisplayNegotiationReason::Requested
         } else if selected_mode.preferred {
@@ -373,9 +404,9 @@ where
                 pixel_format,
                 color_space,
                 quantization,
-                audio_enabled: false,
-                hdr_enabled: false,
-                vrr_enabled: false,
+                audio_enabled,
+                hdr_enabled,
+                vrr_enabled,
             },
             reason,
         })
@@ -437,7 +468,18 @@ where
         if !self.sink.quantization.supports(config.quantization) {
             return Err(DisplayConfigError::UnsupportedQuantization);
         }
-        if config.audio_enabled || config.hdr_enabled || config.vrr_enabled {
+        if config.audio_enabled && !(self.sink.audio.basic_pcm || self.sink.audio.max_channels > 0)
+        {
+            return Err(DisplayConfigError::UnsupportedMode);
+        }
+        if config.hdr_enabled
+            && !(self.sink.hdr.hdr_static_metadata
+                || self.sink.hdr.hdr10
+                || self.sink.hdr.hybrid_log_gamma)
+        {
+            return Err(DisplayConfigError::UnsupportedMode);
+        }
+        if config.vrr_enabled && !self.sink.vrr.adaptive_sync {
             return Err(DisplayConfigError::UnsupportedMode);
         }
         if !mode_within_port_caps(config.mode, port_caps) {
@@ -448,29 +490,29 @@ where
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct DviPort<'a, H: DviHardware = UnsupportedDviHardware> {
-    dvi: &'a Dvi<H>,
+pub struct HdmiPort<'a, H: HdmiHardware = unsupported::UnsupportedHdmiHardware> {
+    hdmi: &'a Hdmi<H>,
 }
 
-impl<'a, H> DviPort<'a, H>
+impl<'a, H> HdmiPort<'a, H>
 where
-    H: DviHardware,
+    H: HdmiHardware,
 {
-    fn new(dvi: &'a Dvi<H>) -> Self {
-        Self { dvi }
+    fn new(hdmi: &'a Hdmi<H>) -> Self {
+        Self { hdmi }
     }
 
     fn provider(&self) -> u8 {
-        self.dvi.provider
+        self.hdmi.provider
     }
 }
 
-impl<H> DisplayControlContract for Dvi<H>
+impl<H> DisplayControlContract for Hdmi<H>
 where
-    H: DviHardware,
+    H: HdmiHardware,
 {
     type Port<'a>
-        = DviPort<'a, H>
+        = HdmiPort<'a, H>
     where
         Self: 'a;
 
@@ -533,17 +575,17 @@ where
     }
 
     fn port(&self) -> DisplayResult<Self::Port<'_>> {
-        Ok(DviPort::new(self))
+        Ok(HdmiPort::new(self))
     }
 
     fn port_mut(&mut self) -> DisplayResult<Self::Port<'_>> {
-        Ok(DviPort::new(self))
+        Ok(HdmiPort::new(self))
     }
 }
 
-impl<'a, H> DisplayPortContract for DviPort<'a, H>
+impl<'a, H> DisplayPortContract for HdmiPort<'a, H>
 where
-    H: DviHardware,
+    H: HdmiHardware,
 {
     fn descriptor(&self) -> DisplayResult<DisplayPortDescriptor> {
         H::port_descriptor(self.provider())
@@ -565,7 +607,7 @@ where
     }
 
     fn validate_config(&self, config: &DisplayActiveConfig) -> Result<(), DisplayConfigError> {
-        self.dvi.validate_active_config(config)
+        self.hdmi.validate_active_config(config)
     }
 
     fn active_config(&self) -> DisplayResult<Option<DisplayActiveConfig>> {
@@ -631,15 +673,15 @@ where
     }
 }
 
-fn enumerate_dvi_bindings<H>(
-    _registered: &RegisteredDriver<DviDriver<H>>,
+fn enumerate_hdmi_bindings<H>(
+    _registered: &RegisteredDriver<HdmiDriver<H>>,
     context: &mut DriverDiscoveryContext<'_>,
-    out: &mut [DviBinding],
+    out: &mut [HdmiBinding],
 ) -> Result<usize, DriverError>
 where
-    H: DviHardware + 'static,
+    H: HdmiHardware + 'static,
 {
-    let _ = context.downcast_mut::<DviDriverContext<H>>()?;
+    let _ = context.downcast_mut::<HdmiDriverContext<H>>()?;
     if out.is_empty() {
         return Err(DriverError::resource_exhausted());
     }
@@ -652,10 +694,10 @@ where
         let Some(descriptor) = H::output_descriptor(provider) else {
             continue;
         };
-        if descriptor.connector != DisplayConnectorKind::Dvi {
+        if descriptor.connector != DisplayConnectorKind::Hdmi {
             continue;
         }
-        out[written] = DviBinding {
+        out[written] = HdmiBinding {
             provider,
             output_name: descriptor.name,
         };
@@ -665,15 +707,15 @@ where
     Ok(written)
 }
 
-fn activate_dvi_binding<H>(
-    _registered: &RegisteredDriver<DviDriver<H>>,
+fn activate_hdmi_binding<H>(
+    _registered: &RegisteredDriver<HdmiDriver<H>>,
     context: &mut DriverActivationContext<'_>,
-    binding: DviBinding,
-) -> Result<ActiveDriver<DviDriver<H>>, DriverError>
+    binding: HdmiBinding,
+) -> Result<ActiveDriver<HdmiDriver<H>>, DriverError>
 where
-    H: DviHardware + 'static,
+    H: HdmiHardware + 'static,
 {
-    let _ = context.downcast_mut::<DviDriverContext<H>>()?;
+    let _ = context.downcast_mut::<HdmiDriverContext<H>>()?;
     let Some(descriptor) = H::output_descriptor(binding.provider) else {
         return Err(DriverError::invalid());
     };
@@ -681,21 +723,21 @@ where
         return Err(DriverError::invalid());
     }
 
-    let instance = Dvi::<H>::try_new(binding.provider).map_err(map_display_error)?;
+    let instance = Hdmi::<H>::try_new(binding.provider).map_err(map_display_error)?;
     Ok(ActiveDriver::new(binding, instance))
 }
 
-impl<H> DriverContract for DviDriver<H>
+impl<H> DriverContract for HdmiDriver<H>
 where
-    H: DviHardware + 'static,
+    H: HdmiHardware + 'static,
 {
-    type Binding = DviBinding;
-    type Instance = Dvi<H>;
+    type Binding = HdmiBinding;
+    type Instance = Hdmi<H>;
 
     fn registration() -> DriverRegistration<Self> {
         DriverRegistration::new(
             driver_metadata,
-            DriverActivation::new(enumerate_dvi_bindings::<H>, activate_dvi_binding::<H>),
+            DriverActivation::new(enumerate_hdmi_bindings::<H>, activate_hdmi_binding::<H>),
         )
     }
 }
@@ -705,9 +747,9 @@ mod tests {
     use super::*;
 
     const TEST_OUTPUT_DESCRIPTOR: DisplayOutputDescriptor = DisplayOutputDescriptor {
-        id: crate::contract::drivers::display::DisplayOutputId(0),
-        name: "dvi-0",
-        connector: DisplayConnectorKind::Dvi,
+        id: fusion_hal::contract::drivers::display::DisplayOutputId(0),
+        name: "hdmi-0",
+        connector: DisplayConnectorKind::Hdmi,
         hotplug_supported: true,
     };
 
@@ -716,12 +758,34 @@ mod tests {
         edid[..8].copy_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]);
         edid[8] = 0x04;
         edid[9] = 0x6d;
-        edid[10] = 0x78;
-        edid[11] = 0x56;
-        edid[12] = 0x34;
-        edid[13] = 0x12;
-        edid[14] = 0xab;
-        edid[15] = 0xcd;
+        edid[10] = 0x34;
+        edid[11] = 0x12;
+        edid[12] = 0x78;
+        edid[13] = 0x56;
+        edid[14] = 0x34;
+        edid[15] = 0x12;
+        edid[16] = 1;
+        edid[17] = 4;
+        edid[18] = 0x01;
+        edid[19] = 0x03;
+        edid[20] = 0x80;
+        edid[21] = 0x34;
+        edid[22] = 0x20;
+        edid[23] = 0x78;
+        edid[24] = 0x2a;
+        edid[25] = 0xcf;
+        edid[26] = 0x74;
+        edid[27] = 0xa3;
+        edid[28] = 0x57;
+        edid[29] = 0x4c;
+        edid[30] = 0xb0;
+        edid[31] = 0x23;
+        edid[32] = 0x09;
+        edid[33] = 0x48;
+        edid[34] = 0x4c;
+        edid[35] = 0x21;
+        edid[36] = 0x08;
+        edid[37] = 0x00;
 
         let dtd = &mut edid[54..72];
         dtd.copy_from_slice(&[
@@ -731,12 +795,34 @@ mod tests {
 
         let name_descriptor = &mut edid[72..90];
         name_descriptor.copy_from_slice(&[
-            0x00, 0x00, 0x00, 0xfc, 0x00, b'F', b'u', b's', b'i', b'o', b'n', b' ', b'D', b'V',
-            b'I', 0x0a, 0x20, 0x20,
+            0x00, 0x00, 0x00, 0xfc, 0x00, b'F', b'u', b's', b'i', b'o', b'n', b' ', b'H', b'D',
+            b'M', b'I', 0x0a, 0x20,
         ]);
 
+        edid[126] = 1;
         finalize_edid_checksum(&mut edid);
         edid
+    }
+
+    fn build_cta_extension() -> [u8; EDID_BLOCK_BYTES] {
+        let mut extension = [0u8; EDID_BLOCK_BYTES];
+        extension[0] = 0x02;
+        extension[1] = 0x03;
+        extension[2] = 0x0f;
+        extension[3] = 0x70;
+        extension[4] = 0x23;
+        extension[5] = 0x09;
+        extension[6] = 0x07;
+        extension[7] = 0x07;
+        extension[8] = 0x42;
+        extension[9] = 0x90;
+        extension[10] = 0x04;
+        extension[11] = 0xe3;
+        extension[12] = 0x06;
+        extension[13] = 0x0c;
+        extension[14] = 0x00;
+        finalize_edid_checksum(&mut extension);
+        extension
     }
 
     fn finalize_edid_checksum(block: &mut [u8; EDID_BLOCK_BYTES]) {
@@ -746,9 +832,9 @@ mod tests {
         block[EDID_BLOCK_BYTES - 1] = checksum.wrapping_neg();
     }
 
-    struct FakeDviHardware;
+    struct FakeHdmiHardware;
 
-    impl DviHardware for FakeDviHardware {
+    impl HdmiHardware for FakeHdmiHardware {
         fn provider_count() -> u8 {
             1
         }
@@ -766,13 +852,16 @@ mod tests {
         }
 
         fn raw_descriptors(_provider: u8) -> DisplayResult<DisplayDescriptorSet<'static>> {
-            let edid = build_base_edid().to_vec();
+            let mut edid = build_base_edid().to_vec();
+            edid.extend_from_slice(&build_cta_extension());
             let leaked = Box::leak(edid.into_boxed_slice());
             let descriptors = Box::leak(
-                vec![crate::contract::drivers::display::DisplayRawDescriptor {
-                    kind: DisplayRawDescriptorKind::Edid,
-                    bytes: leaked,
-                }]
+                vec![
+                    fusion_hal::contract::drivers::display::DisplayRawDescriptor {
+                        kind: DisplayRawDescriptorKind::Edid,
+                        bytes: leaked,
+                    },
+                ]
                 .into_boxed_slice(),
             );
             Ok(DisplayDescriptorSet { descriptors })
@@ -780,7 +869,7 @@ mod tests {
 
         fn port_descriptor(_provider: u8) -> DisplayResult<DisplayPortDescriptor> {
             Ok(DisplayPortDescriptor {
-                connector: DisplayConnectorKind::Dvi,
+                connector: DisplayConnectorKind::Hdmi,
                 hotplug_supported: true,
                 hotplug_event_supported: true,
                 cpu_upload_supported: true,
@@ -793,8 +882,8 @@ mod tests {
 
         fn port_capabilities(_provider: u8) -> DisplayResult<DisplayPortCapabilities> {
             Ok(DisplayPortCapabilities {
-                max_width: 1920,
-                max_height: 1200,
+                max_width: 3840,
+                max_height: 2160,
                 max_refresh_hz: 60,
                 supported_pixel_formats: DisplayPixelFormatSupport {
                     rgb565: true,
@@ -812,8 +901,8 @@ mod tests {
             })
         }
 
-        fn runtime_state(_provider: u8) -> DisplayResult<DviRuntimeState> {
-            Ok(DviRuntimeState {
+        fn runtime_state(_provider: u8) -> DisplayResult<HdmiRuntimeState> {
+            Ok(HdmiRuntimeState {
                 enabled: true,
                 blanked: false,
                 active_config: None,
@@ -861,7 +950,7 @@ mod tests {
         ) -> DisplayResult<DisplayPresentReport> {
             Ok(DisplayPresentReport {
                 presented: true,
-                frame_id: crate::contract::drivers::display::DisplayFrameId(1),
+                frame_id: fusion_hal::contract::drivers::display::DisplayFrameId(1),
                 vblank_sequence: Some(1),
             })
         }
@@ -883,28 +972,43 @@ mod tests {
     }
 
     #[test]
-    fn dvi_parser_extracts_identity_and_modes() {
-        let dvi = Dvi::<FakeDviHardware>::try_new(0).unwrap();
-        assert!(dvi.sink.descriptor_valid);
-        assert_eq!(dvi.sink.identity.product_code, Some(0x5678));
+    fn hdmi_parser_extracts_identity_and_modes() {
+        let mut edid = build_base_edid().to_vec();
+        edid.extend_from_slice(&build_cta_extension());
+        let leaked = Box::leak(edid.into_boxed_slice());
+        let descriptors = [
+            fusion_hal::contract::drivers::display::DisplayRawDescriptor {
+                kind: DisplayRawDescriptorKind::Edid,
+                bytes: leaked,
+            },
+        ];
+        let sink = parse_edid_sink(
+            DisplayConnectorKind::Hdmi,
+            DisplayDescriptorSet {
+                descriptors: Box::leak(Box::new(descriptors)),
+            },
+        );
+
+        assert!(sink.descriptor_valid);
+        assert_eq!(sink.identity.product_code, Some(0x1234));
         assert_eq!(
-            dvi.sink
-                .identity
+            sink.identity
                 .model_name
                 .map(|text| text.as_bytes().to_vec()),
-            Some(b"Fusion DVI".to_vec())
+            Some(b"Fusion HDMI".to_vec())
         );
-        assert!(dvi.sink.mode_count >= 1);
-        assert!(dvi.sink.color_spaces.rgb);
-        assert!(!dvi.sink.color_spaces.ycbcr444);
-        assert!(!dvi.sink.audio.basic_pcm);
-        assert!(!dvi.sink.hdr.hdr_static_metadata);
+        assert!(sink.mode_count >= 2);
+        assert!(sink.audio.basic_pcm);
+        assert!(sink.color_spaces.ycbcr444);
+        assert!(sink.color_spaces.ycbcr422);
+        assert!(sink.hdr.hdr_static_metadata);
+        assert!(sink.hdr.hdr10);
     }
 
     #[test]
-    fn dvi_driver_negotiates_requested_mode() {
-        let dvi = Dvi::<FakeDviHardware>::try_new(0).unwrap();
-        let result = dvi
+    fn hdmi_driver_negotiates_requested_mode() {
+        let hdmi = Hdmi::<FakeHdmiHardware>::try_new(0).unwrap();
+        let result = hdmi
             .negotiate(&DisplayNegotiationRequest {
                 preferred_modes: &[DisplayMode {
                     width: 1920,
@@ -925,8 +1029,8 @@ mod tests {
                     default: true,
                     ..DisplayQuantizationSupport::default()
                 },
-                require_audio: false,
-                prefer_hdr: false,
+                require_audio: true,
+                prefer_hdr: true,
                 prefer_vrr: false,
                 allow_scaling: false,
                 allow_interlaced: false,
@@ -937,34 +1041,15 @@ mod tests {
         assert_eq!(result.config.mode.height, 1080);
         assert_eq!(result.config.pixel_format, DisplayPixelFormat::Xrgb8888);
         assert_eq!(result.config.color_space, DisplayColorSpace::Rgb);
-        assert!(!result.config.audio_enabled);
-        assert!(!result.config.hdr_enabled);
+        assert!(result.config.audio_enabled);
+        assert!(result.config.hdr_enabled);
     }
 
     #[test]
-    fn dvi_driver_rejects_audio_request() {
-        let dvi = Dvi::<FakeDviHardware>::try_new(0).unwrap();
-        assert!(
-            dvi.negotiate(&DisplayNegotiationRequest {
-                preferred_modes: &[],
-                preferred_pixel_formats: DisplayPixelFormatSupport::default(),
-                preferred_color_spaces: DisplayColorSpaceSupport::default(),
-                preferred_quantization: DisplayQuantizationSupport::default(),
-                require_audio: true,
-                prefer_hdr: false,
-                prefer_vrr: false,
-                allow_scaling: false,
-                allow_interlaced: false,
-            })
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn dvi_driver_builds_port_handle_and_validates_config() {
-        let dvi = Dvi::<FakeDviHardware>::try_new(0).unwrap();
-        let port = dvi.port().unwrap();
-        let negotiated = dvi
+    fn hdmi_driver_builds_port_handle_and_validates_config() {
+        let hdmi = Hdmi::<FakeHdmiHardware>::try_new(0).unwrap();
+        let port = hdmi.port().unwrap();
+        let negotiated = hdmi
             .negotiate(&DisplayNegotiationRequest {
                 preferred_modes: &[],
                 preferred_pixel_formats: DisplayPixelFormatSupport::default(),
@@ -981,32 +1066,15 @@ mod tests {
         assert!(port.validate_config(&negotiated.config).is_ok());
         assert_eq!(
             port.descriptor().unwrap().connector,
-            DisplayConnectorKind::Dvi
+            DisplayConnectorKind::Hdmi
         );
     }
 
     #[test]
-    fn dvi_driver_rejects_audio_enabled_config() {
-        let dvi = Dvi::<FakeDviHardware>::try_new(0).unwrap();
-        let port = dvi.port().unwrap();
-        let mut negotiated = dvi
-            .negotiate(&DisplayNegotiationRequest {
-                preferred_modes: &[],
-                preferred_pixel_formats: DisplayPixelFormatSupport::default(),
-                preferred_color_spaces: DisplayColorSpaceSupport::default(),
-                preferred_quantization: DisplayQuantizationSupport::default(),
-                require_audio: false,
-                prefer_hdr: false,
-                prefer_vrr: false,
-                allow_scaling: false,
-                allow_interlaced: false,
-            })
-            .unwrap()
-            .config;
-        negotiated.audio_enabled = true;
-        assert_eq!(
-            port.validate_config(&negotiated),
-            Err(DisplayConfigError::UnsupportedMode)
-        );
+    fn hdmi_cea_table_includes_4k60() {
+        let (mode, _) = lookup_cea_mode(97).expect("vic 97");
+        assert_eq!(mode.width, 3840);
+        assert_eq!(mode.height, 2160);
+        assert_eq!(mode.refresh_hz_milli, 60_000);
     }
 }

@@ -1,8 +1,10 @@
-//! DisplayPort display endpoint driver family.
+//! VGA display endpoint driver family.
+
+#![cfg_attr(not(feature = "std"), no_std)]
 
 use core::marker::PhantomData;
 
-use super::edid::{
+use fusion_hal::drivers::display::shared::edid::{
     contains_mode,
     matches_requested_color_space,
     matches_requested_quantization,
@@ -13,11 +15,11 @@ use super::edid::{
     select_quantization,
     ParsedEdidSink,
 };
-use super::support::{
+use fusion_hal::drivers::display::shared::support::{
     map_config_error,
     map_display_error,
 };
-use crate::contract::drivers::display::{
+use fusion_hal::contract::drivers::display::{
     DisplayActiveConfig,
     DisplayConfigError,
     DisplayConnectorKind,
@@ -43,7 +45,6 @@ use crate::contract::drivers::display::{
     DisplayPowerState,
     DisplayPresentReport,
     DisplayPresentRequest,
-    DisplayRawDescriptorKind,
     DisplayRegion,
     DisplayResult,
     DisplaySinkCapabilities,
@@ -51,7 +52,7 @@ use crate::contract::drivers::display::{
     DisplayTiming,
     DisplayUploadReport,
 };
-use crate::contract::drivers::driver::{
+use fusion_hal::contract::drivers::driver::{
     ActiveDriver,
     DriverActivation,
     DriverActivationContext,
@@ -64,25 +65,34 @@ use crate::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
+#[cfg(any(target_os = "none", feature = "fdxe-module"))]
+mod fdxe;
+#[path = "interface/interface.rs"]
+pub mod interface;
+mod unsupported;
+
 #[cfg(test)]
-use super::edid::EDID_BLOCK_BYTES;
+use fusion_hal::drivers::display::shared::edid::EDID_BLOCK_BYTES;
 #[cfg(test)]
-use crate::contract::drivers::display::{
+use fusion_hal::contract::drivers::display::{
     DisplayColorSpace,
     DisplayColorSpaceSupport,
     DisplayPixelFormat,
     DisplayPixelFormatSupport,
     DisplayQuantizationSupport,
+    DisplayRawDescriptorKind,
 };
 
-const DISPLAY_PORT_DRIVER_CONTRACTS: [DriverContractKey; 2] = [
+const VGA_DRIVER_CONTRACTS: [DriverContractKey; 2] = [
     DriverContractKey("display.control"),
     DriverContractKey("display.port"),
 ];
-const DISPLAY_PORT_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
+const VGA_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("display.layout")];
+const VGA_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
     DriverBindingSource::Acpi,
@@ -90,51 +100,43 @@ const DISPLAY_PORT_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::Pci,
     DriverBindingSource::Manual,
 ];
-const DISPLAY_PORT_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "display.port.display_port",
+const VGA_DRIVER_METADATA: DriverMetadata = DriverMetadata {
+    key: "display.port.vga",
     class: DriverClass::Display,
     identity: DriverIdentity {
         vendor: "Fusion",
         family: Some("Display"),
         package: None,
-        product: "DisplayPort driver",
-        advertised_interface: "DisplayPort endpoint",
+        product: "VGA driver",
+        advertised_interface: "VGA endpoint",
     },
-    contracts: &DISPLAY_PORT_DRIVER_CONTRACTS,
-    binding_sources: &DISPLAY_PORT_DRIVER_BINDING_SOURCES,
-    description: "DisplayPort endpoint driver layered over one selected DisplayPort hardware substrate",
+    contracts: &VGA_DRIVER_CONTRACTS,
+    required_contracts: &VGA_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
+    binding_sources: &VGA_DRIVER_BINDING_SOURCES,
+    description: "VGA display endpoint driver layered over one selected VGA hardware substrate",
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DisplayPortBinding {
+pub struct VgaBinding {
     pub provider: u8,
     pub output_name: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct DisplayPortRuntimeState {
+pub struct VgaRuntimeState {
     pub enabled: bool,
     pub blanked: bool,
     pub active_config: Option<DisplayActiveConfig>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-struct DisplayPortTransportCaps {
-    dpcd_revision_major: u8,
-    dpcd_revision_minor: u8,
-    max_link_rate_kbps: Option<u32>,
-    max_lane_count: u8,
-    enhanced_framing: bool,
-    downspread: bool,
-    has_display_id: bool,
-}
-
-/// Hardware-facing DisplayPort seam consumed by the DisplayPort driver family.
+/// Hardware-facing VGA seam consumed by the VGA driver family.
 ///
-/// The public DisplayPort driver owns descriptor parsing, sink identity, capability derivation,
-/// negotiation, and config validation. The backend only needs to surface raw descriptors,
-/// connector truth, and the actual output programming/presentation operations.
-pub trait DisplayPortHardware {
+/// The public VGA driver owns EDID parsing, sink identity, capability derivation, negotiation,
+/// and config validation. The backend only needs to surface raw descriptors, connector truth, and
+/// the actual output programming/presentation operations.
+pub trait VgaHardware {
     fn provider_count() -> u8;
     fn output_descriptor(provider: u8) -> Option<&'static DisplayOutputDescriptor>;
 
@@ -171,7 +173,7 @@ pub trait DisplayPortHardware {
 
     fn port_descriptor(provider: u8) -> DisplayResult<DisplayPortDescriptor>;
     fn port_capabilities(provider: u8) -> DisplayResult<DisplayPortCapabilities>;
-    fn runtime_state(provider: u8) -> DisplayResult<DisplayPortRuntimeState>;
+    fn runtime_state(provider: u8) -> DisplayResult<VgaRuntimeState>;
     fn set_config(provider: u8, config: &DisplayActiveConfig) -> DisplayResult<()>;
     fn enable(provider: u8) -> DisplayResult<()>;
     fn disable(provider: u8) -> DisplayResult<()>;
@@ -196,9 +198,9 @@ pub trait DisplayPortHardware {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct UnsupportedDisplayPortHardware;
+pub struct UnsupportedVgaHardware;
 
-impl DisplayPortHardware for UnsupportedDisplayPortHardware {
+impl VgaHardware for UnsupportedVgaHardware {
     fn provider_count() -> u8 {
         0
     }
@@ -223,7 +225,7 @@ impl DisplayPortHardware for UnsupportedDisplayPortHardware {
         Err(DisplayError::unsupported())
     }
 
-    fn runtime_state(_provider: u8) -> DisplayResult<DisplayPortRuntimeState> {
+    fn runtime_state(_provider: u8) -> DisplayResult<VgaRuntimeState> {
         Err(DisplayError::unsupported())
     }
 
@@ -283,18 +285,18 @@ impl DisplayPortHardware for UnsupportedDisplayPortHardware {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DisplayPortDriver<H: DisplayPortHardware = UnsupportedDisplayPortHardware> {
+pub struct VgaDriver<H: VgaHardware = unsupported::UnsupportedVgaHardware> {
     marker: PhantomData<fn() -> H>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DisplayPortDriverContext<H: DisplayPortHardware = UnsupportedDisplayPortHardware> {
+pub struct VgaDriverContext<H: VgaHardware = unsupported::UnsupportedVgaHardware> {
     marker: PhantomData<fn() -> H>,
 }
 
-impl<H> DisplayPortDriverContext<H>
+impl<H> VgaDriverContext<H>
 where
-    H: DisplayPortHardware,
+    H: VgaHardware,
 {
     #[must_use]
     pub const fn new() -> Self {
@@ -306,39 +308,38 @@ where
 
 #[must_use]
 pub const fn driver_metadata() -> &'static DriverMetadata {
-    &DISPLAY_PORT_DRIVER_METADATA
+    &VGA_DRIVER_METADATA
 }
 
-type DisplayPortSinkCache = ParsedEdidSink;
+type VgaSinkCache = ParsedEdidSink;
 
 #[derive(Debug, Clone)]
-pub struct DisplayPortEndpoint<H: DisplayPortHardware = UnsupportedDisplayPortHardware> {
+pub struct Vga<H: VgaHardware = unsupported::UnsupportedVgaHardware> {
     provider: u8,
-    sink: DisplayPortSinkCache,
-    transport: DisplayPortTransportCaps,
+    sink: VgaSinkCache,
     _hardware: PhantomData<H>,
 }
 
-impl<H> DisplayPortEndpoint<H>
+impl<H> Vga<H>
 where
-    H: DisplayPortHardware,
+    H: VgaHardware,
 {
     fn try_new(provider: u8) -> DisplayResult<Self> {
-        let descriptors = H::raw_descriptors(provider)?;
-        let sink = parse_edid_sink(DisplayConnectorKind::DisplayPort, descriptors);
-        let transport = parse_display_port_transport(descriptors);
+        let mut sink = parse_edid_sink(DisplayConnectorKind::Vga, H::raw_descriptors(provider)?);
+        sink.constrain_for_rgb_only();
         Ok(Self {
             provider,
             sink,
-            transport,
             _hardware: PhantomData,
         })
     }
 
     fn refresh_sink(&mut self) -> DisplayResult<()> {
-        let descriptors = H::raw_descriptors(self.provider)?;
-        self.sink = parse_edid_sink(DisplayConnectorKind::DisplayPort, descriptors);
-        self.transport = parse_display_port_transport(descriptors);
+        self.sink = parse_edid_sink(
+            DisplayConnectorKind::Vga,
+            H::raw_descriptors(self.provider)?,
+        );
+        self.sink.constrain_for_rgb_only();
         Ok(())
     }
 
@@ -346,7 +347,7 @@ where
         &self,
         request: &DisplayNegotiationRequest<'_>,
     ) -> DisplayResult<DisplayNegotiationResult> {
-        if self.sink.mode_count == 0 {
+        if self.sink.mode_count == 0 || request.require_audio || request.prefer_hdr {
             return Err(DisplayError::negotiation_failed());
         }
 
@@ -367,26 +368,9 @@ where
         let quantization =
             select_quantization(request.preferred_quantization, self.sink.quantization);
 
-        let audio_enabled = if request.require_audio {
-            if self.sink.audio.basic_pcm || self.sink.audio.max_channels > 0 {
-                true
-            } else {
-                return Err(DisplayError::negotiation_failed());
-            }
-        } else {
-            false
-        };
-
-        let hdr_enabled = request.prefer_hdr
-            && (self.sink.hdr.hdr_static_metadata
-                || self.sink.hdr.hdr10
-                || self.sink.hdr.hybrid_log_gamma);
-        let vrr_enabled = request.prefer_vrr && self.sink.vrr.adaptive_sync;
-
         let reason = if contains_mode(request.preferred_modes, selected_mode)
             && matches_requested_color_space(request.preferred_color_spaces, color_space)
             && matches_requested_quantization(request.preferred_quantization, quantization)
-            && (!request.require_audio || audio_enabled)
         {
             DisplayNegotiationReason::Requested
         } else if selected_mode.preferred {
@@ -402,9 +386,9 @@ where
                 pixel_format,
                 color_space,
                 quantization,
-                audio_enabled,
-                hdr_enabled,
-                vrr_enabled,
+                audio_enabled: false,
+                hdr_enabled: false,
+                vrr_enabled: false,
             },
             reason,
         })
@@ -466,18 +450,7 @@ where
         if !self.sink.quantization.supports(config.quantization) {
             return Err(DisplayConfigError::UnsupportedQuantization);
         }
-        if config.audio_enabled && !(self.sink.audio.basic_pcm || self.sink.audio.max_channels > 0)
-        {
-            return Err(DisplayConfigError::UnsupportedMode);
-        }
-        if config.hdr_enabled
-            && !(self.sink.hdr.hdr_static_metadata
-                || self.sink.hdr.hdr10
-                || self.sink.hdr.hybrid_log_gamma)
-        {
-            return Err(DisplayConfigError::UnsupportedMode);
-        }
-        if config.vrr_enabled && !self.sink.vrr.adaptive_sync {
+        if config.audio_enabled || config.hdr_enabled || config.vrr_enabled {
             return Err(DisplayConfigError::UnsupportedMode);
         }
         if !mode_within_port_caps(config.mode, port_caps) {
@@ -488,29 +461,29 @@ where
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct DisplayPortEndpointPort<'a, H: DisplayPortHardware = UnsupportedDisplayPortHardware> {
-    endpoint: &'a DisplayPortEndpoint<H>,
+pub struct VgaPort<'a, H: VgaHardware = unsupported::UnsupportedVgaHardware> {
+    vga: &'a Vga<H>,
 }
 
-impl<'a, H> DisplayPortEndpointPort<'a, H>
+impl<'a, H> VgaPort<'a, H>
 where
-    H: DisplayPortHardware,
+    H: VgaHardware,
 {
-    fn new(endpoint: &'a DisplayPortEndpoint<H>) -> Self {
-        Self { endpoint }
+    fn new(vga: &'a Vga<H>) -> Self {
+        Self { vga }
     }
 
     fn provider(&self) -> u8 {
-        self.endpoint.provider
+        self.vga.provider
     }
 }
 
-impl<H> DisplayControlContract for DisplayPortEndpoint<H>
+impl<H> DisplayControlContract for Vga<H>
 where
-    H: DisplayPortHardware,
+    H: VgaHardware,
 {
     type Port<'a>
-        = DisplayPortEndpointPort<'a, H>
+        = VgaPort<'a, H>
     where
         Self: 'a;
 
@@ -573,17 +546,17 @@ where
     }
 
     fn port(&self) -> DisplayResult<Self::Port<'_>> {
-        Ok(DisplayPortEndpointPort::new(self))
+        Ok(VgaPort::new(self))
     }
 
     fn port_mut(&mut self) -> DisplayResult<Self::Port<'_>> {
-        Ok(DisplayPortEndpointPort::new(self))
+        Ok(VgaPort::new(self))
     }
 }
 
-impl<'a, H> DisplayPortContract for DisplayPortEndpointPort<'a, H>
+impl<'a, H> DisplayPortContract for VgaPort<'a, H>
 where
-    H: DisplayPortHardware,
+    H: VgaHardware,
 {
     fn descriptor(&self) -> DisplayResult<DisplayPortDescriptor> {
         H::port_descriptor(self.provider())
@@ -605,7 +578,7 @@ where
     }
 
     fn validate_config(&self, config: &DisplayActiveConfig) -> Result<(), DisplayConfigError> {
-        self.endpoint.validate_active_config(config)
+        self.vga.validate_active_config(config)
     }
 
     fn active_config(&self) -> DisplayResult<Option<DisplayActiveConfig>> {
@@ -671,15 +644,15 @@ where
     }
 }
 
-fn enumerate_display_port_bindings<H>(
-    _registered: &RegisteredDriver<DisplayPortDriver<H>>,
+fn enumerate_vga_bindings<H>(
+    _registered: &RegisteredDriver<VgaDriver<H>>,
     context: &mut DriverDiscoveryContext<'_>,
-    out: &mut [DisplayPortBinding],
+    out: &mut [VgaBinding],
 ) -> Result<usize, DriverError>
 where
-    H: DisplayPortHardware + 'static,
+    H: VgaHardware + 'static,
 {
-    let _ = context.downcast_mut::<DisplayPortDriverContext<H>>()?;
+    let _ = context.downcast_mut::<VgaDriverContext<H>>()?;
     if out.is_empty() {
         return Err(DriverError::resource_exhausted());
     }
@@ -692,10 +665,10 @@ where
         let Some(descriptor) = H::output_descriptor(provider) else {
             continue;
         };
-        if descriptor.connector != DisplayConnectorKind::DisplayPort {
+        if descriptor.connector != DisplayConnectorKind::Vga {
             continue;
         }
-        out[written] = DisplayPortBinding {
+        out[written] = VgaBinding {
             provider,
             output_name: descriptor.name,
         };
@@ -705,15 +678,15 @@ where
     Ok(written)
 }
 
-fn activate_display_port_binding<H>(
-    _registered: &RegisteredDriver<DisplayPortDriver<H>>,
+fn activate_vga_binding<H>(
+    _registered: &RegisteredDriver<VgaDriver<H>>,
     context: &mut DriverActivationContext<'_>,
-    binding: DisplayPortBinding,
-) -> Result<ActiveDriver<DisplayPortDriver<H>>, DriverError>
+    binding: VgaBinding,
+) -> Result<ActiveDriver<VgaDriver<H>>, DriverError>
 where
-    H: DisplayPortHardware + 'static,
+    H: VgaHardware + 'static,
 {
-    let _ = context.downcast_mut::<DisplayPortDriverContext<H>>()?;
+    let _ = context.downcast_mut::<VgaDriverContext<H>>()?;
     let Some(descriptor) = H::output_descriptor(binding.provider) else {
         return Err(DriverError::invalid());
     };
@@ -721,76 +694,22 @@ where
         return Err(DriverError::invalid());
     }
 
-    let instance =
-        DisplayPortEndpoint::<H>::try_new(binding.provider).map_err(map_display_error)?;
+    let instance = Vga::<H>::try_new(binding.provider).map_err(map_display_error)?;
     Ok(ActiveDriver::new(binding, instance))
 }
 
-impl<H> DriverContract for DisplayPortDriver<H>
+impl<H> DriverContract for VgaDriver<H>
 where
-    H: DisplayPortHardware + 'static,
+    H: VgaHardware + 'static,
 {
-    type Binding = DisplayPortBinding;
-    type Instance = DisplayPortEndpoint<H>;
+    type Binding = VgaBinding;
+    type Instance = Vga<H>;
 
     fn registration() -> DriverRegistration<Self> {
         DriverRegistration::new(
             driver_metadata,
-            DriverActivation::new(
-                enumerate_display_port_bindings::<H>,
-                activate_display_port_binding::<H>,
-            ),
+            DriverActivation::new(enumerate_vga_bindings::<H>, activate_vga_binding::<H>),
         )
-    }
-}
-
-fn find_descriptor_bytes(
-    descriptors: DisplayDescriptorSet<'static>,
-    kind: DisplayRawDescriptorKind,
-) -> Option<&'static [u8]> {
-    descriptors
-        .descriptors
-        .iter()
-        .find(|descriptor| descriptor.kind == kind)
-        .map(|descriptor| descriptor.bytes)
-}
-
-fn parse_display_port_transport(
-    descriptors: DisplayDescriptorSet<'static>,
-) -> DisplayPortTransportCaps {
-    let mut transport = DisplayPortTransportCaps {
-        has_display_id: find_descriptor_bytes(descriptors, DisplayRawDescriptorKind::DisplayId)
-            .is_some(),
-        ..DisplayPortTransportCaps::default()
-    };
-
-    let Some(dpcd) = find_descriptor_bytes(descriptors, DisplayRawDescriptorKind::Dpcd) else {
-        return transport;
-    };
-    if dpcd.len() < 3 {
-        return transport;
-    }
-
-    let revision = dpcd[0];
-    transport.dpcd_revision_major = revision >> 4;
-    transport.dpcd_revision_minor = revision & 0x0f;
-    transport.max_link_rate_kbps = dpcd_link_rate_kbps(dpcd[1]);
-    transport.max_lane_count = dpcd[2] & 0x1f;
-    transport.enhanced_framing = dpcd[2] & 0x80 != 0;
-    if dpcd.len() > 3 {
-        transport.downspread = dpcd[3] & 0x01 != 0;
-    }
-
-    transport
-}
-
-fn dpcd_link_rate_kbps(code: u8) -> Option<u32> {
-    match code {
-        0x06 => Some(162_000),
-        0x0a => Some(270_000),
-        0x14 => Some(540_000),
-        0x1e => Some(810_000),
-        _ => None,
     }
 }
 
@@ -799,9 +718,9 @@ mod tests {
     use super::*;
 
     const TEST_OUTPUT_DESCRIPTOR: DisplayOutputDescriptor = DisplayOutputDescriptor {
-        id: crate::contract::drivers::display::DisplayOutputId(0),
-        name: "dp-0",
-        connector: DisplayConnectorKind::DisplayPort,
+        id: fusion_hal::contract::drivers::display::DisplayOutputId(0),
+        name: "vga-0",
+        connector: DisplayConnectorKind::Vga,
         hotplug_supported: true,
     };
 
@@ -810,12 +729,12 @@ mod tests {
         edid[..8].copy_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]);
         edid[8] = 0x04;
         edid[9] = 0x6d;
-        edid[10] = 0xcd;
-        edid[11] = 0xab;
-        edid[12] = 0x12;
-        edid[13] = 0x34;
-        edid[14] = 0x56;
-        edid[15] = 0x78;
+        edid[10] = 0xaa;
+        edid[11] = 0x55;
+        edid[12] = 0x11;
+        edid[13] = 0x22;
+        edid[14] = 0x33;
+        edid[15] = 0x44;
 
         let dtd = &mut edid[54..72];
         dtd.copy_from_slice(&[
@@ -825,47 +744,12 @@ mod tests {
 
         let name_descriptor = &mut edid[72..90];
         name_descriptor.copy_from_slice(&[
-            0x00, 0x00, 0x00, 0xfc, 0x00, b'F', b'u', b's', b'i', b'o', b'n', b' ', b'D', b'P',
-            0x0a, 0x20, 0x20, 0x20,
+            0x00, 0x00, 0x00, 0xfc, 0x00, b'F', b'u', b's', b'i', b'o', b'n', b' ', b'V', b'G',
+            b'A', 0x0a, 0x20, 0x20,
         ]);
 
-        edid[126] = 1;
         finalize_edid_checksum(&mut edid);
         edid
-    }
-
-    fn build_cta_extension() -> [u8; EDID_BLOCK_BYTES] {
-        let mut extension = [0u8; EDID_BLOCK_BYTES];
-        extension[0] = 0x02;
-        extension[1] = 0x03;
-        extension[2] = 0x0f;
-        extension[3] = 0x70;
-        extension[4] = 0x23;
-        extension[5] = 0x09;
-        extension[6] = 0x07;
-        extension[7] = 0x07;
-        extension[8] = 0x42;
-        extension[9] = 0x90;
-        extension[10] = 0x04;
-        extension[11] = 0xe3;
-        extension[12] = 0x06;
-        extension[13] = 0x0c;
-        extension[14] = 0x00;
-        finalize_edid_checksum(&mut extension);
-        extension
-    }
-
-    fn build_dpcd() -> [u8; 16] {
-        let mut dpcd = [0u8; 16];
-        dpcd[0] = 0x14;
-        dpcd[1] = 0x1e;
-        dpcd[2] = 0x84;
-        dpcd[3] = 0x01;
-        dpcd
-    }
-
-    fn build_display_id() -> [u8; 8] {
-        [0x70, 0x01, 0x01, 0x00, 0, 0, 0, 0]
     }
 
     fn finalize_edid_checksum(block: &mut [u8; EDID_BLOCK_BYTES]) {
@@ -875,9 +759,9 @@ mod tests {
         block[EDID_BLOCK_BYTES - 1] = checksum.wrapping_neg();
     }
 
-    struct FakeDisplayPortHardware;
+    struct FakeVgaHardware;
 
-    impl DisplayPortHardware for FakeDisplayPortHardware {
+    impl VgaHardware for FakeVgaHardware {
         fn provider_count() -> u8 {
             1
         }
@@ -895,24 +779,13 @@ mod tests {
         }
 
         fn raw_descriptors(_provider: u8) -> DisplayResult<DisplayDescriptorSet<'static>> {
-            let mut edid = build_base_edid().to_vec();
-            edid.extend_from_slice(&build_cta_extension());
-            let edid = Box::leak(edid.into_boxed_slice());
-            let dpcd = Box::leak(Box::new(build_dpcd())).as_slice();
-            let display_id = Box::leak(Box::new(build_display_id())).as_slice();
+            let edid = build_base_edid().to_vec();
+            let leaked = Box::leak(edid.into_boxed_slice());
             let descriptors = Box::leak(
                 vec![
-                    crate::contract::drivers::display::DisplayRawDescriptor {
+                    fusion_hal::contract::drivers::display::DisplayRawDescriptor {
                         kind: DisplayRawDescriptorKind::Edid,
-                        bytes: edid,
-                    },
-                    crate::contract::drivers::display::DisplayRawDescriptor {
-                        kind: DisplayRawDescriptorKind::Dpcd,
-                        bytes: dpcd,
-                    },
-                    crate::contract::drivers::display::DisplayRawDescriptor {
-                        kind: DisplayRawDescriptorKind::DisplayId,
-                        bytes: display_id,
+                        bytes: leaked,
                     },
                 ]
                 .into_boxed_slice(),
@@ -922,7 +795,7 @@ mod tests {
 
         fn port_descriptor(_provider: u8) -> DisplayResult<DisplayPortDescriptor> {
             Ok(DisplayPortDescriptor {
-                connector: DisplayConnectorKind::DisplayPort,
+                connector: DisplayConnectorKind::Vga,
                 hotplug_supported: true,
                 hotplug_event_supported: true,
                 cpu_upload_supported: true,
@@ -935,8 +808,8 @@ mod tests {
 
         fn port_capabilities(_provider: u8) -> DisplayResult<DisplayPortCapabilities> {
             Ok(DisplayPortCapabilities {
-                max_width: 3840,
-                max_height: 2160,
+                max_width: 1920,
+                max_height: 1200,
                 max_refresh_hz: 60,
                 supported_pixel_formats: DisplayPixelFormatSupport {
                     rgb565: true,
@@ -954,8 +827,8 @@ mod tests {
             })
         }
 
-        fn runtime_state(_provider: u8) -> DisplayResult<DisplayPortRuntimeState> {
-            Ok(DisplayPortRuntimeState {
+        fn runtime_state(_provider: u8) -> DisplayResult<VgaRuntimeState> {
+            Ok(VgaRuntimeState {
                 enabled: true,
                 blanked: false,
                 active_config: None,
@@ -1003,7 +876,7 @@ mod tests {
         ) -> DisplayResult<DisplayPresentReport> {
             Ok(DisplayPresentReport {
                 presented: true,
-                frame_id: crate::contract::drivers::display::DisplayFrameId(1),
+                frame_id: fusion_hal::contract::drivers::display::DisplayFrameId(1),
                 vblank_sequence: Some(1),
             })
         }
@@ -1025,32 +898,28 @@ mod tests {
     }
 
     #[test]
-    fn display_port_parser_extracts_identity_and_transport() {
-        let endpoint = DisplayPortEndpoint::<FakeDisplayPortHardware>::try_new(0).unwrap();
-        assert!(endpoint.sink.descriptor_valid);
-        assert_eq!(endpoint.sink.identity.product_code, Some(0xabcd));
+    fn vga_parser_extracts_identity_and_modes() {
+        let vga = Vga::<FakeVgaHardware>::try_new(0).unwrap();
+        assert!(vga.sink.descriptor_valid);
+        assert_eq!(vga.sink.identity.product_code, Some(0x55aa));
         assert_eq!(
-            endpoint
-                .sink
+            vga.sink
                 .identity
                 .model_name
                 .map(|text| text.as_bytes().to_vec()),
-            Some(b"Fusion DP".to_vec())
+            Some(b"Fusion VGA".to_vec())
         );
-        assert!(endpoint.sink.mode_count >= 2);
-        assert_eq!(endpoint.transport.dpcd_revision_major, 1);
-        assert_eq!(endpoint.transport.dpcd_revision_minor, 4);
-        assert_eq!(endpoint.transport.max_link_rate_kbps, Some(810_000));
-        assert_eq!(endpoint.transport.max_lane_count, 4);
-        assert!(endpoint.transport.enhanced_framing);
-        assert!(endpoint.transport.downspread);
-        assert!(endpoint.transport.has_display_id);
+        assert!(vga.sink.mode_count >= 1);
+        assert!(vga.sink.color_spaces.rgb);
+        assert!(!vga.sink.color_spaces.ycbcr444);
+        assert!(!vga.sink.audio.basic_pcm);
+        assert!(!vga.sink.hdr.hdr_static_metadata);
     }
 
     #[test]
-    fn display_port_driver_negotiates_requested_mode() {
-        let endpoint = DisplayPortEndpoint::<FakeDisplayPortHardware>::try_new(0).unwrap();
-        let result = endpoint
+    fn vga_driver_negotiates_requested_mode() {
+        let vga = Vga::<FakeVgaHardware>::try_new(0).unwrap();
+        let result = vga
             .negotiate(&DisplayNegotiationRequest {
                 preferred_modes: &[DisplayMode {
                     width: 1920,
@@ -1071,8 +940,8 @@ mod tests {
                     default: true,
                     ..DisplayQuantizationSupport::default()
                 },
-                require_audio: true,
-                prefer_hdr: true,
+                require_audio: false,
+                prefer_hdr: false,
                 prefer_vrr: false,
                 allow_scaling: false,
                 allow_interlaced: false,
@@ -1083,15 +952,34 @@ mod tests {
         assert_eq!(result.config.mode.height, 1080);
         assert_eq!(result.config.pixel_format, DisplayPixelFormat::Xrgb8888);
         assert_eq!(result.config.color_space, DisplayColorSpace::Rgb);
-        assert!(result.config.audio_enabled);
-        assert!(result.config.hdr_enabled);
+        assert!(!result.config.audio_enabled);
+        assert!(!result.config.hdr_enabled);
     }
 
     #[test]
-    fn display_port_driver_builds_port_handle_and_validates_config() {
-        let endpoint = DisplayPortEndpoint::<FakeDisplayPortHardware>::try_new(0).unwrap();
-        let port = endpoint.port().unwrap();
-        let negotiated = endpoint
+    fn vga_driver_rejects_audio_request() {
+        let vga = Vga::<FakeVgaHardware>::try_new(0).unwrap();
+        assert!(
+            vga.negotiate(&DisplayNegotiationRequest {
+                preferred_modes: &[],
+                preferred_pixel_formats: DisplayPixelFormatSupport::default(),
+                preferred_color_spaces: DisplayColorSpaceSupport::default(),
+                preferred_quantization: DisplayQuantizationSupport::default(),
+                require_audio: true,
+                prefer_hdr: false,
+                prefer_vrr: false,
+                allow_scaling: false,
+                allow_interlaced: false,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vga_driver_builds_port_handle_and_validates_config() {
+        let vga = Vga::<FakeVgaHardware>::try_new(0).unwrap();
+        let port = vga.port().unwrap();
+        let negotiated = vga
             .negotiate(&DisplayNegotiationRequest {
                 preferred_modes: &[],
                 preferred_pixel_formats: DisplayPixelFormatSupport::default(),
@@ -1108,7 +996,32 @@ mod tests {
         assert!(port.validate_config(&negotiated.config).is_ok());
         assert_eq!(
             port.descriptor().unwrap().connector,
-            DisplayConnectorKind::DisplayPort
+            DisplayConnectorKind::Vga
+        );
+    }
+
+    #[test]
+    fn vga_driver_rejects_audio_enabled_config() {
+        let vga = Vga::<FakeVgaHardware>::try_new(0).unwrap();
+        let port = vga.port().unwrap();
+        let mut negotiated = vga
+            .negotiate(&DisplayNegotiationRequest {
+                preferred_modes: &[],
+                preferred_pixel_formats: DisplayPixelFormatSupport::default(),
+                preferred_color_spaces: DisplayColorSpaceSupport::default(),
+                preferred_quantization: DisplayQuantizationSupport::default(),
+                require_audio: false,
+                prefer_hdr: false,
+                prefer_vrr: false,
+                allow_scaling: false,
+                allow_interlaced: false,
+            })
+            .unwrap()
+            .config;
+        negotiated.audio_enabled = true;
+        assert_eq!(
+            port.validate_config(&negotiated),
+            Err(DisplayConfigError::UnsupportedMode)
         );
     }
 }

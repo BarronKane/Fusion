@@ -24,8 +24,8 @@ use crate::contract::drivers::display::{
     DisplayVrrCapabilities,
 };
 
-pub(crate) const MAX_EDID_MODES: usize = 32;
-pub(crate) const EDID_BLOCK_BYTES: usize = 128;
+pub const MAX_EDID_MODES: usize = 32;
+pub const EDID_BLOCK_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct EdidModeRecord {
@@ -62,22 +62,22 @@ impl EdidModeRecord {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ParsedEdidSink {
-    pub(crate) descriptors: DisplayDescriptorSet<'static>,
-    pub(crate) descriptor_valid: bool,
-    pub(crate) identity: DisplayIdentity,
-    pub(crate) modes: [DisplayMode; MAX_EDID_MODES],
-    pub(crate) timings: [DisplayTiming; MAX_EDID_MODES],
-    pub(crate) mode_count: usize,
-    pub(crate) max_pixel_clock_khz: Option<u32>,
-    pub(crate) pixel_formats: DisplayPixelFormatSupport,
-    pub(crate) color_spaces: DisplayColorSpaceSupport,
-    pub(crate) quantization: DisplayQuantizationSupport,
-    pub(crate) audio: DisplayAudioCapabilities,
-    pub(crate) hdr: DisplayHdrCapabilities,
-    pub(crate) vrr: DisplayVrrCapabilities,
-    pub(crate) scaling: DisplayScalingCapabilities,
-    pub(crate) protection: DisplayProtectionCapabilities,
+pub struct ParsedEdidSink {
+    pub descriptors: DisplayDescriptorSet<'static>,
+    pub descriptor_valid: bool,
+    pub identity: DisplayIdentity,
+    pub modes: [DisplayMode; MAX_EDID_MODES],
+    pub timings: [DisplayTiming; MAX_EDID_MODES],
+    pub mode_count: usize,
+    pub max_pixel_clock_khz: Option<u32>,
+    pub pixel_formats: DisplayPixelFormatSupport,
+    pub color_spaces: DisplayColorSpaceSupport,
+    pub quantization: DisplayQuantizationSupport,
+    pub audio: DisplayAudioCapabilities,
+    pub hdr: DisplayHdrCapabilities,
+    pub vrr: DisplayVrrCapabilities,
+    pub scaling: DisplayScalingCapabilities,
+    pub protection: DisplayProtectionCapabilities,
 }
 
 impl ParsedEdidSink {
@@ -126,7 +126,7 @@ impl ParsedEdidSink {
         }
     }
 
-    pub(crate) fn timing_for_mode(&self, mode: DisplayMode) -> Option<DisplayTiming> {
+    pub fn timing_for_mode(&self, mode: DisplayMode) -> Option<DisplayTiming> {
         for index in 0..self.mode_count {
             if same_mode(self.modes[index], mode) {
                 return Some(self.timings[index]);
@@ -135,7 +135,7 @@ impl ParsedEdidSink {
         None
     }
 
-    pub(crate) fn supports_mode(&self, mode: DisplayMode) -> bool {
+    pub fn supports_mode(&self, mode: DisplayMode) -> bool {
         self.timing_for_mode(mode).is_some()
     }
 
@@ -163,7 +163,7 @@ impl ParsedEdidSink {
         self.mode_count += 1;
     }
 
-    pub(crate) fn sink_capabilities(&self) -> DisplaySinkCapabilities<'_> {
+    pub fn sink_capabilities(&self) -> DisplaySinkCapabilities<'_> {
         DisplaySinkCapabilities {
             modes: &self.modes[..self.mode_count],
             preferred_mode: self.modes[..self.mode_count]
@@ -182,7 +182,7 @@ impl ParsedEdidSink {
         }
     }
 
-    pub(crate) fn constrain_for_rgb_only(&mut self) {
+    pub fn constrain_for_rgb_only(&mut self) {
         self.color_spaces = DisplayColorSpaceSupport {
             rgb: true,
             ycbcr444: false,
@@ -197,7 +197,7 @@ impl ParsedEdidSink {
     }
 }
 
-pub(crate) fn parse_edid_sink(
+pub fn parse_edid_sink(
     connector: DisplayConnectorKind,
     descriptors: DisplayDescriptorSet<'static>,
 ) -> ParsedEdidSink {
@@ -412,7 +412,7 @@ fn parse_detailed_timing(descriptor: &[u8]) -> Option<(DisplayMode, DisplayTimin
     Some((mode_from_timing(timing, false), timing))
 }
 
-pub(crate) fn lookup_cea_mode(vic: u8) -> Option<(DisplayMode, DisplayTiming)> {
+pub fn lookup_cea_mode(vic: u8) -> Option<(DisplayMode, DisplayTiming)> {
     let timing = match vic {
         1 => DisplayTiming {
             pixel_clock_khz: 25_175,
@@ -548,7 +548,7 @@ pub(crate) fn lookup_cea_mode(vic: u8) -> Option<(DisplayMode, DisplayTiming)> {
     Some((mode_from_timing(timing, false), timing))
 }
 
-pub(crate) fn mode_from_timing(timing: DisplayTiming, preferred: bool) -> DisplayMode {
+pub fn mode_from_timing(timing: DisplayTiming, preferred: bool) -> DisplayMode {
     let total_pixels = u64::from(timing.horizontal_total()) * u64::from(timing.vertical_total());
     let refresh_hz_milli = if total_pixels == 0 {
         0
@@ -571,20 +571,20 @@ fn has_preferred_mode(sink: &ParsedEdidSink) -> bool {
         .any(|mode| mode.preferred)
 }
 
-pub(crate) fn same_mode(lhs: DisplayMode, rhs: DisplayMode) -> bool {
+pub fn same_mode(lhs: DisplayMode, rhs: DisplayMode) -> bool {
     lhs.width == rhs.width
         && lhs.height == rhs.height
         && lhs.refresh_hz_milli == rhs.refresh_hz_milli
         && lhs.interlaced == rhs.interlaced
 }
 
-pub(crate) fn mode_within_port_caps(mode: DisplayMode, caps: DisplayPortCapabilities) -> bool {
+pub fn mode_within_port_caps(mode: DisplayMode, caps: DisplayPortCapabilities) -> bool {
     mode.width <= caps.max_width
         && mode.height <= caps.max_height
         && mode.refresh_hz_milli <= caps.max_refresh_hz.saturating_mul(1000)
 }
 
-pub(crate) fn select_pixel_format(
+pub fn select_pixel_format(
     requested: DisplayPixelFormatSupport,
     port: DisplayPixelFormatSupport,
     sink: DisplayPixelFormatSupport,
@@ -614,7 +614,7 @@ pub(crate) fn select_pixel_format(
     None
 }
 
-pub(crate) fn select_color_space(
+pub fn select_color_space(
     requested: DisplayColorSpaceSupport,
     sink: DisplayColorSpaceSupport,
 ) -> DisplayColorSpace {
@@ -640,7 +640,7 @@ pub(crate) fn select_color_space(
     DisplayColorSpace::Rgb
 }
 
-pub(crate) fn select_quantization(
+pub fn select_quantization(
     requested: DisplayQuantizationSupport,
     sink: DisplayQuantizationSupport,
 ) -> DisplayQuantization {
@@ -665,18 +665,18 @@ pub(crate) fn select_quantization(
     DisplayQuantization::Default
 }
 
-pub(crate) fn contains_mode(modes: &[DisplayMode], candidate: DisplayMode) -> bool {
+pub fn contains_mode(modes: &[DisplayMode], candidate: DisplayMode) -> bool {
     modes.iter().copied().any(|mode| same_mode(mode, candidate))
 }
 
-pub(crate) fn matches_requested_color_space(
+pub fn matches_requested_color_space(
     requested: DisplayColorSpaceSupport,
     selected: DisplayColorSpace,
 ) -> bool {
     requested.supports(selected)
 }
 
-pub(crate) fn matches_requested_quantization(
+pub fn matches_requested_quantization(
     requested: DisplayQuantizationSupport,
     selected: DisplayQuantization,
 ) -> bool {

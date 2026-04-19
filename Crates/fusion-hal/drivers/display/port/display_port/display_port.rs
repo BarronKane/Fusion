@@ -1,8 +1,10 @@
-//! HDMI display endpoint driver family.
+//! DisplayPort display endpoint driver family.
+
+#![cfg_attr(not(feature = "std"), no_std)]
 
 use core::marker::PhantomData;
 
-use super::edid::{
+use fusion_hal::drivers::display::shared::edid::{
     contains_mode,
     matches_requested_color_space,
     matches_requested_quantization,
@@ -13,11 +15,11 @@ use super::edid::{
     select_quantization,
     ParsedEdidSink,
 };
-use super::support::{
+use fusion_hal::drivers::display::shared::support::{
     map_config_error,
     map_display_error,
 };
-use crate::contract::drivers::display::{
+use fusion_hal::contract::drivers::display::{
     DisplayActiveConfig,
     DisplayConfigError,
     DisplayConnectorKind,
@@ -43,6 +45,7 @@ use crate::contract::drivers::display::{
     DisplayPowerState,
     DisplayPresentReport,
     DisplayPresentRequest,
+    DisplayRawDescriptorKind,
     DisplayRegion,
     DisplayResult,
     DisplaySinkCapabilities,
@@ -50,7 +53,7 @@ use crate::contract::drivers::display::{
     DisplayTiming,
     DisplayUploadReport,
 };
-use crate::contract::drivers::driver::{
+use fusion_hal::contract::drivers::driver::{
     ActiveDriver,
     DriverActivation,
     DriverActivationContext,
@@ -63,28 +66,34 @@ use crate::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
+#[cfg(any(target_os = "none", feature = "fdxe-module"))]
+mod fdxe;
+#[path = "interface/interface.rs"]
+pub mod interface;
+mod unsupported;
+
 #[cfg(test)]
-use super::edid::EDID_BLOCK_BYTES;
+use fusion_hal::drivers::display::shared::edid::EDID_BLOCK_BYTES;
 #[cfg(test)]
-use crate::contract::drivers::display::{
+use fusion_hal::contract::drivers::display::{
     DisplayColorSpace,
     DisplayColorSpaceSupport,
     DisplayPixelFormat,
     DisplayPixelFormatSupport,
     DisplayQuantizationSupport,
-    DisplayRawDescriptorKind,
 };
-#[cfg(test)]
-use super::edid::lookup_cea_mode;
 
-const HDMI_DRIVER_CONTRACTS: [DriverContractKey; 2] = [
+const DISPLAY_PORT_DRIVER_CONTRACTS: [DriverContractKey; 2] = [
     DriverContractKey("display.control"),
     DriverContractKey("display.port"),
 ];
-const HDMI_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
+const DISPLAY_PORT_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 1] =
+    [DriverContractKey("display.layout")];
+const DISPLAY_PORT_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
     DriverBindingSource::Acpi,
@@ -92,40 +101,54 @@ const HDMI_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::Pci,
     DriverBindingSource::Manual,
 ];
-const HDMI_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "display.port.hdmi",
+const DISPLAY_PORT_DRIVER_METADATA: DriverMetadata = DriverMetadata {
+    key: "display.port.display_port",
     class: DriverClass::Display,
     identity: DriverIdentity {
         vendor: "Fusion",
         family: Some("Display"),
         package: None,
-        product: "HDMI driver",
-        advertised_interface: "HDMI endpoint",
+        product: "DisplayPort driver",
+        advertised_interface: "DisplayPort endpoint",
     },
-    contracts: &HDMI_DRIVER_CONTRACTS,
-    binding_sources: &HDMI_DRIVER_BINDING_SOURCES,
-    description: "HDMI display endpoint driver layered over one selected HDMI hardware substrate",
+    contracts: &DISPLAY_PORT_DRIVER_CONTRACTS,
+    required_contracts: &DISPLAY_PORT_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
+    binding_sources: &DISPLAY_PORT_DRIVER_BINDING_SOURCES,
+    description: "DisplayPort endpoint driver layered over one selected DisplayPort hardware substrate",
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HdmiBinding {
+pub struct DisplayPortBinding {
     pub provider: u8,
     pub output_name: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct HdmiRuntimeState {
+pub struct DisplayPortRuntimeState {
     pub enabled: bool,
     pub blanked: bool,
     pub active_config: Option<DisplayActiveConfig>,
 }
 
-/// Hardware-facing HDMI seam consumed by the HDMI driver family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+struct DisplayPortTransportCaps {
+    dpcd_revision_major: u8,
+    dpcd_revision_minor: u8,
+    max_link_rate_kbps: Option<u32>,
+    max_lane_count: u8,
+    enhanced_framing: bool,
+    downspread: bool,
+    has_display_id: bool,
+}
+
+/// Hardware-facing DisplayPort seam consumed by the DisplayPort driver family.
 ///
-/// The public HDMI driver owns EDID parsing, sink identity, capability derivation, negotiation,
-/// and config validation. The backend only needs to surface raw descriptors, connector truth, and
-/// the actual output programming/presentation operations.
-pub trait HdmiHardware {
+/// The public DisplayPort driver owns descriptor parsing, sink identity, capability derivation,
+/// negotiation, and config validation. The backend only needs to surface raw descriptors,
+/// connector truth, and the actual output programming/presentation operations.
+pub trait DisplayPortHardware {
     fn provider_count() -> u8;
     fn output_descriptor(provider: u8) -> Option<&'static DisplayOutputDescriptor>;
 
@@ -162,7 +185,7 @@ pub trait HdmiHardware {
 
     fn port_descriptor(provider: u8) -> DisplayResult<DisplayPortDescriptor>;
     fn port_capabilities(provider: u8) -> DisplayResult<DisplayPortCapabilities>;
-    fn runtime_state(provider: u8) -> DisplayResult<HdmiRuntimeState>;
+    fn runtime_state(provider: u8) -> DisplayResult<DisplayPortRuntimeState>;
     fn set_config(provider: u8, config: &DisplayActiveConfig) -> DisplayResult<()>;
     fn enable(provider: u8) -> DisplayResult<()>;
     fn disable(provider: u8) -> DisplayResult<()>;
@@ -187,9 +210,9 @@ pub trait HdmiHardware {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct UnsupportedHdmiHardware;
+pub struct UnsupportedDisplayPortHardware;
 
-impl HdmiHardware for UnsupportedHdmiHardware {
+impl DisplayPortHardware for UnsupportedDisplayPortHardware {
     fn provider_count() -> u8 {
         0
     }
@@ -214,7 +237,7 @@ impl HdmiHardware for UnsupportedHdmiHardware {
         Err(DisplayError::unsupported())
     }
 
-    fn runtime_state(_provider: u8) -> DisplayResult<HdmiRuntimeState> {
+    fn runtime_state(_provider: u8) -> DisplayResult<DisplayPortRuntimeState> {
         Err(DisplayError::unsupported())
     }
 
@@ -274,18 +297,20 @@ impl HdmiHardware for UnsupportedHdmiHardware {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct HdmiDriver<H: HdmiHardware = UnsupportedHdmiHardware> {
+pub struct DisplayPortDriver<H: DisplayPortHardware = unsupported::UnsupportedDisplayPortHardware> {
     marker: PhantomData<fn() -> H>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct HdmiDriverContext<H: HdmiHardware = UnsupportedHdmiHardware> {
+pub struct DisplayPortDriverContext<
+    H: DisplayPortHardware = unsupported::UnsupportedDisplayPortHardware,
+> {
     marker: PhantomData<fn() -> H>,
 }
 
-impl<H> HdmiDriverContext<H>
+impl<H> DisplayPortDriverContext<H>
 where
-    H: HdmiHardware,
+    H: DisplayPortHardware,
 {
     #[must_use]
     pub const fn new() -> Self {
@@ -297,36 +322,40 @@ where
 
 #[must_use]
 pub const fn driver_metadata() -> &'static DriverMetadata {
-    &HDMI_DRIVER_METADATA
+    &DISPLAY_PORT_DRIVER_METADATA
 }
 
-type HdmiSinkCache = ParsedEdidSink;
+type DisplayPortSinkCache = ParsedEdidSink;
 
 #[derive(Debug, Clone)]
-pub struct Hdmi<H: HdmiHardware = UnsupportedHdmiHardware> {
+pub struct DisplayPortEndpoint<H: DisplayPortHardware = unsupported::UnsupportedDisplayPortHardware>
+{
     provider: u8,
-    sink: HdmiSinkCache,
+    sink: DisplayPortSinkCache,
+    transport: DisplayPortTransportCaps,
     _hardware: PhantomData<H>,
 }
 
-impl<H> Hdmi<H>
+impl<H> DisplayPortEndpoint<H>
 where
-    H: HdmiHardware,
+    H: DisplayPortHardware,
 {
     fn try_new(provider: u8) -> DisplayResult<Self> {
-        let sink = parse_edid_sink(DisplayConnectorKind::Hdmi, H::raw_descriptors(provider)?);
+        let descriptors = H::raw_descriptors(provider)?;
+        let sink = parse_edid_sink(DisplayConnectorKind::DisplayPort, descriptors);
+        let transport = parse_display_port_transport(descriptors);
         Ok(Self {
             provider,
             sink,
+            transport,
             _hardware: PhantomData,
         })
     }
 
     fn refresh_sink(&mut self) -> DisplayResult<()> {
-        self.sink = parse_edid_sink(
-            DisplayConnectorKind::Hdmi,
-            H::raw_descriptors(self.provider)?,
-        );
+        let descriptors = H::raw_descriptors(self.provider)?;
+        self.sink = parse_edid_sink(DisplayConnectorKind::DisplayPort, descriptors);
+        self.transport = parse_display_port_transport(descriptors);
         Ok(())
     }
 
@@ -476,29 +505,32 @@ where
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct HdmiPort<'a, H: HdmiHardware = UnsupportedHdmiHardware> {
-    hdmi: &'a Hdmi<H>,
+pub struct DisplayPortEndpointPort<
+    'a,
+    H: DisplayPortHardware = unsupported::UnsupportedDisplayPortHardware,
+> {
+    endpoint: &'a DisplayPortEndpoint<H>,
 }
 
-impl<'a, H> HdmiPort<'a, H>
+impl<'a, H> DisplayPortEndpointPort<'a, H>
 where
-    H: HdmiHardware,
+    H: DisplayPortHardware,
 {
-    fn new(hdmi: &'a Hdmi<H>) -> Self {
-        Self { hdmi }
+    fn new(endpoint: &'a DisplayPortEndpoint<H>) -> Self {
+        Self { endpoint }
     }
 
     fn provider(&self) -> u8 {
-        self.hdmi.provider
+        self.endpoint.provider
     }
 }
 
-impl<H> DisplayControlContract for Hdmi<H>
+impl<H> DisplayControlContract for DisplayPortEndpoint<H>
 where
-    H: HdmiHardware,
+    H: DisplayPortHardware,
 {
     type Port<'a>
-        = HdmiPort<'a, H>
+        = DisplayPortEndpointPort<'a, H>
     where
         Self: 'a;
 
@@ -561,17 +593,17 @@ where
     }
 
     fn port(&self) -> DisplayResult<Self::Port<'_>> {
-        Ok(HdmiPort::new(self))
+        Ok(DisplayPortEndpointPort::new(self))
     }
 
     fn port_mut(&mut self) -> DisplayResult<Self::Port<'_>> {
-        Ok(HdmiPort::new(self))
+        Ok(DisplayPortEndpointPort::new(self))
     }
 }
 
-impl<'a, H> DisplayPortContract for HdmiPort<'a, H>
+impl<'a, H> DisplayPortContract for DisplayPortEndpointPort<'a, H>
 where
-    H: HdmiHardware,
+    H: DisplayPortHardware,
 {
     fn descriptor(&self) -> DisplayResult<DisplayPortDescriptor> {
         H::port_descriptor(self.provider())
@@ -593,7 +625,7 @@ where
     }
 
     fn validate_config(&self, config: &DisplayActiveConfig) -> Result<(), DisplayConfigError> {
-        self.hdmi.validate_active_config(config)
+        self.endpoint.validate_active_config(config)
     }
 
     fn active_config(&self) -> DisplayResult<Option<DisplayActiveConfig>> {
@@ -659,15 +691,15 @@ where
     }
 }
 
-fn enumerate_hdmi_bindings<H>(
-    _registered: &RegisteredDriver<HdmiDriver<H>>,
+fn enumerate_display_port_bindings<H>(
+    _registered: &RegisteredDriver<DisplayPortDriver<H>>,
     context: &mut DriverDiscoveryContext<'_>,
-    out: &mut [HdmiBinding],
+    out: &mut [DisplayPortBinding],
 ) -> Result<usize, DriverError>
 where
-    H: HdmiHardware + 'static,
+    H: DisplayPortHardware + 'static,
 {
-    let _ = context.downcast_mut::<HdmiDriverContext<H>>()?;
+    let _ = context.downcast_mut::<DisplayPortDriverContext<H>>()?;
     if out.is_empty() {
         return Err(DriverError::resource_exhausted());
     }
@@ -680,10 +712,10 @@ where
         let Some(descriptor) = H::output_descriptor(provider) else {
             continue;
         };
-        if descriptor.connector != DisplayConnectorKind::Hdmi {
+        if descriptor.connector != DisplayConnectorKind::DisplayPort {
             continue;
         }
-        out[written] = HdmiBinding {
+        out[written] = DisplayPortBinding {
             provider,
             output_name: descriptor.name,
         };
@@ -693,15 +725,15 @@ where
     Ok(written)
 }
 
-fn activate_hdmi_binding<H>(
-    _registered: &RegisteredDriver<HdmiDriver<H>>,
+fn activate_display_port_binding<H>(
+    _registered: &RegisteredDriver<DisplayPortDriver<H>>,
     context: &mut DriverActivationContext<'_>,
-    binding: HdmiBinding,
-) -> Result<ActiveDriver<HdmiDriver<H>>, DriverError>
+    binding: DisplayPortBinding,
+) -> Result<ActiveDriver<DisplayPortDriver<H>>, DriverError>
 where
-    H: HdmiHardware + 'static,
+    H: DisplayPortHardware + 'static,
 {
-    let _ = context.downcast_mut::<HdmiDriverContext<H>>()?;
+    let _ = context.downcast_mut::<DisplayPortDriverContext<H>>()?;
     let Some(descriptor) = H::output_descriptor(binding.provider) else {
         return Err(DriverError::invalid());
     };
@@ -709,22 +741,76 @@ where
         return Err(DriverError::invalid());
     }
 
-    let instance = Hdmi::<H>::try_new(binding.provider).map_err(map_display_error)?;
+    let instance =
+        DisplayPortEndpoint::<H>::try_new(binding.provider).map_err(map_display_error)?;
     Ok(ActiveDriver::new(binding, instance))
 }
 
-impl<H> DriverContract for HdmiDriver<H>
+impl<H> DriverContract for DisplayPortDriver<H>
 where
-    H: HdmiHardware + 'static,
+    H: DisplayPortHardware + 'static,
 {
-    type Binding = HdmiBinding;
-    type Instance = Hdmi<H>;
+    type Binding = DisplayPortBinding;
+    type Instance = DisplayPortEndpoint<H>;
 
     fn registration() -> DriverRegistration<Self> {
         DriverRegistration::new(
             driver_metadata,
-            DriverActivation::new(enumerate_hdmi_bindings::<H>, activate_hdmi_binding::<H>),
+            DriverActivation::new(
+                enumerate_display_port_bindings::<H>,
+                activate_display_port_binding::<H>,
+            ),
         )
+    }
+}
+
+fn find_descriptor_bytes(
+    descriptors: DisplayDescriptorSet<'static>,
+    kind: DisplayRawDescriptorKind,
+) -> Option<&'static [u8]> {
+    descriptors
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.kind == kind)
+        .map(|descriptor| descriptor.bytes)
+}
+
+fn parse_display_port_transport(
+    descriptors: DisplayDescriptorSet<'static>,
+) -> DisplayPortTransportCaps {
+    let mut transport = DisplayPortTransportCaps {
+        has_display_id: find_descriptor_bytes(descriptors, DisplayRawDescriptorKind::DisplayId)
+            .is_some(),
+        ..DisplayPortTransportCaps::default()
+    };
+
+    let Some(dpcd) = find_descriptor_bytes(descriptors, DisplayRawDescriptorKind::Dpcd) else {
+        return transport;
+    };
+    if dpcd.len() < 3 {
+        return transport;
+    }
+
+    let revision = dpcd[0];
+    transport.dpcd_revision_major = revision >> 4;
+    transport.dpcd_revision_minor = revision & 0x0f;
+    transport.max_link_rate_kbps = dpcd_link_rate_kbps(dpcd[1]);
+    transport.max_lane_count = dpcd[2] & 0x1f;
+    transport.enhanced_framing = dpcd[2] & 0x80 != 0;
+    if dpcd.len() > 3 {
+        transport.downspread = dpcd[3] & 0x01 != 0;
+    }
+
+    transport
+}
+
+fn dpcd_link_rate_kbps(code: u8) -> Option<u32> {
+    match code {
+        0x06 => Some(162_000),
+        0x0a => Some(270_000),
+        0x14 => Some(540_000),
+        0x1e => Some(810_000),
+        _ => None,
     }
 }
 
@@ -733,9 +819,9 @@ mod tests {
     use super::*;
 
     const TEST_OUTPUT_DESCRIPTOR: DisplayOutputDescriptor = DisplayOutputDescriptor {
-        id: crate::contract::drivers::display::DisplayOutputId(0),
-        name: "hdmi-0",
-        connector: DisplayConnectorKind::Hdmi,
+        id: fusion_hal::contract::drivers::display::DisplayOutputId(0),
+        name: "dp-0",
+        connector: DisplayConnectorKind::DisplayPort,
         hotplug_supported: true,
     };
 
@@ -744,34 +830,12 @@ mod tests {
         edid[..8].copy_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]);
         edid[8] = 0x04;
         edid[9] = 0x6d;
-        edid[10] = 0x34;
-        edid[11] = 0x12;
-        edid[12] = 0x78;
-        edid[13] = 0x56;
-        edid[14] = 0x34;
-        edid[15] = 0x12;
-        edid[16] = 1;
-        edid[17] = 4;
-        edid[18] = 0x01;
-        edid[19] = 0x03;
-        edid[20] = 0x80;
-        edid[21] = 0x34;
-        edid[22] = 0x20;
-        edid[23] = 0x78;
-        edid[24] = 0x2a;
-        edid[25] = 0xcf;
-        edid[26] = 0x74;
-        edid[27] = 0xa3;
-        edid[28] = 0x57;
-        edid[29] = 0x4c;
-        edid[30] = 0xb0;
-        edid[31] = 0x23;
-        edid[32] = 0x09;
-        edid[33] = 0x48;
-        edid[34] = 0x4c;
-        edid[35] = 0x21;
-        edid[36] = 0x08;
-        edid[37] = 0x00;
+        edid[10] = 0xcd;
+        edid[11] = 0xab;
+        edid[12] = 0x12;
+        edid[13] = 0x34;
+        edid[14] = 0x56;
+        edid[15] = 0x78;
 
         let dtd = &mut edid[54..72];
         dtd.copy_from_slice(&[
@@ -781,8 +845,8 @@ mod tests {
 
         let name_descriptor = &mut edid[72..90];
         name_descriptor.copy_from_slice(&[
-            0x00, 0x00, 0x00, 0xfc, 0x00, b'F', b'u', b's', b'i', b'o', b'n', b' ', b'H', b'D',
-            b'M', b'I', 0x0a, 0x20,
+            0x00, 0x00, 0x00, 0xfc, 0x00, b'F', b'u', b's', b'i', b'o', b'n', b' ', b'D', b'P',
+            0x0a, 0x20, 0x20, 0x20,
         ]);
 
         edid[126] = 1;
@@ -811,6 +875,19 @@ mod tests {
         extension
     }
 
+    fn build_dpcd() -> [u8; 16] {
+        let mut dpcd = [0u8; 16];
+        dpcd[0] = 0x14;
+        dpcd[1] = 0x1e;
+        dpcd[2] = 0x84;
+        dpcd[3] = 0x01;
+        dpcd
+    }
+
+    fn build_display_id() -> [u8; 8] {
+        [0x70, 0x01, 0x01, 0x00, 0, 0, 0, 0]
+    }
+
     fn finalize_edid_checksum(block: &mut [u8; EDID_BLOCK_BYTES]) {
         let checksum = block[..EDID_BLOCK_BYTES - 1]
             .iter()
@@ -818,9 +895,9 @@ mod tests {
         block[EDID_BLOCK_BYTES - 1] = checksum.wrapping_neg();
     }
 
-    struct FakeHdmiHardware;
+    struct FakeDisplayPortHardware;
 
-    impl HdmiHardware for FakeHdmiHardware {
+    impl DisplayPortHardware for FakeDisplayPortHardware {
         fn provider_count() -> u8 {
             1
         }
@@ -840,12 +917,24 @@ mod tests {
         fn raw_descriptors(_provider: u8) -> DisplayResult<DisplayDescriptorSet<'static>> {
             let mut edid = build_base_edid().to_vec();
             edid.extend_from_slice(&build_cta_extension());
-            let leaked = Box::leak(edid.into_boxed_slice());
+            let edid = Box::leak(edid.into_boxed_slice());
+            let dpcd = Box::leak(Box::new(build_dpcd())).as_slice();
+            let display_id = Box::leak(Box::new(build_display_id())).as_slice();
             let descriptors = Box::leak(
-                vec![crate::contract::drivers::display::DisplayRawDescriptor {
-                    kind: DisplayRawDescriptorKind::Edid,
-                    bytes: leaked,
-                }]
+                vec![
+                    fusion_hal::contract::drivers::display::DisplayRawDescriptor {
+                        kind: DisplayRawDescriptorKind::Edid,
+                        bytes: edid,
+                    },
+                    fusion_hal::contract::drivers::display::DisplayRawDescriptor {
+                        kind: DisplayRawDescriptorKind::Dpcd,
+                        bytes: dpcd,
+                    },
+                    fusion_hal::contract::drivers::display::DisplayRawDescriptor {
+                        kind: DisplayRawDescriptorKind::DisplayId,
+                        bytes: display_id,
+                    },
+                ]
                 .into_boxed_slice(),
             );
             Ok(DisplayDescriptorSet { descriptors })
@@ -853,7 +942,7 @@ mod tests {
 
         fn port_descriptor(_provider: u8) -> DisplayResult<DisplayPortDescriptor> {
             Ok(DisplayPortDescriptor {
-                connector: DisplayConnectorKind::Hdmi,
+                connector: DisplayConnectorKind::DisplayPort,
                 hotplug_supported: true,
                 hotplug_event_supported: true,
                 cpu_upload_supported: true,
@@ -885,8 +974,8 @@ mod tests {
             })
         }
 
-        fn runtime_state(_provider: u8) -> DisplayResult<HdmiRuntimeState> {
-            Ok(HdmiRuntimeState {
+        fn runtime_state(_provider: u8) -> DisplayResult<DisplayPortRuntimeState> {
+            Ok(DisplayPortRuntimeState {
                 enabled: true,
                 blanked: false,
                 active_config: None,
@@ -934,7 +1023,7 @@ mod tests {
         ) -> DisplayResult<DisplayPresentReport> {
             Ok(DisplayPresentReport {
                 presented: true,
-                frame_id: crate::contract::drivers::display::DisplayFrameId(1),
+                frame_id: fusion_hal::contract::drivers::display::DisplayFrameId(1),
                 vblank_sequence: Some(1),
             })
         }
@@ -956,41 +1045,32 @@ mod tests {
     }
 
     #[test]
-    fn hdmi_parser_extracts_identity_and_modes() {
-        let mut edid = build_base_edid().to_vec();
-        edid.extend_from_slice(&build_cta_extension());
-        let leaked = Box::leak(edid.into_boxed_slice());
-        let descriptors = [crate::contract::drivers::display::DisplayRawDescriptor {
-            kind: DisplayRawDescriptorKind::Edid,
-            bytes: leaked,
-        }];
-        let sink = parse_edid_sink(
-            DisplayConnectorKind::Hdmi,
-            DisplayDescriptorSet {
-                descriptors: Box::leak(Box::new(descriptors)),
-            },
-        );
-
-        assert!(sink.descriptor_valid);
-        assert_eq!(sink.identity.product_code, Some(0x1234));
+    fn display_port_parser_extracts_identity_and_transport() {
+        let endpoint = DisplayPortEndpoint::<FakeDisplayPortHardware>::try_new(0).unwrap();
+        assert!(endpoint.sink.descriptor_valid);
+        assert_eq!(endpoint.sink.identity.product_code, Some(0xabcd));
         assert_eq!(
-            sink.identity
+            endpoint
+                .sink
+                .identity
                 .model_name
                 .map(|text| text.as_bytes().to_vec()),
-            Some(b"Fusion HDMI".to_vec())
+            Some(b"Fusion DP".to_vec())
         );
-        assert!(sink.mode_count >= 2);
-        assert!(sink.audio.basic_pcm);
-        assert!(sink.color_spaces.ycbcr444);
-        assert!(sink.color_spaces.ycbcr422);
-        assert!(sink.hdr.hdr_static_metadata);
-        assert!(sink.hdr.hdr10);
+        assert!(endpoint.sink.mode_count >= 2);
+        assert_eq!(endpoint.transport.dpcd_revision_major, 1);
+        assert_eq!(endpoint.transport.dpcd_revision_minor, 4);
+        assert_eq!(endpoint.transport.max_link_rate_kbps, Some(810_000));
+        assert_eq!(endpoint.transport.max_lane_count, 4);
+        assert!(endpoint.transport.enhanced_framing);
+        assert!(endpoint.transport.downspread);
+        assert!(endpoint.transport.has_display_id);
     }
 
     #[test]
-    fn hdmi_driver_negotiates_requested_mode() {
-        let hdmi = Hdmi::<FakeHdmiHardware>::try_new(0).unwrap();
-        let result = hdmi
+    fn display_port_driver_negotiates_requested_mode() {
+        let endpoint = DisplayPortEndpoint::<FakeDisplayPortHardware>::try_new(0).unwrap();
+        let result = endpoint
             .negotiate(&DisplayNegotiationRequest {
                 preferred_modes: &[DisplayMode {
                     width: 1920,
@@ -1028,10 +1108,10 @@ mod tests {
     }
 
     #[test]
-    fn hdmi_driver_builds_port_handle_and_validates_config() {
-        let hdmi = Hdmi::<FakeHdmiHardware>::try_new(0).unwrap();
-        let port = hdmi.port().unwrap();
-        let negotiated = hdmi
+    fn display_port_driver_builds_port_handle_and_validates_config() {
+        let endpoint = DisplayPortEndpoint::<FakeDisplayPortHardware>::try_new(0).unwrap();
+        let port = endpoint.port().unwrap();
+        let negotiated = endpoint
             .negotiate(&DisplayNegotiationRequest {
                 preferred_modes: &[],
                 preferred_pixel_formats: DisplayPixelFormatSupport::default(),
@@ -1048,15 +1128,7 @@ mod tests {
         assert!(port.validate_config(&negotiated.config).is_ok());
         assert_eq!(
             port.descriptor().unwrap().connector,
-            DisplayConnectorKind::Hdmi
+            DisplayConnectorKind::DisplayPort
         );
-    }
-
-    #[test]
-    fn hdmi_cea_table_includes_4k60() {
-        let (mode, _) = lookup_cea_mode(97).expect("vic 97");
-        assert_eq!(mode.width, 3840);
-        assert_eq!(mode.height, 2160);
-        assert_eq!(mode.refresh_hz_milli, 60_000);
     }
 }

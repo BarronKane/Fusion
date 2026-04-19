@@ -2,45 +2,27 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Clone, Copy)]
-struct ModuleSpec {
-    crate_name: &'static str,
-    feature_env: &'static str,
-    driver_count: usize,
-    selected_by_soc_rp2350: bool,
-}
+#[path = "build_support/fdxe_select.rs"]
+mod fdxe_select;
 
-const MODULE_SPECS: &[ModuleSpec] = &[
-    ModuleSpec {
-        crate_name: "fd-bus-gpio",
-        feature_env: "CARGO_FEATURE_FD_BUS_GPIO",
-        driver_count: 1,
-        selected_by_soc_rp2350: true,
-    },
-    ModuleSpec {
-        crate_name: "fd-bus-usb",
-        feature_env: "CARGO_FEATURE_FD_BUS_USB",
-        driver_count: 1,
-        selected_by_soc_rp2350: true,
-    },
-    ModuleSpec {
-        crate_name: "fd-net-chipset-infineon-cyw43439",
-        feature_env: "CARGO_FEATURE_FD_NET_CHIPSET_INFINEON_CYW43439",
-        driver_count: 2,
-        selected_by_soc_rp2350: true,
-    },
-];
+use fdxe_select::{
+    MODULE_SPECS,
+    ModuleSpec,
+    module_enabled_with,
+    module_spec,
+    validate_selected_modules,
+};
 
-fn module_spec(crate_name: &str) -> Option<ModuleSpec> {
-    MODULE_SPECS
-        .iter()
-        .copied()
-        .find(|spec| spec.crate_name == crate_name)
+fn soc_rp2350_enabled() -> bool {
+    env::var_os("CARGO_FEATURE_SOC_RP2350").is_some()
 }
 
 fn module_enabled(spec: ModuleSpec) -> bool {
-    env::var_os(spec.feature_env).is_some()
-        || (spec.selected_by_soc_rp2350 && env::var_os("CARGO_FEATURE_SOC_RP2350").is_some())
+    module_enabled_with(
+        spec,
+        |name| env::var_os(name).is_some(),
+        soc_rp2350_enabled(),
+    )
 }
 
 fn available_fdxe_modules() -> Vec<&'static str> {
@@ -52,10 +34,18 @@ fn available_fdxe_modules() -> Vec<&'static str> {
         .collect()
 }
 
+fn selected_module_specs(requests: &[String]) -> Vec<ModuleSpec> {
+    requests
+        .iter()
+        .filter_map(|module| module_spec(module))
+        .filter(|spec| module_enabled(*spec))
+        .collect()
+}
+
 fn requested_fdxe_modules() -> Vec<String> {
     let mut modules = Vec::new();
 
-    if env::var_os("CARGO_FEATURE_SOC_RP2350").is_some() {
+    if soc_rp2350_enabled() {
         modules.push("fd-bus-gpio".to_owned());
         modules.push("fd-bus-usb".to_owned());
         modules.push("fd-net-chipset-infineon-cyw43439".to_owned());
@@ -93,15 +83,6 @@ fn requested_fdxe_modules() -> Vec<String> {
     modules
 }
 
-fn requested_driver_capacity(requests: &[String]) -> usize {
-    requests
-        .iter()
-        .filter_map(|module| module_spec(module))
-        .filter(|spec| module_enabled(*spec))
-        .map(|spec| spec.driver_count)
-        .sum()
-}
-
 fn render_str_list(name: &str, values: &[impl AsRef<str>]) -> String {
     if values.is_empty() {
         return format!("pub const {name}: &[&str] = &[];\n");
@@ -124,21 +105,21 @@ fn main() {
     println!("cargo:rerun-if-changed={}", shared.display());
     println!("cargo:rerun-if-env-changed=FUSION_FDXE_REQUESTS");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SOC_RP2350");
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FD_BUS_GPIO");
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FD_BUS_USB");
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FD_NET_CHIPSET_INFINEON_CYW43439");
+    for spec in MODULE_SPECS {
+        println!("cargo:rerun-if-env-changed={}", spec.feature_env);
+    }
 
     let body = fs::read_to_string(&shared).expect("read shared FDXE ABI");
     fs::write(&shared_out, body).expect("write staged FDXE ABI");
 
     let available = available_fdxe_modules();
     let requests = requested_fdxe_modules();
-    let module_capacity = requests
-        .iter()
-        .filter_map(|module| module_spec(module))
-        .filter(|spec| module_enabled(*spec))
-        .count();
-    let driver_capacity = requested_driver_capacity(&requests);
+    let selected_specs = selected_module_specs(&requests);
+    if let Err(error) = validate_selected_modules(&selected_specs) {
+        panic!("{error}");
+    }
+    let module_capacity = selected_specs.len();
+    let driver_capacity: usize = selected_specs.iter().map(|spec| spec.drivers.len()).sum();
 
     let mut rendered = String::new();
     rendered.push_str(&render_str_list(

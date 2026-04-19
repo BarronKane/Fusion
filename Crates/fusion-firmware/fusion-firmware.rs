@@ -11,6 +11,10 @@ pub use sys::hal::runtime::{
     RootCourierSecurityPolicy,
 };
 
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "build_support/fdxe_select.rs"]
+mod __fdxe_select_tests;
 #[path = "aml/aml.rs"]
 pub mod aml;
 #[path = "contract/contract.rs"]

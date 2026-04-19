@@ -7,14 +7,14 @@ use crate::contract::drivers::display::{
 };
 use crate::contract::drivers::driver::DriverError;
 
-pub(crate) fn map_config_error(error: DisplayConfigError) -> DisplayError {
+pub fn map_config_error(error: DisplayConfigError) -> DisplayError {
     match error {
         DisplayConfigError::NotReady => DisplayError::state_conflict(),
         _ => DisplayError::invalid(),
     }
 }
 
-pub(crate) fn map_display_error(error: DisplayError) -> DriverError {
+pub fn map_display_error(error: DisplayError) -> DriverError {
     match error.kind() {
         DisplayErrorKind::Unsupported => DriverError::unsupported(),
         DisplayErrorKind::Invalid => DriverError::invalid(),

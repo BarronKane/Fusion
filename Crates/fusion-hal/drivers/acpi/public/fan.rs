@@ -23,6 +23,7 @@ use crate::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
@@ -30,6 +31,7 @@ use crate::drivers::acpi::public::interface::contract::AcpiFanHardware;
 use crate::drivers::acpi::public::unsupported;
 
 const FAN_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("acpi.fan")];
+const FAN_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const FAN_DRIVER_BINDING_SOURCES: [DriverBindingSource; 2] =
     [DriverBindingSource::Acpi, DriverBindingSource::Manual];
 const FAN_DRIVER_METADATA: DriverMetadata = DriverMetadata {
@@ -43,6 +45,9 @@ const FAN_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         advertised_interface: "ACPI fan",
     },
     contracts: &FAN_DRIVER_CONTRACTS,
+    required_contracts: &FAN_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
     binding_sources: &FAN_DRIVER_BINDING_SOURCES,
     description: "Canonical ACPI fan driver layered over one selected ACPI backend",
 };

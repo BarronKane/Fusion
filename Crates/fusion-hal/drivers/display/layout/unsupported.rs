@@ -1,6 +1,6 @@
 //! Unsupported machine-display layout backend placeholders.
 
-use crate::contract::drivers::display::{
+use fusion_hal::contract::drivers::display::{
     DisplayActiveConfig,
     DisplayConfigError,
     DisplayControlContract,
@@ -37,7 +37,7 @@ use crate::contract::drivers::display::{
     DisplayUploadReport,
 };
 
-use super::DisplayLayoutHardware;
+use super::DisplayLayoutBackend;
 
 /// Unsupported layout backend placeholder used as the default type parameter for the canonical
 /// display-layout driver family.
@@ -59,38 +59,38 @@ impl DisplayControlContract for UnsupportedDisplayControl {
         Self: 'a;
 
     fn state(&self) -> DisplayResult<DisplayControlState> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn refresh(&mut self) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn identify(&self) -> DisplayResult<DisplayIdentity> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn sink_capabilities(&self) -> DisplayResult<DisplaySinkCapabilities<'_>> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn raw_descriptors(&self) -> DisplayResult<DisplayDescriptorSet<'_>> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn negotiate(
         &self,
         _request: &DisplayNegotiationRequest<'_>,
     ) -> DisplayResult<DisplayNegotiationResult> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn feature_capabilities(&self) -> DisplayResult<DisplayFeatureCapabilities> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn get_feature(&self, _feature: DisplayFeature) -> DisplayResult<DisplayFeatureValue> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn set_feature(
@@ -98,15 +98,15 @@ impl DisplayControlContract for UnsupportedDisplayControl {
         _feature: DisplayFeature,
         _value: DisplayFeatureValue,
     ) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn power_state(&self) -> DisplayResult<DisplayPowerState> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn set_power_state(&mut self, _state: DisplayPowerState) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn port(&self) -> DisplayResult<Self::Port<'_>> {
@@ -120,15 +120,15 @@ impl DisplayControlContract for UnsupportedDisplayControl {
 
 impl DisplayPortContract for UnsupportedDisplayPort {
     fn descriptor(&self) -> DisplayResult<DisplayPortDescriptor> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn state(&self) -> DisplayResult<DisplayPortState> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn capabilities(&self) -> DisplayResult<DisplayPortCapabilities> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn validate_config(&self, _config: &DisplayActiveConfig) -> Result<(), DisplayConfigError> {
@@ -136,66 +136,66 @@ impl DisplayPortContract for UnsupportedDisplayPort {
     }
 
     fn active_config(&self) -> DisplayResult<Option<DisplayActiveConfig>> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn set_config(&mut self, _config: &DisplayActiveConfig) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn enable(&mut self) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn disable(&mut self) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn blank(&mut self, _blanked: bool) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn attach_surface(&mut self, _surface: DisplaySurfaceBinding) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn detach_surface(&mut self) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn upload_frame(
         &mut self,
         _frame: &DisplayFrameView<'_>,
-        _region: Option<crate::contract::drivers::display::DisplayRegion>,
+        _region: Option<fusion_hal::contract::drivers::display::DisplayRegion>,
     ) -> DisplayResult<DisplayUploadReport> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn present(&mut self, _request: &DisplayPresentRequest) -> DisplayResult<DisplayPresentReport> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn flush(&mut self) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn wait_vblank(&mut self, _timeout_ms: u32) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn wait_hotplug_event(
         &mut self,
         _timeout_ms: u32,
     ) -> DisplayResult<Option<DisplayHotplugEvent>> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn timing(&self) -> DisplayResult<Option<DisplayTiming>> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 }
 
-impl DisplayLayoutHardware for UnsupportedDisplayLayoutHardware {
+impl DisplayLayoutBackend for UnsupportedDisplayLayoutHardware {
     type Control<'a>
         = UnsupportedDisplayControl
     where
@@ -232,7 +232,7 @@ impl DisplayLayoutHardware for UnsupportedDisplayLayoutHardware {
     }
 
     fn apply_layout(_layout: u8, _config: &DisplayLayoutConfig<'_>) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn primary_output(_layout: u8) -> DisplayResult<Option<DisplayOutputId>> {
@@ -240,7 +240,7 @@ impl DisplayLayoutHardware for UnsupportedDisplayLayoutHardware {
     }
 
     fn set_primary_output(_layout: u8, _output: Option<DisplayOutputId>) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn control<'a>(_layout: u8, _id: DisplayOutputId) -> DisplayResult<Option<Self::Control<'a>>> {
@@ -259,13 +259,13 @@ impl DisplayLayoutHardware for UnsupportedDisplayLayoutHardware {
         _surface: DisplaySurfaceId,
         _placement: &DisplaySurfacePlacement,
     ) -> DisplayResult<()> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 
     fn present_layout(
         _layout: u8,
         _request: &DisplayLayoutPresentRequest<'_>,
     ) -> DisplayResult<DisplayLayoutPresentReport> {
-        Err(crate::contract::drivers::display::DisplayError::unsupported())
+        Err(fusion_hal::contract::drivers::display::DisplayError::unsupported())
     }
 }

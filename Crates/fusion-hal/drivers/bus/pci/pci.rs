@@ -18,6 +18,7 @@ use fusion_hal::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
@@ -35,6 +36,7 @@ use self::interface::contract::{
 };
 
 const PCI_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("bus.pci")];
+const PCI_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 // The universal PCI family declares the full binding-source taxonomy up front even though only
 // manual attachment is practically usable today. That keeps future ACPI/DT/platform attachers from
 // forcing a contract metadata rewrite just because the discovery side finally grew up.
@@ -56,6 +58,9 @@ const PCI_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         advertised_interface: "PCI family",
     },
     contracts: &PCI_DRIVER_CONTRACTS,
+    required_contracts: &PCI_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
     binding_sources: &PCI_DRIVER_BINDING_SOURCES,
     description: "Universal PCI provider driver layered over one selected hardware substrate",
 };

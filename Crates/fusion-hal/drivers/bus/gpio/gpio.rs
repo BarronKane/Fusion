@@ -17,6 +17,7 @@ use fusion_hal::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
@@ -34,6 +35,7 @@ use self::interface::contract::{
 };
 
 const GPIO_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("bus.gpio")];
+const GPIO_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const GPIO_DRIVER_BINDING_SOURCES: [DriverBindingSource; 5] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -52,6 +54,9 @@ const GPIO_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         advertised_interface: "GPIO",
     },
     contracts: &GPIO_DRIVER_CONTRACTS,
+    required_contracts: &GPIO_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
     binding_sources: &GPIO_DRIVER_BINDING_SOURCES,
     description: "Universal GPIO provider driver layered over one selected hardware substrate",
 };

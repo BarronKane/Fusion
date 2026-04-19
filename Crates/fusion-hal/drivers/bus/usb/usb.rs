@@ -18,6 +18,7 @@ use fusion_hal::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
@@ -39,6 +40,7 @@ use self::interface::contract::{
 };
 
 const USB_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("bus.usb")];
+const USB_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const USB_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -58,6 +60,9 @@ const USB_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         advertised_interface: "USB family",
     },
     contracts: &USB_DRIVER_CONTRACTS,
+    required_contracts: &USB_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
     binding_sources: &USB_DRIVER_BINDING_SOURCES,
     description: "Universal USB provider driver layered over one selected hardware substrate",
 };

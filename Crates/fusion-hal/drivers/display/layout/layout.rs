@@ -1,8 +1,10 @@
 //! Canonical public display-layout driver family.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
 use core::marker::PhantomData;
 
-use crate::contract::drivers::display::{
+use fusion_hal::contract::drivers::display::{
     DisplayControlContract,
     DisplayLayoutConfig,
     DisplayLayoutContract,
@@ -16,7 +18,7 @@ use crate::contract::drivers::display::{
     DisplaySurfaceId,
     DisplaySurfacePlacement,
 };
-use crate::contract::drivers::driver::{
+use fusion_hal::contract::drivers::driver::{
     ActiveDriver,
     DriverActivation,
     DriverActivationContext,
@@ -29,13 +31,19 @@ use crate::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
+#[cfg(any(target_os = "none", feature = "fdxe-module"))]
+mod fdxe;
+#[path = "interface/interface.rs"]
+pub mod interface;
 mod unsupported;
 
 const DISPLAY_LAYOUT_DRIVER_CONTRACTS: [DriverContractKey; 1] =
     [DriverContractKey("display.layout")];
+const DISPLAY_LAYOUT_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const DISPLAY_LAYOUT_DRIVER_BINDING_SOURCES: [DriverBindingSource; 5] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -54,6 +62,9 @@ const DISPLAY_LAYOUT_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         advertised_interface: "machine display composition",
     },
     contracts: &DISPLAY_LAYOUT_DRIVER_CONTRACTS,
+    required_contracts: &DISPLAY_LAYOUT_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::MustBeConsumed,
+    singleton_class: Some("display.layout.machine"),
     binding_sources: &DISPLAY_LAYOUT_DRIVER_BINDING_SOURCES,
     description: "Canonical display-layout driver layered over one selected machine display substrate",
 };
@@ -65,9 +76,8 @@ pub struct DisplayLayoutBinding {
     pub layout_id: &'static str,
 }
 
-/// Hardware-facing machine-display composition seam consumed by the canonical layout driver
-/// family.
-pub trait DisplayLayoutHardware {
+/// Composition-facing machine-display backend seam consumed by the canonical layout driver family.
+pub trait DisplayLayoutBackend {
     type Control<'a>: DisplayControlContract
     where
         Self: 'a;
@@ -104,7 +114,7 @@ pub trait DisplayLayoutHardware {
 /// Registerable canonical display-layout driver family marker.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DisplayLayoutDriver<
-    H: DisplayLayoutHardware = unsupported::UnsupportedDisplayLayoutHardware,
+    H: DisplayLayoutBackend = unsupported::UnsupportedDisplayLayoutHardware,
 > {
     marker: PhantomData<fn() -> H>,
 }
@@ -112,14 +122,14 @@ pub struct DisplayLayoutDriver<
 /// One-shot discovery/activation context for the canonical display-layout driver family.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DisplayLayoutDriverContext<
-    H: DisplayLayoutHardware = unsupported::UnsupportedDisplayLayoutHardware,
+    H: DisplayLayoutBackend = unsupported::UnsupportedDisplayLayoutHardware,
 > {
     marker: PhantomData<fn() -> H>,
 }
 
 impl<H> DisplayLayoutDriverContext<H>
 where
-    H: DisplayLayoutHardware,
+    H: DisplayLayoutBackend,
 {
     #[must_use]
     pub const fn new() -> Self {
@@ -137,14 +147,14 @@ pub const fn driver_metadata() -> &'static DriverMetadata {
 
 /// Canonical machine-display composition surface over one selected layout backend.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DisplayLayout<H: DisplayLayoutHardware = unsupported::UnsupportedDisplayLayoutHardware> {
+pub struct DisplayLayout<H: DisplayLayoutBackend = unsupported::UnsupportedDisplayLayoutHardware> {
     layout: u8,
     _hardware: PhantomData<H>,
 }
 
 impl<H> DisplayLayout<H>
 where
-    H: DisplayLayoutHardware,
+    H: DisplayLayoutBackend,
 {
     #[must_use]
     pub const fn new(layout: u8) -> Self {
@@ -157,7 +167,7 @@ where
 
 impl<H> DisplayLayoutContract for DisplayLayout<H>
 where
-    H: DisplayLayoutHardware,
+    H: DisplayLayoutBackend,
 {
     type Control<'a>
         = H::Control<'a>
@@ -228,7 +238,7 @@ fn enumerate_layout_bindings<H>(
     out: &mut [DisplayLayoutBinding],
 ) -> Result<usize, DriverError>
 where
-    H: DisplayLayoutHardware + 'static,
+    H: DisplayLayoutBackend + 'static,
 {
     let _ = context.downcast_mut::<DisplayLayoutDriverContext<H>>()?;
     if out.is_empty() {
@@ -256,7 +266,7 @@ fn activate_layout_binding<H>(
     binding: DisplayLayoutBinding,
 ) -> Result<ActiveDriver<DisplayLayoutDriver<H>>, DriverError>
 where
-    H: DisplayLayoutHardware + 'static,
+    H: DisplayLayoutBackend + 'static,
 {
     let _ = context.downcast_mut::<DisplayLayoutDriverContext<H>>()?;
     let Some(layout_id) = H::layout_id(binding.layout) else {
@@ -274,7 +284,7 @@ where
 
 impl<H> DriverContract for DisplayLayoutDriver<H>
 where
-    H: DisplayLayoutHardware + 'static,
+    H: DisplayLayoutBackend + 'static,
 {
     type Binding = DisplayLayoutBinding;
     type Instance = DisplayLayout<H>;

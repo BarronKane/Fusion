@@ -22,6 +22,7 @@ use crate::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
@@ -29,6 +30,7 @@ use crate::drivers::acpi::public::interface::contract::AcpiEmbeddedControllerHar
 use crate::drivers::acpi::public::unsupported;
 
 const EC_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("acpi.embedded_controller")];
+const EC_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const EC_DRIVER_BINDING_SOURCES: [DriverBindingSource; 2] =
     [DriverBindingSource::Acpi, DriverBindingSource::Manual];
 const EC_DRIVER_METADATA: DriverMetadata = DriverMetadata {
@@ -42,6 +44,9 @@ const EC_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         advertised_interface: "ACPI embedded controller",
     },
     contracts: &EC_DRIVER_CONTRACTS,
+    required_contracts: &EC_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
     binding_sources: &EC_DRIVER_BINDING_SOURCES,
     description: "Canonical ACPI embedded-controller driver layered over one selected ACPI backend",
 };

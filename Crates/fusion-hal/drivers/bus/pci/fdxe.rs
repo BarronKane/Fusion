@@ -15,6 +15,7 @@ mod abi {
         DriverClass,
         DriverContractKey,
         DriverIdentity,
+        DriverUsefulness,
     };
 
     include!(concat!(env!("OUT_DIR"), "/fdxe_shared.rs"));

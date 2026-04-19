@@ -10,6 +10,7 @@ use crate::contract::drivers::driver::{
     DriverClass,
     DriverContractKey,
     DriverIdentity,
+    DriverUsefulness,
 };
 
 include!("shared.rs");

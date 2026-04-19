@@ -24,6 +24,7 @@ use crate::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
@@ -31,6 +32,7 @@ use crate::drivers::acpi::public::interface::contract::AcpiBatteryHardware;
 use crate::drivers::acpi::public::unsupported;
 
 const BATTERY_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("acpi.battery")];
+const BATTERY_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const BATTERY_DRIVER_BINDING_SOURCES: [DriverBindingSource; 2] =
     [DriverBindingSource::Acpi, DriverBindingSource::Manual];
 const BATTERY_DRIVER_METADATA: DriverMetadata = DriverMetadata {
@@ -44,6 +46,9 @@ const BATTERY_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         advertised_interface: "ACPI battery",
     },
     contracts: &BATTERY_DRIVER_CONTRACTS,
+    required_contracts: &BATTERY_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
     binding_sources: &BATTERY_DRIVER_BINDING_SOURCES,
     description: "Canonical ACPI battery driver layered over one selected ACPI backend",
 };

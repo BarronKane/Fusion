@@ -14,6 +14,7 @@ use fusion_hal::contract::drivers::driver::{
     DriverError,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 use fusion_hal::contract::drivers::net::NetVendorIdentity;
@@ -111,6 +112,7 @@ pub const CYW43439_BLUETOOTH_VENDOR_IDENTITY: NetVendorIdentity = NetVendorIdent
 
 const CYW43439_BLUETOOTH_DRIVER_CONTRACTS: [DriverContractKey; 1] =
     [DriverContractKey("net.bluetooth")];
+const CYW43439_BLUETOOTH_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const CYW43439_BLUETOOTH_BINDING_SOURCES: [DriverBindingSource; 4] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -122,6 +124,9 @@ const CYW43439_BLUETOOTH_DRIVER_METADATA: DriverMetadata = DriverMetadata {
     class: DriverClass::Network,
     identity: CYW43439_BLUETOOTH_VENDOR_IDENTITY,
     contracts: &CYW43439_BLUETOOTH_DRIVER_CONTRACTS,
+    required_contracts: &CYW43439_BLUETOOTH_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
     binding_sources: &CYW43439_BLUETOOTH_BINDING_SOURCES,
     description: "Infineon AIROC CYW43439 Bluetooth controller driver",
 };

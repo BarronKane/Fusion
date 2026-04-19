@@ -23,6 +23,7 @@ use crate::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
@@ -30,6 +31,7 @@ use crate::drivers::acpi::public::interface::contract::AcpiLidHardware;
 use crate::drivers::acpi::public::unsupported;
 
 const LID_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("acpi.lid")];
+const LID_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const LID_DRIVER_BINDING_SOURCES: [DriverBindingSource; 2] =
     [DriverBindingSource::Acpi, DriverBindingSource::Manual];
 const LID_DRIVER_METADATA: DriverMetadata = DriverMetadata {
@@ -43,6 +45,9 @@ const LID_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         advertised_interface: "ACPI lid",
     },
     contracts: &LID_DRIVER_CONTRACTS,
+    required_contracts: &LID_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
     binding_sources: &LID_DRIVER_BINDING_SOURCES,
     description: "Canonical ACPI lid driver layered over one selected ACPI backend",
 };

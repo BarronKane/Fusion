@@ -22,6 +22,7 @@ use fusion_hal::contract::drivers::driver::{
     DriverClass,
     DriverContractKey,
     DriverIdentity,
+    DriverUsefulness,
 };
 
 include!(concat!(env!("OUT_DIR"), "/fdxe_shared.rs"));

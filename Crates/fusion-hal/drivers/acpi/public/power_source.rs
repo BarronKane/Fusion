@@ -23,6 +23,7 @@ use crate::contract::drivers::driver::{
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
+    DriverUsefulness,
     RegisteredDriver,
 };
 
@@ -31,6 +32,7 @@ use crate::drivers::acpi::public::unsupported;
 
 const POWER_SOURCE_DRIVER_CONTRACTS: [DriverContractKey; 1] =
     [DriverContractKey("acpi.power_source")];
+const POWER_SOURCE_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const POWER_SOURCE_DRIVER_BINDING_SOURCES: [DriverBindingSource; 2] =
     [DriverBindingSource::Acpi, DriverBindingSource::Manual];
 const POWER_SOURCE_DRIVER_METADATA: DriverMetadata = DriverMetadata {
@@ -44,6 +46,9 @@ const POWER_SOURCE_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         advertised_interface: "ACPI power source",
     },
     contracts: &POWER_SOURCE_DRIVER_CONTRACTS,
+    required_contracts: &POWER_SOURCE_DRIVER_REQUIRED_CONTRACTS,
+    usefulness: DriverUsefulness::Standalone,
+    singleton_class: None,
     binding_sources: &POWER_SOURCE_DRIVER_BINDING_SOURCES,
     description: "Canonical ACPI power-source driver layered over one selected ACPI backend",
 };

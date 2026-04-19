@@ -460,6 +460,7 @@ mod tests {
         DriverContractKey,
         DriverIdentity,
         DriverMetadata,
+        DriverUsefulness,
         FDXE_MODULE_V1_ABI_VERSION,
         FDXE_MODULE_V1_MAGIC,
         FdxeDriverExportV1,
@@ -470,6 +471,7 @@ mod tests {
     };
 
     const CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("test.driver")];
+    const REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
     const BINDINGS: [DriverBindingSource; 1] = [DriverBindingSource::Manual];
     const METADATA: DriverMetadata = DriverMetadata {
         key: "test.driver.example",
@@ -482,6 +484,9 @@ mod tests {
             advertised_interface: "Example",
         },
         contracts: &CONTRACTS,
+        required_contracts: &REQUIRED_CONTRACTS,
+        usefulness: DriverUsefulness::Standalone,
+        singleton_class: None,
         binding_sources: &BINDINGS,
         description: "Example exported driver for fdxe tests",
     };

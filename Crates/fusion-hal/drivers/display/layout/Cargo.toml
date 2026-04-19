@@ -1,0 +1,35 @@
+[package]
+name = "fd-display-layout"
+description = ""
+documentation = ""
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+path = "layout.rs"
+
+[features]
+default = []
+std = ["fusion-hal/std"]
+soc = ["fusion-hal/soc"]
+hosted = ["std", "fusion-hal/hosted"]
+critical-safe = ["fusion-hal/critical-safe"]
+debug-profile = ["fusion-hal/debug-profile"]
+debug-insights = ["fusion-hal/debug-insights"]
+fdxe-module = []
+sys-cortex-m = ["soc", "fusion-hal/sys-cortex-m"]
+soc-rp2350 = ["sys-cortex-m", "fusion-hal/soc-rp2350"]
+sys-fusion-kn = ["hosted", "fusion-hal/sys-fusion-kn"]
+cortex-m-vector-secure-world = ["fusion-hal/cortex-m-vector-secure-world"]
+cortex-m-vector-nonsecure-world = ["fusion-hal/cortex-m-vector-nonsecure-world"]
+
+[dependencies]
+fusion-hal = { workspace = true, default-features = false }
+
+[lints]
+workspace = true
