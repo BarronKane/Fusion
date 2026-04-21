@@ -25,7 +25,7 @@ use abi::{
 };
 
 const DRIVER_EXPORTS: [FdxeDriverExportV1; 1] = [FdxeDriverExportV1::new(
-    "display.port.hdmi",
+    crate::dogma::HDMI_DRIVER_DOGMA.key,
     crate::driver_metadata,
 )];
 

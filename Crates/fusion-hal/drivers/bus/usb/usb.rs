@@ -12,18 +12,22 @@ use fusion_hal::contract::drivers::driver::{
     DriverBindingSource,
     DriverClass,
     DriverContract,
-    DriverContractKey,
     DriverDiscoveryContext,
     DriverError,
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
-    DriverUsefulness,
     RegisteredDriver,
+};
+pub(crate) use fusion_hal::contract::drivers::driver::{
+    DriverContractKey,
+    DriverDogma,
+    DriverUsefulness,
 };
 
 pub use usb_contract::*;
 
+mod dogma;
 #[cfg(any(target_os = "none", feature = "fdxe-module"))]
 mod fdxe;
 #[path = "interface/interface.rs"]
@@ -39,8 +43,6 @@ use self::interface::contract::{
     UsbHardwareUsb4,
 };
 
-const USB_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("bus.usb")];
-const USB_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const USB_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -50,7 +52,7 @@ const USB_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::Manual,
 ];
 const USB_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "bus.usb",
+    key: dogma::USB_DRIVER_DOGMA.key,
     class: DriverClass::Bus,
     identity: DriverIdentity {
         vendor: "Fusion",
@@ -59,10 +61,10 @@ const USB_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         product: "USB driver",
         advertised_interface: "USB family",
     },
-    contracts: &USB_DRIVER_CONTRACTS,
-    required_contracts: &USB_DRIVER_REQUIRED_CONTRACTS,
-    usefulness: DriverUsefulness::Standalone,
-    singleton_class: None,
+    contracts: dogma::USB_DRIVER_DOGMA.contracts,
+    required_contracts: dogma::USB_DRIVER_DOGMA.required_contracts,
+    usefulness: dogma::USB_DRIVER_DOGMA.usefulness,
+    singleton_class: dogma::USB_DRIVER_DOGMA.singleton_class,
     binding_sources: &USB_DRIVER_BINDING_SOURCES,
     description: "Universal USB provider driver layered over one selected hardware substrate",
 };

@@ -12,18 +12,22 @@ use fusion_hal::contract::drivers::driver::{
     DriverBindingSource,
     DriverClass,
     DriverContract,
-    DriverContractKey,
     DriverDiscoveryContext,
     DriverError,
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
-    DriverUsefulness,
     RegisteredDriver,
+};
+pub(crate) use fusion_hal::contract::drivers::driver::{
+    DriverContractKey,
+    DriverDogma,
+    DriverUsefulness,
 };
 
 pub use pci_contract::*;
 
+mod dogma;
 #[cfg(any(target_os = "none", feature = "fdxe-module"))]
 mod fdxe;
 #[path = "interface/interface.rs"]
@@ -35,8 +39,6 @@ use self::interface::contract::{
     PciHardwareFunction,
 };
 
-const PCI_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("bus.pci")];
-const PCI_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 // The universal PCI family declares the full binding-source taxonomy up front even though only
 // manual attachment is practically usable today. That keeps future ACPI/DT/platform attachers from
 // forcing a contract metadata rewrite just because the discovery side finally grew up.
@@ -48,7 +50,7 @@ const PCI_DRIVER_BINDING_SOURCES: [DriverBindingSource; 5] = [
     DriverBindingSource::Manual,
 ];
 const PCI_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "bus.pci",
+    key: dogma::PCI_DRIVER_DOGMA.key,
     class: DriverClass::Bus,
     identity: DriverIdentity {
         vendor: "Fusion",
@@ -57,10 +59,10 @@ const PCI_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         product: "PCI driver",
         advertised_interface: "PCI family",
     },
-    contracts: &PCI_DRIVER_CONTRACTS,
-    required_contracts: &PCI_DRIVER_REQUIRED_CONTRACTS,
-    usefulness: DriverUsefulness::Standalone,
-    singleton_class: None,
+    contracts: dogma::PCI_DRIVER_DOGMA.contracts,
+    required_contracts: dogma::PCI_DRIVER_DOGMA.required_contracts,
+    usefulness: dogma::PCI_DRIVER_DOGMA.usefulness,
+    singleton_class: dogma::PCI_DRIVER_DOGMA.singleton_class,
     binding_sources: &PCI_DRIVER_BINDING_SOURCES,
     description: "Universal PCI provider driver layered over one selected hardware substrate",
 };

@@ -5,6 +5,8 @@ members = [
     "Crates/fusion-firmware/macros",
     "Crates/fusion-firmware",
     "Crates/fusion-hal",
+    "Crates/fusion-hal/driver-dogma",
+    "Crates/fusion-hal/drivers/acpi/public",
     "Crates/fusion-hal/drivers/display/layout",
     "Crates/fusion-hal/drivers/display/port/hdmi",
     "Crates/fusion-hal/drivers/display/port/dvi",
@@ -33,6 +35,7 @@ repository = ""
 # Fusion substrate stack.
 fusion-firmware = { path = "Crates/fusion-firmware", default-features = false }
 fusion-firmware-macros = { path = "Crates/fusion-firmware/macros" }
+fusion-driver-dogma = { path = "Crates/fusion-hal/driver-dogma", default-features = false }
 fusion-hal = { path = "Crates/fusion-hal", default-features = false }
 fusion-pal = { path = "Crates/fusion-pal", default-features = false }
 fusion-pcu = { path = "Crates/fusion-pcu", default-features = false }

@@ -17,26 +17,21 @@ use crate::contract::drivers::driver::{
     DriverBindingSource,
     DriverClass,
     DriverContract,
-    DriverContractKey,
     DriverDiscoveryContext,
     DriverError,
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
-    DriverUsefulness,
     RegisteredDriver,
 };
 
 use crate::drivers::acpi::public::interface::contract::AcpiPowerSourceHardware;
 use crate::drivers::acpi::public::unsupported;
 
-const POWER_SOURCE_DRIVER_CONTRACTS: [DriverContractKey; 1] =
-    [DriverContractKey("acpi.power_source")];
-const POWER_SOURCE_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const POWER_SOURCE_DRIVER_BINDING_SOURCES: [DriverBindingSource; 2] =
     [DriverBindingSource::Acpi, DriverBindingSource::Manual];
 const POWER_SOURCE_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "acpi.power_source",
+    key: crate::drivers::acpi::public::dogma::POWER_SOURCE_DRIVER_DOGMA.key,
     class: DriverClass::Other("acpi"),
     identity: DriverIdentity {
         vendor: "Fusion",
@@ -45,10 +40,11 @@ const POWER_SOURCE_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         product: "power-source driver",
         advertised_interface: "ACPI power source",
     },
-    contracts: &POWER_SOURCE_DRIVER_CONTRACTS,
-    required_contracts: &POWER_SOURCE_DRIVER_REQUIRED_CONTRACTS,
-    usefulness: DriverUsefulness::Standalone,
-    singleton_class: None,
+    contracts: crate::drivers::acpi::public::dogma::POWER_SOURCE_DRIVER_DOGMA.contracts,
+    required_contracts: crate::drivers::acpi::public::dogma::POWER_SOURCE_DRIVER_DOGMA
+        .required_contracts,
+    usefulness: crate::drivers::acpi::public::dogma::POWER_SOURCE_DRIVER_DOGMA.usefulness,
+    singleton_class: crate::drivers::acpi::public::dogma::POWER_SOURCE_DRIVER_DOGMA.singleton_class,
     binding_sources: &POWER_SOURCE_DRIVER_BINDING_SOURCES,
     description: "Canonical ACPI power-source driver layered over one selected ACPI backend",
 };

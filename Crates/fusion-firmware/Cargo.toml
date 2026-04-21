@@ -21,6 +21,7 @@ hosted = ["std", "fusion-hal/hosted", "fusion-pal/hosted", "fusion-sys/hosted", 
 critical-safe = ["fusion-hal/critical-safe", "fusion-pal/critical-safe", "fusion-sys/critical-safe", "fusion-std/critical-safe"]
 debug-profile = ["fusion-hal/debug-profile", "fusion-pal/debug-profile", "fusion-sys/debug-profile", "fusion-std/debug-profile"]
 debug-insights = ["fusion-hal/debug-insights", "fusion-pal/debug-insights", "fusion-sys/debug-insights", "fusion-std/debug-insights"]
+fd-acpi-public = ["dep:fd-acpi-public"]
 fd-bus-usb = ["dep:fd-bus-usb", "fusion-pal/fd-bus-usb"]
 sys-cortex-m = ["soc", "fusion-hal/sys-cortex-m", "fusion-pal/sys-cortex-m", "fusion-sys/sys-cortex-m", "fusion-std/sys-cortex-m"]
 soc-rp2350 = [
@@ -52,12 +53,14 @@ cortex-m-vector-nonsecure-world = [
 
 [dependencies]
 bitflags.workspace = true
+fusion-driver-dogma = { workspace = true }
 fusion-firmware-macros = { workspace = true }
 fusion-hal = { workspace = true, default-features = false }
 fusion-pal = { workspace = true, default-features = false }
 fusion-pcu = { workspace = true, default-features = false }
 fusion-sys = { workspace = true, default-features = false }
 fusion-std = { workspace = true, default-features = false }
+fd-acpi-public = { path = "../fusion-hal/drivers/acpi/public", default-features = false, optional = true }
 
 [target.'cfg(target_os = "none")'.dependencies]
 fd-bus-gpio = { path = "../fusion-hal/drivers/bus/gpio", default-features = false, optional = true }
@@ -75,6 +78,9 @@ fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false,
 
 [target.'cfg(target_os = "ios")'.dependencies]
 fd-bus-usb = { path = "../fusion-hal/drivers/bus/usb", default-features = false, features = ["std"], optional = true }
+
+[build-dependencies]
+fusion-driver-dogma = { workspace = true }
 
 [lints]
 workspace = true

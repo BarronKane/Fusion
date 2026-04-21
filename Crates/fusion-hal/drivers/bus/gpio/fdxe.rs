@@ -24,8 +24,10 @@ use abi::{
     FdxeStaticModuleV1,
 };
 
-const DRIVER_EXPORTS: [FdxeDriverExportV1; 1] =
-    [FdxeDriverExportV1::new("bus.gpio", crate::driver_metadata)];
+const DRIVER_EXPORTS: [FdxeDriverExportV1; 1] = [FdxeDriverExportV1::new(
+    crate::dogma::GPIO_DRIVER_DOGMA.key,
+    crate::driver_metadata,
+)];
 
 static FDXE_MODULE_HEADER_V1: FdxeModuleV1 = FdxeModuleV1::new(
     env!("CARGO_PKG_NAME"),

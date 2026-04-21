@@ -9,12 +9,10 @@ use fusion_hal::contract::drivers::driver::{
     DriverBindingSource,
     DriverClass,
     DriverContract,
-    DriverContractKey,
     DriverDiscoveryContext,
     DriverError,
     DriverMetadata,
     DriverRegistration,
-    DriverUsefulness,
     RegisteredDriver,
 };
 use fusion_hal::contract::drivers::net::NetVendorIdentity;
@@ -110,9 +108,6 @@ pub const CYW43439_BLUETOOTH_VENDOR_IDENTITY: NetVendorIdentity = NetVendorIdent
     advertised_interface: "Bluetooth 5.2",
 };
 
-const CYW43439_BLUETOOTH_DRIVER_CONTRACTS: [DriverContractKey; 1] =
-    [DriverContractKey("net.bluetooth")];
-const CYW43439_BLUETOOTH_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const CYW43439_BLUETOOTH_BINDING_SOURCES: [DriverBindingSource; 4] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -120,13 +115,13 @@ const CYW43439_BLUETOOTH_BINDING_SOURCES: [DriverBindingSource; 4] = [
     DriverBindingSource::Manual,
 ];
 const CYW43439_BLUETOOTH_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "net.bluetooth.infineon.cyw43439",
+    key: crate::dogma::CYW43439_BLUETOOTH_DRIVER_DOGMA.key,
     class: DriverClass::Network,
     identity: CYW43439_BLUETOOTH_VENDOR_IDENTITY,
-    contracts: &CYW43439_BLUETOOTH_DRIVER_CONTRACTS,
-    required_contracts: &CYW43439_BLUETOOTH_REQUIRED_CONTRACTS,
-    usefulness: DriverUsefulness::Standalone,
-    singleton_class: None,
+    contracts: crate::dogma::CYW43439_BLUETOOTH_DRIVER_DOGMA.contracts,
+    required_contracts: crate::dogma::CYW43439_BLUETOOTH_DRIVER_DOGMA.required_contracts,
+    usefulness: crate::dogma::CYW43439_BLUETOOTH_DRIVER_DOGMA.usefulness,
+    singleton_class: crate::dogma::CYW43439_BLUETOOTH_DRIVER_DOGMA.singleton_class,
     binding_sources: &CYW43439_BLUETOOTH_BINDING_SOURCES,
     description: "Infineon AIROC CYW43439 Bluetooth controller driver",
 };

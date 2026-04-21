@@ -6,6 +6,16 @@ use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::slice;
 
+pub use fusion_driver_dogma::{
+    DriverAvailability,
+    DriverContractKey,
+    DriverDogma,
+    DriverInopReason,
+    DriverUsefulness,
+    DriverValidationError,
+    validate_driver_dogmas,
+};
+
 /// Canonical marketed identity for one driver family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DriverIdentity {
@@ -51,17 +61,6 @@ pub enum DriverClass {
     Other(&'static str),
 }
 
-/// Canonical contract-family key implemented by one driver.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DriverContractKey(pub &'static str);
-
-/// Whether one driver is intrinsically useful on its own or only when something else consumes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DriverUsefulness {
-    Standalone,
-    MustBeConsumed,
-}
-
 /// Enumerated binding/discovery sources a driver can honestly support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DriverBindingSource {
@@ -90,22 +89,6 @@ pub struct DriverMetadata {
     pub singleton_class: Option<&'static str>,
     pub binding_sources: &'static [DriverBindingSource],
     pub description: &'static str,
-}
-
-/// Canonical inactive reason for one registered driver family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DriverInopReason {
-    MissingDependency(DriverContractKey),
-    Unconsumed,
-    SingletonConflict(&'static str),
-}
-
-/// Validated readiness state for one registered driver family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DriverAvailability {
-    Unknown,
-    Ready,
-    Inop(DriverInopReason),
 }
 
 /// Kind of failure returned by driver registration or activation law.

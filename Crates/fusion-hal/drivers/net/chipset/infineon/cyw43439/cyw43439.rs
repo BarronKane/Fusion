@@ -2,9 +2,16 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub(crate) use fusion_hal::contract::drivers::driver::{
+    DriverContractKey,
+    DriverDogma,
+    DriverUsefulness,
+};
+
 #[path = "boot/boot.rs"]
 mod boot;
 mod core;
+mod dogma;
 
 #[path = "bluetooth/bluetooth.rs"]
 pub mod bluetooth;

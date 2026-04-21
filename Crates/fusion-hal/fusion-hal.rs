@@ -6,7 +6,7 @@
 //! - reusable peripheral/device drivers that should not live in `fusion-sys`
 //!
 //! Concrete driver implementations live in external `fd-*` crates such as `fd-bus-gpio`,
-//! `fd-bus-pci`, `fd-bus-usb`, `fd-display-layout`, `fd-display-port-hdmi`,
+//! `fd-bus-pci`, `fd-bus-usb`, `fd-acpi-public`, `fd-display-layout`, `fd-display-port-hdmi`,
 //! `fd-display-port-display_port`, and `fd-net-chipset-infineon-cyw43439`. PAL implements
 //! hardware-facing driver substrate contracts.
 

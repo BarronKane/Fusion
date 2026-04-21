@@ -30,10 +30,13 @@ use abi::{
 
 const DRIVER_EXPORTS: [FdxeDriverExportV1; 2] = [
     FdxeDriverExportV1::new(
-        "net.bluetooth.infineon.cyw43439",
+        crate::dogma::CYW43439_BLUETOOTH_DRIVER_DOGMA.key,
         bluetooth::driver_metadata,
     ),
-    FdxeDriverExportV1::new("net.wifi.infineon.cyw43439", wifi::driver_metadata),
+    FdxeDriverExportV1::new(
+        crate::dogma::CYW43439_WIFI_DRIVER_DOGMA.key,
+        wifi::driver_metadata,
+    ),
 ];
 
 static FDXE_MODULE_HEADER_V1: FdxeModuleV1 = FdxeModuleV1::new(

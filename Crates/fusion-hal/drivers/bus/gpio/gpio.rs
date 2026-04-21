@@ -11,18 +11,22 @@ use fusion_hal::contract::drivers::driver::{
     DriverBindingSource,
     DriverClass,
     DriverContract,
-    DriverContractKey,
     DriverDiscoveryContext,
     DriverError,
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
-    DriverUsefulness,
     RegisteredDriver,
+};
+pub(crate) use fusion_hal::contract::drivers::driver::{
+    DriverContractKey,
+    DriverDogma,
+    DriverUsefulness,
 };
 
 pub use fusion_hal::contract::drivers::bus::gpio::*;
 
+mod dogma;
 #[cfg(any(target_os = "none", feature = "fdxe-module"))]
 mod fdxe;
 #[path = "interface/interface.rs"]
@@ -34,8 +38,6 @@ use self::interface::contract::{
     GpioHardwarePin,
 };
 
-const GPIO_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("bus.gpio")];
-const GPIO_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const GPIO_DRIVER_BINDING_SOURCES: [DriverBindingSource; 5] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -44,7 +46,7 @@ const GPIO_DRIVER_BINDING_SOURCES: [DriverBindingSource; 5] = [
     DriverBindingSource::Manual,
 ];
 const GPIO_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "bus.gpio",
+    key: dogma::GPIO_DRIVER_DOGMA.key,
     class: DriverClass::Bus,
     identity: DriverIdentity {
         vendor: "Fusion",
@@ -53,10 +55,10 @@ const GPIO_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         product: "GPIO driver",
         advertised_interface: "GPIO",
     },
-    contracts: &GPIO_DRIVER_CONTRACTS,
-    required_contracts: &GPIO_DRIVER_REQUIRED_CONTRACTS,
-    usefulness: DriverUsefulness::Standalone,
-    singleton_class: None,
+    contracts: dogma::GPIO_DRIVER_DOGMA.contracts,
+    required_contracts: dogma::GPIO_DRIVER_DOGMA.required_contracts,
+    usefulness: dogma::GPIO_DRIVER_DOGMA.usefulness,
+    singleton_class: dogma::GPIO_DRIVER_DOGMA.singleton_class,
     binding_sources: &GPIO_DRIVER_BINDING_SOURCES,
     description: "Universal GPIO provider driver layered over one selected hardware substrate",
 };

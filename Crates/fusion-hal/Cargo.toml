@@ -29,6 +29,7 @@ cortex-m-vector-nonsecure-world = []
 
 [dependencies]
 bitflags.workspace = true
+fusion-driver-dogma = { workspace = true }
 
 [lints]
 workspace = true

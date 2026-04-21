@@ -59,16 +59,20 @@ use fusion_hal::contract::drivers::driver::{
     DriverBindingSource,
     DriverClass,
     DriverContract,
-    DriverContractKey,
     DriverDiscoveryContext,
     DriverError,
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
-    DriverUsefulness,
     RegisteredDriver,
 };
+pub(crate) use fusion_hal::contract::drivers::driver::{
+    DriverContractKey,
+    DriverDogma,
+    DriverUsefulness,
+};
 
+mod dogma;
 #[cfg(any(target_os = "none", feature = "fdxe-module"))]
 mod fdxe;
 #[path = "interface/interface.rs"]
@@ -89,12 +93,6 @@ use fusion_hal::contract::drivers::display::{
 #[cfg(test)]
 use fusion_hal::drivers::display::shared::edid::lookup_cea_mode;
 
-const HDMI_DRIVER_CONTRACTS: [DriverContractKey; 2] = [
-    DriverContractKey("display.control"),
-    DriverContractKey("display.port"),
-];
-const HDMI_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 1] =
-    [DriverContractKey("display.layout")];
 const HDMI_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -104,7 +102,7 @@ const HDMI_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::Manual,
 ];
 const HDMI_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "display.port.hdmi",
+    key: dogma::HDMI_DRIVER_DOGMA.key,
     class: DriverClass::Display,
     identity: DriverIdentity {
         vendor: "Fusion",
@@ -113,10 +111,10 @@ const HDMI_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         product: "HDMI driver",
         advertised_interface: "HDMI endpoint",
     },
-    contracts: &HDMI_DRIVER_CONTRACTS,
-    required_contracts: &HDMI_DRIVER_REQUIRED_CONTRACTS,
-    usefulness: DriverUsefulness::Standalone,
-    singleton_class: None,
+    contracts: dogma::HDMI_DRIVER_DOGMA.contracts,
+    required_contracts: dogma::HDMI_DRIVER_DOGMA.required_contracts,
+    usefulness: dogma::HDMI_DRIVER_DOGMA.usefulness,
+    singleton_class: dogma::HDMI_DRIVER_DOGMA.singleton_class,
     binding_sources: &HDMI_DRIVER_BINDING_SOURCES,
     description: "HDMI display endpoint driver layered over one selected HDMI hardware substrate",
 };

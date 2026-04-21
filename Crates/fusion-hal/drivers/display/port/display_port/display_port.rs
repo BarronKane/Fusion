@@ -60,16 +60,20 @@ use fusion_hal::contract::drivers::driver::{
     DriverBindingSource,
     DriverClass,
     DriverContract,
-    DriverContractKey,
     DriverDiscoveryContext,
     DriverError,
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
-    DriverUsefulness,
     RegisteredDriver,
 };
+pub(crate) use fusion_hal::contract::drivers::driver::{
+    DriverContractKey,
+    DriverDogma,
+    DriverUsefulness,
+};
 
+mod dogma;
 #[cfg(any(target_os = "none", feature = "fdxe-module"))]
 mod fdxe;
 #[path = "interface/interface.rs"]
@@ -87,12 +91,6 @@ use fusion_hal::contract::drivers::display::{
     DisplayQuantizationSupport,
 };
 
-const DISPLAY_PORT_DRIVER_CONTRACTS: [DriverContractKey; 2] = [
-    DriverContractKey("display.control"),
-    DriverContractKey("display.port"),
-];
-const DISPLAY_PORT_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 1] =
-    [DriverContractKey("display.layout")];
 const DISPLAY_PORT_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -102,7 +100,7 @@ const DISPLAY_PORT_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::Manual,
 ];
 const DISPLAY_PORT_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "display.port.display_port",
+    key: dogma::DISPLAY_PORT_DRIVER_DOGMA.key,
     class: DriverClass::Display,
     identity: DriverIdentity {
         vendor: "Fusion",
@@ -111,10 +109,10 @@ const DISPLAY_PORT_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         product: "DisplayPort driver",
         advertised_interface: "DisplayPort endpoint",
     },
-    contracts: &DISPLAY_PORT_DRIVER_CONTRACTS,
-    required_contracts: &DISPLAY_PORT_DRIVER_REQUIRED_CONTRACTS,
-    usefulness: DriverUsefulness::Standalone,
-    singleton_class: None,
+    contracts: dogma::DISPLAY_PORT_DRIVER_DOGMA.contracts,
+    required_contracts: dogma::DISPLAY_PORT_DRIVER_DOGMA.required_contracts,
+    usefulness: dogma::DISPLAY_PORT_DRIVER_DOGMA.usefulness,
+    singleton_class: dogma::DISPLAY_PORT_DRIVER_DOGMA.singleton_class,
     binding_sources: &DISPLAY_PORT_DRIVER_BINDING_SOURCES,
     description: "DisplayPort endpoint driver layered over one selected DisplayPort hardware substrate",
 };

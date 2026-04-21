@@ -59,16 +59,20 @@ use fusion_hal::contract::drivers::driver::{
     DriverBindingSource,
     DriverClass,
     DriverContract,
-    DriverContractKey,
     DriverDiscoveryContext,
     DriverError,
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
-    DriverUsefulness,
     RegisteredDriver,
 };
+pub(crate) use fusion_hal::contract::drivers::driver::{
+    DriverContractKey,
+    DriverDogma,
+    DriverUsefulness,
+};
 
+mod dogma;
 #[cfg(any(target_os = "none", feature = "fdxe-module"))]
 mod fdxe;
 #[path = "interface/interface.rs"]
@@ -87,11 +91,6 @@ use fusion_hal::contract::drivers::display::{
     DisplayRawDescriptorKind,
 };
 
-const VGA_DRIVER_CONTRACTS: [DriverContractKey; 2] = [
-    DriverContractKey("display.control"),
-    DriverContractKey("display.port"),
-];
-const VGA_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("display.layout")];
 const VGA_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -101,7 +100,7 @@ const VGA_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::Manual,
 ];
 const VGA_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "display.port.vga",
+    key: dogma::VGA_DRIVER_DOGMA.key,
     class: DriverClass::Display,
     identity: DriverIdentity {
         vendor: "Fusion",
@@ -110,10 +109,10 @@ const VGA_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         product: "VGA driver",
         advertised_interface: "VGA endpoint",
     },
-    contracts: &VGA_DRIVER_CONTRACTS,
-    required_contracts: &VGA_DRIVER_REQUIRED_CONTRACTS,
-    usefulness: DriverUsefulness::Standalone,
-    singleton_class: None,
+    contracts: dogma::VGA_DRIVER_DOGMA.contracts,
+    required_contracts: dogma::VGA_DRIVER_DOGMA.required_contracts,
+    usefulness: dogma::VGA_DRIVER_DOGMA.usefulness,
+    singleton_class: dogma::VGA_DRIVER_DOGMA.singleton_class,
     binding_sources: &VGA_DRIVER_BINDING_SOURCES,
     description: "VGA display endpoint driver layered over one selected VGA hardware substrate",
 };

@@ -25,25 +25,26 @@ use fusion_hal::contract::drivers::driver::{
     DriverBindingSource,
     DriverClass,
     DriverContract,
-    DriverContractKey,
     DriverDiscoveryContext,
     DriverError,
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
-    DriverUsefulness,
     RegisteredDriver,
 };
+pub(crate) use fusion_hal::contract::drivers::driver::{
+    DriverContractKey,
+    DriverDogma,
+    DriverUsefulness,
+};
 
+mod dogma;
 #[cfg(any(target_os = "none", feature = "fdxe-module"))]
 mod fdxe;
 #[path = "interface/interface.rs"]
 pub mod interface;
 mod unsupported;
 
-const DISPLAY_LAYOUT_DRIVER_CONTRACTS: [DriverContractKey; 1] =
-    [DriverContractKey("display.layout")];
-const DISPLAY_LAYOUT_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const DISPLAY_LAYOUT_DRIVER_BINDING_SOURCES: [DriverBindingSource; 5] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -52,7 +53,7 @@ const DISPLAY_LAYOUT_DRIVER_BINDING_SOURCES: [DriverBindingSource; 5] = [
     DriverBindingSource::Manual,
 ];
 const DISPLAY_LAYOUT_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "display.layout",
+    key: dogma::DISPLAY_LAYOUT_DRIVER_DOGMA.key,
     class: DriverClass::Display,
     identity: DriverIdentity {
         vendor: "Fusion",
@@ -61,10 +62,10 @@ const DISPLAY_LAYOUT_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         product: "layout driver",
         advertised_interface: "machine display composition",
     },
-    contracts: &DISPLAY_LAYOUT_DRIVER_CONTRACTS,
-    required_contracts: &DISPLAY_LAYOUT_DRIVER_REQUIRED_CONTRACTS,
-    usefulness: DriverUsefulness::MustBeConsumed,
-    singleton_class: Some("display.layout.machine"),
+    contracts: dogma::DISPLAY_LAYOUT_DRIVER_DOGMA.contracts,
+    required_contracts: dogma::DISPLAY_LAYOUT_DRIVER_DOGMA.required_contracts,
+    usefulness: dogma::DISPLAY_LAYOUT_DRIVER_DOGMA.usefulness,
+    singleton_class: dogma::DISPLAY_LAYOUT_DRIVER_DOGMA.singleton_class,
     binding_sources: &DISPLAY_LAYOUT_DRIVER_BINDING_SOURCES,
     description: "Canonical display-layout driver layered over one selected machine display substrate",
 };

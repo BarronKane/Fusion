@@ -59,16 +59,20 @@ use fusion_hal::contract::drivers::driver::{
     DriverBindingSource,
     DriverClass,
     DriverContract,
-    DriverContractKey,
     DriverDiscoveryContext,
     DriverError,
     DriverIdentity,
     DriverMetadata,
     DriverRegistration,
-    DriverUsefulness,
     RegisteredDriver,
 };
+pub(crate) use fusion_hal::contract::drivers::driver::{
+    DriverContractKey,
+    DriverDogma,
+    DriverUsefulness,
+};
 
+mod dogma;
 #[cfg(any(target_os = "none", feature = "fdxe-module"))]
 mod fdxe;
 #[path = "interface/interface.rs"]
@@ -87,11 +91,6 @@ use fusion_hal::contract::drivers::display::{
     DisplayRawDescriptorKind,
 };
 
-const DVI_DRIVER_CONTRACTS: [DriverContractKey; 2] = [
-    DriverContractKey("display.control"),
-    DriverContractKey("display.port"),
-];
-const DVI_DRIVER_REQUIRED_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("display.layout")];
 const DVI_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -101,7 +100,7 @@ const DVI_DRIVER_BINDING_SOURCES: [DriverBindingSource; 6] = [
     DriverBindingSource::Manual,
 ];
 const DVI_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "display.port.dvi",
+    key: dogma::DVI_DRIVER_DOGMA.key,
     class: DriverClass::Display,
     identity: DriverIdentity {
         vendor: "Fusion",
@@ -110,10 +109,10 @@ const DVI_DRIVER_METADATA: DriverMetadata = DriverMetadata {
         product: "DVI driver",
         advertised_interface: "DVI endpoint",
     },
-    contracts: &DVI_DRIVER_CONTRACTS,
-    required_contracts: &DVI_DRIVER_REQUIRED_CONTRACTS,
-    usefulness: DriverUsefulness::Standalone,
-    singleton_class: None,
+    contracts: dogma::DVI_DRIVER_DOGMA.contracts,
+    required_contracts: dogma::DVI_DRIVER_DOGMA.required_contracts,
+    usefulness: dogma::DVI_DRIVER_DOGMA.usefulness,
+    singleton_class: dogma::DVI_DRIVER_DOGMA.singleton_class,
     binding_sources: &DVI_DRIVER_BINDING_SOURCES,
     description: "DVI display endpoint driver layered over one selected DVI hardware substrate",
 };

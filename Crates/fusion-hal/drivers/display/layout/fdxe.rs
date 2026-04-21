@@ -25,7 +25,7 @@ use abi::{
 };
 
 const DRIVER_EXPORTS: [FdxeDriverExportV1; 1] = [FdxeDriverExportV1::new(
-    "display.layout",
+    crate::dogma::DISPLAY_LAYOUT_DRIVER_DOGMA.key,
     crate::driver_metadata,
 )];
 

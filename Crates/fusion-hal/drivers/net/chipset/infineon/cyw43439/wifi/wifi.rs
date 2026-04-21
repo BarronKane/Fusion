@@ -9,12 +9,10 @@ use fusion_hal::contract::drivers::driver::{
     DriverBindingSource,
     DriverClass,
     DriverContract,
-    DriverContractKey,
     DriverDiscoveryContext,
     DriverError,
     DriverMetadata,
     DriverRegistration,
-    DriverUsefulness,
     RegisteredDriver,
 };
 use fusion_hal::contract::drivers::net::NetVendorIdentity;
@@ -73,8 +71,6 @@ pub const CYW43439_WIFI_VENDOR_IDENTITY: NetVendorIdentity = NetVendorIdentity {
     advertised_interface: "2.4 GHz 802.11 b/g/n",
 };
 
-const CYW43439_WIFI_DRIVER_CONTRACTS: [DriverContractKey; 1] = [DriverContractKey("net.wifi")];
-const CYW43439_WIFI_REQUIRED_CONTRACTS: [DriverContractKey; 0] = [];
 const CYW43439_WIFI_BINDING_SOURCES: [DriverBindingSource; 4] = [
     DriverBindingSource::StaticSoc,
     DriverBindingSource::BoardManifest,
@@ -82,13 +78,13 @@ const CYW43439_WIFI_BINDING_SOURCES: [DriverBindingSource; 4] = [
     DriverBindingSource::Manual,
 ];
 const CYW43439_WIFI_DRIVER_METADATA: DriverMetadata = DriverMetadata {
-    key: "net.wifi.infineon.cyw43439",
+    key: crate::dogma::CYW43439_WIFI_DRIVER_DOGMA.key,
     class: DriverClass::Network,
     identity: CYW43439_WIFI_VENDOR_IDENTITY,
-    contracts: &CYW43439_WIFI_DRIVER_CONTRACTS,
-    required_contracts: &CYW43439_WIFI_REQUIRED_CONTRACTS,
-    usefulness: DriverUsefulness::Standalone,
-    singleton_class: None,
+    contracts: crate::dogma::CYW43439_WIFI_DRIVER_DOGMA.contracts,
+    required_contracts: crate::dogma::CYW43439_WIFI_DRIVER_DOGMA.required_contracts,
+    usefulness: crate::dogma::CYW43439_WIFI_DRIVER_DOGMA.usefulness,
+    singleton_class: crate::dogma::CYW43439_WIFI_DRIVER_DOGMA.singleton_class,
     binding_sources: &CYW43439_WIFI_BINDING_SOURCES,
     description: "Infineon AIROC CYW43439 Wi-Fi controller driver",
 };
