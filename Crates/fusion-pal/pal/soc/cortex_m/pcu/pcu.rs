@@ -74,7 +74,6 @@ use crate::pal::soc::cortex_m::hal::soc::pio::{
 };
 use crate::pal::soc::cortex_m::hal::soc::board;
 
-const CORTEX_M_CPU_EXECUTOR_ID: PcuExecutorId = PcuExecutorId(0);
 const MAX_CORTEX_M_PIO_EXECUTORS: usize = 8;
 
 const CORTEX_M_PIO_STREAM_DIRECT_SUPPORT: PcuStreamCapabilities = PcuStreamCapabilities::FIFO_INPUT
@@ -89,8 +88,6 @@ const CORTEX_M_PIO_STREAM_DIRECT_SUPPORT: PcuStreamCapabilities = PcuStreamCapab
     .union(PcuStreamCapabilities::MASK_LOWER)
     .union(PcuStreamCapabilities::BYTE_SWAP32);
 
-const CORTEX_M_CPU_EXECUTOR_SUPPORT: PcuExecutorSupport = PcuExecutorSupport::unsupported();
-
 const CORTEX_M_PIO_EXECUTOR_SUPPORT: PcuExecutorSupport = PcuExecutorSupport {
     primitives: PcuPrimitiveCaps::STREAM,
     dispatch_policy: PcuDispatchPolicyCaps::PERSISTENT_INSTALL
@@ -102,16 +99,6 @@ const CORTEX_M_PIO_EXECUTOR_SUPPORT: PcuExecutorSupport = PcuExecutorSupport {
     signal_instructions: PcuSignalOpCaps::empty(),
 };
 
-const fn cpu_executor() -> PcuExecutorDescriptor {
-    PcuExecutorDescriptor {
-        id: CORTEX_M_CPU_EXECUTOR_ID,
-        name: "cortex-m-cpu",
-        class: PcuExecutorClass::Cpu,
-        origin: PcuExecutorOrigin::Synthetic,
-        support: CORTEX_M_CPU_EXECUTOR_SUPPORT,
-    }
-}
-
 const fn pio_executor(id: u8, name: &'static str) -> PcuExecutorDescriptor {
     PcuExecutorDescriptor {
         id: PcuExecutorId(id),
@@ -122,37 +109,31 @@ const fn pio_executor(id: u8, name: &'static str) -> PcuExecutorDescriptor {
     }
 }
 
-static CORTEX_M_EXECUTORS_0: [PcuExecutorDescriptor; 1] = [cpu_executor()];
-static CORTEX_M_EXECUTORS_1: [PcuExecutorDescriptor; 2] =
-    [cpu_executor(), pio_executor(1, "cortex-m-pio0")];
-static CORTEX_M_EXECUTORS_2: [PcuExecutorDescriptor; 3] = [
-    cpu_executor(),
+static CORTEX_M_EXECUTORS_0: [PcuExecutorDescriptor; 0] = [];
+static CORTEX_M_EXECUTORS_1: [PcuExecutorDescriptor; 1] = [pio_executor(1, "cortex-m-pio0")];
+static CORTEX_M_EXECUTORS_2: [PcuExecutorDescriptor; 2] = [
     pio_executor(1, "cortex-m-pio0"),
     pio_executor(2, "cortex-m-pio1"),
 ];
-static CORTEX_M_EXECUTORS_3: [PcuExecutorDescriptor; 4] = [
-    cpu_executor(),
+static CORTEX_M_EXECUTORS_3: [PcuExecutorDescriptor; 3] = [
     pio_executor(1, "cortex-m-pio0"),
     pio_executor(2, "cortex-m-pio1"),
     pio_executor(3, "cortex-m-pio2"),
 ];
-static CORTEX_M_EXECUTORS_4: [PcuExecutorDescriptor; 5] = [
-    cpu_executor(),
+static CORTEX_M_EXECUTORS_4: [PcuExecutorDescriptor; 4] = [
     pio_executor(1, "cortex-m-pio0"),
     pio_executor(2, "cortex-m-pio1"),
     pio_executor(3, "cortex-m-pio2"),
     pio_executor(4, "cortex-m-pio3"),
 ];
-static CORTEX_M_EXECUTORS_5: [PcuExecutorDescriptor; 6] = [
-    cpu_executor(),
+static CORTEX_M_EXECUTORS_5: [PcuExecutorDescriptor; 5] = [
     pio_executor(1, "cortex-m-pio0"),
     pio_executor(2, "cortex-m-pio1"),
     pio_executor(3, "cortex-m-pio2"),
     pio_executor(4, "cortex-m-pio3"),
     pio_executor(5, "cortex-m-pio4"),
 ];
-static CORTEX_M_EXECUTORS_6: [PcuExecutorDescriptor; 7] = [
-    cpu_executor(),
+static CORTEX_M_EXECUTORS_6: [PcuExecutorDescriptor; 6] = [
     pio_executor(1, "cortex-m-pio0"),
     pio_executor(2, "cortex-m-pio1"),
     pio_executor(3, "cortex-m-pio2"),
@@ -160,8 +141,7 @@ static CORTEX_M_EXECUTORS_6: [PcuExecutorDescriptor; 7] = [
     pio_executor(5, "cortex-m-pio4"),
     pio_executor(6, "cortex-m-pio5"),
 ];
-static CORTEX_M_EXECUTORS_7: [PcuExecutorDescriptor; 8] = [
-    cpu_executor(),
+static CORTEX_M_EXECUTORS_7: [PcuExecutorDescriptor; 7] = [
     pio_executor(1, "cortex-m-pio0"),
     pio_executor(2, "cortex-m-pio1"),
     pio_executor(3, "cortex-m-pio2"),
@@ -170,8 +150,7 @@ static CORTEX_M_EXECUTORS_7: [PcuExecutorDescriptor; 8] = [
     pio_executor(6, "cortex-m-pio5"),
     pio_executor(7, "cortex-m-pio6"),
 ];
-static CORTEX_M_EXECUTORS_8: [PcuExecutorDescriptor; 9] = [
-    cpu_executor(),
+static CORTEX_M_EXECUTORS_8: [PcuExecutorDescriptor; 8] = [
     pio_executor(1, "cortex-m-pio0"),
     pio_executor(2, "cortex-m-pio1"),
     pio_executor(3, "cortex-m-pio2"),
@@ -181,7 +160,6 @@ static CORTEX_M_EXECUTORS_8: [PcuExecutorDescriptor; 9] = [
     pio_executor(7, "cortex-m-pio6"),
     pio_executor(8, "cortex-m-pio7"),
 ];
-static CORTEX_M_CPU_EXECUTOR_CLAIMED: AtomicBool = AtomicBool::new(false);
 static CORTEX_M_PIO_EXECUTOR_CLAIMED: [AtomicBool; MAX_CORTEX_M_PIO_EXECUTORS] = [
     AtomicBool::new(false),
     AtomicBool::new(false),
@@ -309,17 +287,19 @@ impl PcuBaseContract for CortexMPcu {
         let support = system_pio().support();
         let has_pio = support.engine_count != 0;
         PcuSupport {
-            caps: PcuCaps::ENUMERATE_EXECUTORS
-                | PcuCaps::CLAIM_EXECUTOR
-                | PcuCaps::DISPATCH
-                | PcuCaps::COMPLETION_STATUS
-                | PcuCaps::EXTERNAL_RESOURCES,
-            // Overall generic-PCU support is still native on CPU-only Cortex-M targets even when
-            // no topology-bound PIO executor is surfaced.
-            implementation: if support.engine_count == 0 {
-                PcuImplementationKind::Native
+            caps: if has_pio {
+                PcuCaps::ENUMERATE_EXECUTORS
+                    | PcuCaps::CLAIM_EXECUTOR
+                    | PcuCaps::DISPATCH
+                    | PcuCaps::COMPLETION_STATUS
+                    | PcuCaps::EXTERNAL_RESOURCES
             } else {
+                PcuCaps::ENUMERATE_EXECUTORS
+            },
+            implementation: if has_pio {
                 map_pio_implementation_kind(support.implementation)
+            } else {
+                PcuImplementationKind::Unsupported
             },
             executor_count: cortex_m_executors().len() as u8,
             primitive_support: cortex_m_primitive_support(has_pio),
@@ -678,41 +658,23 @@ fn cortex_m_initialize_pio_lanes(_claim: &PioLaneClaim, _initial_pc: u8) -> Resu
 
 impl PcuControlContract for CortexMPcu {
     fn claim_executor(&self, executor: PcuExecutorId) -> Result<PcuExecutorClaim, PcuError> {
-        match executor {
-            CORTEX_M_CPU_EXECUTOR_ID => {
-                CORTEX_M_CPU_EXECUTOR_CLAIMED
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .map_err(|_| PcuError::busy())?;
-            }
-            PcuExecutorId(index) => {
-                if index == 0 || usize::from(index) > pio_executor_count() {
-                    return Err(PcuError::invalid());
-                }
-                CORTEX_M_PIO_EXECUTOR_CLAIMED[usize::from(index - 1)]
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .map_err(|_| PcuError::busy())?;
-            }
+        let PcuExecutorId(index) = executor;
+        if index == 0 || usize::from(index) > pio_executor_count() {
+            return Err(PcuError::invalid());
         }
+        CORTEX_M_PIO_EXECUTOR_CLAIMED[usize::from(index - 1)]
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| PcuError::busy())?;
         Ok(PcuExecutorClaim::new(executor))
     }
 
     fn release_executor(&self, claim: PcuExecutorClaim) -> Result<(), PcuError> {
-        match claim.executor() {
-            CORTEX_M_CPU_EXECUTOR_ID => {
-                if !CORTEX_M_CPU_EXECUTOR_CLAIMED.swap(false, Ordering::AcqRel) {
-                    return Err(PcuError::state_conflict());
-                }
-            }
-            PcuExecutorId(index) => {
-                if index == 0 || usize::from(index) > pio_executor_count() {
-                    return Err(PcuError::invalid());
-                }
-                if !CORTEX_M_PIO_EXECUTOR_CLAIMED[usize::from(index - 1)]
-                    .swap(false, Ordering::AcqRel)
-                {
-                    return Err(PcuError::state_conflict());
-                }
-            }
+        let PcuExecutorId(index) = claim.executor();
+        if index == 0 || usize::from(index) > pio_executor_count() {
+            return Err(PcuError::invalid());
+        }
+        if !CORTEX_M_PIO_EXECUTOR_CLAIMED[usize::from(index - 1)].swap(false, Ordering::AcqRel) {
+            return Err(PcuError::state_conflict());
         }
         Ok(())
     }

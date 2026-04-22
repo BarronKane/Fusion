@@ -1,9 +1,4 @@
 //! macOS fusion-pal PCU executor backend.
-//!
-//! Hosted macOS has no truthful hardware queue-dispatch engine surfaced through this
-//! backend, so we expose a single synthetic CPU executor for contract compatibility.
-//! The executor is explicit in metadata (`origin: Synthetic`) and never claims
-//! device-backed behavior.
 
 use core::sync::atomic::{
     AtomicBool,
@@ -12,87 +7,32 @@ use core::sync::atomic::{
 
 use crate::contract::drivers::pcu::{
     PcuBaseContract,
-    PcuCaps,
-    PcuCommandOpCaps,
-    PcuCommandSupport,
+    PcuCommandSubmission,
     PcuControlContract,
-    PcuDispatchOpCaps,
-    PcuDispatchPolicyCaps,
-    PcuDispatchSupport,
+    PcuDirectDispatchBackend,
     PcuError,
     PcuExecutorClaim,
-    PcuExecutorClass,
-    PcuExecutorDescriptor,
     PcuExecutorId,
-    PcuExecutorOrigin,
-    PcuExecutorSupport,
-    PcuFeatureSupport,
-    PcuPrimitiveCaps,
-    PcuPrimitiveSupport,
-    PcuSignalOpCaps,
-    PcuSignalSupport,
-    PcuStreamCapabilities,
-    PcuStreamSupport,
+    PcuInvocationBindings,
+    PcuInvocationParameters,
+    PcuSignalInstallation,
+    PcuStreamInstallation,
     PcuSupport,
-    PcuTransactionFeatureCaps,
-    PcuTransactionSupport,
+    PcuTransactionSubmission,
+};
+use crate::pal::hosted::pcu_shared::{
+    HOST_CPU_EXECUTOR_ID,
+    HostedCpuStreamHandle,
+    HostedCpuUnsupportedFiniteHandle,
+    HostedCpuUnsupportedPersistentHandle,
+    host_cpu_executor_descriptor,
+    host_pcu_support,
+    install_host_cpu_stream,
 };
 
-const HOST_CPU_EXECUTOR_ID: PcuExecutorId = PcuExecutorId(0);
-
-const HOST_CPU_EXECUTOR_SUPPORT: PcuExecutorSupport = PcuExecutorSupport {
-    primitives: PcuPrimitiveCaps::all(),
-    dispatch_policy: PcuDispatchPolicyCaps::SERIAL
-        .union(PcuDispatchPolicyCaps::PERSISTENT_INSTALL)
-        .union(PcuDispatchPolicyCaps::CPU_FALLBACK)
-        .union(PcuDispatchPolicyCaps::ORDERED_SUBMISSION),
-    dispatch_instructions: PcuDispatchOpCaps::all(),
-    stream_instructions: PcuStreamCapabilities::all(),
-    command_instructions: PcuCommandOpCaps::all(),
-    transaction_features: PcuTransactionFeatureCaps::all(),
-    signal_instructions: PcuSignalOpCaps::all(),
-};
-
-/// Hosted synthetic executor table for this backend.
-static HOST_EXECUTORS: [PcuExecutorDescriptor; 1] = [PcuExecutorDescriptor {
-    id: HOST_CPU_EXECUTOR_ID,
-    name: "host-cpu",
-    class: PcuExecutorClass::Cpu,
-    origin: PcuExecutorOrigin::Synthetic,
-    support: HOST_CPU_EXECUTOR_SUPPORT,
-}];
-
-/// Process-global claim state for the single hosted executor.
+static HOST_EXECUTORS: [crate::contract::drivers::pcu::PcuExecutorDescriptor; 1] =
+    [host_cpu_executor_descriptor()];
 static HOST_CPU_EXECUTOR_CLAIMED: AtomicBool = AtomicBool::new(false);
-
-const HOST_PRIMITIVE_SUPPORT: PcuPrimitiveSupport = PcuPrimitiveSupport {
-    primitives: PcuFeatureSupport::new(PcuPrimitiveCaps::all(), PcuPrimitiveCaps::all()),
-};
-const HOST_DISPATCH_SUPPORT: PcuDispatchSupport = PcuDispatchSupport {
-    flags: PcuDispatchPolicyCaps::SERIAL
-        .union(PcuDispatchPolicyCaps::PERSISTENT_INSTALL)
-        .union(PcuDispatchPolicyCaps::CPU_FALLBACK)
-        .union(PcuDispatchPolicyCaps::ORDERED_SUBMISSION),
-    instructions: PcuFeatureSupport::new(PcuDispatchOpCaps::all(), PcuDispatchOpCaps::all()),
-};
-const HOST_STREAM_SUPPORT: PcuStreamSupport = PcuStreamSupport {
-    instructions: PcuFeatureSupport::new(
-        PcuStreamCapabilities::all(),
-        PcuStreamCapabilities::all(),
-    ),
-};
-const HOST_COMMAND_SUPPORT: PcuCommandSupport = PcuCommandSupport {
-    instructions: PcuFeatureSupport::new(PcuCommandOpCaps::all(), PcuCommandOpCaps::all()),
-};
-const HOST_TRANSACTION_SUPPORT: PcuTransactionSupport = PcuTransactionSupport {
-    features: PcuFeatureSupport::new(
-        PcuTransactionFeatureCaps::all(),
-        PcuTransactionFeatureCaps::all(),
-    ),
-};
-const HOST_SIGNAL_SUPPORT: PcuSignalSupport = PcuSignalSupport {
-    instructions: PcuFeatureSupport::new(PcuSignalOpCaps::all(), PcuSignalOpCaps::all()),
-};
 
 /// macOS generic PCU executor provider.
 #[derive(Debug, Clone, Copy, Default)]
@@ -117,25 +57,62 @@ impl MacOsPcu {
 
 impl PcuBaseContract for MacOsPcu {
     fn support(&self) -> PcuSupport {
-        PcuSupport {
-            caps: PcuCaps::ENUMERATE_EXECUTORS
-                | PcuCaps::CLAIM_EXECUTOR
-                | PcuCaps::DISPATCH
-                | PcuCaps::COMPLETION_STATUS
-                | PcuCaps::EXTERNAL_RESOURCES,
-            implementation: crate::contract::drivers::pcu::PcuImplementationKind::Native,
-            executor_count: HOST_EXECUTORS.len() as u8,
-            primitive_support: HOST_PRIMITIVE_SUPPORT,
-            dispatch_support: HOST_DISPATCH_SUPPORT,
-            stream_support: HOST_STREAM_SUPPORT,
-            command_support: HOST_COMMAND_SUPPORT,
-            transaction_support: HOST_TRANSACTION_SUPPORT,
-            signal_support: HOST_SIGNAL_SUPPORT,
-        }
+        host_pcu_support()
     }
 
-    fn executors(&self) -> &'static [PcuExecutorDescriptor] {
+    fn executors(&self) -> &'static [crate::contract::drivers::pcu::PcuExecutorDescriptor] {
         &HOST_EXECUTORS
+    }
+}
+
+impl PcuDirectDispatchBackend for MacOsPcu {
+    type DispatchHandle = HostedCpuUnsupportedFiniteHandle;
+    type CommandHandle = HostedCpuUnsupportedFiniteHandle;
+    type TransactionHandle = HostedCpuUnsupportedFiniteHandle;
+    type StreamHandle = HostedCpuStreamHandle;
+    type SignalHandle = HostedCpuUnsupportedPersistentHandle;
+
+    fn submit_dispatch_direct(
+        &self,
+        _submission: crate::contract::drivers::pcu::PcuDispatchSubmission<'_>,
+        _bindings: PcuInvocationBindings<'_>,
+        _parameters: PcuInvocationParameters<'_>,
+    ) -> Result<Self::DispatchHandle, PcuError> {
+        Err(PcuError::unsupported())
+    }
+
+    fn submit_command_direct(
+        &self,
+        _submission: PcuCommandSubmission<'_>,
+        _parameters: PcuInvocationParameters<'_>,
+    ) -> Result<Self::CommandHandle, PcuError> {
+        Err(PcuError::unsupported())
+    }
+
+    fn submit_transaction_direct(
+        &self,
+        _submission: PcuTransactionSubmission<'_>,
+        _bindings: PcuInvocationBindings<'_>,
+        _parameters: PcuInvocationParameters<'_>,
+    ) -> Result<Self::TransactionHandle, PcuError> {
+        Err(PcuError::unsupported())
+    }
+
+    fn install_stream_direct(
+        &self,
+        installation: PcuStreamInstallation<'_>,
+        bindings: PcuInvocationBindings<'_>,
+        parameters: PcuInvocationParameters<'_>,
+    ) -> Result<Self::StreamHandle, PcuError> {
+        install_host_cpu_stream(installation, bindings, parameters)
+    }
+
+    fn install_signal_direct(
+        &self,
+        _installation: PcuSignalInstallation<'_>,
+        _parameters: PcuInvocationParameters<'_>,
+    ) -> Result<Self::SignalHandle, PcuError> {
+        Err(PcuError::unsupported())
     }
 }
 
@@ -144,7 +121,6 @@ impl PcuControlContract for MacOsPcu {
         if executor != HOST_CPU_EXECUTOR_ID {
             return Err(PcuError::invalid());
         }
-        // Hosted shape is single-owner: only one active claim is accepted at a time.
         HOST_CPU_EXECUTOR_CLAIMED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| PcuError::busy())?;
