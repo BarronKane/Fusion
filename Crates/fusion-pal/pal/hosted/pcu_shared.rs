@@ -56,6 +56,8 @@ pub const HOST_CPU_EXECUTOR_SUPPORT: PcuExecutorSupport = PcuExecutorSupport {
     primitives: PcuPrimitiveCaps::STREAM,
     dispatch_policy: PcuDispatchPolicyCaps::PERSISTENT_INSTALL,
     dispatch_instructions: crate::contract::drivers::pcu::PcuDispatchOpCaps::empty(),
+    dispatch_types: crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
+    dispatch_features: crate::contract::drivers::pcu::PcuDispatchFeatureCaps::empty(),
     stream_instructions: HOST_CPU_STREAM_DIRECT_SUPPORT,
     command_instructions: crate::contract::drivers::pcu::PcuCommandOpCaps::empty(),
     transaction_features: crate::contract::drivers::pcu::PcuTransactionFeatureCaps::empty(),
@@ -71,6 +73,14 @@ pub const HOST_DISPATCH_SUPPORT: PcuDispatchSupport = PcuDispatchSupport {
     instructions: PcuFeatureSupport::new(
         crate::contract::drivers::pcu::PcuDispatchOpCaps::empty(),
         crate::contract::drivers::pcu::PcuDispatchOpCaps::empty(),
+    ),
+    types: PcuFeatureSupport::new(
+        crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
+        crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
+    ),
+    features: PcuFeatureSupport::new(
+        crate::contract::drivers::pcu::PcuDispatchFeatureCaps::empty(),
+        crate::contract::drivers::pcu::PcuDispatchFeatureCaps::empty(),
     ),
 };
 
@@ -555,8 +565,8 @@ mod tests {
     fn hosted_stream_rejects_runtime_bindings() {
         let builder =
             PcuStreamKernelBuilder::<{ HOSTED_CPU_MAX_STREAM_PATTERNS }>::words(13, "stream")
-            .increment()
-            .expect("builder should accept pattern");
+                .increment()
+                .expect("builder should accept pattern");
         let kernel = builder.ir();
         let mut output = [0_u32; 1];
         let binding = crate::contract::drivers::pcu::PcuInvocationBinding {

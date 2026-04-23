@@ -93,6 +93,8 @@ const CORTEX_M_PIO_EXECUTOR_SUPPORT: PcuExecutorSupport = PcuExecutorSupport {
     dispatch_policy: PcuDispatchPolicyCaps::PERSISTENT_INSTALL
         .union(PcuDispatchPolicyCaps::ORDERED_SUBMISSION),
     dispatch_instructions: PcuDispatchOpCaps::empty(),
+    dispatch_types: crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
+    dispatch_features: crate::contract::drivers::pcu::PcuDispatchFeatureCaps::empty(),
     stream_instructions: CORTEX_M_PIO_STREAM_DIRECT_SUPPORT,
     command_instructions: PcuCommandOpCaps::empty(),
     transaction_features: PcuTransactionFeatureCaps::empty(),
@@ -199,6 +201,14 @@ const fn cortex_m_dispatch_support(has_pio: bool) -> PcuDispatchSupport {
         instructions: PcuFeatureSupport::new(
             PcuDispatchOpCaps::empty(),
             PcuDispatchOpCaps::empty(),
+        ),
+        types: PcuFeatureSupport::new(
+            crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
+            crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
+        ),
+        features: PcuFeatureSupport::new(
+            crate::contract::drivers::pcu::PcuDispatchFeatureCaps::empty(),
+            crate::contract::drivers::pcu::PcuDispatchFeatureCaps::empty(),
         ),
     }
 }

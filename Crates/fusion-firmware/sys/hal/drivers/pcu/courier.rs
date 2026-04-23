@@ -1006,10 +1006,12 @@ fn wait_for_firmware_progress() {
 const fn encode_error_kind(kind: PcuErrorKind) -> u8 {
     match kind {
         PcuErrorKind::Unsupported => 1,
-        PcuErrorKind::Invalid => 2,
-        PcuErrorKind::Busy => 3,
-        PcuErrorKind::ResourceExhausted => 4,
-        PcuErrorKind::StateConflict => 5,
+        PcuErrorKind::UnsupportedTypeSupport => 2,
+        PcuErrorKind::UnsupportedFeatureSupport => 3,
+        PcuErrorKind::Invalid => 4,
+        PcuErrorKind::Busy => 5,
+        PcuErrorKind::ResourceExhausted => 6,
+        PcuErrorKind::StateConflict => 7,
         PcuErrorKind::Platform(_) => u8::MAX,
     }
 }
@@ -1021,9 +1023,11 @@ fn service_error_from_state() -> PcuError {
         .store(u32::from(encoded), Ordering::Release);
     match encoded {
         1 => PcuError::unsupported(),
-        2 => PcuError::invalid(),
-        3 => PcuError::busy(),
-        4 => PcuError::resource_exhausted(),
+        2 => PcuError::unsupported_type_support(),
+        3 => PcuError::unsupported_feature_support(),
+        4 => PcuError::invalid(),
+        5 => PcuError::busy(),
+        6 => PcuError::resource_exhausted(),
         _ => PcuError::state_conflict(),
     }
 }
@@ -1111,6 +1115,8 @@ const fn encode_run_state(state: fusion_sys::courier::CourierRunState) -> u32 {
 const fn pcu_error_from_kind(kind: PcuErrorKind) -> PcuError {
     match kind {
         PcuErrorKind::Unsupported => PcuError::unsupported(),
+        PcuErrorKind::UnsupportedTypeSupport => PcuError::unsupported_type_support(),
+        PcuErrorKind::UnsupportedFeatureSupport => PcuError::unsupported_feature_support(),
         PcuErrorKind::Invalid => PcuError::invalid(),
         PcuErrorKind::Busy => PcuError::busy(),
         PcuErrorKind::ResourceExhausted => PcuError::resource_exhausted(),
