@@ -92,9 +92,13 @@ const CORTEX_M_PIO_EXECUTOR_SUPPORT: PcuExecutorSupport = PcuExecutorSupport {
     primitives: PcuPrimitiveCaps::STREAM,
     dispatch_policy: PcuDispatchPolicyCaps::PERSISTENT_INSTALL
         .union(PcuDispatchPolicyCaps::ORDERED_SUBMISSION),
+    value_types: crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
     dispatch_instructions: PcuDispatchOpCaps::empty(),
-    dispatch_types: crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
     dispatch_features: crate::contract::drivers::pcu::PcuDispatchFeatureCaps::empty(),
+    render_families: crate::contract::drivers::pcu::PcuRenderFamilyCaps::empty(),
+    raster_features: crate::contract::drivers::pcu::PcuRasterFeatureCaps::empty(),
+    mesh_features: crate::contract::drivers::pcu::PcuMeshFeatureCaps::empty(),
+    ray_trace_features: crate::contract::drivers::pcu::PcuRayTraceFeatureCaps::empty(),
     stream_instructions: CORTEX_M_PIO_STREAM_DIRECT_SUPPORT,
     command_instructions: PcuCommandOpCaps::empty(),
     transaction_features: PcuTransactionFeatureCaps::empty(),
@@ -201,10 +205,6 @@ const fn cortex_m_dispatch_support(has_pio: bool) -> PcuDispatchSupport {
         instructions: PcuFeatureSupport::new(
             PcuDispatchOpCaps::empty(),
             PcuDispatchOpCaps::empty(),
-        ),
-        types: PcuFeatureSupport::new(
-            crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
-            crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
         ),
         features: PcuFeatureSupport::new(
             crate::contract::drivers::pcu::PcuDispatchFeatureCaps::empty(),
@@ -313,7 +313,12 @@ impl PcuBaseContract for CortexMPcu {
             },
             executor_count: cortex_m_executors().len() as u8,
             primitive_support: cortex_m_primitive_support(has_pio),
+            value_type_support: PcuFeatureSupport::new(
+                crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
+                crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
+            ),
             dispatch_support: cortex_m_dispatch_support(has_pio),
+            render_support: crate::contract::drivers::pcu::PcuRenderSupport::unsupported(),
             stream_support: cortex_m_stream_support(has_pio),
             command_support: cortex_m_command_support(),
             transaction_support: cortex_m_transaction_support(),

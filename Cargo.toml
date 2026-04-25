@@ -15,6 +15,7 @@ members = [
     "Crates/fusion-hal/drivers/bus/pci",
     "Crates/fusion-pal",
     "Crates/fusion-pcu",
+    "Crates/fusion-gpu",
     "Crates/fusion-sys",
     "Crates/fusion-std",
     "Crates/fusion-kn",
@@ -39,6 +40,7 @@ fusion-driver-dogma = { path = "Crates/fusion-hal/driver-dogma", default-feature
 fusion-hal = { path = "Crates/fusion-hal", default-features = false }
 fusion-pal = { path = "Crates/fusion-pal", default-features = false }
 fusion-pcu = { path = "Crates/fusion-pcu", default-features = false }
+fusion-gpu = { path = "Crates/fusion-gpu", default-features = false }
 fusion-sys = { path = "Crates/fusion-sys", default-features = false }
 fusion-std = { path = "Crates/fusion-std", default-features = false }
 fusion-kn = { path = "Crates/fusion-kn" }

@@ -55,9 +55,13 @@ pub const HOST_CPU_STREAM_DIRECT_SUPPORT: PcuStreamCapabilities = PcuStreamCapab
 pub const HOST_CPU_EXECUTOR_SUPPORT: PcuExecutorSupport = PcuExecutorSupport {
     primitives: PcuPrimitiveCaps::STREAM,
     dispatch_policy: PcuDispatchPolicyCaps::PERSISTENT_INSTALL,
+    value_types: crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
     dispatch_instructions: crate::contract::drivers::pcu::PcuDispatchOpCaps::empty(),
-    dispatch_types: crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
     dispatch_features: crate::contract::drivers::pcu::PcuDispatchFeatureCaps::empty(),
+    render_families: crate::contract::drivers::pcu::PcuRenderFamilyCaps::empty(),
+    raster_features: crate::contract::drivers::pcu::PcuRasterFeatureCaps::empty(),
+    mesh_features: crate::contract::drivers::pcu::PcuMeshFeatureCaps::empty(),
+    ray_trace_features: crate::contract::drivers::pcu::PcuRayTraceFeatureCaps::empty(),
     stream_instructions: HOST_CPU_STREAM_DIRECT_SUPPORT,
     command_instructions: crate::contract::drivers::pcu::PcuCommandOpCaps::empty(),
     transaction_features: crate::contract::drivers::pcu::PcuTransactionFeatureCaps::empty(),
@@ -73,10 +77,6 @@ pub const HOST_DISPATCH_SUPPORT: PcuDispatchSupport = PcuDispatchSupport {
     instructions: PcuFeatureSupport::new(
         crate::contract::drivers::pcu::PcuDispatchOpCaps::empty(),
         crate::contract::drivers::pcu::PcuDispatchOpCaps::empty(),
-    ),
-    types: PcuFeatureSupport::new(
-        crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
-        crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
     ),
     features: PcuFeatureSupport::new(
         crate::contract::drivers::pcu::PcuDispatchFeatureCaps::empty(),
@@ -133,7 +133,12 @@ pub const fn host_pcu_support() -> PcuSupport {
         implementation: PcuImplementationKind::Native,
         executor_count: 1,
         primitive_support: HOST_PRIMITIVE_SUPPORT,
+        value_type_support: PcuFeatureSupport::new(
+            crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
+            crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
+        ),
         dispatch_support: HOST_DISPATCH_SUPPORT,
+        render_support: crate::contract::drivers::pcu::PcuRenderSupport::unsupported(),
         stream_support: HOST_STREAM_SUPPORT,
         command_support: HOST_COMMAND_SUPPORT,
         transaction_support: HOST_TRANSACTION_SUPPORT,
