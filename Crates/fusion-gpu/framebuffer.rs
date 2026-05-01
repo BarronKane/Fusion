@@ -1,20 +1,18 @@
 //! Framebuffer composition vocabulary.
-//!
-//! This first cut is deliberately narrow. It gives `fusion-gpu` one honest typed framebuffer
-//! stand-in that future resource/pipeline/surface work can compose around without pretending
-//! residency or presentation are already solved.
 
 use crate::{
     GpuAttachmentRole,
+    GpuBlendAttachmentState,
     GpuExtent2D,
+    GpuFillOperation,
     GpuFormat,
     GpuFormatClass,
-    GpuFillOperation,
-    GpuDrawPipeline,
+    GpuMeshPipeline,
+    GpuRasterPipeline,
+    GpuRayTracePipeline,
     GpuResourceHandle,
     GpuSampleCount,
 };
-use fusion_pcu::PcuRenderKernel;
 
 /// Active framebuffer extension envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -157,8 +155,9 @@ pub enum GpuFramebufferCompatibilityError {
     SampleShadingUnsupported,
     AlphaToCoverageUnsupported,
     FillTargetsEmpty,
+    FillTargetIndexOutOfRange(u8),
     FillTargetMissing(u8),
-    UnsupportedRenderKernelFamily,
+    DuplicateFillTarget(u8),
 }
 
 /// One typed framebuffer description.
@@ -259,9 +258,7 @@ impl<'a> GpuFramebuffer<'a> {
             }
         }
 
-        let color_count = self.color_attachment_count();
-
-        if self.extensions.blending.is_some() && color_count == 0 {
+        if self.extensions.blending.is_some() && self.color_attachment_count() == 0 {
             return Err(GpuFramebufferValidationError::BlendingWithoutColorAttachment);
         }
         if self.extensions.depth_stencil.is_some() && !self.has_depth_or_stencil_attachment() {
@@ -280,103 +277,63 @@ impl<'a> GpuFramebuffer<'a> {
         Ok(())
     }
 
-    /// Validates one raster/mesh/ray-trace draw pipeline against this framebuffer.
+    /// Validates one raster-family pipeline against this framebuffer.
     ///
     /// # Errors
     ///
     /// Returns one honest compatibility error when the pipeline and framebuffer do not agree.
-    pub fn validate_draw_pipeline(
+    pub fn validate_raster_pipeline(
         &self,
-        pipeline: &GpuDrawPipeline<'_>,
+        pipeline: &GpuRasterPipeline<'_>,
+    ) -> Result<(), GpuFramebufferCompatibilityError> {
+        self.validate_draw_like_state(
+            pipeline.rasterizer,
+            pipeline.depth_stencil,
+            pipeline.blend_attachments,
+            pipeline.multisample,
+            false,
+        )
+    }
+
+    /// Validates one mesh-family pipeline against this framebuffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest compatibility error when the pipeline and framebuffer do not agree.
+    pub fn validate_mesh_pipeline(
+        &self,
+        pipeline: &GpuMeshPipeline<'_>,
+    ) -> Result<(), GpuFramebufferCompatibilityError> {
+        let Some(rasterizer) = self.extensions.rasterizer else {
+            return Err(GpuFramebufferCompatibilityError::MissingRasterizerExtension);
+        };
+        if !rasterizer.mesh_shading {
+            return Err(GpuFramebufferCompatibilityError::MeshShadingUnsupported);
+        }
+
+        self.validate_draw_like_state(
+            pipeline.rasterizer,
+            pipeline.depth_stencil,
+            pipeline.blend_attachments,
+            pipeline.multisample,
+            true,
+        )
+    }
+
+    /// Validates one ray-trace-family pipeline against this framebuffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns one honest compatibility error when the pipeline and framebuffer do not agree.
+    pub fn validate_ray_trace_pipeline(
+        &self,
+        _pipeline: &GpuRayTracePipeline<'_>,
     ) -> Result<(), GpuFramebufferCompatibilityError> {
         self.validate()
             .map_err(GpuFramebufferCompatibilityError::Structural)?;
-
-        match pipeline.kernel {
-            PcuRenderKernel::Raster(_) => {
-                if self.extensions.rasterizer.is_none() {
-                    return Err(GpuFramebufferCompatibilityError::MissingRasterizerExtension);
-                }
-                if self.attachments.is_empty() {
-                    return Err(GpuFramebufferCompatibilityError::MissingColorAttachment);
-                }
-            }
-            PcuRenderKernel::Mesh(_) => {
-                let Some(rasterizer) = self.extensions.rasterizer else {
-                    return Err(GpuFramebufferCompatibilityError::MissingRasterizerExtension);
-                };
-                if !rasterizer.mesh_shading {
-                    return Err(GpuFramebufferCompatibilityError::MeshShadingUnsupported);
-                }
-            }
-            PcuRenderKernel::RayTrace(_) => {
-                if self.extensions.ray_trace.is_none() {
-                    return Err(GpuFramebufferCompatibilityError::MissingRayTraceExtension);
-                }
-            }
+        if self.extensions.ray_trace.is_none() {
+            return Err(GpuFramebufferCompatibilityError::MissingRayTraceExtension);
         }
-
-        if pipeline.depth_stencil.is_some() {
-            if self.extensions.depth_stencil.is_none() {
-                return Err(GpuFramebufferCompatibilityError::MissingDepthStencilExtension);
-            }
-            if !self.has_depth_or_stencil_attachment() {
-                return Err(GpuFramebufferCompatibilityError::MissingDepthStencilAttachment);
-            }
-        }
-
-        if !pipeline.blend_attachments.is_empty() {
-            let Some(blending) = self.extensions.blending else {
-                return Err(GpuFramebufferCompatibilityError::BlendStateWithoutExtension);
-            };
-            let available = self.color_attachment_count();
-            let requested = u8::try_from(pipeline.blend_attachments.len()).unwrap_or(u8::MAX);
-            if requested > available || requested > blending.max_color_attachments {
-                return Err(
-                    GpuFramebufferCompatibilityError::BlendAttachmentCountExceeded {
-                        requested,
-                        available,
-                        max_supported: blending.max_color_attachments,
-                    },
-                );
-            }
-            if !blending.independent_blend && requested > 1 {
-                let first = pipeline.blend_attachments[0];
-                if pipeline
-                    .blend_attachments
-                    .iter()
-                    .copied()
-                    .skip(1)
-                    .any(|attachment| attachment != first)
-                {
-                    return Err(GpuFramebufferCompatibilityError::IndependentBlendUnsupported);
-                }
-            }
-        }
-
-        let Some(attachment_samples) = self.attachment_samples() else {
-            return Err(GpuFramebufferCompatibilityError::MissingColorAttachment);
-        };
-        if pipeline.multisample.samples != attachment_samples {
-            return Err(GpuFramebufferCompatibilityError::MultisampleStateMismatch);
-        }
-        if pipeline.multisample.sample_shading_enable {
-            let Some(multisample) = self.extensions.multisample else {
-                return Err(GpuFramebufferCompatibilityError::MultisampleExtensionMissing);
-            };
-            if !multisample.sample_shading {
-                return Err(GpuFramebufferCompatibilityError::SampleShadingUnsupported);
-            }
-        }
-        if pipeline.multisample.alpha_to_coverage_enable {
-            let Some(multisample) = self.extensions.multisample else {
-                return Err(GpuFramebufferCompatibilityError::MultisampleExtensionMissing);
-            };
-            if !multisample.alpha_to_coverage {
-                return Err(GpuFramebufferCompatibilityError::AlphaToCoverageUnsupported);
-            }
-        }
-
         Ok(())
     }
 
@@ -392,14 +349,120 @@ impl<'a> GpuFramebuffer<'a> {
         self.validate()
             .map_err(GpuFramebufferCompatibilityError::Structural)?;
         let _ = operation.kernel;
-        if operation.color_attachments.is_empty() {
+        if operation.targets.is_empty() {
             return Err(GpuFramebufferCompatibilityError::FillTargetsEmpty);
         }
-        for index in operation.color_attachments.iter().copied() {
-            if self.color_attachment(index).is_none() {
-                return Err(GpuFramebufferCompatibilityError::FillTargetMissing(index));
+
+        let mut mask = 0_u32;
+        for target in operation.targets.iter().copied() {
+            let Some(bit) = 1_u32.checked_shl(u32::from(target.color_attachment)) else {
+                return Err(GpuFramebufferCompatibilityError::FillTargetIndexOutOfRange(
+                    target.color_attachment,
+                ));
+            };
+            if (mask & bit) != 0 {
+                return Err(GpuFramebufferCompatibilityError::DuplicateFillTarget(
+                    target.color_attachment,
+                ));
+            }
+            mask |= bit;
+
+            if self.color_attachment(target.color_attachment).is_none() {
+                return Err(GpuFramebufferCompatibilityError::FillTargetMissing(
+                    target.color_attachment,
+                ));
             }
         }
+
+        Ok(())
+    }
+
+    fn validate_draw_like_state(
+        &self,
+        rasterizer: crate::GpuRasterizerState,
+        depth_stencil: Option<crate::GpuDepthStencilState>,
+        blend_attachments: &[GpuBlendAttachmentState],
+        multisample: crate::GpuMultisampleState,
+        mesh: bool,
+    ) -> Result<(), GpuFramebufferCompatibilityError> {
+        self.validate()
+            .map_err(GpuFramebufferCompatibilityError::Structural)?;
+
+        if self.extensions.rasterizer.is_none() {
+            return Err(GpuFramebufferCompatibilityError::MissingRasterizerExtension);
+        }
+        if self.attachments.is_empty() {
+            return Err(GpuFramebufferCompatibilityError::MissingColorAttachment);
+        }
+        if matches!(rasterizer.polygon_mode, crate::GpuPolygonMode::Line)
+            && self.extensions.rasterizer.is_some_and(|ext| !ext.wireframe)
+        {
+            return Err(GpuFramebufferCompatibilityError::MissingRasterizerExtension);
+        }
+        if mesh && self.color_attachment_count() == 0 && !self.has_depth_or_stencil_attachment() {
+            return Err(GpuFramebufferCompatibilityError::MissingColorAttachment);
+        }
+
+        if depth_stencil.is_some() {
+            if self.extensions.depth_stencil.is_none() {
+                return Err(GpuFramebufferCompatibilityError::MissingDepthStencilExtension);
+            }
+            if !self.has_depth_or_stencil_attachment() {
+                return Err(GpuFramebufferCompatibilityError::MissingDepthStencilAttachment);
+            }
+        }
+
+        if !blend_attachments.is_empty() {
+            let Some(blending) = self.extensions.blending else {
+                return Err(GpuFramebufferCompatibilityError::BlendStateWithoutExtension);
+            };
+            let available = self.color_attachment_count();
+            let requested = u8::try_from(blend_attachments.len()).unwrap_or(u8::MAX);
+            if requested > available || requested > blending.max_color_attachments {
+                return Err(
+                    GpuFramebufferCompatibilityError::BlendAttachmentCountExceeded {
+                        requested,
+                        available,
+                        max_supported: blending.max_color_attachments,
+                    },
+                );
+            }
+            if !blending.independent_blend && requested > 1 {
+                let first = blend_attachments[0];
+                if blend_attachments
+                    .iter()
+                    .copied()
+                    .skip(1)
+                    .any(|attachment| attachment != first)
+                {
+                    return Err(GpuFramebufferCompatibilityError::IndependentBlendUnsupported);
+                }
+            }
+        }
+
+        let Some(attachment_samples) = self.attachment_samples() else {
+            return Err(GpuFramebufferCompatibilityError::MissingColorAttachment);
+        };
+        if multisample.samples != attachment_samples {
+            return Err(GpuFramebufferCompatibilityError::MultisampleStateMismatch);
+        }
+        if multisample.sample_shading_enable {
+            let Some(multisample_extension) = self.extensions.multisample else {
+                return Err(GpuFramebufferCompatibilityError::MultisampleExtensionMissing);
+            };
+            if !multisample_extension.sample_shading {
+                return Err(GpuFramebufferCompatibilityError::SampleShadingUnsupported);
+            }
+        }
+        if multisample.alpha_to_coverage_enable {
+            let Some(multisample_extension) = self.extensions.multisample else {
+                return Err(GpuFramebufferCompatibilityError::MultisampleExtensionMissing);
+            };
+            if !multisample_extension.alpha_to_coverage {
+                return Err(GpuFramebufferCompatibilityError::AlphaToCoverageUnsupported);
+            }
+        }
+
         Ok(())
     }
 
@@ -469,51 +532,58 @@ mod tests {
     use super::{
         GpuFramebuffer,
         GpuFramebufferAttachment,
+        GpuFramebufferCompatibilityError,
+        GpuFramebufferExtensions,
         GpuFramebufferValidationError,
+        GpuMultisampleExtension,
+        GpuRasterizerExtension,
     };
     use crate::{
         GpuAttachmentRole,
         GpuBlendAttachmentState,
         GpuBlendFactor,
-        GpuBlendingExtension,
         GpuBlendOp,
         GpuColorWriteMask,
-        GpuCompareOp,
+        GpuExtent2D,
         GpuCullMode,
         GpuDepthStencilState,
-        GpuDepthStencilExtension,
-        GpuDrawCall,
-        GpuDrawPipeline,
-        GpuExtent2D,
-        GpuFormat,
-        GpuFramebufferCompatibilityError,
-        GpuFramebufferExtensions,
         GpuFillOperation,
+        GpuFillTargetBinding,
+        GpuFormat,
         GpuFrontFace,
-        GpuMultisampleExtension,
+        GpuMeshPipeline,
         GpuMultisampleState,
         GpuPolygonMode,
         GpuPrimitiveTopology,
-        GpuRasterizerExtension,
+        GpuRasterPipeline,
         GpuRasterizerState,
         GpuResourceHandle,
-        GpuScissorRect,
-        GpuScissorState,
         GpuSampleCount,
         GpuViewport,
         GpuViewportState,
+        GpuScissorRect,
+        GpuScissorState,
     };
     use fusion_pcu::{
         PcuDispatchAluOp,
-        PcuKernelId,
-        PcuRasterFeatureCaps,
-        PcuRasterKernelIr,
-        PcuRenderKernel,
+        PcuDispatchKernelIr,
+        PcuInvocationTarget,
         PcuValueTypeCaps,
     };
     use fusion_pcu::model::PcuDispatchKernelBuilder;
+    use std::boxed::Box;
 
     const EXTENT: GpuExtent2D = GpuExtent2D::new(1920, 1080);
+    const BLEND_ATTACHMENTS: [GpuBlendAttachmentState; 1] = [GpuBlendAttachmentState {
+        blend_enable: true,
+        src_color_factor: GpuBlendFactor::One,
+        dst_color_factor: GpuBlendFactor::Zero,
+        color_op: GpuBlendOp::Add,
+        src_alpha_factor: GpuBlendFactor::One,
+        dst_alpha_factor: GpuBlendFactor::Zero,
+        alpha_op: GpuBlendOp::Add,
+        color_write_mask: GpuColorWriteMask::all(),
+    }];
 
     fn handle(raw: u64) -> GpuResourceHandle {
         GpuResourceHandle::new(
@@ -521,181 +591,10 @@ mod tests {
         )
     }
 
-    #[test]
-    fn framebuffer_validates_matching_color_and_depth_attachments() {
-        let attachments = [
-            GpuFramebufferAttachment::new(
-                Some("color0"),
-                handle(1),
-                GpuAttachmentRole::Color { index: 0 },
-                GpuFormat::Rgba8Unorm,
-                EXTENT,
-                GpuSampleCount::One,
-            ),
-            GpuFramebufferAttachment::new(
-                Some("depth"),
-                handle(2),
-                GpuAttachmentRole::Depth,
-                GpuFormat::Depth32Float,
-                EXTENT,
-                GpuSampleCount::One,
-            ),
-        ];
-        let framebuffer = GpuFramebuffer::new(Some("main"), EXTENT, &attachments);
-
-        assert_eq!(framebuffer.validate(), Ok(()));
-        assert!(framebuffer.color_attachment(0).is_some());
-        assert!(framebuffer.depth_attachment().is_some());
-    }
-
-    #[test]
-    fn framebuffer_rejects_duplicate_color_indices() {
-        let attachments = [
-            GpuFramebufferAttachment::new(
-                Some("color0a"),
-                handle(1),
-                GpuAttachmentRole::Color { index: 0 },
-                GpuFormat::Rgba8Unorm,
-                EXTENT,
-                GpuSampleCount::One,
-            ),
-            GpuFramebufferAttachment::new(
-                Some("color0b"),
-                handle(2),
-                GpuAttachmentRole::Color { index: 0 },
-                GpuFormat::Bgra8Unorm,
-                EXTENT,
-                GpuSampleCount::One,
-            ),
-        ];
-        let framebuffer = GpuFramebuffer::new(Some("dup"), EXTENT, &attachments);
-
-        assert_eq!(
-            framebuffer.validate(),
-            Err(GpuFramebufferValidationError::DuplicateColorAttachmentIndex(0))
-        );
-    }
-
-    #[test]
-    fn framebuffer_rejects_role_format_mismatch() {
-        let attachments = [GpuFramebufferAttachment::new(
-            Some("bad-depth"),
-            handle(2),
-            GpuAttachmentRole::Depth,
-            GpuFormat::Rgba8Unorm,
-            EXTENT,
-            GpuSampleCount::One,
-        )];
-        let framebuffer = GpuFramebuffer::new(Some("bad"), EXTENT, &attachments);
-
-        assert_eq!(
-            framebuffer.validate(),
-            Err(GpuFramebufferValidationError::RoleFormatMismatch)
-        );
-    }
-
-    #[test]
-    fn framebuffer_rejects_mismatched_attachment_extent() {
-        let attachments = [GpuFramebufferAttachment::new(
-            Some("color0"),
-            handle(1),
-            GpuAttachmentRole::Color { index: 0 },
-            GpuFormat::Rgba8Unorm,
-            GpuExtent2D::new(1280, 720),
-            GpuSampleCount::One,
-        )];
-        let framebuffer = GpuFramebuffer::new(Some("size"), EXTENT, &attachments);
-
-        assert_eq!(
-            framebuffer.validate(),
-            Err(GpuFramebufferValidationError::AttachmentExtentMismatch)
-        );
-    }
-
-    #[test]
-    fn framebuffer_rejects_out_of_range_color_index() {
-        let attachments = [GpuFramebufferAttachment::new(
-            Some("color33"),
-            handle(1),
-            GpuAttachmentRole::Color { index: 33 },
-            GpuFormat::Rgba8Unorm,
-            EXTENT,
-            GpuSampleCount::One,
-        )];
-        let framebuffer = GpuFramebuffer::new(Some("bad-index"), EXTENT, &attachments);
-
-        assert_eq!(
-            framebuffer.validate(),
-            Err(GpuFramebufferValidationError::ColorAttachmentIndexOutOfRange(33))
-        );
-    }
-
-    #[test]
-    fn framebuffer_validates_raster_draw_pipeline_when_extensions_match() {
-        let attachments = [
-            GpuFramebufferAttachment::new(
-                Some("color0"),
-                handle(1),
-                GpuAttachmentRole::Color { index: 0 },
-                GpuFormat::Rgba8Unorm,
-                EXTENT,
-                GpuSampleCount::Four,
-            ),
-            GpuFramebufferAttachment::new(
-                Some("depth"),
-                handle(2),
-                GpuAttachmentRole::Depth,
-                GpuFormat::Depth32Float,
-                EXTENT,
-                GpuSampleCount::Four,
-            ),
-        ];
-        let framebuffer = GpuFramebuffer::new(Some("main"), EXTENT, &attachments).with_extensions(
-            GpuFramebufferExtensions {
-                rasterizer: Some(GpuRasterizerExtension {
-                    mesh_shading: false,
-                    wireframe: true,
-                }),
-                blending: Some(GpuBlendingExtension {
-                    max_color_attachments: 1,
-                    independent_blend: false,
-                }),
-                depth_stencil: Some(GpuDepthStencilExtension {
-                    depth_test: true,
-                    stencil_test: false,
-                }),
-                multisample: Some(GpuMultisampleExtension {
-                    max_samples: GpuSampleCount::Four,
-                    sample_shading: true,
-                    alpha_to_coverage: true,
-                }),
-                ray_trace: None,
-            },
-        );
-        let kernel = PcuRenderKernel::Raster(PcuRasterKernelIr {
-            id: PcuKernelId(7),
-            entry_point: "raster",
-            bindings: &[],
-            ports: &[],
-            parameters: &[],
-            vertex_entry: "vs_main",
-            fragment_entry: Some("fs_main"),
-            type_caps: PcuValueTypeCaps::FLOAT32 | PcuValueTypeCaps::VECTOR_VALUES,
-            features: PcuRasterFeatureCaps::VERTEX_STAGE
-                .union(PcuRasterFeatureCaps::FRAGMENT_STAGE),
-        });
-        let blend = [GpuBlendAttachmentState {
-            blend_enable: true,
-            src_color_factor: GpuBlendFactor::One,
-            dst_color_factor: GpuBlendFactor::Zero,
-            color_op: GpuBlendOp::Add,
-            src_alpha_factor: GpuBlendFactor::One,
-            dst_alpha_factor: GpuBlendFactor::Zero,
-            alpha_op: GpuBlendOp::Add,
-            color_write_mask: GpuColorWriteMask::all(),
-        }];
-        let pipeline = GpuDrawPipeline {
-            kernel: &kernel,
+    fn raster_pipeline<'a>(kernel: &'a PcuDispatchKernelIr<'a>) -> GpuRasterPipeline<'a> {
+        GpuRasterPipeline {
+            vertex_kernel: kernel,
+            fragment_kernel: Some(kernel),
             topology: GpuPrimitiveTopology::Triangles,
             rasterizer: GpuRasterizerState {
                 cull_mode: GpuCullMode::Back,
@@ -706,22 +605,22 @@ mod tests {
             depth_stencil: Some(GpuDepthStencilState {
                 depth_test_enable: true,
                 depth_write_enable: true,
-                depth_compare_op: GpuCompareOp::LessOrEqual,
+                depth_compare_op: crate::GpuCompareOp::Less,
                 stencil_test_enable: false,
-                front: super::super::pipeline::GpuStencilFaceState {
-                    fail_op: super::super::pipeline::GpuStencilOp::Keep,
-                    pass_op: super::super::pipeline::GpuStencilOp::Keep,
-                    depth_fail_op: super::super::pipeline::GpuStencilOp::Keep,
-                    compare_op: GpuCompareOp::Always,
+                front: crate::GpuStencilFaceState {
+                    fail_op: crate::GpuStencilOp::Keep,
+                    pass_op: crate::GpuStencilOp::Keep,
+                    depth_fail_op: crate::GpuStencilOp::Keep,
+                    compare_op: crate::GpuCompareOp::Always,
                 },
-                back: super::super::pipeline::GpuStencilFaceState {
-                    fail_op: super::super::pipeline::GpuStencilOp::Keep,
-                    pass_op: super::super::pipeline::GpuStencilOp::Keep,
-                    depth_fail_op: super::super::pipeline::GpuStencilOp::Keep,
-                    compare_op: GpuCompareOp::Always,
+                back: crate::GpuStencilFaceState {
+                    fail_op: crate::GpuStencilOp::Keep,
+                    pass_op: crate::GpuStencilOp::Keep,
+                    depth_fail_op: crate::GpuStencilOp::Keep,
+                    compare_op: crate::GpuCompareOp::Always,
                 },
             }),
-            blend_attachments: &blend,
+            blend_attachments: &BLEND_ATTACHMENTS,
             viewport: GpuViewportState::Static(GpuViewport {
                 x: 0.0,
                 y: 0.0,
@@ -741,19 +640,202 @@ mod tests {
                 sample_shading_enable: true,
                 alpha_to_coverage_enable: true,
             },
-        };
+        }
+    }
 
-        assert_eq!(framebuffer.validate_draw_pipeline(&pipeline), Ok(()));
-        let _ = GpuDrawCall::Direct {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        };
+    fn dispatch_kernel<'a>(id: u32, entry_point: &'static str) -> &'a PcuDispatchKernelIr<'a> {
+        let builder = PcuDispatchKernelBuilder::<1>::new(id, entry_point, [1, 1, 1])
+            .with_type_caps(PcuValueTypeCaps::FLOAT32 | PcuValueTypeCaps::VECTOR_VALUES)
+            .with_arithmetic_op(PcuDispatchAluOp::Add)
+            .expect("test builder should accept one arithmetic op");
+        let builder = Box::leak(Box::new(builder));
+        Box::leak(Box::new(builder.ir()))
+    }
+
+    fn mesh_pipeline<'a>(kernel: &'a PcuDispatchKernelIr<'a>) -> GpuMeshPipeline<'a> {
+        GpuMeshPipeline {
+            task_kernel: None,
+            mesh_kernel: kernel,
+            fragment_kernel: Some(kernel),
+            rasterizer: GpuRasterizerState {
+                cull_mode: GpuCullMode::Back,
+                front_face: GpuFrontFace::CounterClockwise,
+                polygon_mode: GpuPolygonMode::Fill,
+                depth_bias: None,
+            },
+            depth_stencil: None,
+            blend_attachments: &[],
+            viewport: GpuViewportState::Static(GpuViewport {
+                x: 0.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }),
+            scissor: GpuScissorState::Static(GpuScissorRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }),
+            multisample: GpuMultisampleState {
+                samples: GpuSampleCount::One,
+                sample_shading_enable: false,
+                alpha_to_coverage_enable: false,
+            },
+        }
     }
 
     #[test]
-    fn framebuffer_rejects_draw_pipeline_without_rasterizer_extension() {
+    fn framebuffer_validates_matching_color_and_depth_attachments() {
+        let attachments = [
+            GpuFramebufferAttachment::new(
+                Some("color0"),
+                handle(1),
+                GpuAttachmentRole::Color { index: 0 },
+                GpuFormat::Rgba8Unorm,
+                EXTENT,
+                GpuSampleCount::Four,
+            ),
+            GpuFramebufferAttachment::new(
+                Some("depth"),
+                handle(2),
+                GpuAttachmentRole::Depth,
+                GpuFormat::Depth32Float,
+                EXTENT,
+                GpuSampleCount::Four,
+            ),
+        ];
+
+        let framebuffer = GpuFramebuffer::new(Some("main"), EXTENT, &attachments).with_extensions(
+            GpuFramebufferExtensions {
+                rasterizer: Some(GpuRasterizerExtension {
+                    mesh_shading: true,
+                    wireframe: true,
+                }),
+                blending: Some(crate::GpuBlendingExtension {
+                    max_color_attachments: 1,
+                    independent_blend: false,
+                }),
+                depth_stencil: Some(crate::GpuDepthStencilExtension {
+                    depth_test: true,
+                    stencil_test: false,
+                }),
+                multisample: Some(GpuMultisampleExtension {
+                    max_samples: GpuSampleCount::Four,
+                    sample_shading: true,
+                    alpha_to_coverage: true,
+                }),
+                ray_trace: None,
+            },
+        );
+
+        let kernel = dispatch_kernel(7, "raster");
+        let pipeline = raster_pipeline(kernel);
+
+        assert_eq!(framebuffer.validate(), Ok(()));
+        assert_eq!(framebuffer.validate_raster_pipeline(&pipeline), Ok(()));
+    }
+
+    #[test]
+    fn framebuffer_rejects_duplicate_color_indices() {
+        let attachments = [
+            GpuFramebufferAttachment::new(
+                Some("color0-a"),
+                handle(1),
+                GpuAttachmentRole::Color { index: 0 },
+                GpuFormat::Rgba8Unorm,
+                EXTENT,
+                GpuSampleCount::One,
+            ),
+            GpuFramebufferAttachment::new(
+                Some("color0-b"),
+                handle(2),
+                GpuAttachmentRole::Color { index: 0 },
+                GpuFormat::Bgra8Unorm,
+                EXTENT,
+                GpuSampleCount::One,
+            ),
+        ];
+
+        let framebuffer = GpuFramebuffer::new(Some("dup"), EXTENT, &attachments);
+
+        assert_eq!(
+            framebuffer.validate(),
+            Err(GpuFramebufferValidationError::DuplicateColorAttachmentIndex(0))
+        );
+    }
+
+    #[test]
+    fn framebuffer_rejects_mismatched_attachment_extent() {
+        let attachments = [
+            GpuFramebufferAttachment::new(
+                Some("color0"),
+                handle(1),
+                GpuAttachmentRole::Color { index: 0 },
+                GpuFormat::Rgba8Unorm,
+                EXTENT,
+                GpuSampleCount::One,
+            ),
+            GpuFramebufferAttachment::new(
+                Some("depth"),
+                handle(2),
+                GpuAttachmentRole::Depth,
+                GpuFormat::Depth32Float,
+                GpuExtent2D::new(1280, 720),
+                GpuSampleCount::One,
+            ),
+        ];
+
+        let framebuffer = GpuFramebuffer::new(Some("bad"), EXTENT, &attachments);
+
+        assert_eq!(
+            framebuffer.validate(),
+            Err(GpuFramebufferValidationError::AttachmentExtentMismatch)
+        );
+    }
+
+    #[test]
+    fn framebuffer_rejects_role_format_mismatch() {
+        let attachments = [GpuFramebufferAttachment::new(
+            Some("depth"),
+            handle(1),
+            GpuAttachmentRole::Depth,
+            GpuFormat::Rgba8Unorm,
+            EXTENT,
+            GpuSampleCount::One,
+        )];
+
+        let framebuffer = GpuFramebuffer::new(Some("bad"), EXTENT, &attachments);
+
+        assert_eq!(
+            framebuffer.validate(),
+            Err(GpuFramebufferValidationError::RoleFormatMismatch)
+        );
+    }
+
+    #[test]
+    fn framebuffer_rejects_out_of_range_color_index() {
+        let attachments = [GpuFramebufferAttachment::new(
+            Some("color-big"),
+            handle(1),
+            GpuAttachmentRole::Color { index: 32 },
+            GpuFormat::Rgba8Unorm,
+            EXTENT,
+            GpuSampleCount::One,
+        )];
+
+        let framebuffer = GpuFramebuffer::new(Some("bad"), EXTENT, &attachments);
+
+        assert_eq!(
+            framebuffer.validate(),
+            Err(GpuFramebufferValidationError::ColorAttachmentIndexOutOfRange(32))
+        );
+    }
+
+    #[test]
+    fn framebuffer_rejects_mesh_pipeline_without_mesh_extension() {
         let attachments = [GpuFramebufferAttachment::new(
             Some("color0"),
             handle(1),
@@ -762,42 +844,23 @@ mod tests {
             EXTENT,
             GpuSampleCount::One,
         )];
-        let framebuffer = GpuFramebuffer::new(Some("main"), EXTENT, &attachments);
-        let kernel = PcuRenderKernel::Raster(PcuRasterKernelIr {
-            id: PcuKernelId(8),
-            entry_point: "raster",
-            bindings: &[],
-            ports: &[],
-            parameters: &[],
-            vertex_entry: "vs_main",
-            fragment_entry: Some("fs_main"),
-            type_caps: PcuValueTypeCaps::FLOAT32 | PcuValueTypeCaps::VECTOR_VALUES,
-            features: PcuRasterFeatureCaps::VERTEX_STAGE
-                .union(PcuRasterFeatureCaps::FRAGMENT_STAGE),
-        });
-        let pipeline = GpuDrawPipeline {
-            kernel: &kernel,
-            topology: GpuPrimitiveTopology::Triangles,
-            rasterizer: GpuRasterizerState {
-                cull_mode: GpuCullMode::None,
-                front_face: GpuFrontFace::CounterClockwise,
-                polygon_mode: GpuPolygonMode::Fill,
-                depth_bias: None,
+        let framebuffer = GpuFramebuffer::new(Some("main"), EXTENT, &attachments).with_extensions(
+            GpuFramebufferExtensions {
+                rasterizer: Some(GpuRasterizerExtension {
+                    mesh_shading: false,
+                    wireframe: true,
+                }),
+                blending: None,
+                depth_stencil: None,
+                multisample: None,
+                ray_trace: None,
             },
-            depth_stencil: None,
-            blend_attachments: &[],
-            viewport: GpuViewportState::Dynamic,
-            scissor: GpuScissorState::Dynamic,
-            multisample: GpuMultisampleState {
-                samples: GpuSampleCount::One,
-                sample_shading_enable: false,
-                alpha_to_coverage_enable: false,
-            },
-        };
+        );
+        let pipeline = mesh_pipeline(dispatch_kernel(9, "mesh"));
 
         assert_eq!(
-            framebuffer.validate_draw_pipeline(&pipeline),
-            Err(GpuFramebufferCompatibilityError::MissingRasterizerExtension)
+            framebuffer.validate_mesh_pipeline(&pipeline),
+            Err(GpuFramebufferCompatibilityError::MeshShadingUnsupported)
         );
     }
 
@@ -811,15 +874,21 @@ mod tests {
             EXTENT,
             GpuSampleCount::One,
         )];
-        let framebuffer = GpuFramebuffer::new(Some("main"), EXTENT, &attachments);
-        let builder = PcuDispatchKernelBuilder::<1>::new(9, "fill", [1, 1, 1])
+        let framebuffer = GpuFramebuffer::new(Some("fill"), EXTENT, &attachments);
+        let builder = PcuDispatchKernelBuilder::<1>::new(10, "fill", [8, 1, 1])
             .with_type_caps(PcuValueTypeCaps::UINT32 | PcuValueTypeCaps::SCALAR_VALUES)
             .with_arithmetic_op(PcuDispatchAluOp::Add)
-            .expect("test dispatch builder should accept one op");
+            .expect("test dispatch builder should accept one arithmetic op");
         let kernel = builder.ir();
         let fill = GpuFillOperation {
             kernel: &kernel,
-            color_attachments: &[0],
+            targets: &[GpuFillTargetBinding {
+                color_attachment: 0,
+                target: PcuInvocationTarget::Binding(fusion_pcu::PcuBindingRef {
+                    set: 0,
+                    binding: 0,
+                }),
+            }],
         };
 
         assert_eq!(framebuffer.validate_fill_operation(&fill), Ok(()));
@@ -835,20 +904,55 @@ mod tests {
             EXTENT,
             GpuSampleCount::One,
         )];
-        let framebuffer = GpuFramebuffer::new(Some("main"), EXTENT, &attachments);
-        let builder = PcuDispatchKernelBuilder::<1>::new(10, "fill", [1, 1, 1])
+        let framebuffer = GpuFramebuffer::new(Some("fill"), EXTENT, &attachments);
+        let builder = PcuDispatchKernelBuilder::<1>::new(11, "fill", [8, 1, 1])
             .with_type_caps(PcuValueTypeCaps::UINT32 | PcuValueTypeCaps::SCALAR_VALUES)
             .with_arithmetic_op(PcuDispatchAluOp::Add)
-            .expect("test dispatch builder should accept one op");
+            .expect("test dispatch builder should accept one arithmetic op");
         let kernel = builder.ir();
         let fill = GpuFillOperation {
             kernel: &kernel,
-            color_attachments: &[1],
+            targets: &[GpuFillTargetBinding {
+                color_attachment: 3,
+                target: PcuInvocationTarget::Port("image"),
+            }],
         };
 
         assert_eq!(
             framebuffer.validate_fill_operation(&fill),
-            Err(GpuFramebufferCompatibilityError::FillTargetMissing(1))
+            Err(GpuFramebufferCompatibilityError::FillTargetMissing(3))
+        );
+    }
+
+    #[test]
+    fn framebuffer_rejects_fill_operation_for_out_of_range_color_target_index() {
+        let attachments = [GpuFramebufferAttachment::new(
+            Some("color0"),
+            handle(1),
+            GpuAttachmentRole::Color { index: 0 },
+            GpuFormat::Rgba8Unorm,
+            EXTENT,
+            GpuSampleCount::One,
+        )];
+        let framebuffer = GpuFramebuffer::new(Some("fill"), EXTENT, &attachments);
+        let builder = PcuDispatchKernelBuilder::<1>::new(12, "fill", [8, 1, 1])
+            .with_type_caps(PcuValueTypeCaps::UINT32 | PcuValueTypeCaps::SCALAR_VALUES)
+            .with_arithmetic_op(PcuDispatchAluOp::Add)
+            .expect("test dispatch builder should accept one arithmetic op");
+        let kernel = builder.ir();
+        let fill = GpuFillOperation {
+            kernel: &kernel,
+            targets: &[GpuFillTargetBinding {
+                color_attachment: 32,
+                target: PcuInvocationTarget::Port("image"),
+            }],
+        };
+
+        assert_eq!(
+            framebuffer.validate_fill_operation(&fill),
+            Err(GpuFramebufferCompatibilityError::FillTargetIndexOutOfRange(
+                32
+            ))
         );
     }
 }

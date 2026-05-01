@@ -2,8 +2,8 @@
 //!
 //! `fusion-gpu` sits above `fusion-pcu` and owns graphics-oriented composition law:
 //! - framebuffer vocabulary
-//! - future pipeline/resource/shader composition
-//! - future lowering from graphics work into PCU compute/render families
+//! - pipeline/resource composition
+//! - future lowering from graphics work into raw PCU instruction kernels
 //!
 //! It intentionally does not own:
 //! - platform presentation/windowing

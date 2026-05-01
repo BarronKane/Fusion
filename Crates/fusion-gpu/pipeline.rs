@@ -2,12 +2,12 @@
 
 use fusion_pcu::{
     PcuDispatchKernelIr,
-    PcuRenderKernel,
+    PcuInvocationTarget,
 };
 
 use crate::GpuSampleCount;
 
-/// Primitive assembly topology for one draw.
+/// Primitive assembly topology for one raster draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuPrimitiveTopology {
     Points,
@@ -49,7 +49,7 @@ pub struct GpuDepthBias {
     pub slope_factor: f32,
 }
 
-/// Rasterizer state for one draw.
+/// Rasterizer state for one raster or mesh draw.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GpuRasterizerState {
     pub cull_mode: GpuCullMode,
@@ -207,7 +207,7 @@ pub enum GpuScissorState {
     Dynamic,
 }
 
-/// Multisample state for one draw.
+/// Multisample state for one raster or mesh draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GpuMultisampleState {
     pub samples: GpuSampleCount,
@@ -215,10 +215,11 @@ pub struct GpuMultisampleState {
     pub alpha_to_coverage_enable: bool,
 }
 
-/// One raster draw pipeline description.
+/// One raster-family pipeline description.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GpuDrawPipeline<'a> {
-    pub kernel: &'a PcuRenderKernel<'a>,
+pub struct GpuRasterPipeline<'a> {
+    pub vertex_kernel: &'a PcuDispatchKernelIr<'a>,
+    pub fragment_kernel: Option<&'a PcuDispatchKernelIr<'a>>,
     pub topology: GpuPrimitiveTopology,
     pub rasterizer: GpuRasterizerState,
     pub depth_stencil: Option<GpuDepthStencilState>,
@@ -228,9 +229,41 @@ pub struct GpuDrawPipeline<'a> {
     pub multisample: GpuMultisampleState,
 }
 
-/// Direct or indexed draw call geometry.
+/// One mesh-family pipeline description.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuMeshPipeline<'a> {
+    pub task_kernel: Option<&'a PcuDispatchKernelIr<'a>>,
+    pub mesh_kernel: &'a PcuDispatchKernelIr<'a>,
+    pub fragment_kernel: Option<&'a PcuDispatchKernelIr<'a>>,
+    pub rasterizer: GpuRasterizerState,
+    pub depth_stencil: Option<GpuDepthStencilState>,
+    pub blend_attachments: &'a [GpuBlendAttachmentState],
+    pub viewport: GpuViewportState,
+    pub scissor: GpuScissorState,
+    pub multisample: GpuMultisampleState,
+}
+
+/// One ray-trace-family pipeline description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GpuDrawCall {
+pub struct GpuRayTracePipeline<'a> {
+    pub raygen_kernel: &'a PcuDispatchKernelIr<'a>,
+    pub miss_kernels: &'a [&'a PcuDispatchKernelIr<'a>],
+    pub closest_hit_kernels: &'a [&'a PcuDispatchKernelIr<'a>],
+    pub any_hit_kernels: &'a [&'a PcuDispatchKernelIr<'a>],
+    pub callable_kernels: &'a [&'a PcuDispatchKernelIr<'a>],
+}
+
+/// Closed graphics-family pipeline payload.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GpuRenderPipeline<'a> {
+    Raster(GpuRasterPipeline<'a>),
+    Mesh(GpuMeshPipeline<'a>),
+    RayTrace(GpuRayTracePipeline<'a>),
+}
+
+/// Direct or indexed raster draw-call geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuRasterDrawCall {
     Direct {
         vertex_count: u32,
         instance_count: u32,
@@ -246,9 +279,46 @@ pub enum GpuDrawCall {
     },
 }
 
+/// Mesh-family dispatch geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuMeshDispatch {
+    pub groups_x: u32,
+    pub groups_y: u32,
+    pub groups_z: u32,
+}
+
+impl GpuMeshDispatch {
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.groups_x == 0 || self.groups_y == 0 || self.groups_z == 0
+    }
+}
+
+/// Ray-trace dispatch extent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuTraceExtent {
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+}
+
+impl GpuTraceExtent {
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.width == 0 || self.height == 0 || self.depth == 0
+    }
+}
+
+/// One explicit attachment-to-binding routing record for compute-fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuFillTargetBinding<'a> {
+    pub color_attachment: u8,
+    pub target: PcuInvocationTarget<'a>,
+}
+
 /// Compute-fill operation against one framebuffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GpuFillOperation<'a> {
     pub kernel: &'a PcuDispatchKernelIr<'a>,
-    pub color_attachments: &'a [u8],
+    pub targets: &'a [GpuFillTargetBinding<'a>],
 }
