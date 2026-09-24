@@ -152,6 +152,21 @@ mod tests {
     };
     use fusion_hal::drivers::acpi::public::interface::contract::AcpiHardware;
     use fusion_hal::drivers::acpi::vendor::dell::DellLatitudeE6430AcpiHardware;
+    use fusion_pcu::model::{
+        PcuCommandEffectKind,
+        PcuCommandKernelIr,
+        PcuCommandOp,
+        PcuCommandResult,
+        PcuCommandResultId,
+        PcuCommandStep,
+        PcuOperand,
+        PcuTarget,
+    };
+    use fusion_pcu::{
+        PcuKernelId,
+        PcuValueType,
+        validate_command_kernel,
+    };
 
     use super::*;
     use crate::aml::{
@@ -422,6 +437,51 @@ mod tests {
         assert_eq!(
             backend_notification_query_target::<DellLatitudeE6430AcpiHardware>(0, 0x67),
             None
+        );
+    }
+
+    #[test]
+    fn dell_lid_command_cannot_be_lowered_as_an_opaque_named_read() {
+        let lid = DellLatitudeE6430AcpiHardware::aml_methods(0)
+            .iter()
+            .find(|method| method.path == "\\_SB.LID0._LID")
+            .expect("Dell E6430 backend declares _LID");
+        assert_eq!(lid.lowering, AcpiAmlLoweringKind::Command);
+
+        // This is the tempting but semantically incomplete approximation: treat the AML method
+        // as a named u8 read. The shared verifier must reject it because no region/field contract
+        // connects that name to an executable host read.
+        let steps = [
+            PcuCommandStep {
+                name: Some("lid-read"),
+                op: PcuCommandOp::ReadResult {
+                    target: PcuTarget::Named("\\_SB.LID0._LID"),
+                    result: PcuCommandResult {
+                        id: PcuCommandResultId(0),
+                        value_type: PcuValueType::u8(),
+                    },
+                    width_bits: 8,
+                    effect: PcuCommandEffectKind::Read,
+                },
+            },
+            PcuCommandStep {
+                name: Some("return"),
+                op: PcuCommandOp::Return {
+                    value: Some(PcuOperand::Result(PcuCommandResultId(0))),
+                },
+            },
+        ];
+        let kernel = PcuCommandKernelIr {
+            id: PcuKernelId(0),
+            entry_point: "lid",
+            bindings: &[],
+            ports: &[],
+            parameters: &[],
+            steps: &steps,
+        };
+        assert_eq!(
+            validate_command_kernel(&kernel),
+            Err(fusion_pcu::validation::PcuCommandValidationError::OpaqueReadTarget)
         );
     }
 

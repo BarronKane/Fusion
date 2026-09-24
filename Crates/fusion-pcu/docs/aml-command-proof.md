@@ -19,6 +19,8 @@ The core now has `PcuCommandResultId`, typed `PcuCommandResult`, `PcuOperand::Re
 
 There is no backend-neutral descriptor that binds an AML `OpRegion` and field bit range to a PCU host target. `PcuBinding` and `PcuPort` describe ordinary typed values, not an address-space identity plus region-relative offset, access width, or field extraction rules. Also, `PcuCommandOp::Invoke` has no result destination, so it cannot express the `ECG3 -> ECBT -> ECR1` return chain. The command vocabulary has no branch operation for `ECBT`'s `If`/two-return control flow, and the host operation error contract does not preserve AML host-failure kinds as a command result. A string target such as `Named("\\_SB...ECR1")` would only conceal these missing semantics.
 
+The executable boundary check is `dell_lid_command_cannot_be_lowered_as_an_opaque_named_read` in `aml/lowering.rs`: it confirms Dell `_LID` is classified as `Command`, constructs the tempting `ReadResult(Named("\\_SB.LID0._LID"))` approximation, and asserts that the shared PCU verifier rejects it as `OpaqueReadTarget`. Thus there is no PCU read/effect trace to compare with the AML VM yet; this is an explicit rejection proof, not a conformance proof or Dell `_LID` support claim.
+
 ## Smallest honest next contract slice
 
 Before lowering this fixture, add a backend-neutral host-region contract with:

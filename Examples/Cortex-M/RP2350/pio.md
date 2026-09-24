@@ -3,7 +3,7 @@
 ## `#[pcu]` — Heterogeneous Compute Dispatch via Proc Macro
 
 ```rust
-#[pcu(threads = 3)]
+#[pcu(invocations = 3)]
 fn led_dance(leds: &mut [Led; 8]) {
     // Compiles to PIO instructions on RP2350.
     // 3 state machines run this in parallel.
@@ -16,7 +16,7 @@ fn led_dance(leds: &mut [Led; 8]) {
 
 1. **Lower** the function body to PCU-IR
 2. **Validate** it fits in 32 instructions (PIO instruction memory limit)
-3. **Claim** `threads` lanes on a PIO engine with enough capacity at bind time
+3. **Claim** capacity for three logical invocations across PIO state machines at bind time
 4. **Generate FIFO feed schedule** if the body references external data
 5. **Emit a software fallback** — green fiber path if the PCU isn't available or the body exceeds PIO limits
 6. **Wire GPIO pin claims** from component handles (e.g., `Led`) into PINCTRL automatically

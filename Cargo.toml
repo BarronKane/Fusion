@@ -20,6 +20,7 @@ members = [
     "Crates/fusion-pcu/runner",
     "Crates/fusion-pcu",
     "Crates/fusion-pcu/dialects/tensor",
+    "Crates/fusion-pcu/dialects/vm-reference",
     "Crates/fusion-gpu",
     "Crates/fusion-sys",
     "Crates/fusion-std",

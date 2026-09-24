@@ -535,7 +535,7 @@ mod tests {
         let submission = GpuFillSubmission {
             framebuffer: &framebuffer,
             operation: &operation,
-            shape: PcuInvocationShape::threads(
+            shape: PcuInvocationShape::invocations(
                 NonZeroU32::new(64).expect("test shape must be nonzero"),
             ),
             bindings: PcuInvocationBindings::empty(),
