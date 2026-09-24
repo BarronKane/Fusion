@@ -16,26 +16,24 @@ use core::sync::atomic::{
 use core::time::Duration;
 
 use fusion_pal::sys::pcu::{
-    PcuCommandSubmission,
-    PcuDispatchContract,
-    PcuDispatchSubmission,
+    PcuBaseContract,
     PcuError,
     PcuErrorKind,
-    PcuFiniteHandle,
-    PcuFiniteState,
+    PcuExecutorDescriptor,
     PcuInvocationBindings,
     PcuInvocationParameters,
     PcuKernelId,
     PcuPersistentHandle,
     PcuPersistentState,
     PcuPort,
-    PcuSignalInstallation,
+    PcuStreamBackend,
     PcuStreamCapabilities,
     PcuStreamInstallation,
+    PcuDirectStreamBackend,
     PcuStreamKernelIr,
     PcuStreamPattern,
     PcuStreamValueType,
-    PcuTransactionSubmission,
+    PcuSupport,
     PlatformPcu,
     system_pcu,
 };
@@ -154,7 +152,7 @@ pub static PIO_COURIER_DEBUG_STATE: PioCourierDebugState = PioCourierDebugState 
     magic_end: PIO_COURIER_DEBUG_MAGIC_END,
 };
 
-type PlatformStreamHandle = <PlatformPcu as PcuDispatchContract>::StreamHandle;
+type PlatformStreamHandle = <PlatformPcu as PcuDirectStreamBackend>::StreamHandle;
 
 struct PioCourierCommandProtocol;
 struct PioCourierStatusProtocol;
@@ -486,41 +484,6 @@ pub struct SystemPioCourier {
     client: &'static PioCourierClientIo,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PioCourierUnsupportedFiniteHandle;
-
-impl PcuFiniteHandle for PioCourierUnsupportedFiniteHandle {
-    fn state(&self) -> Result<PcuFiniteState, PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn wait(self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PioCourierUnsupportedPersistentHandle;
-
-impl PcuPersistentHandle for PioCourierUnsupportedPersistentHandle {
-    fn state(&self) -> Result<PcuPersistentState, PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn start(&mut self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn stop(&mut self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn uninstall(self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
-    }
-}
-
-#[derive(Clone, Copy)]
 pub struct PioCourierStreamHandle {
     client: &'static PioCourierClientIo,
     slot: u8,
@@ -601,38 +564,18 @@ pub fn system_pio_courier() -> Result<SystemPioCourier, PcuError> {
     })
 }
 
-impl PcuDispatchContract for SystemPioCourier {
-    type DispatchHandle = PioCourierUnsupportedFiniteHandle;
-    type CommandHandle = PioCourierUnsupportedFiniteHandle;
-    type TransactionHandle = PioCourierUnsupportedFiniteHandle;
+impl PcuBaseContract for SystemPioCourier {
+    fn support(&self) -> PcuSupport {
+        system_pcu().support()
+    }
+
+    fn executors(&self) -> &'static [PcuExecutorDescriptor] {
+        system_pcu().executors()
+    }
+}
+
+impl PcuStreamBackend for SystemPioCourier {
     type StreamHandle = PioCourierStreamHandle;
-    type SignalHandle = PioCourierUnsupportedPersistentHandle;
-
-    fn submit_dispatch(
-        &self,
-        _submission: PcuDispatchSubmission<'_>,
-        _bindings: PcuInvocationBindings<'_>,
-        _parameters: PcuInvocationParameters<'_>,
-    ) -> Result<Self::DispatchHandle, PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn submit_command(
-        &self,
-        _submission: PcuCommandSubmission<'_>,
-        _parameters: PcuInvocationParameters<'_>,
-    ) -> Result<Self::CommandHandle, PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn submit_transaction(
-        &self,
-        _submission: PcuTransactionSubmission<'_>,
-        _bindings: PcuInvocationBindings<'_>,
-        _parameters: PcuInvocationParameters<'_>,
-    ) -> Result<Self::TransactionHandle, PcuError> {
-        Err(PcuError::unsupported())
-    }
 
     fn install_stream(
         &self,
@@ -653,14 +596,6 @@ impl PcuDispatchContract for SystemPioCourier {
             PioCourierStatus::Failed { kind, .. } => Err(pcu_error_from_kind(kind)),
             _ => Err(PcuError::state_conflict()),
         }
-    }
-
-    fn install_signal(
-        &self,
-        _installation: PcuSignalInstallation<'_>,
-        _parameters: PcuInvocationParameters<'_>,
-    ) -> Result<Self::SignalHandle, PcuError> {
-        Err(PcuError::unsupported())
     }
 }
 
@@ -926,7 +861,8 @@ fn install_stream_from_spec(spec: PioStreamInstallSpec) -> Result<PlatformStream
     PIO_COURIER_DEBUG_STATE
         .install_phase
         .store(11, Ordering::Release);
-    system_pcu().install_stream(
+    PcuDirectStreamBackend::install_stream(
+        &system_pcu(),
         PcuStreamInstallation { kernel: &kernel },
         PcuInvocationBindings::empty(),
         PcuInvocationParameters::empty(),

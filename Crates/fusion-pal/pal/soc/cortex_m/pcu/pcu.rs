@@ -1,32 +1,22 @@
 //! Cortex-M coprocessor backend.
 
-use core::sync::atomic::{
-    AtomicBool,
-    Ordering,
-};
-
 use crate::contract::drivers::pcu::{
     PcuBaseContract,
     PcuCaps,
     PcuCommandOpCaps,
-    PcuCommandSubmission,
     PcuCommandSupport,
-    PcuControlContract,
-    PcuDirectDispatchBackend,
+    PcuDirectStreamBackend,
+    PcuExclusiveStreamBackend,
     PcuDispatchOpCaps,
     PcuDispatchPolicyCaps,
-    PcuDispatchSubmission,
     PcuDispatchSupport,
     PcuError,
-    PcuExecutorClaim,
     PcuExecutorClass,
     PcuExecutorDescriptor,
     PcuExecutorId,
     PcuExecutorOrigin,
     PcuExecutorSupport,
     PcuFeatureSupport,
-    PcuFiniteHandle,
-    PcuFiniteState,
     PcuImplementationKind,
     PcuInvocationBindings,
     PcuInvocationParameters,
@@ -34,17 +24,17 @@ use crate::contract::drivers::pcu::{
     PcuPersistentState,
     PcuPrimitiveCaps,
     PcuPrimitiveSupport,
-    PcuSignalInstallation,
     PcuSignalOpCaps,
     PcuSignalSupport,
     PcuStreamInstallation,
     PcuStreamCapabilities,
     PcuStreamKernelIr,
     PcuStreamPattern,
-    PcuStreamValueType,
+    PcuPioU32StreamProfileError,
+    validate_pio_u32_stream_invocation,
+    validate_pio_u32_stream_profile,
     PcuStreamSupport,
     PcuSupport,
-    PcuTransactionSubmission,
     PcuTransactionFeatureCaps,
     PcuTransactionSupport,
 };
@@ -162,17 +152,6 @@ static CORTEX_M_EXECUTORS_8: [PcuExecutorDescriptor; 8] = [
     pio_executor(7, "cortex-m-pio6"),
     pio_executor(8, "cortex-m-pio7"),
 ];
-static CORTEX_M_PIO_EXECUTOR_CLAIMED: [AtomicBool; MAX_CORTEX_M_PIO_EXECUTORS] = [
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-];
-
 fn pio_executor_count() -> usize {
     core::cmp::min(system_pio().engines().len(), MAX_CORTEX_M_PIO_EXECUTORS)
 }
@@ -333,47 +312,35 @@ enum CortexMPersistentKernelState {
     Stopped,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CortexMUnsupportedFiniteHandle;
-
-impl PcuFiniteHandle for CortexMUnsupportedFiniteHandle {
-    fn state(&self) -> Result<PcuFiniteState, PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn wait(self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CortexMUnsupportedPersistentHandle;
-
-impl PcuPersistentHandle for CortexMUnsupportedPersistentHandle {
-    fn state(&self) -> Result<PcuPersistentState, PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn start(&mut self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn stop(&mut self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn uninstall(self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct CortexMPioStreamHandle {
     engine_claim: PioEngineClaim,
     lane_claim: PioLaneClaim,
     lane: crate::pal::soc::cortex_m::hal::soc::pio::PioLaneId,
     lease: PioProgramLease,
     state: CortexMPersistentKernelState,
+}
+
+/// Opaque non-copyable claim for one selected Cortex-M PIO executor and lane.
+///
+/// Dropping an unconsumed lease releases its lane and engine claims. Successful installation
+/// moves those claims into the stream handle, leaving this lease consumed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CortexMPioExecutorLease {
+    executor: PcuExecutorId,
+    engine_claim: Option<PioEngineClaim>,
+    lane_claim: Option<PioLaneClaim>,
+}
+
+impl Drop for CortexMPioExecutorLease {
+    fn drop(&mut self) {
+        if let Some(lane_claim) = self.lane_claim.take() {
+            let _ = system_pio().release_lanes(lane_claim);
+        }
+        if let Some(engine_claim) = self.engine_claim.take() {
+            let _ = system_pio().release_engine(engine_claim);
+        }
+    }
 }
 
 impl PcuPersistentHandle for CortexMPioStreamHandle {
@@ -443,38 +410,8 @@ impl CortexMPioStreamHandle {
     }
 }
 
-impl PcuDirectDispatchBackend for CortexMPcu {
-    type DispatchHandle = CortexMUnsupportedFiniteHandle;
-    type CommandHandle = CortexMUnsupportedFiniteHandle;
-    type TransactionHandle = CortexMUnsupportedFiniteHandle;
+impl PcuDirectStreamBackend for CortexMPcu {
     type StreamHandle = CortexMPioStreamHandle;
-    type SignalHandle = CortexMUnsupportedPersistentHandle;
-
-    fn submit_dispatch_direct(
-        &self,
-        _submission: PcuDispatchSubmission<'_>,
-        _bindings: PcuInvocationBindings<'_>,
-        _parameters: PcuInvocationParameters<'_>,
-    ) -> Result<Self::DispatchHandle, PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn submit_command_direct(
-        &self,
-        _submission: PcuCommandSubmission<'_>,
-        _parameters: PcuInvocationParameters<'_>,
-    ) -> Result<Self::CommandHandle, PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn submit_transaction_direct(
-        &self,
-        _submission: PcuTransactionSubmission<'_>,
-        _bindings: PcuInvocationBindings<'_>,
-        _parameters: PcuInvocationParameters<'_>,
-    ) -> Result<Self::TransactionHandle, PcuError> {
-        Err(PcuError::unsupported())
-    }
 
     fn install_stream_direct(
         &self,
@@ -482,92 +419,200 @@ impl PcuDirectDispatchBackend for CortexMPcu {
         bindings: PcuInvocationBindings<'_>,
         parameters: PcuInvocationParameters<'_>,
     ) -> Result<Self::StreamHandle, PcuError> {
-        if !bindings.is_empty()
-            || !parameters.is_empty()
-            || !installation.kernel.parameters.is_empty()
-        {
-            return Err(PcuError::unsupported());
-        }
-        cortex_m_install_pio_stream(installation.kernel)
+        validate_pio_u32_stream_invocation(installation.kernel, bindings, parameters)
+            .map_err(pio_stream_profile_error)?;
+        cortex_m_install_pio_stream(installation, bindings, parameters)
+    }
+}
+
+impl PcuExclusiveStreamBackend for CortexMPcu {
+    type Lease = CortexMPioExecutorLease;
+    type StreamHandle = CortexMPioStreamHandle;
+
+    fn claim_stream_executor(&self, executor: PcuExecutorId) -> Result<Self::Lease, PcuError> {
+        let engine = pio_engine_for_executor(executor)?;
+        let engine_claim = system_pio().claim_engine(engine)?;
+        let lane_claim = match system_pio().claim_lanes(engine, PioLaneMask::from_lane(0)) {
+            Ok(claim) => claim,
+            Err(error) => {
+                let _ = system_pio().release_engine(engine_claim);
+                return Err(error);
+            }
+        };
+        Ok(CortexMPioExecutorLease {
+            executor,
+            engine_claim: Some(engine_claim),
+            lane_claim: Some(lane_claim),
+        })
     }
 
-    fn install_signal_direct(
+    fn lease_executor(&self, lease: &Self::Lease) -> PcuExecutorId {
+        lease.executor
+    }
+
+    fn install_stream_on_lease_direct(
         &self,
-        _installation: PcuSignalInstallation<'_>,
-        _parameters: PcuInvocationParameters<'_>,
-    ) -> Result<Self::SignalHandle, PcuError> {
-        Err(PcuError::unsupported())
+        lease: &mut Self::Lease,
+        installation: PcuStreamInstallation<'_>,
+        bindings: PcuInvocationBindings<'_>,
+        parameters: PcuInvocationParameters<'_>,
+    ) -> Result<Self::StreamHandle, PcuError> {
+        validate_pio_u32_stream_invocation(installation.kernel, bindings, parameters)
+            .map_err(pio_stream_profile_error)?;
+        cortex_m_install_pio_stream_on_lease(lease, installation.kernel)
     }
 }
 
 fn cortex_m_install_pio_stream(
-    kernel: &PcuStreamKernelIr<'_>,
+    installation: PcuStreamInstallation<'_>,
+    bindings: PcuInvocationBindings<'_>,
+    parameters: PcuInvocationParameters<'_>,
 ) -> Result<CortexMPioStreamHandle, PcuError> {
-    if kernel.validate_simple_transform().is_err() {
-        return Err(PcuError::invalid());
-    }
-
-    let [pattern] = kernel.patterns else {
-        return Err(PcuError::unsupported());
-    };
-    if kernel.simple_transform_type() != Some(PcuStreamValueType::U32) {
-        return Err(PcuError::unsupported());
-    }
-
-    let (engine_claim, lane_claim) = claim_first_available_pio_lane()?;
-    let lane = crate::pal::soc::cortex_m::hal::soc::pio::PioLaneId {
-        engine: engine_claim.engine(),
-        index: 0,
-    };
-    let install_result =
-        cortex_m_load_stream_pattern(engine_claim, lane_claim, kernel.id, *pattern);
-    match install_result {
-        Ok(lease) => Ok(CortexMPioStreamHandle {
-            engine_claim,
-            lane_claim,
-            lane,
-            lease,
-            state: CortexMPersistentKernelState::Dormant,
-        }),
-        Err(error) => {
-            let _ = system_pio().release_lanes(lane_claim);
-            let _ = system_pio().release_engine(engine_claim);
-            Err(error)
-        }
-    }
-}
-
-fn claim_first_available_pio_lane() -> Result<(PioEngineClaim, PioLaneClaim), PcuError> {
     let mut saw_busy = false;
-    for engine in system_pio().engines().iter().copied() {
-        let engine_claim = match system_pio().claim_engine(engine.id) {
-            Ok(claim) => claim,
-            Err(error) if error.kind() == PcuError::busy().kind() => {
-                saw_busy = true;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-
-        let lane_claim = match system_pio().claim_lanes(engine.id, PioLaneMask::from_lane(0)) {
-            Ok(claim) => claim,
-            Err(error) => {
-                let _ = system_pio().release_engine(engine_claim);
-                if error.kind() == PcuError::busy().kind() {
+    for descriptor in cortex_m_executors().iter().copied() {
+        let mut lease =
+            match PcuExclusiveStreamBackend::claim_stream_executor(&CortexMPcu, descriptor.id) {
+                Ok(lease) => lease,
+                Err(error) if error.kind() == PcuError::busy().kind() => {
                     saw_busy = true;
                     continue;
                 }
-                return Err(error);
-            }
-        };
-
-        return Ok((engine_claim, lane_claim));
+                Err(error) => return Err(error),
+            };
+        return PcuExclusiveStreamBackend::install_stream_on_lease(
+            &CortexMPcu,
+            &mut lease,
+            installation,
+            bindings,
+            parameters,
+        );
     }
-
     if saw_busy {
         Err(PcuError::busy())
     } else {
         Err(PcuError::unsupported())
+    }
+}
+
+fn cortex_m_install_pio_stream_on_lease(
+    lease: &mut CortexMPioExecutorLease,
+    kernel: &PcuStreamKernelIr<'_>,
+) -> Result<CortexMPioStreamHandle, PcuError> {
+    validate_pio_u32_stream_profile(kernel).map_err(pio_stream_profile_error)?;
+    let engine_claim = lease
+        .engine_claim
+        .as_ref()
+        .copied()
+        .ok_or_else(PcuError::state_conflict)?;
+    let lane_claim = lease
+        .lane_claim
+        .as_ref()
+        .copied()
+        .ok_or_else(PcuError::state_conflict)?;
+    let engine = pio_engine_for_executor(lease.executor)?;
+    let lane = claimed_pio_lane_for_executor(engine, engine_claim, lane_claim)?;
+    let [pattern] = kernel.patterns else {
+        return Err(PcuError::unsupported());
+    };
+    let program_lease =
+        cortex_m_load_stream_pattern(engine_claim, lane_claim, kernel.id, *pattern)?;
+    let engine_claim = lease
+        .engine_claim
+        .take()
+        .ok_or_else(PcuError::state_conflict)?;
+    let lane_claim = lease
+        .lane_claim
+        .take()
+        .ok_or_else(PcuError::state_conflict)?;
+    Ok(CortexMPioStreamHandle {
+        engine_claim,
+        lane_claim,
+        lane,
+        lease: program_lease,
+        state: CortexMPersistentKernelState::Dormant,
+    })
+}
+
+fn pio_engine_for_executor(
+    executor: PcuExecutorId,
+) -> Result<crate::pal::soc::cortex_m::hal::soc::pio::PioEngineId, PcuError> {
+    let index = usize::from(executor.0);
+    if index == 0 || index > pio_executor_count() {
+        return Err(PcuError::invalid());
+    }
+    system_pio()
+        .engines()
+        .get(index - 1)
+        .map(|engine| engine.id)
+        .ok_or_else(PcuError::invalid)
+}
+
+fn claimed_pio_lane_for_executor(
+    engine: crate::pal::soc::cortex_m::hal::soc::pio::PioEngineId,
+    engine_claim: PioEngineClaim,
+    lane_claim: PioLaneClaim,
+) -> Result<crate::pal::soc::cortex_m::hal::soc::pio::PioLaneId, PcuError> {
+    let lane = crate::pal::soc::cortex_m::hal::soc::pio::PioLaneId { engine, index: 0 };
+    if engine_claim.engine() != engine
+        || lane_claim.engine() != engine
+        || !lane_claim.contains_lane(lane)
+    {
+        return Err(PcuError::state_conflict());
+    }
+    Ok(lane)
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::claimed_pio_lane_for_executor;
+    use crate::pal::soc::cortex_m::hal::soc::pio::{
+        PioEngineClaim,
+        PioEngineId,
+        PioLaneClaim,
+        PioLaneId,
+        PioLaneMask,
+    };
+
+    #[test]
+    fn lease_claims_must_match_the_selected_engine_lane() {
+        let engine = PioEngineId(1);
+        let lane = claimed_pio_lane_for_executor(
+            engine,
+            PioEngineClaim { engine },
+            PioLaneClaim {
+                engine,
+                lanes: PioLaneMask::from_lane(0),
+            },
+        )
+        .expect("matching engine and lane claims should be accepted");
+        assert_eq!(lane, PioLaneId { engine, index: 0 });
+
+        assert!(
+            claimed_pio_lane_for_executor(
+                PioEngineId(2),
+                PioEngineClaim { engine },
+                PioLaneClaim {
+                    engine,
+                    lanes: PioLaneMask::from_lane(0),
+                },
+            )
+            .is_err()
+        );
+    }
+}
+
+fn pio_stream_profile_error(error: PcuPioU32StreamProfileError) -> PcuError {
+    match error {
+        PcuPioU32StreamProfileError::InvalidPortCount
+        | PcuPioU32StreamProfileError::InvalidPortShape
+        | PcuPioU32StreamProfileError::InvalidValueType(_)
+        | PcuPioU32StreamProfileError::InvalidPattern(_) => PcuError::invalid(),
+        PcuPioU32StreamProfileError::KernelBindingsPresent
+        | PcuPioU32StreamProfileError::ParametersPresent
+        | PcuPioU32StreamProfileError::InvalidPatternCount { .. }
+        | PcuPioU32StreamProfileError::UnsupportedPattern(_)
+        | PcuPioU32StreamProfileError::RuntimeBindingsPresent
+        | PcuPioU32StreamProfileError::RuntimeParametersPresent => PcuError::unsupported(),
     }
 }
 
@@ -664,28 +709,4 @@ fn cortex_m_initialize_pio_lanes(claim: &PioLaneClaim, initial_pc: u8) -> Result
 #[cfg(not(feature = "soc-rp2350"))]
 fn cortex_m_initialize_pio_lanes(_claim: &PioLaneClaim, _initial_pc: u8) -> Result<(), PcuError> {
     Err(PcuError::unsupported())
-}
-
-impl PcuControlContract for CortexMPcu {
-    fn claim_executor(&self, executor: PcuExecutorId) -> Result<PcuExecutorClaim, PcuError> {
-        let PcuExecutorId(index) = executor;
-        if index == 0 || usize::from(index) > pio_executor_count() {
-            return Err(PcuError::invalid());
-        }
-        CORTEX_M_PIO_EXECUTOR_CLAIMED[usize::from(index - 1)]
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| PcuError::busy())?;
-        Ok(PcuExecutorClaim::new(executor))
-    }
-
-    fn release_executor(&self, claim: PcuExecutorClaim) -> Result<(), PcuError> {
-        let PcuExecutorId(index) = claim.executor();
-        if index == 0 || usize::from(index) > pio_executor_count() {
-            return Err(PcuError::invalid());
-        }
-        if !CORTEX_M_PIO_EXECUTOR_CLAIMED[usize::from(index - 1)].swap(false, Ordering::AcqRel) {
-            return Err(PcuError::state_conflict());
-        }
-        Ok(())
-    }
 }

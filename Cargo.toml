@@ -14,7 +14,12 @@ members = [
     "Crates/fusion-hal/drivers/display/port/display_port",
     "Crates/fusion-hal/drivers/bus/pci",
     "Crates/fusion-pal",
+    "Crates/fusion-pcu/macros",
+    "Crates/fusion-pcu/backends/spirv",
+    "Crates/fusion-pcu/backends/rocm",
+    "Crates/fusion-pcu/runner",
     "Crates/fusion-pcu",
+    "Crates/fusion-pcu/dialects/tensor",
     "Crates/fusion-gpu",
     "Crates/fusion-sys",
     "Crates/fusion-std",
@@ -23,6 +28,7 @@ members = [
     # Hosted example.
     "Examples/Hosted/Template",
     "Examples/Hosted/AllocatorAudit",
+    "Examples/Hosted/compute/fusion-rocm-example",
     "Examples/Hosted/graphics/fusion-vulkan-example",
 ]
 
@@ -40,7 +46,11 @@ fusion-firmware-macros = { path = "Crates/fusion-firmware/macros" }
 fusion-driver-dogma = { path = "Crates/fusion-hal/driver-dogma", default-features = false }
 fusion-hal = { path = "Crates/fusion-hal", default-features = false }
 fusion-pal = { path = "Crates/fusion-pal", default-features = false }
+fusion-pcu-macros = { path = "Crates/fusion-pcu/macros" }
 fusion-pcu = { path = "Crates/fusion-pcu", default-features = false }
+fusion-pcu-spirv = { path = "Crates/fusion-pcu/backends/spirv", default-features = false }
+fusion-pcu-rocm = { path = "Crates/fusion-pcu/backends/rocm", default-features = false }
+fusion-pcu-runner = { path = "Crates/fusion-pcu/runner", default-features = false }
 fusion-gpu = { path = "Crates/fusion-gpu", default-features = false }
 fusion-sys = { path = "Crates/fusion-sys", default-features = false }
 fusion-std = { path = "Crates/fusion-std", default-features = false }

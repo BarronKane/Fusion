@@ -286,6 +286,7 @@ mod tests {
 
     struct DellRegionHost {
         ec: RefCell<[u8; 256]>,
+        fail_ec_register: Cell<Option<u8>>,
         ec_stream_command: Cell<u8>,
         ec_stream_index: Cell<u8>,
         ec_streams: RefCell<Vec<(u8, Vec<u8>)>>,
@@ -298,6 +299,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 ec: RefCell::new([0; 256]),
+                fail_ec_register: Cell::new(None),
                 ec_stream_command: Cell::new(0),
                 ec_stream_index: Cell::new(0),
                 ec_streams: RefCell::new(Vec::new()),
@@ -459,6 +461,9 @@ mod tests {
 
     impl AmlEmbeddedControllerHost for DellRegionHost {
         fn read_embedded_controller(&self, register: u8) -> AmlResult<u8> {
+            if self.fail_ec_register.get() == Some(register) {
+                return Err(AmlError::host_failure());
+            }
             if register == 0x2A {
                 if let Some(value) = self.read_ec_stream_byte() {
                     return Ok(value);
@@ -591,6 +596,29 @@ mod tests {
         let lid_method = namespace.record_by_path(lid_path).unwrap().descriptor.id;
         let ecrd_node = namespace.record_by_path(ecrd_path).unwrap().descriptor.id;
 
+        // The captured entry chain delegates to EC helper methods. ECR1 is itself a
+        // one-argument AML method rather than a direct field, so the EC semantics cannot
+        // be reduced to a single typed PCU read.
+        let ecg3_path = AmlResolvedNamePath::parse_text("\\ECG3").unwrap();
+        let ecg3_record = namespace.record_by_path(ecg3_path).unwrap();
+        let crate::aml::AmlNamespaceNodePayload::Method(ecg3_method) = ecg3_record.payload else {
+            panic!("ECG3 must be a method");
+        };
+        assert_eq!(ecg3_method.arg_count, 0);
+        let ecbt_path = AmlResolvedNamePath::parse_text("\\ECBT").unwrap();
+        let ecbt_record = namespace.record_by_path(ecbt_path).unwrap();
+        let crate::aml::AmlNamespaceNodePayload::Method(ecbt_method) = ecbt_record.payload else {
+            panic!("ECBT must be a method");
+        };
+        assert_eq!(ecbt_method.arg_count, 2);
+        assert_eq!(namespace.code_bytes(ecbt_method.body).unwrap().len(), 37);
+        let ecr1_path = AmlResolvedNamePath::parse_text("\\_SB.PCI0.LPCB.ECDV.ECR1").unwrap();
+        let ecr1_record = namespace.record_by_path(ecr1_path).unwrap();
+        let crate::aml::AmlNamespaceNodePayload::Method(ecr1_method) = ecr1_record.payload else {
+            panic!("ECR1 must be the captured helper method");
+        };
+        assert_eq!(ecr1_method.arg_count, 1);
+        assert_eq!(namespace.code_bytes(ecr1_method.body).unwrap().len(), 637);
         let integer_slots: [Cell<Option<AmlRuntimeIntegerSlot>>; 16] =
             core::array::from_fn(|_| Cell::new(None));
         let package_slots: [Cell<Option<AmlRuntimePackageSlot>>; 8] =
@@ -617,6 +645,36 @@ mod tests {
             .unwrap();
         assert_eq!(lid_outcome.return_value, Some(AmlValue::Integer(1)));
         assert!(!lid_outcome.blocked);
+
+        host.ec.borrow_mut()[0] = 0;
+        let closed_lid_outcome = evaluator
+            .evaluate_with_host_and_state(
+                &host,
+                &state,
+                AmlMethodInvocation {
+                    method: lid_method,
+                    phase: AmlExecutionPhase::Runtime,
+                    args: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(closed_lid_outcome.return_value, Some(AmlValue::Integer(0)));
+        assert!(!closed_lid_outcome.blocked);
+
+        host.ec.borrow_mut()[0] = 0x10;
+        host.fail_ec_register.set(Some(0));
+        let read_failure = evaluator
+            .evaluate_with_host_and_state(
+                &host,
+                &state,
+                AmlMethodInvocation {
+                    method: lid_method,
+                    phase: AmlExecutionPhase::Runtime,
+                    args: &[],
+                },
+            )
+            .unwrap_err();
+        assert_eq!(read_failure.kind, crate::aml::AmlErrorKind::HostFailure);
     }
 
     #[test]

@@ -12,8 +12,6 @@ use crate::contract::drivers::pcu::{
     PcuExecutorOrigin,
     PcuExecutorSupport,
     PcuFeatureSupport,
-    PcuFiniteHandle,
-    PcuFiniteState,
     PcuImplementationKind,
     PcuInvocationBindings,
     PcuInvocationParameters,
@@ -123,7 +121,6 @@ pub const fn host_cpu_executor_descriptor() -> PcuExecutorDescriptor {
 pub const fn host_pcu_support() -> PcuSupport {
     PcuSupport {
         caps: PcuCaps::ENUMERATE_EXECUTORS
-            .union(PcuCaps::CLAIM_EXECUTOR)
             .union(PcuCaps::DISPATCH)
             .union(PcuCaps::COMPLETION_STATUS),
         implementation: PcuImplementationKind::Native,
@@ -138,40 +135,6 @@ pub const fn host_pcu_support() -> PcuSupport {
         command_support: HOST_COMMAND_SUPPORT,
         transaction_support: HOST_TRANSACTION_SUPPORT,
         signal_support: HOST_SIGNAL_SUPPORT,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HostedCpuUnsupportedFiniteHandle;
-
-impl PcuFiniteHandle for HostedCpuUnsupportedFiniteHandle {
-    fn state(&self) -> Result<PcuFiniteState, PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn wait(self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HostedCpuUnsupportedPersistentHandle;
-
-impl PcuPersistentHandle for HostedCpuUnsupportedPersistentHandle {
-    fn state(&self) -> Result<PcuPersistentState, PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn start(&mut self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn stop(&mut self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
-    }
-
-    fn uninstall(self) -> Result<(), PcuError> {
-        Err(PcuError::unsupported())
     }
 }
 
@@ -521,6 +484,26 @@ mod tests {
             handle.process_word(0x21).expect("word should process"),
             0x42
         );
+    }
+
+    #[test]
+    fn hosted_cpu_matches_shared_pio_u32_profile_vectors() {
+        for vector in crate::contract::drivers::pcu::PCU_PIO_U32_STREAM_VECTORS {
+            let builder =
+                PcuStreamKernelBuilder::<{ HOSTED_CPU_MAX_STREAM_PATTERNS }>::words(14, "stream")
+                    .with_pattern(vector.pattern)
+                    .expect("shared vector should be an admissible pattern");
+            let mut handle = active_word_handle(builder, &[]);
+            assert_eq!(
+                handle
+                    .process_word(vector.input)
+                    .expect("word should process"),
+                vector.expected,
+                "pattern {:?}, input {:#010x}",
+                vector.pattern,
+                vector.input
+            );
+        }
     }
 
     #[test]
