@@ -1,0 +1,4 @@
+[submodule "Crates/fusion-pcu"]
+	path = Crates/fusion-pcu
+	url = git@github.com:Private-Asylum/Fusion-PCU.git
+	branch = main

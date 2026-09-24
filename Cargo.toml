@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["Crates/fusion-pcu"]
 members = [
     # fusion substrate crates.
     "Crates/fusion-firmware/macros",
@@ -14,13 +15,6 @@ members = [
     "Crates/fusion-hal/drivers/display/port/display_port",
     "Crates/fusion-hal/drivers/bus/pci",
     "Crates/fusion-pal",
-    "Crates/fusion-pcu/macros",
-    "Crates/fusion-pcu/backends/spirv",
-    "Crates/fusion-pcu/backends/rocm",
-    "Crates/fusion-pcu/runner",
-    "Crates/fusion-pcu",
-    "Crates/fusion-pcu/dialects/tensor",
-    "Crates/fusion-pcu/dialects/vm-reference",
     "Crates/fusion-gpu",
     "Crates/fusion-sys",
     "Crates/fusion-std",
@@ -29,8 +23,6 @@ members = [
     # Hosted example.
     "Examples/Hosted/Template",
     "Examples/Hosted/AllocatorAudit",
-    "Examples/Hosted/compute/fusion-rocm-example",
-    "Examples/Hosted/graphics/fusion-vulkan-example",
 ]
 
 [workspace.package]
