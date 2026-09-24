@@ -40,7 +40,7 @@ fusion-driver-dogma = { path = "Crates/fusion-hal/driver-dogma", default-feature
 fusion-hal = { path = "Crates/fusion-hal", default-features = false }
 fusion-pal = { path = "Crates/fusion-pal", default-features = false }
 fusion-pcu-macros = { path = "Crates/fusion-pcu/macros" }
-fusion-pcu = { path = "Crates/fusion-pcu", default-features = false }
+fusion-pcu = { path = "Crates/fusion-pcu/Crates/fusion-pcu", default-features = false }
 fusion-pcu-spirv = { path = "Crates/fusion-pcu/backends/spirv", default-features = false }
 fusion-pcu-rocm = { path = "Crates/fusion-pcu/backends/rocm", default-features = false }
 fusion-pcu-runner = { path = "Crates/fusion-pcu/runner", default-features = false }
