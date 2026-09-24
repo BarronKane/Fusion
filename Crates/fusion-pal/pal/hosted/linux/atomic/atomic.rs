@@ -257,7 +257,6 @@ const fn map_errno(errno: Errno) -> AtomicError {
 const fn validate_load_ordering(ordering: Ordering) -> Result<(), AtomicError> {
     match ordering {
         Ordering::Relaxed | Ordering::Acquire | Ordering::SeqCst => Ok(()),
-        Ordering::Release | Ordering::AcqRel => Err(AtomicError::invalid()),
         _ => Err(AtomicError::invalid()),
     }
 }
@@ -265,7 +264,6 @@ const fn validate_load_ordering(ordering: Ordering) -> Result<(), AtomicError> {
 const fn validate_store_ordering(ordering: Ordering) -> Result<(), AtomicError> {
     match ordering {
         Ordering::Relaxed | Ordering::Release | Ordering::SeqCst => Ok(()),
-        Ordering::Acquire | Ordering::AcqRel => Err(AtomicError::invalid()),
         _ => Err(AtomicError::invalid()),
     }
 }
@@ -290,10 +288,8 @@ const fn validate_compare_exchange_orderings(
     }
 
     match (success, failure) {
-        (Ordering::Relaxed, Ordering::Relaxed)
-        | (Ordering::Acquire, Ordering::Relaxed | Ordering::Acquire)
-        | (Ordering::Release, Ordering::Relaxed)
-        | (Ordering::AcqRel, Ordering::Relaxed | Ordering::Acquire)
+        (Ordering::Relaxed | Ordering::Release, Ordering::Relaxed)
+        | (Ordering::Acquire | Ordering::AcqRel, Ordering::Relaxed | Ordering::Acquire)
         | (Ordering::SeqCst, Ordering::Relaxed | Ordering::Acquire | Ordering::SeqCst) => Ok(()),
         _ => Err(AtomicError::invalid()),
     }

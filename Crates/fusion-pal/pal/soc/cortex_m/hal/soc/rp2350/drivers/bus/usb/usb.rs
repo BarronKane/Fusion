@@ -78,7 +78,10 @@ const RP2350_USBCTRL_DPRAM_BYTES: usize = 4096;
 const RP2350_USBCTRL_IRQN: u16 = 14;
 const CORTEX_M_EXTERNAL_EXCEPTION_BASE: i16 = 16;
 const RP2350_USB_EP0_MAX_PACKET_SIZE: usize = 64;
+const RP2350_USB_EP0_MAX_PACKET_SIZE_U32: u32 = 64;
 const RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE: usize = 64;
+const RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE_U16: u16 = 64;
+const RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE_U32: u32 = 64;
 const RP2350_USB_DEBUG_ENDPOINT_OUT_DPRAM_OFFSET: usize = 0;
 const RP2350_USB_DEBUG_ENDPOINT_IN_DPRAM_OFFSET: usize = 64;
 
@@ -208,7 +211,7 @@ const RP2350_USB_DEBUG_BULK_OUT_ENDPOINT: UsbEndpointDescriptor = UsbEndpointDes
         direction: UsbDirection::Out,
     },
     transfer_type: UsbTransferType::Bulk,
-    max_packet_size: RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE as u16,
+    max_packet_size: RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE_U16,
     interval: 0,
 };
 
@@ -218,7 +221,7 @@ const RP2350_USB_DEBUG_BULK_IN_ENDPOINT: UsbEndpointDescriptor = UsbEndpointDesc
         direction: UsbDirection::In,
     },
     transfer_type: UsbTransferType::Bulk,
-    max_packet_size: RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE as u16,
+    max_packet_size: RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE_U16,
     interval: 0,
 };
 
@@ -387,6 +390,8 @@ pub struct UsbHostController;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UsbHostDevice;
 
+// USB handshake flags are independent protocol state and are updated by different IRQ paths.
+#[allow(clippy::struct_excessive_bools)]
 struct Rp2350UsbRuntime {
     pending_address: Option<u8>,
     device_address: u8,
@@ -426,7 +431,7 @@ impl Rp2350UsbRuntime {
         }
     }
 
-    fn reset_for_bus(&mut self) {
+    const fn reset_for_bus(&mut self) {
         self.pending_address = None;
         self.device_address = 0;
         self.active_configuration = 0;
@@ -482,14 +487,8 @@ impl UsbRuntimeSlot {
                             unsafe { (*self.value.get()).write(runtime) };
                             self.state
                                 .store(RP2350_USB_RUNTIME_READY, Ordering::Release);
-                            match rp2350_usb_activate_controller() {
-                                Ok(()) => return Ok(()),
-                                Err(error) => {
-                                    self.state
-                                        .store(RP2350_USB_RUNTIME_UNINITIALIZED, Ordering::Release);
-                                    return Err(error);
-                                }
-                            }
+                            rp2350_usb_activate_controller();
+                            return Ok(());
                         }
                         Err(error) => {
                             self.state
@@ -498,7 +497,6 @@ impl UsbRuntimeSlot {
                         }
                     }
                 }
-                RP2350_USB_RUNTIME_RUNNING => core::hint::spin_loop(),
                 _ => core::hint::spin_loop(),
             }
         }
@@ -794,8 +792,16 @@ impl UsbDeviceControllerContract for UsbDeviceController {
     }
 }
 
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
+///
+/// # Panics
+///
+/// Panics only if the compile-time USB IRQ number does not fit in `i16`.
 pub fn service_runtime_irq(irqn: i16) -> Result<bool, UsbError> {
-    let usb_irqn = RP2350_USBCTRL_IRQN as i16;
+    let usb_irqn = i16::try_from(RP2350_USBCTRL_IRQN).expect("USB IRQ number fits i16");
     let usb_exception_number = usb_irqn + CORTEX_M_EXTERNAL_EXCEPTION_BASE;
     if irqn != usb_irqn && irqn != usb_exception_number {
         return Ok(false);
@@ -832,7 +838,7 @@ fn rp2350_usb_initialize_controller() -> Result<Rp2350UsbRuntime, UsbError> {
             RP2350_USBCTRL_DPRAM_BASE as *mut u8,
             0,
             RP2350_USBCTRL_DPRAM_BYTES,
-        )
+        );
     };
 
     let _ = crate::pal::soc::cortex_m::hal::soc::rp2350::irq_disable(RP2350_USBCTRL_IRQN);
@@ -865,12 +871,11 @@ fn rp2350_usb_initialize_controller() -> Result<Rp2350UsbRuntime, UsbError> {
     Ok(runtime)
 }
 
-fn rp2350_usb_activate_controller() -> Result<(), UsbError> {
+fn rp2350_usb_activate_controller() {
     rp2350_usb_write_reg(
         USB_SIE_CTRL_OFFSET,
         USB_SIE_CTRL_EP0_INT_1BUF_BITS | USB_SIE_CTRL_PULLUP_EN_BITS,
     );
-    Ok(())
 }
 
 fn rp2350_usb_reset_block() -> Result<(), UsbError> {
@@ -1030,9 +1035,10 @@ fn rp2350_usb_prepare_setup_response(
             }
             Ok(SetupResponse::AckIn)
         }
-        (UsbDirection::Out, USB_REQUEST_CLEAR_FEATURE)
-        | (UsbDirection::Out, USB_REQUEST_SET_FEATURE)
-        | (UsbDirection::Out, USB_REQUEST_SET_INTERFACE) => Ok(SetupResponse::AckIn),
+        (
+            UsbDirection::Out,
+            USB_REQUEST_CLEAR_FEATURE | USB_REQUEST_SET_FEATURE | USB_REQUEST_SET_INTERFACE,
+        ) => Ok(SetupResponse::AckIn),
         _ => Ok(SetupResponse::Stall),
     }
 }
@@ -1047,7 +1053,7 @@ fn rp2350_usb_configure_endpoint(
 
     if endpoint.address == RP2350_USB_DEBUG_BULK_OUT_ENDPOINT.address
         && matches!(endpoint.transfer_type, UsbTransferType::Bulk)
-        && endpoint.max_packet_size == RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE as u16
+        && endpoint.max_packet_size == RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE_U16
         && endpoint.interval == 0
     {
         rp2350_usb_configure_debug_bulk_out(runtime);
@@ -1056,7 +1062,7 @@ fn rp2350_usb_configure_endpoint(
 
     if endpoint.address == RP2350_USB_DEBUG_BULK_IN_ENDPOINT.address
         && matches!(endpoint.transfer_type, UsbTransferType::Bulk)
-        && endpoint.max_packet_size == RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE as u16
+        && endpoint.max_packet_size == RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE_U16
         && endpoint.interval == 0
     {
         rp2350_usb_configure_debug_bulk_in(runtime);
@@ -1115,7 +1121,7 @@ fn rp2350_usb_disable_debug_bulk_endpoints(runtime: &mut Rp2350UsbRuntime) {
     }
 }
 
-fn rp2350_usb_reset_debug_bulk_endpoint_state(runtime: &mut Rp2350UsbRuntime) {
+const fn rp2350_usb_reset_debug_bulk_endpoint_state(runtime: &mut Rp2350UsbRuntime) {
     runtime.ep1_in_busy = false;
     runtime.ep1_out_armed = false;
     runtime.ep1_out_ready = false;
@@ -1124,14 +1130,18 @@ fn rp2350_usb_reset_debug_bulk_endpoint_state(runtime: &mut Rp2350UsbRuntime) {
     runtime.ep1_out_data1 = false;
 }
 
-fn rp2350_usb_endpoint_control_value(transfer_type: UsbTransferType, dpram_offset: usize) -> u32 {
+#[allow(clippy::cast_possible_truncation)] // DPRAM offsets are fixed, validated USB hardware constants.
+const fn rp2350_usb_endpoint_control_value(
+    transfer_type: UsbTransferType,
+    dpram_offset: usize,
+) -> u32 {
     USB_ENDPOINT_CTRL_ENABLE_BITS
         | USB_ENDPOINT_CTRL_INTERRUPT_PER_BUFFER_BITS
         | (rp2350_usb_transfer_type_bits(transfer_type) << USB_ENDPOINT_CTRL_BUFFER_TYPE_LSB)
         | dpram_offset as u32
 }
 
-fn rp2350_usb_transfer_type_bits(transfer_type: UsbTransferType) -> u32 {
+const fn rp2350_usb_transfer_type_bits(transfer_type: UsbTransferType) -> u32 {
     match transfer_type {
         UsbTransferType::Control => 0,
         UsbTransferType::Isochronous => 1,
@@ -1158,7 +1168,9 @@ fn rp2350_usb_queue_debug_in(
         rp2350_usb_byte_copy_to_dpram(rp2350_usb_debug_in_buffer(), payload);
     }
 
-    let mut value = (payload.len() as u32 & USB_BUF_CTRL_LEN_MASK) | USB_BUF_CTRL_FULL;
+    let mut value = (u32::try_from(payload.len()).map_err(|_| UsbError::resource_exhausted())?
+        & USB_BUF_CTRL_LEN_MASK)
+        | USB_BUF_CTRL_FULL;
     if runtime.ep1_in_data1 {
         value |= USB_BUF_CTRL_DATA1_PID;
     }
@@ -1201,7 +1213,7 @@ fn rp2350_usb_arm_debug_out(runtime: &mut Rp2350UsbRuntime) -> Result<(), UsbErr
         return Err(UsbError::busy());
     }
 
-    let mut value = RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE as u32 & USB_BUF_CTRL_LEN_MASK;
+    let mut value = RP2350_USB_DEBUG_ENDPOINT_MAX_PACKET_SIZE_U32 & USB_BUF_CTRL_LEN_MASK;
     if runtime.ep1_out_data1 {
         value |= USB_BUF_CTRL_DATA1_PID;
     }
@@ -1247,7 +1259,7 @@ fn rp2350_usb_write_string_descriptor(
         return Err(UsbError::resource_exhausted());
     }
 
-    buffer[0] = descriptor_len as u8;
+    buffer[0] = u8::try_from(descriptor_len).map_err(|_| UsbError::resource_exhausted())?;
     buffer[1] = 0x03;
     for (index, byte) in text.iter().copied().enumerate() {
         buffer[2 + (index * 2)] = byte;
@@ -1298,11 +1310,11 @@ fn rp2350_usb_handle_ep0_in_complete(runtime: &mut Rp2350UsbRuntime) {
     }
 }
 
-fn rp2350_usb_handle_ep0_out_complete(runtime: &mut Rp2350UsbRuntime) {
+const fn rp2350_usb_handle_ep0_out_complete(runtime: &mut Rp2350UsbRuntime) {
     runtime.expect_status_out = false;
 }
 
-fn rp2350_usb_handle_ep1_in_complete(runtime: &mut Rp2350UsbRuntime) {
+const fn rp2350_usb_handle_ep1_in_complete(runtime: &mut Rp2350UsbRuntime) {
     runtime.ep1_in_busy = false;
 }
 
@@ -1327,8 +1339,10 @@ fn rp2350_usb_start_ep0_in(
     }
 
     runtime.expect_status_out = expect_status_out;
-    let mut value =
-        (len as u32 & USB_BUF_CTRL_LEN_MASK) | USB_BUF_CTRL_LAST | USB_BUF_CTRL_RESET_SEL;
+    let mut value = (u32::try_from(len).expect("EP0 packet length fits u32")
+        & USB_BUF_CTRL_LEN_MASK)
+        | USB_BUF_CTRL_LAST
+        | USB_BUF_CTRL_RESET_SEL;
     value |= USB_BUF_CTRL_FULL;
     if runtime.ep0_in_data1 {
         value |= USB_BUF_CTRL_DATA1_PID;
@@ -1342,7 +1356,7 @@ fn rp2350_usb_start_ep0_in(
 }
 
 fn rp2350_usb_arm_ep0_out(runtime: &mut Rp2350UsbRuntime) {
-    let mut value = (RP2350_USB_EP0_MAX_PACKET_SIZE as u32 & USB_BUF_CTRL_LEN_MASK)
+    let mut value = (RP2350_USB_EP0_MAX_PACKET_SIZE_U32 & USB_BUF_CTRL_LEN_MASK)
         | USB_BUF_CTRL_LAST
         | USB_BUF_CTRL_RESET_SEL;
     if runtime.ep0_out_data1 {
@@ -1389,7 +1403,7 @@ fn rp2350_usb_device_state() -> Result<UsbDeviceState, UsbError> {
     })
 }
 
-fn rp2350_usb_device_state_from_snapshot(
+const fn rp2350_usb_device_state_from_snapshot(
     active_configuration: u8,
     device_address: u8,
     bus_reset_seen: bool,
@@ -1432,7 +1446,9 @@ fn rp2350_usb_vbus_observation(sie_status: u32) -> Rp2350UsbVbusObservation {
     let vbus_detected = (sie_status & USB_SIE_STATUS_VBUS_DETECTED_BITS) != 0;
 
     match usb_device_vbus_detect_source() {
-        Some(CortexMUsbDeviceVbusDetectSource::NativeController) if !vbus_detect_override => {
+        Some(CortexMUsbDeviceVbusDetectSource::NativeController) | None
+            if !vbus_detect_override =>
+        {
             if vbus_detected {
                 Rp2350UsbVbusObservation::Present
             } else {
@@ -1449,18 +1465,11 @@ fn rp2350_usb_vbus_observation(sie_status: u32) -> Rp2350UsbVbusObservation {
                 Err(_) => Rp2350UsbVbusObservation::Unknown,
             }
         }
-        None if !vbus_detect_override => {
-            if vbus_detected {
-                Rp2350UsbVbusObservation::Present
-            } else {
-                Rp2350UsbVbusObservation::Absent
-            }
-        }
         None => Rp2350UsbVbusObservation::Unknown,
     }
 }
 
-fn rp2350_usb_parse_setup_packet(bytes: [u8; 8]) -> UsbSetupPacket {
+const fn rp2350_usb_parse_setup_packet(bytes: [u8; 8]) -> UsbSetupPacket {
     let bm_request_type = bytes[0];
     UsbSetupPacket {
         direction: if (bm_request_type & 0x80) != 0 {
@@ -1487,7 +1496,7 @@ fn rp2350_usb_parse_setup_packet(bytes: [u8; 8]) -> UsbSetupPacket {
     }
 }
 
-fn rp2350_usb_dpram() -> *mut Rp2350UsbDeviceDpram {
+const fn rp2350_usb_dpram() -> *mut Rp2350UsbDeviceDpram {
     RP2350_USBCTRL_DPRAM_BASE as *mut Rp2350UsbDeviceDpram
 }
 

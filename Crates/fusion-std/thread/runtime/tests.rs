@@ -1,3 +1,6 @@
+// Keep singleton fixtures local so each test's configuration stays visible.
+#![allow(clippy::items_after_statements)]
+
 use std::alloc::{
     Layout,
     alloc_zeroed,
@@ -26,6 +29,7 @@ use fusion_sys::courier::{
     CourierChildLaunchRequest,
     CourierLaunchDescriptor,
     CourierPlan,
+    CourierScopeRole,
     CourierVisibility,
 };
 use fusion_sys::domain::{
@@ -469,6 +473,7 @@ fn current_runtime_singleton_runtime_summary_combines_fiber_and_async_lanes() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn combined_current_runtime_realizes_child_launch_against_domain_registry() {
     let _guard = crate::thread::runtime_test_guard();
     const ROOT_COURIER: CourierId = CourierId::new(1);
@@ -488,6 +493,7 @@ fn combined_current_runtime_realizes_child_launch_against_domain_registry() {
         .register_courier(CourierDescriptor {
             id: ROOT_COURIER,
             name: "kernel",
+            scope_role: CourierScopeRole::ContextRoot,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
             visibility: CourierVisibility::Full,
             claim_awareness: ClaimAwareness::Black,
@@ -511,6 +517,7 @@ fn combined_current_runtime_realizes_child_launch_against_domain_registry() {
         descriptor: CourierLaunchDescriptor {
             id: CHILD_COURIER,
             name: "httpd",
+            scope_role: CourierScopeRole::Leaf,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
             visibility: CourierVisibility::Scoped,
             claim_awareness: ClaimAwareness::Black,

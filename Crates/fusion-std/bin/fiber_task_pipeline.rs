@@ -106,11 +106,10 @@ fn pipeline_target_dir(workspace_root: &Path, config: &PipelineConfig) -> PathBu
     } else {
         dir = dir.join("default-features");
     }
-    if let Some(features) = config.features.as_ref() {
-        dir.join(sanitize_path_component(features))
-    } else {
-        dir.join("default")
-    }
+    config.features.as_ref().map_or_else(
+        || dir.join("default"),
+        |features| dir.join(sanitize_path_component(features)),
+    )
 }
 
 fn sanitize_path_component(raw: &str) -> String {
@@ -633,7 +632,7 @@ fn materialize_async_poll_stack_roots(
     config: &PipelineConfig,
     artifact: &Path,
 ) -> Result<Option<PathBuf>, String> {
-    let explicit = config.async_poll_stack_roots_path.as_ref().cloned();
+    let explicit = config.async_poll_stack_roots_path.clone();
     let discovered = collect_generated_async_poll_stack_roots(artifact)?;
     if explicit.is_none() && discovered.is_empty() {
         return Ok(None);

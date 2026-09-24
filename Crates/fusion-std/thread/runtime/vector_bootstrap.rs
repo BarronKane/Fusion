@@ -9,11 +9,14 @@ use fusion_sys::thread::vector::{
 use super::ExecutorError;
 use crate::sync::SyncErrorKind;
 
-pub(crate) fn ensure_runtime_reserved_wake_vectors_best_effort() {
+pub fn ensure_runtime_reserved_wake_vectors_best_effort() {
     sys_ensure_runtime_reserved_wake_vectors_best_effort();
 }
 
-pub(crate) fn with_runtime_vector_builder<R>(
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
+pub fn with_runtime_vector_builder<R>(
     bind: impl FnOnce(&mut VectorTableBuilder) -> R,
 ) -> Result<R, ExecutorError> {
     sys_with_runtime_vector_builder(bind).map_err(executor_error_from_vector)
@@ -30,8 +33,8 @@ const fn executor_error_from_vector(error: VectorError) -> ExecutorError {
         VectorErrorKind::AlreadyBound
         | VectorErrorKind::NotBound
         | VectorErrorKind::StateConflict
-        | VectorErrorKind::Sealed => ExecutorError::Sync(SyncErrorKind::Busy),
+        | VectorErrorKind::Sealed
+        | VectorErrorKind::Platform(_) => ExecutorError::Sync(SyncErrorKind::Busy),
         VectorErrorKind::ResourceExhausted => ExecutorError::Sync(SyncErrorKind::Overflow),
-        VectorErrorKind::Platform(_) => ExecutorError::Sync(SyncErrorKind::Busy),
     }
 }

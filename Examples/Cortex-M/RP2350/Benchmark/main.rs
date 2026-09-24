@@ -64,10 +64,13 @@ static mut FUSION_RP2350_BENCH_OUTPUT: BenchOutput = BenchOutput {
 };
 
 fn now_nanos() -> u64 {
-    system_monotonic_time()
-        .now()
-        .expect("monotonic runtime time should exist on RP2350")
-        .as_nanos() as u64
+    u64::try_from(
+        system_monotonic_time()
+            .now()
+            .expect("monotonic runtime time should exist on RP2350")
+            .as_nanos(),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 fn measure_nanos(mut job: impl FnMut()) -> u32 {

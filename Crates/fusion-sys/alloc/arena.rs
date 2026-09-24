@@ -115,6 +115,12 @@ impl<'a, L: LifetimePolicy> ArenaAllocation<'a, L> {
         }
     }
 
+    /// Returns whether this allocation is empty or has been released.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Returns the alignment satisfied by this allocation.
     #[must_use]
     pub const fn align(&self) -> usize {
@@ -320,6 +326,10 @@ impl<L: LifetimePolicy> BoundedArena<L> {
 
     /// Returns the exact pool-extent request needed to host one bounded arena under one explicit
     /// allocator layout policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn extent_request_with_layout_policy(
         capacity: usize,
         max_align: usize,

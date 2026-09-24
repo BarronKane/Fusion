@@ -8,6 +8,11 @@ repository = ""
 
 [workspace]
 
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"
+
 [lib]
 crate-type = ["rlib"]
 path = "lib.rs"

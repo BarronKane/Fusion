@@ -921,13 +921,11 @@ const fn thread_pool_align_up(value: usize, align: usize) -> Result<usize, Threa
     if align == 0 || !align.is_power_of_two() {
         return Err(ThreadPoolError::invalid());
     }
-    let mask = match align.checked_sub(1) {
-        Some(mask) => mask,
-        None => return Err(ThreadPoolError::invalid()),
+    let Some(mask) = align.checked_sub(1) else {
+        return Err(ThreadPoolError::invalid());
     };
-    let sum = match value.checked_add(mask) {
-        Some(sum) => sum,
-        None => return Err(ThreadPoolError::resource_exhausted()),
+    let Some(sum) = value.checked_add(mask) else {
+        return Err(ThreadPoolError::resource_exhausted());
     };
     Ok(sum & !mask)
 }

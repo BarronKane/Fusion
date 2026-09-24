@@ -8,6 +8,11 @@ repository = ""
 
 [workspace]
 
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"
+
 [[bin]]
 name = "fusion-uefi-bootloader"
 path = "fusion-uefi-bootloader.rs"

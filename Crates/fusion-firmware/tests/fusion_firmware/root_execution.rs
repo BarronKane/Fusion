@@ -15,7 +15,7 @@ fn root_execution_probe_uses_canonical_fusion_main_harness() {
     let target_dir = repo_root.join("target/test-fixtures/root_execution_probe");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let output = Command::new(cargo)
-        .current_dir(&repo_root)
+        .current_dir(repo_root)
         .arg("run")
         .arg("--manifest-path")
         .arg(&fixture_manifest)

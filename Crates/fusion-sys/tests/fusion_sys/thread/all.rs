@@ -315,11 +315,10 @@ fn monotonic_runtime_time_support_tracks_thread_scheduler_truth() {
         assert_eq!(runtime_support.raw_bits, None);
         assert_eq!(runtime_support.tick_hz, None);
         assert_eq!(runtime_support.canonicalization, None);
-        assert_eq!(
-            runtime_support
+        assert!(
+            !runtime_support
                 .caps
-                .contains(MonotonicRuntimeTimeCaps::RAW_DEADLINE_COMPARE),
-            false
+                .contains(MonotonicRuntimeTimeCaps::RAW_DEADLINE_COMPARE)
         );
     }
     if runtime_support
@@ -333,11 +332,10 @@ fn monotonic_runtime_time_support_tracks_thread_scheduler_truth() {
         );
         assert!(runtime_support.deadline_wait.is_some());
     } else {
-        assert_eq!(
-            runtime_support
+        assert!(
+            !runtime_support
                 .caps
-                .contains(MonotonicRuntimeTimeCaps::SLEEP_UNTIL),
-            false
+                .contains(MonotonicRuntimeTimeCaps::SLEEP_UNTIL)
         );
         assert_eq!(runtime_support.deadline_wait, None);
     }
@@ -476,11 +474,10 @@ fn monotonic_runtime_time_deadline_support_is_shaped_honestly() {
             }
         }
     } else {
-        assert_eq!(
-            support
+        assert!(
+            !support
                 .caps
-                .contains(MonotonicRuntimeTimeCaps::ONE_SHOT_ALARM),
-            false
+                .contains(MonotonicRuntimeTimeCaps::ONE_SHOT_ALARM)
         );
     }
 }

@@ -1,9 +1,23 @@
 //! USB host-side framework contracts.
 
-use super::core::*;
-use super::controller::*;
-use super::error::*;
-use super::topology::*;
+use super::core::{
+    UsbEndpointAddress,
+    UsbTransferType,
+    UsbCoreContract,
+    UsbDeviceDescriptor,
+    UsbConfigurationDescriptor,
+    UsbInterfaceDescriptor,
+    UsbEndpointDescriptor,
+    UsbSetupPacket,
+    UsbDescriptorType,
+};
+use super::controller::UsbControllerContract;
+use super::error::UsbError;
+use super::topology::{
+    UsbDeviceAddress,
+    UsbTopologyContract,
+    UsbPortId,
+};
 
 /// Host-side lifecycle state for one enumerated USB function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -252,7 +252,7 @@ pub struct AcpiAmlActivationReport<'a> {
     pub vm_state: AmlVmState,
 }
 
-impl<'a> AcpiAmlActivationReport<'a> {
+impl AcpiAmlActivationReport<'_> {
     #[must_use]
     pub fn is_clean(self) -> bool {
         self.verification.is_clean()
@@ -281,7 +281,7 @@ impl<'a> RealizedAcpiPlatformWithAml<'a> {
     }
 
     #[must_use]
-    pub fn into_parts(self) -> (RealizedAcpiPlatform, AcpiAmlActivationReport<'a>) {
+    pub const fn into_parts(self) -> (RealizedAcpiPlatform, AcpiAmlActivationReport<'a>) {
         (self.platform, self.aml)
     }
 }
@@ -390,9 +390,9 @@ pub fn realize_platform(
 /// - public ACPI driver activation fails,
 /// - the declared backend AML surface does not match the supplied namespace,
 /// - or AML lifecycle activation fails.
-pub fn realize_platform_with_aml<'records, 'blocks, 'issues>(
+pub fn realize_platform_with_aml<'issues>(
     fingerprint: &AcpiPlatformFingerprint,
-    namespace: AmlLoadedNamespace<'records, 'blocks>,
+    namespace: AmlLoadedNamespace<'_, '_>,
     host: &dyn AmlRegionAccessHost,
     runtime: &AmlRuntimeState<'_>,
     issue_storage: &'issues mut [MaybeUninit<AmlBackendVerificationIssue>],
@@ -418,6 +418,10 @@ pub fn realize_platform_with_aml<'records, 'blocks, 'issues>(
 ///
 /// `definition_storage` is only used for the secondary definition blocks (`SSDT`/`PSDT`). The
 /// `DSDT` block is carried directly by value.
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
 pub fn load_namespace_from_definition_tables<'records, 'tables>(
     dsdt: Dsdt<'tables>,
     secondary_definition_tables: &'tables [AcpiTableView<'tables>],
@@ -434,12 +438,17 @@ pub fn load_namespace_from_definition_tables<'records, 'tables>(
 
 /// Loads AML from one validated `DSDT` plus any secondary definition tables, then realizes the
 /// matched ACPI backend and activates its AML lifecycle.
-pub fn realize_platform_from_definition_tables_with_aml<'records, 'tables, 'issues>(
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
+#[allow(clippy::too_many_arguments)] // Caller-owned AML storage has independent lifetimes.
+pub fn realize_platform_from_definition_tables_with_aml<'tables, 'issues>(
     fingerprint: &AcpiPlatformFingerprint,
     dsdt: Dsdt<'tables>,
     secondary_definition_tables: &'tables [AcpiTableView<'tables>],
     definition_storage: &'tables mut [MaybeUninit<AmlDefinitionBlock<'tables>>],
-    namespace_storage: &'records mut [MaybeUninit<AmlNamespaceLoadRecord>],
+    namespace_storage: &mut [MaybeUninit<AmlNamespaceLoadRecord>],
     host: &dyn AmlRegionAccessHost,
     runtime: &AmlRuntimeState<'_>,
     issue_storage: &'issues mut [MaybeUninit<AmlBackendVerificationIssue>],
@@ -472,8 +481,8 @@ pub fn realize_dell_latitude_e6430_platform() -> Result<RealizedAcpiPlatform, Ac
 /// - public driver activation fails,
 /// - the Dell AML surface does not verify cleanly,
 /// - or AML lifecycle activation does not complete cleanly.
-pub fn realize_dell_latitude_e6430_platform_with_aml<'records, 'blocks, 'issues>(
-    namespace: AmlLoadedNamespace<'records, 'blocks>,
+pub fn realize_dell_latitude_e6430_platform_with_aml<'issues>(
+    namespace: AmlLoadedNamespace<'_, '_>,
     host: &dyn AmlRegionAccessHost,
     runtime: &AmlRuntimeState<'_>,
     issue_storage: &'issues mut [MaybeUninit<AmlBackendVerificationIssue>],
@@ -488,15 +497,15 @@ pub fn realize_dell_latitude_e6430_platform_with_aml<'records, 'blocks, 'issues>
 }
 
 /// Dell proving-path wrapper over [`realize_platform_from_definition_tables_with_aml`].
-pub fn realize_dell_latitude_e6430_platform_from_definition_tables_with_aml<
-    'records,
-    'tables,
-    'issues,
->(
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
+pub fn realize_dell_latitude_e6430_platform_from_definition_tables_with_aml<'tables, 'issues>(
     dsdt: Dsdt<'tables>,
     secondary_definition_tables: &'tables [AcpiTableView<'tables>],
     definition_storage: &'tables mut [MaybeUninit<AmlDefinitionBlock<'tables>>],
-    namespace_storage: &'records mut [MaybeUninit<AmlNamespaceLoadRecord>],
+    namespace_storage: &mut [MaybeUninit<AmlNamespaceLoadRecord>],
     host: &dyn AmlRegionAccessHost,
     runtime: &AmlRuntimeState<'_>,
     issue_storage: &'issues mut [MaybeUninit<AmlBackendVerificationIssue>],
@@ -806,22 +815,22 @@ fn load_secondary_definition_blocks<'tables>(
     Ok(secondary)
 }
 
-fn map_driver_error(error: DriverError) -> AcpiRealizationError {
+const fn map_driver_error(error: DriverError) -> AcpiRealizationError {
     match error.kind() {
         DriverErrorKind::Unsupported => AcpiRealizationError::unsupported(),
         DriverErrorKind::Invalid => AcpiRealizationError::invalid(),
         DriverErrorKind::Busy => AcpiRealizationError::busy(),
         DriverErrorKind::ResourceExhausted => AcpiRealizationError::resource_exhausted(),
-        DriverErrorKind::StateConflict => AcpiRealizationError::state_conflict(),
-        DriverErrorKind::MissingContext
+        DriverErrorKind::StateConflict
+        | DriverErrorKind::MissingContext
         | DriverErrorKind::WrongContextType
         | DriverErrorKind::AlreadyRegistered => AcpiRealizationError::state_conflict(),
         DriverErrorKind::Platform(code) => AcpiRealizationError::platform(code),
     }
 }
 
-fn activate_backend_aml<'records, 'blocks, 'issues, B: AcpiAmlBackend>(
-    namespace: AmlLoadedNamespace<'records, 'blocks>,
+fn activate_backend_aml<'issues, B: AcpiAmlBackend>(
+    namespace: AmlLoadedNamespace<'_, '_>,
     host: &dyn AmlRegionAccessHost,
     runtime: &AmlRuntimeState<'_>,
     issue_storage: &'issues mut [MaybeUninit<AmlBackendVerificationIssue>],
@@ -855,7 +864,7 @@ fn activate_backend_aml<'records, 'blocks, 'issues, B: AcpiAmlBackend>(
     })
 }
 
-fn map_aml_error(error: AmlError) -> AcpiRealizationError {
+const fn map_aml_error(error: AmlError) -> AcpiRealizationError {
     match error.kind {
         AmlErrorKind::Unsupported => AcpiRealizationError::unsupported(),
         AmlErrorKind::Overflow => AcpiRealizationError::resource_exhausted(),
@@ -883,7 +892,9 @@ mod tests {
         let bytes = {
             let mut table = Vec::from([0_u8; 36]);
             table[0..4].copy_from_slice(b"DSDT");
-            table[4..8].copy_from_slice(&((36 + payload.len()) as u32).to_le_bytes());
+            let table_len =
+                u32::try_from(36 + payload.len()).expect("test definition table length fits u32");
+            table[4..8].copy_from_slice(&table_len.to_le_bytes());
             table[8] = 2;
             table[10..16].copy_from_slice(b"FUSION");
             table[16..24].copy_from_slice(b"ACPIREAL");

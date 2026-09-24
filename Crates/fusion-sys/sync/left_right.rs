@@ -3,7 +3,7 @@
 //! Note: While I was soft speccing this in a general sense, I came across a crate
 //! by some very talented developers:
 //!
-//! https://github.com/jonhoo/left-right.git
+//! <https://github.com/jonhoo/left-right.git>
 //!
 //! I did not read the source of this crate, but I came across by way of a tech talk that
 //! broke down the concept of left-right synchronization as apposed to mutexes and rwlock.
@@ -134,7 +134,7 @@ impl<T: Clone, const READERS: usize> LeftRight<T, READERS> {
 impl<T, const READERS: usize> LeftRight<T, READERS> {
     /// Creates a new left-right table from two explicit replicas.
     #[must_use]
-    pub fn with_replicas(left: T, right: T) -> Self {
+    pub const fn with_replicas(left: T, right: T) -> Self {
         Self {
             writer: ThinMutex::new(),
             active_side: AtomicUsize::new(LEFT_RIGHT_ACTIVE_LEFT),

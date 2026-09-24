@@ -39,8 +39,7 @@ fn run() -> Result<(), String> {
     let samples = selected_samples()?;
     println!("lifecycle_probe");
     println!(
-        "  config: samples={} stack_bytes={} task_capacity={}",
-        samples, PROBE_STACK_BYTES, PROBE_TASK_CAPACITY
+        "  config: samples={samples} stack_bytes={PROBE_STACK_BYTES} task_capacity={PROBE_TASK_CAPACITY}"
     );
 
     for workers in [1_usize, 2, 4] {

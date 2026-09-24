@@ -68,6 +68,10 @@ pub struct AmlDefinitionBlock<'a> {
 }
 
 impl<'a> AmlDefinitionBlock<'a> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn from_acpi_table(table: AcpiTableView<'a>) -> AmlResult<Self> {
         let kind = AmlDefinitionBlockKind::from_signature(table.header().signature().bytes());
         if !kind.is_definition_block() {
@@ -81,6 +85,10 @@ impl<'a> AmlDefinitionBlock<'a> {
         })
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn from_dsdt(dsdt: Dsdt<'a>) -> AmlResult<Self> {
         Self::from_acpi_table(dsdt.table())
     }
@@ -125,6 +133,10 @@ pub struct AmlPkgLength {
 }
 
 impl AmlPkgLength {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn parse(bytes: &[u8]) -> AmlResult<Self> {
         let lead = *bytes.first().ok_or_else(AmlError::truncated)?;
         let follow_count = (lead >> 6) & 0b11;

@@ -101,7 +101,7 @@ pub static CYW43439_BOOT_LAST_VERIFY: AtomicU32 = AtomicU32::new(0);
 #[unsafe(no_mangle)]
 pub static CYW43439_BOOT_LAST_SLEEP_CSR: AtomicU32 = AtomicU32::new(0);
 
-pub(crate) struct Cyw43439Bootstrap;
+pub struct Cyw43439Bootstrap;
 
 impl Cyw43439Bootstrap {
     pub(crate) fn ensure_wlan_bus_clocked<H>(
@@ -195,6 +195,8 @@ impl Cyw43439Bootstrap {
         Err(Cyw43439Error::unsupported())
     }
 
+    // The ordered register sequence is kept together to make the hardware bootstrap auditable.
+    #[allow(clippy::too_many_lines)]
     fn bootstrap_shared_spi_bus<H>(chipset: &mut Cyw43439Chipset<H>) -> Result<(), Cyw43439Error>
     where
         H: Cyw43439HardwareContract,
@@ -240,9 +242,9 @@ impl Cyw43439Bootstrap {
             bus_control |= Cyw43439GspiBusControlFlags::INTERRUPT_POLARITY_HIGH;
         }
 
-        let bootstrap_word = (bus_control.bits() as u32)
+        let bootstrap_word = u32::from(bus_control.bits())
             | (4_u32 << 8)
-            | ((Cyw43439GspiBusStatusControlFlags::INTERRUPT_WITH_STATUS.bits() as u32) << 16);
+            | (u32::from(Cyw43439GspiBusStatusControlFlags::INTERRUPT_WITH_STATUS.bits()) << 16);
         CYW43439_BOOT_PHASE.store(6, Ordering::Release);
         chipset
             .hardware
@@ -273,7 +275,8 @@ impl Cyw43439Bootstrap {
         transport
             .write_f0_u8(
                 Cyw43439GspiF0Register::ResponseDelayF1,
-                CYW43439_GSPI_BACKPLANE_READ_PAD_LEN_BYTES as u8,
+                u8::try_from(CYW43439_GSPI_BACKPLANE_READ_PAD_LEN_BYTES)
+                    .map_err(|_| Cyw43439Error::invalid())?,
             )
             .inspect_err(|_| {
                 CYW43439_BOOT_LAST_ERROR.store(7, Ordering::Release);
@@ -293,7 +296,7 @@ impl Cyw43439Bootstrap {
                 .inspect_err(|_| {
                     CYW43439_BOOT_LAST_ERROR.store(12, Ordering::Release);
                 })?;
-            CYW43439_BOOT_LAST_STATUS.store(watermark as u32, Ordering::Release);
+            CYW43439_BOOT_LAST_STATUS.store(u32::from(watermark), Ordering::Release);
         }
         CYW43439_BOOT_PHASE.store(10, Ordering::Release);
         let backplane_clock_csr = transport
@@ -301,7 +304,7 @@ impl Cyw43439Bootstrap {
             .inspect_err(|_| {
                 CYW43439_BOOT_LAST_ERROR.store(8, Ordering::Release);
             })?;
-        CYW43439_BOOT_LAST_BACKPLANE.store(backplane_clock_csr as u32, Ordering::Release);
+        CYW43439_BOOT_LAST_BACKPLANE.store(u32::from(backplane_clock_csr), Ordering::Release);
         CYW43439_BOOT_PHASE.store(11, Ordering::Release);
         transport
             .write_f0_u16(
@@ -321,6 +324,8 @@ impl Cyw43439Bootstrap {
         Ok(())
     }
 
+    // Firmware, NVRAM, CLM, and readiness checks share one error-tracked boot transaction.
+    #[allow(clippy::too_many_lines)]
     fn download_wlan_runtime<H>(chipset: &mut Cyw43439Chipset<H>) -> Result<(), Cyw43439Error>
     where
         H: Cyw43439HardwareContract,
@@ -384,16 +389,22 @@ impl Cyw43439Bootstrap {
             })?;
         if firmware.len() > 4 {
             let start = firmware.len() - 4;
-            Self::verify_backplane_word(&mut transport, start as u32, &firmware[start..])
-                .inspect_err(|_| {
-                    CYW43439_BOOT_LAST_ERROR.store(45, Ordering::Release);
-                })?;
+            Self::verify_backplane_word(
+                &mut transport,
+                u32::try_from(start).map_err(|_| Cyw43439Error::invalid())?,
+                &firmware[start..],
+            )
+            .inspect_err(|_| {
+                CYW43439_BOOT_LAST_ERROR.store(45, Ordering::Release);
+            })?;
         }
 
         CYW43439_BOOT_PHASE.store(27, Ordering::Release);
         let nvram_len_aligned = align_up_4(nvram.len());
+        let nvram_len_aligned_u32 =
+            u32::try_from(nvram_len_aligned).map_err(|_| Cyw43439Error::invalid())?;
         let nvram_addr = CYW43439_RAM_SIZE_BYTES
-            .checked_sub(4 + nvram_len_aligned as u32)
+            .checked_sub(4 + nvram_len_aligned_u32)
             .ok_or_else(Cyw43439Error::invalid)
             .inspect_err(|_| {
                 CYW43439_BOOT_LAST_ERROR.store(27, Ordering::Release);
@@ -406,7 +417,8 @@ impl Cyw43439Bootstrap {
             .inspect_err(|_| {
                 CYW43439_BOOT_LAST_ERROR.store(46, Ordering::Release);
             })?;
-        let nvram_words = (nvram_len_aligned / 4) as u32;
+        let nvram_words =
+            u32::try_from(nvram_len_aligned / 4).map_err(|_| Cyw43439Error::invalid())?;
         let nvram_size_info = ((!(nvram_words) & 0xffff) << 16) | nvram_words;
         transport
             .write_backplane_u32(CYW43439_RAM_SIZE_BYTES - 4, nvram_size_info)
@@ -458,15 +470,15 @@ impl Cyw43439Bootstrap {
                 .inspect_err(|_| {
                     CYW43439_BOOT_LAST_ERROR.store(33, Ordering::Release);
                 })?;
-            CYW43439_BOOT_LAST_BACKPLANE.store(clock_csr as u32, Ordering::Release);
+            CYW43439_BOOT_LAST_BACKPLANE.store(u32::from(clock_csr), Ordering::Release);
             if (clock_csr & CYW43439_GSPI_SBSDIO_HT_AVAIL) != 0 {
                 break;
             }
             transport.progress_host_runtime();
             transport.delay_ms(CYW43439_BOOT_HT_POLL_INTERVAL_MS);
         }
-        if (CYW43439_BOOT_LAST_BACKPLANE.load(Ordering::Acquire) as u8
-            & CYW43439_GSPI_SBSDIO_HT_AVAIL)
+        if (CYW43439_BOOT_LAST_BACKPLANE.load(Ordering::Acquire)
+            & u32::from(CYW43439_GSPI_SBSDIO_HT_AVAIL))
             == 0
         {
             CYW43439_BOOT_LAST_ERROR.store(34, Ordering::Release);
@@ -523,7 +535,7 @@ impl Cyw43439Bootstrap {
         }
     }
 
-    fn get_core_address(core_id: u8) -> Result<u32, Cyw43439Error> {
+    const fn get_core_address(core_id: u8) -> Result<u32, Cyw43439Error> {
         match core_id {
             CYW43439_CORE_WLAN_ARM => {
                 Ok(CYW43439_GSPI_WLAN_ARMCM3_BASE_ADDRESS + CYW43439_GSPI_WRAPPER_REGISTER_OFFSET)
@@ -603,14 +615,14 @@ impl Cyw43439Bootstrap {
         )?;
 
         let sleep_csr = transport.read_f1_u8(CYW43439_GSPI_SDIO_SLEEP_CSR)?;
-        CYW43439_BOOT_LAST_SLEEP_CSR.store(sleep_csr as u32, Ordering::Release);
+        CYW43439_BOOT_LAST_SLEEP_CSR.store(u32::from(sleep_csr), Ordering::Release);
         if (sleep_csr & CYW43439_GSPI_SBSDIO_SLPCSR_KEEP_SDIO_ON) == 0 {
             transport.write_f1_u8(
                 CYW43439_GSPI_SDIO_SLEEP_CSR,
                 sleep_csr | CYW43439_GSPI_SBSDIO_SLPCSR_KEEP_SDIO_ON,
             )?;
             let read_back = transport.read_f1_u8(CYW43439_GSPI_SDIO_SLEEP_CSR)?;
-            CYW43439_BOOT_LAST_SLEEP_CSR.store(read_back as u32, Ordering::Release);
+            CYW43439_BOOT_LAST_SLEEP_CSR.store(u32::from(read_back), Ordering::Release);
         }
         transport.write_f1_u8(CYW43439_GSPI_SDIO_PULL_UP, 0x0f)?;
         Ok(())
@@ -625,14 +637,14 @@ impl Cyw43439Bootstrap {
     {
         let base = Self::get_core_address(core_id)?;
         let reg = transport.read_backplane_u8(base + CYW43439_GSPI_AI_IOCTRL_OFFSET)?;
-        CYW43439_BOOT_LAST_CORE_IOCTRL.store(reg as u32, Ordering::Release);
+        CYW43439_BOOT_LAST_CORE_IOCTRL.store(u32::from(reg), Ordering::Release);
         if (reg & (CYW43439_GSPI_SICF_FGC | CYW43439_GSPI_SICF_CLOCK_EN))
             != CYW43439_GSPI_SICF_CLOCK_EN
         {
             return Err(Cyw43439Error::invalid());
         }
         let reg = transport.read_backplane_u8(base + CYW43439_GSPI_AI_RESETCTRL_OFFSET)?;
-        CYW43439_BOOT_LAST_CORE_RESETCTRL.store(reg as u32, Ordering::Release);
+        CYW43439_BOOT_LAST_CORE_RESETCTRL.store(u32::from(reg), Ordering::Release);
         if (reg & CYW43439_GSPI_AIRC_RESET) != 0 {
             return Err(Cyw43439Error::invalid());
         }
@@ -652,7 +664,9 @@ impl Cyw43439Bootstrap {
         }
         let mut actual = [0_u8; 4];
         for (index, slot) in actual[..expected.len()].iter_mut().enumerate() {
-            *slot = transport.read_backplane_u8(address + index as u32)?;
+            *slot = transport.read_backplane_u8(
+                address + u32::try_from(index).map_err(|_| Cyw43439Error::invalid())?,
+            )?;
         }
         let actual_word = u32::from_le_bytes(actual);
         CYW43439_BOOT_LAST_VERIFY.store(actual_word, Ordering::Release);
@@ -681,9 +695,10 @@ impl Cyw43439Bootstrap {
             if copy_len > 0 {
                 block[..copy_len].copy_from_slice(&data[offset..offset + copy_len]);
             }
-            let address = base_address + offset as u32;
+            let offset_u32 = u32::try_from(offset).map_err(|_| Cyw43439Error::invalid())?;
+            let address = base_address + offset_u32;
             CYW43439_BOOT_LAST_TRANSFER_ADDRESS.store(address, Ordering::Release);
-            CYW43439_BOOT_LAST_TRANSFER_OFFSET.store(offset as u32, Ordering::Release);
+            CYW43439_BOOT_LAST_TRANSFER_OFFSET.store(offset_u32, Ordering::Release);
             transport.write_backplane_bytes(address, &block[..end - offset])?;
             transport.progress_host_runtime();
             offset = end;
@@ -691,7 +706,7 @@ impl Cyw43439Bootstrap {
         Ok(())
     }
 
-    fn delay_with_progress<H>(chipset: &mut Cyw43439Chipset<H>, milliseconds: u32)
+    fn delay_with_progress<H>(chipset: &Cyw43439Chipset<H>, milliseconds: u32)
     where
         H: Cyw43439HardwareContract,
     {

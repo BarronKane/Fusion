@@ -1,7 +1,7 @@
 //! Thunderbolt capability/profile vocabulary layered above USB4/Type-C/PD.
 
-use super::core::*;
-use super::error::*;
+use super::core::UsbCoreContract;
+use super::error::UsbError;
 
 /// Thunderbolt generation/profile family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -14,6 +14,7 @@ pub enum ThunderboltGeneration {
 
 /// Thunderbolt capability/profile truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct ThunderboltCapabilities {
     pub usb4_compatible: bool,
     pub pcie_tunneling: bool,

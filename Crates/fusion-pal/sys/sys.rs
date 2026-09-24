@@ -211,12 +211,16 @@ pub mod dma {
     impl DmaRequest {
         /// Returns all surfaced DMA request descriptors for the selected backend.
         #[must_use]
+        // Some selected PAL backends source these slices from APIs that are not const.
+        #[allow(clippy::missing_const_for_fn)]
         pub fn all() -> &'static [DmaRequestDescriptor] {
             dma_requests()
         }
 
         /// Returns all surfaced DMA controller descriptors for the selected backend.
         #[must_use]
+        // Some selected PAL backends source these slices from APIs that are not const.
+        #[allow(clippy::missing_const_for_fn)]
         pub fn controllers() -> &'static [DmaControllerDescriptor] {
             dma_controllers()
         }

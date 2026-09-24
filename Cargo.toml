@@ -75,6 +75,7 @@ windows = "0.62.2"
 winit = "0.30"
 
 [workspace.lints.clippy]
+all = "warn"
 pedantic = "warn"
 nursery = "warn"
 

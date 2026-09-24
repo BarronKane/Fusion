@@ -1,4 +1,22 @@
-use super::*;
+use super::{
+    ResourceRange,
+    CurrentFiberPoolCombinedBackingPlan,
+    CurrentAsyncRuntimeCombinedBackingPlan,
+    FiberPoolBootstrap,
+    ExecutorConfig,
+    CurrentFiberPool,
+    CurrentAsyncRuntime,
+    NonZeroUsize,
+    FiberError,
+    generated_default_fiber_stack_bytes,
+    FiberStackClass,
+    FiberSystem,
+    ExecutorError,
+    FiberErrorKind,
+    SyncErrorKind,
+    AllocError,
+    AllocErrorKind,
+};
 
 /// Global sizing strategy for runtime-owned slabs, arenas, and derived envelopes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,11 +108,13 @@ pub struct CurrentFiberAsyncRuntime {
 pub(super) fn selected_stack_size_with_optional_floor(
     stack_floor_bytes: Option<usize>,
 ) -> Result<NonZeroUsize, FiberError> {
-    let requested = match stack_floor_bytes {
-        Some(stack_floor_bytes) => stack_floor_bytes,
-        None => generated_default_fiber_stack_bytes()
-            .unwrap_or_else(|_| FiberStackClass::MIN.size_bytes().get()),
-    };
+    let requested = stack_floor_bytes.map_or_else(
+        || {
+            generated_default_fiber_stack_bytes()
+                .unwrap_or_else(|_| FiberStackClass::MIN.size_bytes().get())
+        },
+        |stack_floor_bytes| stack_floor_bytes,
+    );
     let requested = NonZeroUsize::new(requested).ok_or_else(FiberError::invalid)?;
     Ok(FiberStackClass::from_stack_bytes(requested)?.size_bytes())
 }
@@ -103,7 +123,7 @@ pub(super) fn current_thread_default_guard_pages() -> usize {
     usize::from(FiberSystem::new().support().context.guard_required)
 }
 
-pub(super) fn executor_error_from_fiber(error: FiberError) -> ExecutorError {
+pub(super) const fn executor_error_from_fiber(error: FiberError) -> ExecutorError {
     match error.kind() {
         FiberErrorKind::Unsupported => ExecutorError::Unsupported,
         FiberErrorKind::Invalid => ExecutorError::Sync(SyncErrorKind::Invalid),
@@ -115,20 +135,21 @@ pub(super) fn executor_error_from_fiber(error: FiberError) -> ExecutorError {
     }
 }
 
-pub(super) fn fiber_error_from_executor(error: ExecutorError) -> FiberError {
+pub(super) const fn fiber_error_from_executor(error: ExecutorError) -> FiberError {
     match error {
         ExecutorError::Unsupported => FiberError::unsupported(),
-        ExecutorError::Stopped | ExecutorError::Cancelled => FiberError::state_conflict(),
+        ExecutorError::Stopped | ExecutorError::Cancelled | ExecutorError::TaskPanicked => {
+            FiberError::state_conflict()
+        }
         ExecutorError::Sync(kind) => match kind {
             SyncErrorKind::Invalid => FiberError::invalid(),
             SyncErrorKind::Overflow => FiberError::resource_exhausted(),
             _ => FiberError::state_conflict(),
         },
-        ExecutorError::TaskPanicked => FiberError::state_conflict(),
     }
 }
 
-pub(super) fn executor_error_from_current_runtime(
+pub(super) const fn executor_error_from_current_runtime(
     error: CurrentFiberAsyncRuntimeError,
 ) -> ExecutorError {
     match error {
@@ -137,7 +158,9 @@ pub(super) fn executor_error_from_current_runtime(
     }
 }
 
-pub(super) fn executor_error_from_runtime_sync(error: crate::sync::SyncError) -> ExecutorError {
+pub(super) const fn executor_error_from_runtime_sync(
+    error: crate::sync::SyncError,
+) -> ExecutorError {
     match error.kind {
         SyncErrorKind::Unsupported => ExecutorError::Unsupported,
         SyncErrorKind::Invalid => ExecutorError::Sync(SyncErrorKind::Invalid),
@@ -148,7 +171,7 @@ pub(super) fn executor_error_from_runtime_sync(error: crate::sync::SyncError) ->
     }
 }
 
-pub(super) fn executor_error_from_alloc(error: AllocError) -> ExecutorError {
+pub(super) const fn executor_error_from_alloc(error: AllocError) -> ExecutorError {
     match error.kind {
         AllocErrorKind::Unsupported | AllocErrorKind::PolicyDenied => ExecutorError::Unsupported,
         AllocErrorKind::InvalidRequest | AllocErrorKind::InvalidDomain => executor_invalid(),
@@ -217,8 +240,5 @@ pub(super) fn next_bounded_runtime_capacity(
     } else {
         next_runtime_capacity(current, required_minimum)?
     };
-    Ok(Some(match limit {
-        Some(limit) => next.min(limit),
-        None => next,
-    }))
+    Ok(Some(limit.map_or(next, |limit| next.min(limit))))
 }

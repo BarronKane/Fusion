@@ -47,7 +47,7 @@
 //! -- HP consumer laptops - Creative interpretations of the specification.
 //! -- ASUS - Don't trust them for security. Okay for desktops, iffy for laptops.
 //! -- Dell - Server boards (poweredge) are solid. Consumer is mixed.
-//! -- Apple - They use DeviceTree, not ACPI, which is in some ways a mercy.
+//! -- Apple - They use `DeviceTree`, not ACPI, which is in some ways a mercy.
 //! -- Supermicro/server boards - Generally the most compliant from enterprise pressure.
 //!
 //! I could go on, but I suspect DSDT is going to end up being the fattest module

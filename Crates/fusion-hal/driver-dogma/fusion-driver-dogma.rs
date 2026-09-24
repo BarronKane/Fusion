@@ -64,11 +64,11 @@ impl fmt::Display for DriverValidationError {
                 required_contract,
             } => write!(
                 f,
-                "driver '{}' requires contract '{}' but no selected module provides it",
-                driver_key, required_contract.0
+                "driver '{driver_key}' requires contract '{}' but no selected module provides it",
+                required_contract.0
             ),
             Self::Unconsumed { driver_key } => {
-                write!(f, "driver '{}' is selected but unconsumed", driver_key)
+                write!(f, "driver '{driver_key}' is selected but unconsumed")
             }
             Self::SingletonConflict {
                 driver_key,
@@ -76,27 +76,29 @@ impl fmt::Display for DriverValidationError {
                 singleton_class,
             } => write!(
                 f,
-                "driver '{}' conflicts with earlier driver '{}' in singleton class '{}'",
-                driver_key, first_driver_key, singleton_class
+                "driver '{driver_key}' conflicts with earlier driver '{first_driver_key}' in singleton class '{singleton_class}'"
             ),
         }
     }
 }
 
 /// Validates one flat driver-dogma set for singleton, dependency, and consumption correctness.
+///
+/// # Errors
+///
+/// Returns the first singleton conflict, missing dependency, or unconsumed driver found.
 pub fn validate_driver_dogmas(drivers: &[DriverDogma]) -> Result<(), DriverValidationError> {
     for (index, driver) in drivers.iter().enumerate() {
-        if let Some(singleton_class) = driver.singleton_class {
-            if let Some(first) = drivers[..index]
+        if let Some(singleton_class) = driver.singleton_class
+            && let Some(first) = drivers[..index]
                 .iter()
                 .find(|candidate| candidate.singleton_class == Some(singleton_class))
-            {
-                return Err(DriverValidationError::SingletonConflict {
-                    driver_key: driver.key,
-                    first_driver_key: first.key,
-                    singleton_class,
-                });
-            }
+        {
+            return Err(DriverValidationError::SingletonConflict {
+                driver_key: driver.key,
+                first_driver_key: first.key,
+                singleton_class,
+            });
         }
     }
 

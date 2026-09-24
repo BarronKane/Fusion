@@ -1,4 +1,4 @@
-//! DisplayPort driver interaction seams.
+//! `DisplayPort` driver interaction seams.
 
 #[path = "contract/contract.rs"]
 pub mod contract;

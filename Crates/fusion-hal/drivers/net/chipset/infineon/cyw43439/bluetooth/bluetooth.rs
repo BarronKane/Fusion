@@ -138,7 +138,8 @@ pub struct Cyw43439Driver<H: Cyw43439HardwareContract = UnsupportedBackend> {
     marker: PhantomData<fn() -> H>,
 }
 
-pub fn driver_metadata() -> &'static DriverMetadata {
+#[must_use]
+pub const fn driver_metadata() -> &'static DriverMetadata {
     &CYW43439_BLUETOOTH_DRIVER_METADATA
 }
 
@@ -219,13 +220,13 @@ where
 {
     /// Creates one universal CYW43439 Bluetooth provider over one hardware-facing substrate.
     #[must_use]
-    pub(crate) fn new(chipset: Cyw43439Chipset<H>) -> Self {
+    pub(crate) const fn new(chipset: Cyw43439Chipset<H>) -> Self {
         Self {
             chipset: Some(chipset),
         }
     }
 
-    fn chipset(&self) -> Option<&Cyw43439Chipset<H>> {
+    const fn chipset(&self) -> Option<&Cyw43439Chipset<H>> {
         self.chipset.as_ref()
     }
 }
@@ -328,7 +329,7 @@ impl<H> Cyw43439Adapter<H>
 where
     H: Cyw43439HardwareContract,
 {
-    fn unsupported<T>() -> Result<T, BluetoothError> {
+    const fn unsupported<T>() -> Result<T, BluetoothError> {
         Err(BluetoothError::unsupported())
     }
 
@@ -343,7 +344,8 @@ where
                 BluetoothHciCommandFrame {
                     header: BluetoothHciCommandHeader {
                         opcode,
-                        parameter_length: parameters.len() as u8,
+                        parameter_length: u8::try_from(parameters.len())
+                            .map_err(|_| BluetoothError::invalid())?,
                     },
                     parameters,
                 },
@@ -387,14 +389,12 @@ where
         parser: impl Fn(BluetoothHciCommandComplete<'_>) -> Option<T>,
     ) -> Result<T, BluetoothError> {
         for _ in 0..4_096 {
-            if self.wait_frame(Some(0))? {
-                if let Some(frame) = self.recv_frame(read_buffer)? {
-                    if let Some(command_complete) = Self::frame_command_complete(frame) {
-                        if command_complete.opcode == expected_opcode {
-                            return parser(command_complete).ok_or_else(BluetoothError::invalid);
-                        }
-                    }
-                }
+            if self.wait_frame(Some(0))?
+                && let Some(frame) = self.recv_frame(read_buffer)?
+                && let Some(command_complete) = Self::frame_command_complete(frame)
+                && command_complete.opcode == expected_opcode
+            {
+                return parser(command_complete).ok_or_else(BluetoothError::invalid);
             }
         }
         Err(BluetoothError::timed_out())
@@ -454,7 +454,7 @@ where
         if parameters.interval_min_units == 0
             || parameters.interval_max_units == 0
             || parameters.interval_min_units > parameters.interval_max_units
-            || parameters.interval_max_units > u16::MAX as u32
+            || parameters.interval_max_units > u32::from(u16::MAX)
         {
             return Err(BluetoothError::invalid());
         }
@@ -483,8 +483,10 @@ where
         };
 
         Ok(BluetoothHciLeAdvertisingParameters {
-            interval_min: parameters.interval_min_units as u16,
-            interval_max: parameters.interval_max_units as u16,
+            interval_min: u16::try_from(parameters.interval_min_units)
+                .map_err(|_| BluetoothError::invalid())?,
+            interval_max: u16::try_from(parameters.interval_max_units)
+                .map_err(|_| BluetoothError::invalid())?,
             advertising_type,
             own_address_type: BluetoothHciLeOwnAddressType::PublicDevice,
             peer_address_type: BluetoothHciLePeerAddressType::PublicDevice,
@@ -544,10 +546,10 @@ where
         })
     }
 
-    fn parse_hci_frame<'a>(
+    fn parse_hci_frame(
         packet_type: BluetoothHciPacketType,
-        bytes: &'a [u8],
-    ) -> BluetoothCanonicalFrame<'a> {
+        bytes: &[u8],
+    ) -> BluetoothCanonicalFrame<'_> {
         let view = match packet_type {
             BluetoothHciPacketType::Command => {
                 if bytes.len() >= fusion_hal::contract::drivers::net::bluetooth::BluetoothHciCommandHeader::ENCODED_LEN

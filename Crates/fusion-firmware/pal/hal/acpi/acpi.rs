@@ -1,10 +1,10 @@
 //! Minimal ACPI table parsing for the dynamic HAL lane.
 //!
-//! https://uefi.org/specs/ACPI/6.6/Frontmatter/List_of_Tables.html
+//! <https://uefi.org/specs/ACPI/6.6/Frontmatter/List_of_Tables.html>
 //!
 //! This module is the start of Fusion's firmware-topology path for generic
 //! bare-metal platforms. The immediate goal is narrow and honest: parse enough
-//! of the ACPI table set to discover interrupt topology and PCIe configuration
+//! of the ACPI table set to discover interrupt topology and `PCIe` configuration
 //! windows without pretending we already have a full AML interpreter or a giant
 //! ACPI subsystem strapped to the repo.
 //!
@@ -125,7 +125,7 @@ pub use mcfg::*;
 pub use realize::*;
 pub use xsdt::*;
 
-pub(crate) fn read_unaligned_copy<T: Copy>(bytes: &[u8]) -> Result<T, AcpiError> {
+pub(crate) const fn read_unaligned_copy<T: Copy>(bytes: &[u8]) -> Result<T, AcpiError> {
     if bytes.len() < size_of::<T>() {
         return Err(AcpiError::truncated());
     }

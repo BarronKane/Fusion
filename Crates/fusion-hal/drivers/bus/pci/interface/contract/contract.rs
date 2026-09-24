@@ -116,30 +116,54 @@ pub trait PciHardwareFunction {
     /// Returns one truthful hot-plug / slot snapshot when available.
     fn hotplug_profile(&self) -> Option<PciHotplugProfile>;
 
-    /// Returns one truthful PCIe profile snapshot when this function participates in PCIe.
+    /// Returns one truthful `PCIe` profile snapshot when this function participates in `PCIe`.
     fn pcie_profile(&self) -> Option<PciExpressProfile>;
 
     /// Reads one byte from configuration space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the function cannot be reached or the read is unsupported.
     fn read_config_u8(&self, offset: PciConfigOffset) -> Result<u8, PciError>;
 
     /// Reads one 16-bit word from configuration space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the function cannot be reached or the read is unsupported.
     fn read_config_u16(&self, offset: PciConfigOffset) -> Result<u16, PciError>;
 
     /// Reads one 32-bit dword from configuration space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the function cannot be reached or the read is unsupported.
     fn read_config_u32(&self, offset: PciConfigOffset) -> Result<u32, PciError>;
 
     /// Writes one byte into configuration space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the function cannot be reached or the write is unsupported.
     fn write_config_u8(&mut self, offset: PciConfigOffset, value: u8) -> Result<(), PciError>;
 
     /// Writes one 16-bit word into configuration space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the function cannot be reached or the write is unsupported.
     fn write_config_u16(&mut self, offset: PciConfigOffset, value: u16) -> Result<(), PciError>;
 
     /// Writes one 32-bit dword into configuration space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the function cannot be reached or the write is unsupported.
     fn write_config_u32(&mut self, offset: PciConfigOffset, value: u32) -> Result<(), PciError>;
 }
 
 #[allow(dead_code)]
-fn _trait_shape_check<T, F>()
+const fn _trait_shape_check<T, F>()
 where
     T: PciHardware<Function = F>,
     F: PciHardwareFunction,

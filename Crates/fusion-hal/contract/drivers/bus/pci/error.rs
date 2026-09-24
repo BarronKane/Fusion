@@ -116,6 +116,7 @@ impl fmt::Display for PciError {
 
 /// PCI error-reporting and containment capability truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct PciErrorReportingProfile {
     pub advanced_error_reporting: bool,
     pub downstream_port_containment: bool,

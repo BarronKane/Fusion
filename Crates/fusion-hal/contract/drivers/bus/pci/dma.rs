@@ -10,6 +10,7 @@ pub enum PciDmaAddressWidth {
 
 /// DMA and translation truth for one function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct PciDmaProfile {
     pub bus_master_capable: bool,
     pub dma_address_width: Option<PciDmaAddressWidth>,

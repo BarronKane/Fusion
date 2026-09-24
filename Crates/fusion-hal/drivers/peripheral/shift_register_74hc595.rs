@@ -392,7 +392,9 @@ where
         self.register
     }
 
-    fn package_and_mask(output: ShiftRegister74hc595OutputId) -> Result<(usize, u8), GpioError> {
+    const fn package_and_mask(
+        output: ShiftRegister74hc595OutputId,
+    ) -> Result<(usize, u8), GpioError> {
         let Some(package) = output.package().array_index() else {
             return Err(GpioError::invalid());
         };

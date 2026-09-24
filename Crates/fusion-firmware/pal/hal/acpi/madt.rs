@@ -312,7 +312,7 @@ impl<'a> Madt<'a> {
                 return Err(AcpiError::invalid_layout());
             }
         }
-        Ok(override_address.unwrap_or(u64::from(self.local_apic_address)))
+        Ok(override_address.unwrap_or_else(|| u64::from(self.local_apic_address)))
     }
 
     /// Returns the MADT table flags.
@@ -338,6 +338,7 @@ pub struct MadtRecordIter<'a> {
     offset: usize,
 }
 
+#[allow(clippy::copy_iterator)] // A copied cursor provides an independent table traversal.
 impl<'a> Iterator for MadtRecordIter<'a> {
     type Item = Result<MadtRecord<'a>, AcpiError>;
 
@@ -364,14 +365,14 @@ impl<'a> Iterator for MadtRecordIter<'a> {
     }
 }
 
-fn parse_record_body<T: Copy>(payload: &[u8]) -> Result<T, AcpiError> {
+const fn parse_record_body<T: Copy>(payload: &[u8]) -> Result<T, AcpiError> {
     if payload.len() != size_of::<T>() {
         return Err(AcpiError::invalid_layout());
     }
     read_unaligned_copy(payload)
 }
 
-fn parse_local_apic_flags(raw: u32) -> Result<MadtLocalApicFlags, AcpiError> {
+const fn parse_local_apic_flags(raw: u32) -> Result<MadtLocalApicFlags, AcpiError> {
     let enabled = MadtLocalApicFlags::ENABLED.bits();
     let online_capable = MadtLocalApicFlags::ONLINE_CAPABLE.bits();
     let defined = enabled | online_capable;
@@ -384,14 +385,14 @@ fn parse_local_apic_flags(raw: u32) -> Result<MadtLocalApicFlags, AcpiError> {
     Ok(MadtLocalApicFlags::from_bits_retain(raw))
 }
 
-fn parse_mps_inti_flags(raw: u16) -> Result<MadtInterruptFlags, AcpiError> {
+const fn parse_mps_inti_flags(raw: u16) -> Result<MadtInterruptFlags, AcpiError> {
     if raw & !0x000F != 0 {
         return Err(AcpiError::invalid_layout());
     }
     Ok(MadtInterruptFlags::new(raw))
 }
 
-fn parse_record<'a>(kind: u8, payload: &'a [u8]) -> Result<MadtRecord<'a>, AcpiError> {
+fn parse_record(kind: u8, payload: &[u8]) -> Result<MadtRecord<'_>, AcpiError> {
     match kind {
         0 => {
             let raw: RawProcessorLocalApic = parse_record_body(payload)?;
@@ -562,7 +563,7 @@ mod tests {
     fn madt_rejects_supported_record_with_wrong_length() {
         let mut bytes = build_madt();
         bytes.push(0);
-        let table_len = bytes.len() as u32;
+        let table_len = u32::try_from(bytes.len()).expect("test MADT length fits u32");
         bytes[4..8].copy_from_slice(&table_len.to_le_bytes());
         bytes[53] = 13;
         bytes[9] = 0;

@@ -126,6 +126,7 @@ impl ParsedEdidSink {
         }
     }
 
+    #[must_use]
     pub fn timing_for_mode(&self, mode: DisplayMode) -> Option<DisplayTiming> {
         for index in 0..self.mode_count {
             if same_mode(self.modes[index], mode) {
@@ -135,6 +136,7 @@ impl ParsedEdidSink {
         None
     }
 
+    #[must_use]
     pub fn supports_mode(&self, mode: DisplayMode) -> bool {
         self.timing_for_mode(mode).is_some()
     }
@@ -163,6 +165,7 @@ impl ParsedEdidSink {
         self.mode_count += 1;
     }
 
+    #[must_use]
     pub fn sink_capabilities(&self) -> DisplaySinkCapabilities<'_> {
         DisplaySinkCapabilities {
             modes: &self.modes[..self.mode_count],
@@ -206,7 +209,7 @@ pub fn parse_edid_sink(
         return sink;
     };
 
-    if edid_bytes.len() < EDID_BLOCK_BYTES || edid_bytes.len() % EDID_BLOCK_BYTES != 0 {
+    if edid_bytes.len() < EDID_BLOCK_BYTES || !edid_bytes.len().is_multiple_of(EDID_BLOCK_BYTES) {
         return sink;
     }
     if !has_edid_header(edid_bytes) {
@@ -257,7 +260,7 @@ fn parse_cta_extension(extension: &[u8], sink: &mut ParsedEdidSink) {
         return;
     }
 
-    let dtd_start = usize::from(extension[2]).max(4).min(EDID_BLOCK_BYTES);
+    let dtd_start = usize::from(extension[2]).clamp(4, EDID_BLOCK_BYTES);
     let flags = extension[3];
     sink.audio.basic_pcm |= flags & 0x40 != 0;
     sink.color_spaces.ycbcr444 |= flags & 0x20 != 0;
@@ -306,7 +309,7 @@ fn parse_cta_extension(extension: &[u8], sink: &mut ParsedEdidSink) {
     }
 }
 
-fn parse_cta_extended_block(payload: &[u8], sink: &mut ParsedEdidSink) {
+const fn parse_cta_extended_block(payload: &[u8], sink: &mut ParsedEdidSink) {
     let Some((&extended_tag, rest)) = payload.split_first() else {
         return;
     };
@@ -336,7 +339,7 @@ fn edid_checksum_valid(block: &[u8]) -> bool {
     block.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)) == 0
 }
 
-fn parse_manufacturer_id(msb: u8, lsb: u8) -> u16 {
+const fn parse_manufacturer_id(msb: u8, lsb: u8) -> u16 {
     u16::from_be_bytes([msb, lsb])
 }
 
@@ -368,7 +371,7 @@ fn parse_display_text(bytes: &[u8]) -> Option<DisplayText> {
     if len == 0 {
         None
     } else {
-        Some(DisplayText::new(raw, len as u8))
+        Some(DisplayText::new(raw, u8::try_from(len).ok()?))
     }
 }
 
@@ -412,6 +415,8 @@ fn parse_detailed_timing(descriptor: &[u8]) -> Option<(DisplayMode, DisplayTimin
     Some((mode_from_timing(timing, false), timing))
 }
 
+#[must_use]
+#[allow(clippy::too_many_lines)] // The CEA mode lookup is a fixed table of timing literals.
 pub fn lookup_cea_mode(vic: u8) -> Option<(DisplayMode, DisplayTiming)> {
     let timing = match vic {
         1 => DisplayTiming {
@@ -548,12 +553,14 @@ pub fn lookup_cea_mode(vic: u8) -> Option<(DisplayMode, DisplayTiming)> {
     Some((mode_from_timing(timing, false), timing))
 }
 
+#[must_use]
 pub fn mode_from_timing(timing: DisplayTiming, preferred: bool) -> DisplayMode {
     let total_pixels = u64::from(timing.horizontal_total()) * u64::from(timing.vertical_total());
     let refresh_hz_milli = if total_pixels == 0 {
         0
     } else {
-        ((u64::from(timing.pixel_clock_khz) * 1_000_000) / total_pixels) as u32
+        u32::try_from((u64::from(timing.pixel_clock_khz) * 1_000_000) / total_pixels)
+            .unwrap_or(u32::MAX)
     };
 
     DisplayMode {
@@ -571,19 +578,22 @@ fn has_preferred_mode(sink: &ParsedEdidSink) -> bool {
         .any(|mode| mode.preferred)
 }
 
-pub fn same_mode(lhs: DisplayMode, rhs: DisplayMode) -> bool {
+#[must_use]
+pub const fn same_mode(lhs: DisplayMode, rhs: DisplayMode) -> bool {
     lhs.width == rhs.width
         && lhs.height == rhs.height
         && lhs.refresh_hz_milli == rhs.refresh_hz_milli
         && lhs.interlaced == rhs.interlaced
 }
 
-pub fn mode_within_port_caps(mode: DisplayMode, caps: DisplayPortCapabilities) -> bool {
+#[must_use]
+pub const fn mode_within_port_caps(mode: DisplayMode, caps: DisplayPortCapabilities) -> bool {
     mode.width <= caps.max_width
         && mode.height <= caps.max_height
         && mode.refresh_hz_milli <= caps.max_refresh_hz.saturating_mul(1000)
 }
 
+#[must_use]
 pub fn select_pixel_format(
     requested: DisplayPixelFormatSupport,
     port: DisplayPixelFormatSupport,
@@ -605,15 +615,12 @@ pub fn select_pixel_format(
         }
     }
 
-    for format in preferences {
-        if port.supports(format) && sink.supports(format) {
-            return Some(format);
-        }
-    }
-
-    None
+    preferences
+        .into_iter()
+        .find(|&format| port.supports(format) && sink.supports(format))
 }
 
+#[must_use]
 pub fn select_color_space(
     requested: DisplayColorSpaceSupport,
     sink: DisplayColorSpaceSupport,
@@ -640,6 +647,7 @@ pub fn select_color_space(
     DisplayColorSpace::Rgb
 }
 
+#[must_use]
 pub fn select_quantization(
     requested: DisplayQuantizationSupport,
     sink: DisplayQuantizationSupport,
@@ -665,18 +673,21 @@ pub fn select_quantization(
     DisplayQuantization::Default
 }
 
+#[must_use]
 pub fn contains_mode(modes: &[DisplayMode], candidate: DisplayMode) -> bool {
     modes.iter().copied().any(|mode| same_mode(mode, candidate))
 }
 
-pub fn matches_requested_color_space(
+#[must_use]
+pub const fn matches_requested_color_space(
     requested: DisplayColorSpaceSupport,
     selected: DisplayColorSpace,
 ) -> bool {
     requested.supports(selected)
 }
 
-pub fn matches_requested_quantization(
+#[must_use]
+pub const fn matches_requested_quantization(
     requested: DisplayQuantizationSupport,
     selected: DisplayQuantization,
 ) -> bool {

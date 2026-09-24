@@ -1,4 +1,46 @@
-use super::*;
+use super::{
+    SyncMutex,
+    HostedReadyQueueState,
+    Semaphore,
+    Arc,
+    Executor,
+    ExecutorError,
+    ExecutorConfig,
+    ExecutorMode,
+    SchedulerBinding,
+    ThreadPool,
+    executor_error_from_thread_pool,
+    AsyncTaskLifecycleInsight,
+    Future,
+    TaskHandle,
+    GeneratedExplicitAsyncPollStackContract,
+    HostedFiberRuntime,
+    executor_error_from_fiber,
+    ControlLease,
+    ExecutorCore,
+    JoinHandle,
+    executor_error_from_alloc,
+    ExecutorReactorState,
+    AtomicBool,
+    Ordering,
+    executor_error_from_sync,
+    StdThreadBuilder,
+    String,
+    AtomicUsize,
+    Vec,
+    ThreadHandle,
+    ThreadSystem,
+    ThreadConfig,
+    ThreadJoinPolicy,
+    ThreadStartMode,
+    ThreadPlacementRequest,
+    executor_error_from_thread,
+    CurrentJob,
+    SyncErrorKind,
+    CURRENT_QUEUE_CAPACITY,
+    ThreadEntryReturn,
+    NonZeroUsize,
+};
 use super::engine::{
     green_executor_dispatch_stack_size,
 };
@@ -87,7 +129,7 @@ impl ThreadAsyncRuntime {
 
     /// Returns the owned carrier thread pool when this runtime uses the composed hosted bootstrap.
     #[must_use]
-    pub fn thread_pool(&self) -> Option<&ThreadPool> {
+    pub const fn thread_pool(&self) -> Option<&ThreadPool> {
         match self.carriers.as_ref() {
             Some(ThreadAsyncCarriers::ThreadPool(pool)) => Some(pool),
             _ => None,
@@ -95,8 +137,12 @@ impl ThreadAsyncRuntime {
     }
 
     /// Returns the underlying executor.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal executor invariant has been violated.
     #[must_use]
-    pub fn executor(&self) -> &Executor {
+    pub const fn executor(&self) -> &Executor {
         self.executor
             .as_ref()
             .expect("thread async runtime executor should exist while borrowed")
@@ -189,6 +235,10 @@ impl ThreadAsyncRuntime {
     }
 
     /// Releases the owned carrier bootstrap and executor back to the caller.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal executor invariant has been violated.
     #[must_use]
     pub fn into_parts(mut self) -> (Option<ThreadPool>, Executor) {
         let executor = self
@@ -266,7 +316,7 @@ impl FiberAsyncRuntime {
         total_fibers: usize,
         executor_config: ExecutorConfig,
     ) -> Result<Self, ExecutorError> {
-        let stack_size = hosted_green_executor_stack_size().map_err(executor_error_from_fiber)?;
+        let stack_size = hosted_green_executor_stack_size();
         let fibers = HostedFiberRuntime::fixed_with_stack(stack_size, total_fibers)
             .map_err(executor_error_from_fiber)?;
         Self::from_hosted_fibers_with_executor_config(fibers, executor_config)
@@ -375,16 +425,15 @@ impl ExecutorReactorDriverState {
         let thread = StdThreadBuilder::new()
             .name(String::from("fusion-async-reactor"))
             .spawn(move || run_reactor_driver(core))
-            .map_err(executor_error_from_std_thread)?;
+            .map_err(|error| executor_error_from_std_thread(&error))?;
         *thread_slot = Some(thread);
         ready.store(true, Ordering::Release);
         Ok(())
     }
 
     pub(super) fn join(&self) {
-        let mut thread_slot = match self.thread.lock().map_err(executor_error_from_sync) {
-            Ok(thread_slot) => thread_slot,
-            Err(_) => return,
+        let Ok(mut thread_slot) = self.thread.lock().map_err(executor_error_from_sync) else {
+            return;
         };
         if let Some(thread) = thread_slot.take() {
             let _ = thread.join();
@@ -491,7 +540,7 @@ impl HostedThreadScheduler {
                         drop(Box::from_raw(scheduler_context));
                     }
                     let _ = scheduler.request_shutdown();
-                    for handle in handles.drain(..) {
+                    for handle in handles {
                         let _ = system.join(handle);
                     }
                     return Err(executor_error_from_thread(error));
@@ -613,7 +662,7 @@ impl HostedThreadScheduler {
 }
 
 impl HostedThreadWorkers {
-    fn direct_supported(config: &ThreadPoolConfig<'_>) -> bool {
+    const fn direct_supported(config: &ThreadPoolConfig<'_>) -> bool {
         matches!(config.placement, PoolPlacement::Inherit)
             && matches!(config.resize_policy, ResizePolicy::Fixed)
             && matches!(config.shutdown_policy, ShutdownPolicy::Drain)
@@ -667,6 +716,8 @@ fn run_hosted_thread_scheduler(queue: &Arc<HostedThreadScheduler>, worker_index:
     }
 }
 
+// The lease is moved into the worker so it outlives the full reactor-driving loop.
+#[allow(clippy::needless_pass_by_value)]
 fn run_reactor_driver(core: ControlLease<ExecutorCore>) {
     loop {
         if core.shutdown_requested.load(Ordering::Acquire) {
@@ -678,11 +729,11 @@ fn run_reactor_driver(core: ControlLease<ExecutorCore>) {
     }
 }
 
-pub(super) fn hosted_green_executor_stack_size() -> Result<NonZeroUsize, FiberError> {
+pub(super) const fn hosted_green_executor_stack_size() -> NonZeroUsize {
     green_executor_dispatch_stack_size()
 }
 
-fn executor_error_from_std_thread(error: std::io::Error) -> ExecutorError {
+fn executor_error_from_std_thread(error: &std::io::Error) -> ExecutorError {
     if error.kind() == std::io::ErrorKind::OutOfMemory {
         return ExecutorError::Sync(SyncErrorKind::Overflow);
     }

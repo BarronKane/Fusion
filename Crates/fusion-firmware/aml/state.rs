@@ -98,16 +98,20 @@ impl<'a> AmlRuntimeState<'a> {
     pub fn read_integer(&self, node: AmlNamespaceNodeId) -> Option<u64> {
         let mut index = 0_usize;
         while index < self.integers.len() {
-            if let Some(slot) = self.integers[index].get() {
-                if slot.node == node {
-                    return Some(slot.value);
-                }
+            if let Some(slot) = self.integers[index].get()
+                && slot.node == node
+            {
+                return Some(slot.value);
             }
             index += 1;
         }
         None
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn write_integer(&self, node: AmlNamespaceNodeId, value: u64) -> AmlResult<()> {
         let mut empty_index = None;
         let mut index = 0_usize;
@@ -130,6 +134,10 @@ impl<'a> AmlRuntimeState<'a> {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn create_package(&self, len: u8) -> AmlResult<AmlRuntimePackageHandle> {
         if usize::from(len) > AML_MAX_PACKAGE_ELEMENTS {
             return Err(AmlError::overflow());
@@ -153,6 +161,10 @@ impl<'a> AmlRuntimeState<'a> {
         Err(AmlError::overflow())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn create_buffer(&self, len: u8) -> AmlResult<AmlRuntimeBufferHandle> {
         if usize::from(len) > AML_MAX_BUFFER_BYTES {
             return Err(AmlError::overflow());
@@ -205,6 +217,10 @@ impl<'a> AmlRuntimeState<'a> {
         Some(slot.elements[usize::from(index)])
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn write_package_integer(
         &self,
         handle: AmlRuntimePackageHandle,
@@ -214,6 +230,10 @@ impl<'a> AmlRuntimeState<'a> {
         self.write_package_value(handle, index, AmlRuntimeAggregateValue::Integer(value))
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn write_package_value(
         &self,
         handle: AmlRuntimePackageHandle,
@@ -249,6 +269,10 @@ impl<'a> AmlRuntimeState<'a> {
         Some(slot.bytes[usize::from(index)])
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn write_buffer_byte(
         &self,
         handle: AmlRuntimeBufferHandle,
@@ -270,6 +294,10 @@ impl<'a> AmlRuntimeState<'a> {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn copy_bytes_into_buffer(
         &self,
         handle: AmlRuntimeBufferHandle,
@@ -290,6 +318,10 @@ impl<'a> AmlRuntimeState<'a> {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn try_acquire_mutex(&self, node: AmlNamespaceNodeId) -> AmlResult<bool> {
         let mut empty_index = None;
         let mut index = 0_usize;
@@ -315,6 +347,10 @@ impl<'a> AmlRuntimeState<'a> {
         Ok(true)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn release_mutex(&self, node: AmlNamespaceNodeId) -> AmlResult<()> {
         let mut index = 0_usize;
         while index < self.mutexes.len() {

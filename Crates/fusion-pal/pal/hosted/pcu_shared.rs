@@ -156,7 +156,7 @@ pub struct HostedCpuStreamHandle {
 }
 
 impl HostedCpuStreamHandle {
-    fn new(value_type: PcuStreamValueType) -> Self {
+    const fn new(value_type: PcuStreamValueType) -> Self {
         Self {
             value_type,
             state: HostedCpuStreamState::Dormant,
@@ -167,7 +167,7 @@ impl HostedCpuStreamHandle {
         }
     }
 
-    pub fn process_byte(&mut self, value: u8) -> Result<u8, PcuError> {
+    pub fn process_byte(&self, value: u8) -> Result<u8, PcuError> {
         if self.value_type != PcuStreamValueType::U8 {
             return Err(PcuError::invalid());
         }
@@ -175,7 +175,7 @@ impl HostedCpuStreamHandle {
         u8::try_from(result).map_err(|_| PcuError::invalid())
     }
 
-    pub fn process_half_word(&mut self, value: u16) -> Result<u16, PcuError> {
+    pub fn process_half_word(&self, value: u16) -> Result<u16, PcuError> {
         if self.value_type != PcuStreamValueType::U16 {
             return Err(PcuError::invalid());
         }
@@ -183,14 +183,14 @@ impl HostedCpuStreamHandle {
         u16::try_from(result).map_err(|_| PcuError::invalid())
     }
 
-    pub fn process_word(&mut self, value: u32) -> Result<u32, PcuError> {
+    pub fn process_word(&self, value: u32) -> Result<u32, PcuError> {
         if self.value_type != PcuStreamValueType::U32 {
             return Err(PcuError::invalid());
         }
         self.process_bits(value)
     }
 
-    fn process_bits(&mut self, value: u32) -> Result<u32, PcuError> {
+    fn process_bits(&self, value: u32) -> Result<u32, PcuError> {
         if self.state != HostedCpuStreamState::Active {
             return Err(PcuError::state_conflict());
         }
@@ -290,26 +290,58 @@ fn apply_pattern(
 ) -> Result<u32, PcuError> {
     let result = match pattern {
         PcuStreamPattern::BitReverse => match value_type {
-            PcuStreamValueType::U8 => u32::from((value as u8).reverse_bits()),
-            PcuStreamValueType::U16 => u32::from((value as u16).reverse_bits()),
+            PcuStreamValueType::U8 => u32::from(
+                u8::try_from(value)
+                    .map_err(|_| PcuError::invalid())?
+                    .reverse_bits(),
+            ),
+            PcuStreamValueType::U16 => u32::from(
+                u16::try_from(value)
+                    .map_err(|_| PcuError::invalid())?
+                    .reverse_bits(),
+            ),
             PcuStreamValueType::U32 => value.reverse_bits(),
         },
         PcuStreamPattern::BitInvert => !value,
         PcuStreamPattern::Increment => match value_type {
-            PcuStreamValueType::U8 => u32::from((value as u8).wrapping_add(1)),
-            PcuStreamValueType::U16 => u32::from((value as u16).wrapping_add(1)),
+            PcuStreamValueType::U8 => u32::from(
+                u8::try_from(value)
+                    .map_err(|_| PcuError::invalid())?
+                    .wrapping_add(1),
+            ),
+            PcuStreamValueType::U16 => u32::from(
+                u16::try_from(value)
+                    .map_err(|_| PcuError::invalid())?
+                    .wrapping_add(1),
+            ),
             PcuStreamValueType::U32 => value.wrapping_add(1),
         },
         PcuStreamPattern::Decrement => match value_type {
-            PcuStreamValueType::U8 => u32::from((value as u8).wrapping_sub(1)),
-            PcuStreamValueType::U16 => u32::from((value as u16).wrapping_sub(1)),
+            PcuStreamValueType::U8 => u32::from(
+                u8::try_from(value)
+                    .map_err(|_| PcuError::invalid())?
+                    .wrapping_sub(1),
+            ),
+            PcuStreamValueType::U16 => u32::from(
+                u16::try_from(value)
+                    .map_err(|_| PcuError::invalid())?
+                    .wrapping_sub(1),
+            ),
             PcuStreamValueType::U32 => value.wrapping_sub(1),
         },
         PcuStreamPattern::AddParameter { parameter } => {
             let operand = lookup_parameter_value(parameter_bindings, parameter, value_type)?;
             match value_type {
-                PcuStreamValueType::U8 => u32::from((value as u8).wrapping_add(operand as u8)),
-                PcuStreamValueType::U16 => u32::from((value as u16).wrapping_add(operand as u16)),
+                PcuStreamValueType::U8 => {
+                    let value = u8::try_from(value).map_err(|_| PcuError::invalid())?;
+                    let operand = u8::try_from(operand).map_err(|_| PcuError::invalid())?;
+                    u32::from(value.wrapping_add(operand))
+                }
+                PcuStreamValueType::U16 => {
+                    let value = u16::try_from(value).map_err(|_| PcuError::invalid())?;
+                    let operand = u16::try_from(operand).map_err(|_| PcuError::invalid())?;
+                    u32::from(value.wrapping_add(operand))
+                }
                 PcuStreamValueType::U32 => value.wrapping_add(operand),
             }
         }
@@ -354,10 +386,10 @@ fn lookup_parameter_value(
 ) -> Result<u32, PcuError> {
     let mut index = 0;
     while index < parameter_bindings.len() {
-        if let Some(binding) = parameter_bindings[index] {
-            if binding.slot == slot {
-                return parameter_as_u32(binding.value, value_type).ok_or_else(PcuError::invalid);
-            }
+        if let Some(binding) = parameter_bindings[index]
+            && binding.slot == slot
+        {
+            return parameter_as_u32(binding.value, value_type).ok_or_else(PcuError::invalid);
         }
         index += 1;
     }
@@ -385,14 +417,8 @@ const fn bit_mask(bits: u8) -> u32 {
 
 fn parameter_as_u32(value: PcuParameterValue, value_type: PcuStreamValueType) -> Option<u32> {
     match value_type {
-        PcuStreamValueType::U8 => match value.as_u8() {
-            Some(value) => Some(u32::from(value)),
-            None => None,
-        },
-        PcuStreamValueType::U16 => match value.as_u16() {
-            Some(value) => Some(u32::from(value)),
-            None => None,
-        },
+        PcuStreamValueType::U8 => value.as_u8().map(u32::from),
+        PcuStreamValueType::U16 => value.as_u16().map(u32::from),
         PcuStreamValueType::U32 => value.as_u32(),
     }
 }
@@ -467,7 +493,7 @@ mod tests {
 
     #[test]
     fn hosted_stream_processes_u32_patterns() {
-        let mut handle = active_word_handle(
+        let handle = active_word_handle(
             PcuStreamKernelBuilder::<{ HOSTED_CPU_MAX_STREAM_PATTERNS }>::words(9, "stream")
                 .increment()
                 .expect("builder should accept increment")
@@ -493,7 +519,7 @@ mod tests {
                 PcuStreamKernelBuilder::<{ HOSTED_CPU_MAX_STREAM_PATTERNS }>::words(14, "stream")
                     .with_pattern(vector.pattern)
                     .expect("shared vector should be an admissible pattern");
-            let mut handle = active_word_handle(builder, &[]);
+            let handle = active_word_handle(builder, &[]);
             assert_eq!(
                 handle
                     .process_word(vector.input)
@@ -518,7 +544,7 @@ mod tests {
             PcuParameterSlot(0),
             PcuParameterValue::U16(0x0010),
         )];
-        let mut handle = active_word_handle(
+        let handle = active_word_handle(
             PcuStreamKernelBuilder::<{ HOSTED_CPU_MAX_STREAM_PATTERNS }>::half_words(12, "stream")
                 .with_parameters(&PARAMETERS)
                 .with_pattern(

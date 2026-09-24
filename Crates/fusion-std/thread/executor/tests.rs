@@ -1,3 +1,6 @@
+// Keep one-off test fixtures next to the case that owns them.
+#![allow(clippy::items_after_statements)]
+
 use core::num::NonZeroUsize;
 use core::sync::atomic::{
     AtomicUsize,
@@ -33,6 +36,7 @@ use fusion_sys::domain::context::{
 use fusion_sys::courier::{
     CourierCaps,
     CourierPlan,
+    CourierScopeRole,
     CourierVisibility,
 };
 use fusion_sys::domain::{
@@ -754,6 +758,8 @@ fn exact_future_spill_accepts_medium_future_frames() {
 }
 
 #[test]
+// This oversized local intentionally makes the generated future exceed the spill budget.
+#[allow(clippy::large_stack_arrays)]
 fn larger_futures_can_exceed_default_per_task_spill_budget_when_domain_has_room() {
     let _guard = crate::thread::runtime_test_guard();
     let executor = Executor::new(ExecutorConfig::new());
@@ -857,7 +863,7 @@ fn future_and_result_share_one_exact_spill_envelope() {
         .with_ref(|slot| {
             slot.allocation
                 .as_ref()
-                .map(|allocation| allocation.as_non_null())
+                .map(fusion_sys::alloc::ExtentLease::as_non_null)
         })
         .expect("result storage should synchronize")
         .expect("result should retain the shared spill envelope");
@@ -865,7 +871,7 @@ fn future_and_result_share_one_exact_spill_envelope() {
     assert_eq!(spill_stats().leased_extent_count, 1);
 
     let output = result
-        .with(|slot| slot.take::<[u8; 384]>(&spill_store))
+        .with(super::InlineAsyncResultStorage::take::<[u8; 384]>)
         .expect("result storage should synchronize")
         .expect("result should take cleanly");
     assert!(output.iter().all(|byte| *byte == 9));
@@ -937,10 +943,8 @@ fn dropping_executor_shuts_down_live_pending_slots() {
 #[test]
 fn executor_binds_to_hosted_fiber_runtime() {
     let _guard = crate::thread::runtime_test_guard();
-    let runtime = match HostedFiberRuntime::fixed_with_stack(
-        hosted_green_executor_stack_size().expect("green executor stack size should resolve"),
-        2,
-    ) {
+    let runtime = match HostedFiberRuntime::fixed_with_stack(hosted_green_executor_stack_size(), 2)
+    {
         Ok(runtime) => runtime,
         Err(error) if is_unsupported_fiber_error(error) => return,
         Err(error) => panic!("hosted fiber runtime should build: {error:?}"),
@@ -1030,6 +1034,7 @@ fn current_async_runtime_queries_courier_truth() {
         .register_courier(CourierDescriptor {
             id: COURIER,
             name: "httpd",
+            scope_role: CourierScopeRole::ContextRoot,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
             visibility: CourierVisibility::Scoped,
             claim_awareness: ClaimAwareness::Black,
@@ -1080,6 +1085,7 @@ fn current_async_runtime_updates_courier_owned_metadata_and_obligations() {
         .register_courier(CourierDescriptor {
             id: COURIER,
             name: "httpd",
+            scope_role: CourierScopeRole::ContextRoot,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
             visibility: CourierVisibility::Scoped,
             claim_awareness: ClaimAwareness::Black,
@@ -1940,7 +1946,11 @@ fn thread_async_runtime_repeated_warm_yield_batches_stay_alive_multi_worker() {
                         .iter()
                         .map(|slot| slot.run_state.load(Ordering::Acquire))
                         .collect();
-                    let states: Vec<u8> = registry.slots.iter().map(|slot| slot.state()).collect();
+                    let states: Vec<u8> = registry
+                        .slots
+                        .iter()
+                        .map(super::AsyncTaskSlot::state)
+                        .collect();
                     panic!(
                         "yield-once task should spawn at iteration={iteration} task={task_index}: {error:?}; free_len={free_len}; states={states:?}; run_states={run_states:?}"
                     );
@@ -2027,10 +2037,7 @@ fn thread_async_runtime_sleep_for_completes() {
 #[test]
 fn fiber_async_runtime_binds_owned_hosted_fibers() {
     let _guard = crate::thread::runtime_test_guard();
-    let hosted = match HostedFiberRuntime::fixed_with_stack(
-        hosted_green_executor_stack_size().expect("green executor stack size should resolve"),
-        2,
-    ) {
+    let hosted = match HostedFiberRuntime::fixed_with_stack(hosted_green_executor_stack_size(), 2) {
         Ok(hosted) => hosted,
         Err(error) if is_unsupported_fiber_error(error) => return,
         Err(error) => panic!("hosted fiber runtime should build: {error:?}"),

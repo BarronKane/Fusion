@@ -288,7 +288,7 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
 
     /// Returns one channel-backed client handle.
     #[must_use]
-    pub fn client_handle(
+    pub const fn client_handle(
         &'static self,
     ) -> Rp2350FiberShiftRegister74hc595<FRAME_BYTES, COMMAND_CAPACITY, STATUS_CAPACITY> {
         Rp2350FiberShiftRegister74hc595 {
@@ -309,7 +309,7 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
         }
         this.spawned = true;
 
-        let service_addr = this as *mut Self as usize;
+        let service_addr = core::ptr::from_mut(this) as usize;
         let handle = spawn(move || {
             run_shift_register_service::<FRAME_BYTES, COMMAND_CAPACITY, STATUS_CAPACITY>(
                 service_addr,
@@ -347,7 +347,9 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
         command: Rp2350ShiftRegisterCommand<FRAME_BYTES>,
     ) -> Result<(), GpioError> {
         match command.kind {
-            Rp2350ShiftRegisterCommandKind::WriteFrame { bytes } => self.write_frame_internal(&bytes),
+            Rp2350ShiftRegisterCommandKind::WriteFrame { bytes } => {
+                self.write_frame_internal(&bytes)
+            }
             Rp2350ShiftRegisterCommandKind::WriteFrameCycle {
                 frames,
                 repeat_count,
@@ -358,7 +360,7 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
         }
     }
 
-    fn write_frame_internal(&mut self, bytes: &[u8; FRAME_BYTES]) -> Result<(), GpioError> {
+    fn write_frame_internal(&self, bytes: &[u8; FRAME_BYTES]) -> Result<(), GpioError> {
         RP2350_SHIFT_SERVICE_HEARTBEAT.fetch_add(1, Ordering::AcqRel);
         RP2350_SHIFT_WRITE_PROGRESS.store(0, Ordering::Release);
         if FRAME_BYTES > 0 {
@@ -369,8 +371,9 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
         }
         let mut batch = self.data.begin_batch();
         for (byte_index, &byte) in bytes.iter().enumerate() {
-            for bit in (0..8).rev() {
-                let progress = ((byte_index as u32) << 8) | (u32::from((7 - bit) as u8) << 4);
+            let byte_index = u32::try_from(byte_index).map_err(|_| GpioError::invalid())?;
+            for bit in (0_u8..8).rev() {
+                let progress = (byte_index << 8) | (u32::from(7 - bit) << 4);
                 RP2350_SHIFT_WRITE_PROGRESS.store(progress | 1, Ordering::Release);
                 batch.push_set_level(&self.data, ((byte >> bit) & 1) != 0)?;
                 RP2350_SHIFT_WRITE_PROGRESS.store(progress | 2, Ordering::Release);
@@ -397,7 +400,7 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
     }
 
     fn write_frame_cycle_internal(
-        &mut self,
+        &self,
         frames: &[[u8; FRAME_BYTES]; RP2350_SHIFT_REGISTER_FRAME_CYCLE_LEN],
         repeat_count: u8,
     ) -> Result<(), GpioError> {
@@ -415,7 +418,7 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
             match self.client.statuses.try_send(self.status_producer, status) {
                 Ok(()) => return Ok(()),
                 Err(error) if error.kind() == ChannelErrorKind::Busy => {
-                    service_wait_for_client()?
+                    service_wait_for_client()?;
                 }
                 Err(error) => return Err(gpio_error_from_channel(error)),
             }
@@ -460,7 +463,7 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
         })
     }
 
-    fn perform(&self, kind: Rp2350ShiftRegisterCommandKind<FRAME_BYTES>) -> Result<(), GpioError> {
+    fn perform(self, kind: Rp2350ShiftRegisterCommandKind<FRAME_BYTES>) -> Result<(), GpioError> {
         let request_id = self.client.next_request_id();
         let command = Rp2350ShiftRegisterCommand { request_id, kind };
 
@@ -475,14 +478,18 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
                     break;
                 }
                 Err(error) if error.kind() == ChannelErrorKind::Busy => {
-                    wait_for_service_progress()?
+                    wait_for_service_progress();
                 }
                 Err(error) => return Err(gpio_error_from_channel(error)),
             }
         }
 
         loop {
-            match self.client.statuses.try_receive(self.client.status_consumer) {
+            match self
+                .client
+                .statuses
+                .try_receive(self.client.status_consumer)
+            {
                 Ok(Some(Rp2350ShiftRegisterStatus::Completed {
                     request_id: observed,
                 })) if observed == request_id => return Ok(()),
@@ -491,9 +498,9 @@ impl<const FRAME_BYTES: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPAC
                     kind,
                 })) if observed == request_id => return Err(gpio_error_from_kind(kind)),
                 Ok(Some(_)) => return Err(GpioError::state_conflict()),
-                Ok(None) => wait_for_service_progress()?,
+                Ok(None) => wait_for_service_progress(),
                 Err(error) if error.kind() == ChannelErrorKind::Busy => {
-                    wait_for_service_progress()?
+                    wait_for_service_progress();
                 }
                 Err(error) => return Err(gpio_error_from_channel(error)),
             }
@@ -509,11 +516,12 @@ fn run_shift_register_service<
     service_addr: usize,
 ) -> ! {
     loop {
-        let service_ptr = service_addr as *mut Rp2350FiberShiftRegister74hc595Service<
-            FRAME_BYTES,
-            COMMAND_CAPACITY,
-            STATUS_CAPACITY,
-        >;
+        let service_ptr = service_addr
+            as *mut Rp2350FiberShiftRegister74hc595Service<
+                FRAME_BYTES,
+                COMMAND_CAPACITY,
+                STATUS_CAPACITY,
+            >;
         // SAFETY: the service lives in static storage for the life of the example process.
         let service = unsafe { &mut *service_ptr };
         let _ = service.pump();
@@ -521,12 +529,10 @@ fn run_shift_register_service<
     }
 }
 
-fn wait_for_service_progress() -> Result<(), GpioError> {
-    if yield_now().is_ok() {
-        return Ok(());
+fn wait_for_service_progress() {
+    if yield_now().is_err() {
+        wait_for_runtime_progress();
     }
-    wait_for_runtime_progress();
-    Ok(())
 }
 
 fn service_wait_for_client() -> Result<(), GpioError> {
@@ -550,7 +556,9 @@ const fn gpio_error_from_kind(kind: GpioErrorKind) -> GpioError {
 
 const fn gpio_error_from_channel(error: ChannelError) -> GpioError {
     match error.kind() {
-        ChannelErrorKind::Unsupported | ChannelErrorKind::ProtocolMismatch => GpioError::unsupported(),
+        ChannelErrorKind::Unsupported | ChannelErrorKind::ProtocolMismatch => {
+            GpioError::unsupported()
+        }
         ChannelErrorKind::Invalid => GpioError::invalid(),
         ChannelErrorKind::Busy => GpioError::busy(),
         ChannelErrorKind::PermissionDenied | ChannelErrorKind::TransportDenied => {

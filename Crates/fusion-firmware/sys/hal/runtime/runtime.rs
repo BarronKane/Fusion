@@ -238,7 +238,6 @@ impl RootRuntimeSlot {
                     self.state.store(ROOT_RUNTIME_READY, Ordering::Release);
                     return unsafe { &*(*self.value.get()).as_ptr() };
                 }
-                ROOT_RUNTIME_RUNNING => core::hint::spin_loop(),
                 _ => core::hint::spin_loop(),
             }
         }
@@ -471,6 +470,10 @@ const fn local_runtime_seal(id: u64) -> LocalAdmissionSeal {
     )
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
 pub fn ensure_root_courier() -> Result<(), DomainError> {
     with_registry_mut(|_| Ok(()))?;
     install_local_syscalls()?;
@@ -589,6 +592,10 @@ pub struct FirmwareBootstrapContext {
 /// This is intentionally a narrow first cut. It makes the root courier/context explicit and
 /// observable at the firmware boundary without pretending the entire ambient thread substrate has
 /// already been rewritten into carrier law.
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
 pub fn bootstrap_root_execution() -> Result<FirmwareBootstrapContext, DomainError> {
     bootstrap_root_execution_with_policy(RootCourierPolicy::disabled())
 }
@@ -598,6 +605,10 @@ pub fn bootstrap_root_execution() -> Result<FirmwareBootstrapContext, DomainErro
 /// Today only the disabled security posture is active. The richer claims/keyring modes are
 /// intentionally carried here now so the entry boundary grows one honest policy seam before the
 /// security doctrine lands for real.
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
 pub fn bootstrap_root_execution_with_policy(
     policy: RootCourierPolicy,
 ) -> Result<FirmwareBootstrapContext, DomainError> {
@@ -662,11 +673,13 @@ const fn root_security_policy_label(policy: RootCourierSecurityPolicy) -> &'stat
     }
 }
 
+#[must_use]
 pub fn runtime_sink() -> CourierRuntimeSink {
     CourierRuntimeSink::new(core::ptr::null_mut(), &FIRMWARE_RUNTIME_SINK_VTABLE)
 }
 
-pub fn launch_control() -> CourierLaunchControl<'static> {
+#[must_use]
+pub const fn launch_control() -> CourierLaunchControl<'static> {
     CourierLaunchControl::new(core::ptr::null_mut(), FIRMWARE_LAUNCH_CONTROL_VTABLE)
 }
 
@@ -718,18 +731,30 @@ where
     handle.join()
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
 pub fn courier_pedigree<const MAX_DEPTH: usize>(
     courier: fusion_sys::domain::CourierId,
 ) -> Result<CourierPedigree<'static, MAX_DEPTH>, DomainError> {
     with_registry(|registry| registry.courier_pedigree(courier))
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
 pub fn qualified_courier_name<const MAX_CHAIN: usize>(
     courier: fusion_sys::domain::CourierId,
 ) -> Result<QualifiedCourierName<'static, MAX_CHAIN>, DomainError> {
     with_registry(|registry| registry.qualified_courier_name(courier))
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
 pub fn resolve_qualified_courier_name<const MAX_CHAIN: usize>(
     target: &QualifiedCourierName<'_, MAX_CHAIN>,
 ) -> Result<fusion_sys::domain::CourierId, DomainError> {
@@ -740,6 +765,10 @@ pub fn resolve_qualified_courier_name<const MAX_CHAIN: usize>(
     })
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
 pub fn resolve_fusion_surface_ref<const MAX_CHAIN: usize>(
     target: &FusionSurfaceRef<'_, MAX_CHAIN>,
 ) -> Result<fusion_sys::domain::CourierId, DomainError> {
@@ -1002,7 +1031,7 @@ fn known_courier_snapshot_parts(
     }
 }
 
-fn known_context_snapshot_parts(
+const fn known_context_snapshot_parts(
     context: ContextId,
 ) -> Option<(
     ContextDescriptor<'static>,
@@ -1247,6 +1276,7 @@ unsafe fn firmware_runtime_record_context(
     .map_err(Into::into)
 }
 
+#[allow(clippy::too_many_arguments)] // Fixed callback ABI used by the runtime sink.
 unsafe fn firmware_runtime_register_fiber(
     _context: *mut (),
     courier: fusion_sys::domain::CourierId,
@@ -1400,6 +1430,7 @@ unsafe fn firmware_remove_obligation(
         .map_err(Into::into)
 }
 
+#[allow(clippy::large_types_passed_by_value)] // Fixed callback ABI transfers the launch request.
 unsafe fn firmware_register_child_courier(
     _context: *mut (),
     request: CourierChildLaunchRequest<'static>,

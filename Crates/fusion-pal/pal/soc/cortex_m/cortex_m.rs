@@ -11,7 +11,7 @@ pub mod dma;
 pub mod identity {
     /// Returns the canonical local-domain name for the selected bare-metal target.
     ///
-    /// Today this defaults to the selected SoC family name until a board- or user-supplied domain
+    /// Today this defaults to the selected `SoC` family name until a board- or user-supplied domain
     /// name exists above it.
     #[must_use]
     pub fn system_domain_name() -> &'static str {

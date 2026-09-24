@@ -1,8 +1,16 @@
 //! USB device-controller / gadget contracts.
 
-use super::core::*;
-use super::controller::*;
-use super::error::*;
+use super::core::{
+    UsbEndpointAddress,
+    UsbTransferType,
+    UsbDeviceDescriptor,
+    UsbConfigurationDescriptor,
+    UsbInterfaceDescriptor,
+    UsbEndpointDescriptor,
+    UsbSetupPacket,
+};
+use super::controller::UsbControllerContract;
+use super::error::UsbError;
 
 /// Device-side lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

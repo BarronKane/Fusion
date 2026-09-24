@@ -354,6 +354,10 @@ pub struct LinuxSemaphore {
 
 impl LinuxSemaphore {
     /// Creates a new Linux semaphore with the given initial and maximum permit counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Invalid` if `max` is zero or `initial` exceeds `max`.
     pub const fn new(initial: u32, max: u32) -> Result<Self, SyncError> {
         if max == 0 || initial > max {
             return Err(SyncError::invalid());

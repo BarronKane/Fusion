@@ -32,7 +32,7 @@ pub enum WifiCanonicalFrame<'a> {
     Event(WifiEventFrame<'a>),
 }
 
-impl<'a> WifiCanonicalFrame<'a> {
+impl WifiCanonicalFrame<'_> {
     /// Returns the active canonical Wi-Fi frame family.
     #[must_use]
     pub const fn kind(self) -> WifiCanonicalFrameKind {

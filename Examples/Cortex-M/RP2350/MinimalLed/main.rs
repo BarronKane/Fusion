@@ -111,7 +111,7 @@ fn startup_dance(leds: &mut PicoLeds) {
     blocking_pause(STARTUP_PHASE_PERIOD);
 }
 
-fn fizzbuzz_command(step: u32) -> (bool, bool) {
+const fn fizzbuzz_command(step: u32) -> (bool, bool) {
     (step.is_multiple_of(3), step.is_multiple_of(5))
 }
 

@@ -15,12 +15,12 @@ pub const fn system_dma() -> PlatformDma {
 
 /// Returns the surfaced DMA controllers for the selected backend.
 #[must_use]
-pub fn dma_controllers() -> &'static [DmaControllerDescriptor] {
+pub const fn dma_controllers() -> &'static [DmaControllerDescriptor] {
     &[]
 }
 
 /// Returns the surfaced DMA request lines for the selected backend.
 #[must_use]
-pub fn dma_requests() -> &'static [DmaRequestDescriptor] {
+pub const fn dma_requests() -> &'static [DmaRequestDescriptor] {
     &[]
 }

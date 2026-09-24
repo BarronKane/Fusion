@@ -130,10 +130,8 @@ struct ExpiryDisplay(Option<u64>);
 
 impl fmt::Display for ExpiryDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Some(expires_at) => write!(f, " ttl-until:{expires_at}"),
-            None => Ok(()),
-        }
+        self.0
+            .map_or(Ok(()), |expires_at| write!(f, " ttl-until:{expires_at}"))
     }
 }
 
@@ -168,7 +166,7 @@ mod tests {
                 id: ClaimContextId::new(1),
                 principal,
                 image_seal: LocalAdmissionSeal::new(
-                    ImageSealId::new(0xa7f3bc91),
+                    ImageSealId::new(0xa7f3_bc91),
                     ClaimsDigest::zero(),
                     ClaimsDigest::zero(),
                     ClaimsDigest::zero(),
@@ -189,7 +187,7 @@ mod tests {
                     issued_at_unix_seconds: 123,
                     expires_at_unix_seconds: Some(456),
                     seal: LocalAdmissionSeal::new(
-                        ImageSealId::new(0xa7f3bc91),
+                        ImageSealId::new(0xa7f3_bc91),
                         ClaimsDigest::zero(),
                         ClaimsDigest::zero(),
                         ClaimsDigest::zero(),
@@ -206,7 +204,7 @@ mod tests {
                         bond: AttachmentBondId::new(0xf819),
                         principal: PrincipalId::parse("firewall@net[kernel]").unwrap(),
                         peer: principal,
-                        peer_seal: ImageSealId::new(0xa7f3bc91),
+                        peer_seal: ImageSealId::new(0xa7f3_bc91),
                         channel: ClaimName::parse("net.tcp.9094").unwrap(),
                         law: TransportAttachmentLaw::ExclusiveSpsc,
                     },

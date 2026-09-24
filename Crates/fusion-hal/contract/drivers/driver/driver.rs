@@ -289,17 +289,23 @@ impl<D: DriverContract> DriverRegistration<D> {
 }
 
 /// Static discovery/activation surface for one registered driver family.
+/// Enumerates bindings for a registered driver using caller-owned output storage.
+pub type DriverEnumerateFn<D> = fn(
+    registered: &RegisteredDriver<D>,
+    context: &mut DriverDiscoveryContext<'_>,
+    out: &mut [<D as DriverContract>::Binding],
+) -> Result<usize, DriverError>;
+
+/// Activates one binding of a registered driver.
+pub type DriverActivateFn<D> = fn(
+    registered: &RegisteredDriver<D>,
+    context: &mut DriverActivationContext<'_>,
+    binding: <D as DriverContract>::Binding,
+) -> Result<ActiveDriver<D>, DriverError>;
+
 pub struct DriverActivation<D: DriverContract> {
-    pub enumerate: fn(
-        registered: &RegisteredDriver<D>,
-        context: &mut DriverDiscoveryContext<'_>,
-        out: &mut [D::Binding],
-    ) -> Result<usize, DriverError>,
-    pub activate: fn(
-        registered: &RegisteredDriver<D>,
-        context: &mut DriverActivationContext<'_>,
-        binding: D::Binding,
-    ) -> Result<ActiveDriver<D>, DriverError>,
+    pub enumerate: DriverEnumerateFn<D>,
+    pub activate: DriverActivateFn<D>,
     marker: PhantomData<fn() -> D>,
 }
 
@@ -314,18 +320,7 @@ impl<D: DriverContract> Copy for DriverActivation<D> {}
 impl<D: DriverContract> DriverActivation<D> {
     /// Creates one static activation surface for one driver family.
     #[must_use]
-    pub const fn new(
-        enumerate: fn(
-            registered: &RegisteredDriver<D>,
-            context: &mut DriverDiscoveryContext<'_>,
-            out: &mut [D::Binding],
-        ) -> Result<usize, DriverError>,
-        activate: fn(
-            registered: &RegisteredDriver<D>,
-            context: &mut DriverActivationContext<'_>,
-            binding: D::Binding,
-        ) -> Result<ActiveDriver<D>, DriverError>,
-    ) -> Self {
+    pub const fn new(enumerate: DriverEnumerateFn<D>, activate: DriverActivateFn<D>) -> Self {
         Self {
             enumerate,
             activate,
@@ -360,6 +355,10 @@ impl<D: DriverContract> RegisteredDriver<D> {
     }
 
     /// Enumerates driver bindings through the registered activation surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn enumerate_bindings(
         &self,
         context: &mut DriverDiscoveryContext<'_>,
@@ -369,6 +368,10 @@ impl<D: DriverContract> RegisteredDriver<D> {
     }
 
     /// Activates one bound driver instance through the registered activation surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn activate(
         &self,
         context: &mut DriverActivationContext<'_>,
@@ -399,13 +402,13 @@ impl<D: DriverContract> ActiveDriver<D> {
 
     /// Returns a shared reference to the active driver instance.
     #[must_use]
-    pub fn instance(&self) -> &D::Instance {
+    pub const fn instance(&self) -> &D::Instance {
         &self.instance
     }
 
     /// Returns a mutable reference to the active driver instance.
     #[must_use]
-    pub fn instance_mut(&mut self) -> &mut D::Instance {
+    pub const fn instance_mut(&mut self) -> &mut D::Instance {
         &mut self.instance
     }
 
@@ -441,13 +444,13 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
     }
 
     #[must_use]
-    fn slots(&self) -> &[DriverSlot] {
+    const fn slots(&self) -> &[DriverSlot] {
         // SAFETY: the prefix `[0..len)` is initialized by `register`.
         unsafe { slice::from_raw_parts(self.slots.as_ptr().cast(), self.len) }
     }
 
     #[must_use]
-    fn slots_mut(&mut self) -> &mut [DriverSlot] {
+    const fn slots_mut(&mut self) -> &mut [DriverSlot] {
         // SAFETY: the prefix `[0..len)` is initialized by `register`.
         unsafe { slice::from_raw_parts_mut(self.slots.as_mut_ptr().cast(), self.len) }
     }
@@ -508,6 +511,10 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
     /// - `Ready` when their requirements are satisfied, they do not violate singleton authority,
     ///   and they are either intrinsically useful or consumed by another ready driver.
     /// - `Inop(...)` otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn validate(&mut self) -> Result<(), DriverError> {
         for slot in self.slots_mut() {
             slot.state = DriverAvailability::Ready;
@@ -540,12 +547,10 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
         states: &[DriverAvailability; CAPACITY],
         metadata: &'static DriverMetadata,
     ) -> DriverAvailability {
-        if let Some(singleton_class) = metadata.singleton_class {
-            if self.has_prior_singleton_conflict(slot, singleton_class) {
-                return DriverAvailability::Inop(DriverInopReason::SingletonConflict(
-                    singleton_class,
-                ));
-            }
+        if let Some(singleton_class) = metadata.singleton_class
+            && self.has_prior_singleton_conflict(slot, singleton_class)
+        {
+            return DriverAvailability::Inop(DriverInopReason::SingletonConflict(singleton_class));
         }
 
         for required in metadata.required_contracts {

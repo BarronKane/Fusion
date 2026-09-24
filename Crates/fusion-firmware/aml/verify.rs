@@ -51,7 +51,7 @@ pub struct AmlBackendVerificationReport<'a> {
     pub issues: &'a [AmlBackendVerificationIssue],
 }
 
-impl<'a> AmlBackendVerificationReport<'a> {
+impl AmlBackendVerificationReport<'_> {
     #[must_use]
     pub const fn is_clean(self) -> bool {
         self.issues.is_empty()
@@ -69,7 +69,7 @@ struct AmlBackendIssueWriter<'a> {
 }
 
 impl<'a> AmlBackendIssueWriter<'a> {
-    fn new(storage: &'a mut [MaybeUninit<AmlBackendVerificationIssue>]) -> Self {
+    const fn new(storage: &'a mut [MaybeUninit<AmlBackendVerificationIssue>]) -> Self {
         Self { storage, len: 0 }
     }
 
@@ -82,7 +82,7 @@ impl<'a> AmlBackendIssueWriter<'a> {
         Ok(())
     }
 
-    fn finish(self) -> AmlBackendVerificationReport<'a> {
+    const fn finish(self) -> AmlBackendVerificationReport<'a> {
         let issues = unsafe {
             slice::from_raw_parts(
                 self.storage.as_ptr().cast::<AmlBackendVerificationIssue>(),
@@ -93,8 +93,12 @@ impl<'a> AmlBackendIssueWriter<'a> {
     }
 }
 
-pub fn verify_acpi_backend<'records, 'blocks, 'storage, B: AcpiAmlBackend>(
-    namespace: AmlLoadedNamespace<'records, 'blocks>,
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
+pub fn verify_acpi_backend<'storage, B: AcpiAmlBackend>(
+    namespace: AmlLoadedNamespace<'_, '_>,
     provider: u8,
     storage: &'storage mut [MaybeUninit<AmlBackendVerificationIssue>],
 ) -> AmlResult<AmlBackendVerificationReport<'storage>> {
@@ -464,10 +468,10 @@ mod tests {
             if self.fail_ec_register.get() == Some(register) {
                 return Err(AmlError::host_failure());
             }
-            if register == 0x2A {
-                if let Some(value) = self.read_ec_stream_byte() {
-                    return Ok(value);
-                }
+            if register == 0x2A
+                && let Some(value) = self.read_ec_stream_byte()
+            {
+                return Ok(value);
             }
             Ok(self.ec.borrow()[usize::from(register)])
         }
@@ -536,7 +540,9 @@ mod tests {
         let table = {
             let mut bytes = Vec::from([0_u8; 36]);
             bytes[0..4].copy_from_slice(b"DSDT");
-            bytes[4..8].copy_from_slice(&((36 + body.len()) as u32).to_le_bytes());
+            let table_len =
+                u32::try_from(36 + body.len()).expect("synthetic test DSDT length fits u32");
+            bytes[4..8].copy_from_slice(&table_len.to_le_bytes());
             bytes[8] = 2;
             bytes[10..16].copy_from_slice(b"FUSION");
             bytes[16..24].copy_from_slice(b"AMLVRFY ");
@@ -584,6 +590,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // ECG3, ECBT, and ECR1 are distinct captured AML names.
     fn dell_captured_namespace_executes_lid_from_real_dsdt() {
         if skipped_if_missing_dump() {
             return;
@@ -679,12 +686,12 @@ mod tests {
 
     #[test]
     fn dell_captured_namespace_executes_psr_from_real_dsdt() {
+        const GNVS_BASE: u64 = 0xDA7F_DE18;
+        const PWRS_OFFSET: u64 = 16;
+
         if skipped_if_missing_dump() {
             return;
         }
-
-        const GNVS_BASE: u64 = 0xDA7FDE18;
-        const PWRS_OFFSET: u64 = 16;
 
         let namespace = load_dell_namespace().expect("captured Dell namespace should load");
         let evaluator = AmlPureEvaluator::new(namespace);
@@ -893,11 +900,11 @@ mod tests {
 
     #[test]
     fn dell_captured_namespace_executes_tmp_from_real_dsdt() {
+        const SMIB_BASE: u64 = 0xDA7D_6000;
+
         if skipped_if_missing_dump() {
             return;
         }
-
-        const SMIB_BASE: u64 = 0xDA7D6000;
 
         let namespace = load_dell_namespace().expect("captured Dell namespace should load");
         let evaluator = AmlPureEvaluator::new(namespace);

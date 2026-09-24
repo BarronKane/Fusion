@@ -1,7 +1,7 @@
 //! USB Type-C connector and role vocabulary.
 
-use super::core::*;
-use super::error::*;
+use super::core::UsbCoreContract;
+use super::error::UsbError;
 
 /// Physical orientation of one USB Type-C attachment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

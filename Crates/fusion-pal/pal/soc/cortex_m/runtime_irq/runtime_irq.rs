@@ -8,9 +8,8 @@
 #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
 #[unsafe(no_mangle)]
 unsafe extern "C" fn DefaultHandler(irqn: i16) {
-    match crate::pal::soc::cortex_m::hal::soc::board::service_reserved_runtime_irq(irqn) {
-        Ok(true) => return,
-        Ok(false) | Err(_) => {}
+    if crate::pal::soc::cortex_m::hal::soc::board::service_reserved_runtime_irq(irqn) == Ok(true) {
+        return;
     }
 
     panic!("unhandled Cortex-M IRQ reached backend DefaultHandler");

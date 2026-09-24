@@ -297,6 +297,9 @@ impl<const STATE_CAPACITY: usize, const SNAPSHOT_CAPACITY: usize, const MAX_CONS
     }
 
     /// Emits one configured runtime-state record only when the state channel is observed.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn emit_state_if_observed(
         &self,
         runtime: &CurrentFiberAsyncRuntime,
@@ -307,6 +310,9 @@ impl<const STATE_CAPACITY: usize, const SNAPSHOT_CAPACITY: usize, const MAX_CONS
     }
 
     /// Emits one configured memory-footprint snapshot only when the snapshot channel is observed.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn emit_configured_memory_footprint_if_observed(
         &self,
         runtime: &CurrentFiberAsyncRuntime,
@@ -460,10 +466,10 @@ impl<
     /// # Errors
     ///
     /// Returns any honest low-level fiber construction failure.
-    pub fn spawn_managed<'state, const META_FIBER_CAPACITY: usize, const MAX_CONSUMERS: usize>(
-        state: Pin<&'state mut Self>,
+    pub fn spawn_managed<const META_FIBER_CAPACITY: usize, const MAX_CONSUMERS: usize>(
+        state: Pin<&mut Self>,
         stack: FiberStack,
-    ) -> Result<ManagedFiber<'state, Self, META_FIBER_CAPACITY, MAX_CONSUMERS>, FiberError> {
+    ) -> Result<ManagedFiber<'_, Self, META_FIBER_CAPACITY, MAX_CONSUMERS>, FiberError> {
         Fiber::spawn_managed(stack, state)
     }
 
@@ -473,13 +479,12 @@ impl<
     ///
     /// Returns any honest low-level fiber construction failure.
     pub fn spawn_managed_with_publication<
-        'state,
         const META_FIBER_CAPACITY: usize,
         const MAX_CONSUMERS: usize,
     >(
-        state: Pin<&'state mut Self>,
+        state: Pin<&mut Self>,
         stack: FiberStack,
-    ) -> Result<ManagedFiber<'state, Self, META_FIBER_CAPACITY, MAX_CONSUMERS>, FiberError> {
+    ) -> Result<ManagedFiber<'_, Self, META_FIBER_CAPACITY, MAX_CONSUMERS>, FiberError> {
         Fiber::spawn_managed_with_publication(stack, state)
     }
 
@@ -498,7 +503,7 @@ impl<
         }
 
         while let Some(request) = self.control_channel.try_receive(self.control_consumer)? {
-            self.handle_request(request)?;
+            self.handle_request(request);
             self.flush_pending_status()?;
             self.flush_metadata()?;
             if self.pending_status.is_some() {
@@ -554,10 +559,7 @@ impl<
         }
     }
 
-    fn handle_request(
-        &mut self,
-        request: CurrentFiberAsyncRuntimeControlRequest,
-    ) -> Result<(), CurrentFiberAsyncRuntimeChannelServiceError> {
+    fn handle_request(&mut self, request: CurrentFiberAsyncRuntimeControlRequest) {
         self.pending_status = Some(match request {
             CurrentFiberAsyncRuntimeControlRequest::ReadConfiguredMemoryFootprint => {
                 match self.runtime.configured_memory_footprint() {
@@ -576,18 +578,13 @@ impl<
                 CurrentFiberAsyncRuntimeControlStatusMessage::MetadataRepublishScheduled
             }
         });
-        Ok(())
     }
 }
 
-impl<
-    'a,
-    const METADATA_CAPACITY: usize,
-    const CONTROL_CAPACITY: usize,
-    const STATUS_CAPACITY: usize,
-> FiberRunnable
+impl<const METADATA_CAPACITY: usize, const CONTROL_CAPACITY: usize, const STATUS_CAPACITY: usize>
+    FiberRunnable
     for CurrentFiberAsyncRuntimeChannelService<
-        'a,
+        '_,
         METADATA_CAPACITY,
         CONTROL_CAPACITY,
         STATUS_CAPACITY,
@@ -745,6 +742,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn runtime_channel_service_can_run_on_managed_fiber() {
         let runtime = CurrentFiberAsyncBootstrap::uniform(
             1,

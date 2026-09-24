@@ -121,7 +121,7 @@ pub fn write_candidate_groups(
 
     for_each_inventory_group(inventory, |record| {
         inventory_groups += 1;
-        let Some(candidate) = candidate_group_for_record(record, inventory, request) else {
+        let Some(candidate) = candidate_group_for_record(&record, inventory, request) else {
             return;
         };
 
@@ -147,7 +147,7 @@ pub(super) fn preferred_candidate_group(
     let mut best = None;
 
     for_each_inventory_group(inventory, |record| {
-        let Some(candidate) = candidate_group_for_record(record, inventory, request) else {
+        let Some(candidate) = candidate_group_for_record(&record, inventory, request) else {
             return;
         };
 
@@ -340,7 +340,7 @@ fn emit_unclassed_strategy_groups(
 }
 
 fn candidate_group_for_record(
-    record: InventoryGroupRecord,
+    record: &InventoryGroupRecord,
     inventory: MemoryProviderInventory<'_>,
     request: &MemoryPoolRequest<'_>,
 ) -> Option<CandidateGroupRecord> {

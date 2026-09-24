@@ -155,13 +155,13 @@ const CYW43439_WL_GPIO_SUPPORT: GpioSupport = GpioSupport {
         .union(GpioProviderCaps::INPUT)
         .union(GpioProviderCaps::OUTPUT),
     implementation: GpioImplementationKind::Native,
-    pin_count: CYW43439_WL_GPIO_PINS.len() as u16,
+    pin_count: 7,
 };
 
 fn force_wifi_only_mode() -> bool {
     matches!(
         option_env!("FUSION_CYW43439_WIFI_ONLY"),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
     )
 }
 
@@ -235,8 +235,7 @@ impl SharedCyw43439Slot {
                     return Ok(());
                 }
                 Err(INIT_READY) => return Ok(()),
-                Err(INIT_RUNNING) => spin_loop(),
-                Err(_) => spin_loop(),
+                Err(INIT_RUNNING | _) => spin_loop(),
             }
         }
     }
@@ -410,8 +409,9 @@ impl GpioHardwarePinContract for Cyw43439WlGpioPinHardware {
         CYW43439_WL_GPIO_PINS
             .iter()
             .find(|descriptor| descriptor.pin == self.wl_gpio)
-            .map(|descriptor| descriptor.capabilities)
-            .unwrap_or_else(GpioCapabilities::empty)
+            .map_or_else(GpioCapabilities::empty, |descriptor| {
+                descriptor.capabilities
+            })
     }
 
     fn set_function(&mut self, function: GpioFunction) -> Result<(), GpioError> {
@@ -814,10 +814,8 @@ fn cyw43439_binding() -> Result<Rp2350Cyw43439Binding, Cyw43439Error> {
         wifi.and_then(wifi_transport_pins),
     ) {
         (Some(transport), Some(other)) if transport == other => transport,
-        (Some(_), Some(_)) => return Err(Cyw43439Error::unsupported()),
-        (Some(transport), None) => transport,
-        (None, Some(transport)) => transport,
-        (None, None) => return Err(Cyw43439Error::unsupported()),
+        (Some(_), Some(_)) | (None, None) => return Err(Cyw43439Error::unsupported()),
+        (Some(transport), None) | (None, Some(transport)) => transport,
     };
 
     let power_gpio = merge_optional_pin(
@@ -904,7 +902,9 @@ fn rp2350_pico2w_firmware_assets(
     }
 }
 
-fn bluetooth_transport_pins(binding: CortexMBluetoothControllerBinding) -> Option<(u8, u8, u8)> {
+const fn bluetooth_transport_pins(
+    binding: CortexMBluetoothControllerBinding,
+) -> Option<(u8, u8, u8)> {
     match binding.transport {
         CortexMBluetoothTransportBinding::Spi3WireSharedDataIrq {
             clock_gpio,
@@ -916,7 +916,7 @@ fn bluetooth_transport_pins(binding: CortexMBluetoothControllerBinding) -> Optio
     }
 }
 
-fn wifi_transport_pins(binding: CortexMWifiControllerBinding) -> Option<(u8, u8, u8)> {
+const fn wifi_transport_pins(binding: CortexMWifiControllerBinding) -> Option<(u8, u8, u8)> {
     match binding.transport {
         CortexMWifiTransportBinding::Spi3WireSharedDataIrq {
             clock_gpio,
@@ -928,7 +928,8 @@ fn wifi_transport_pins(binding: CortexMWifiControllerBinding) -> Option<(u8, u8,
     }
 }
 
-fn bluetooth_transport_kind(
+#[allow(clippy::unnecessary_wraps)] // Trait contract represents backend selection as a fallible operation.
+const fn bluetooth_transport_kind(
     binding: CortexMBluetoothControllerBinding,
 ) -> Result<Cyw43439BluetoothTransport, Cyw43439Error> {
     match binding.transport {
@@ -948,7 +949,9 @@ fn bluetooth_transport_kind(
     }
 }
 
-fn bluetooth_transport_target_rate(binding: CortexMBluetoothControllerBinding) -> Option<u32> {
+const fn bluetooth_transport_target_rate(
+    binding: CortexMBluetoothControllerBinding,
+) -> Option<u32> {
     match binding.transport {
         CortexMBluetoothTransportBinding::Spi3WireSharedDataIrq {
             target_clock_hz, ..
@@ -960,7 +963,8 @@ fn bluetooth_transport_target_rate(binding: CortexMBluetoothControllerBinding) -
     }
 }
 
-fn wifi_transport_kind(
+#[allow(clippy::unnecessary_wraps)] // Trait contract represents backend selection as a fallible operation.
+const fn wifi_transport_kind(
     binding: CortexMWifiControllerBinding,
 ) -> Result<Cyw43439WlanTransport, Cyw43439Error> {
     match binding.transport {
@@ -972,7 +976,7 @@ fn wifi_transport_kind(
     }
 }
 
-fn wifi_transport_target_clock_hz(binding: CortexMWifiControllerBinding) -> Option<u32> {
+const fn wifi_transport_target_clock_hz(binding: CortexMWifiControllerBinding) -> Option<u32> {
     match binding.transport {
         CortexMWifiTransportBinding::Spi3WireSharedDataIrq {
             target_clock_hz, ..
@@ -986,7 +990,10 @@ fn wifi_transport_target_clock_hz(binding: CortexMWifiControllerBinding) -> Opti
     }
 }
 
-fn merge_optional_pin(left: Option<u8>, right: Option<u8>) -> Result<Option<u8>, Cyw43439Error> {
+const fn merge_optional_pin(
+    left: Option<u8>,
+    right: Option<u8>,
+) -> Result<Option<u8>, Cyw43439Error> {
     match (left, right) {
         (Some(left), Some(right)) if left != right => Err(Cyw43439Error::unsupported()),
         (Some(pin), _) | (_, Some(pin)) => Ok(Some(pin)),
@@ -994,7 +1001,10 @@ fn merge_optional_pin(left: Option<u8>, right: Option<u8>) -> Result<Option<u8>,
     }
 }
 
-fn merge_optional_u32(left: Option<u32>, right: Option<u32>) -> Result<Option<u32>, Cyw43439Error> {
+const fn merge_optional_u32(
+    left: Option<u32>,
+    right: Option<u32>,
+) -> Result<Option<u32>, Cyw43439Error> {
     match (left, right) {
         (Some(left), Some(right)) if left != right => Err(Cyw43439Error::unsupported()),
         (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
@@ -1002,7 +1012,10 @@ fn merge_optional_u32(left: Option<u32>, right: Option<u32>) -> Result<Option<u3
     }
 }
 
-fn merge_optional_u8(left: Option<u8>, right: Option<u8>) -> Result<Option<u8>, Cyw43439Error> {
+const fn merge_optional_u8(
+    left: Option<u8>,
+    right: Option<u8>,
+) -> Result<Option<u8>, Cyw43439Error> {
     match (left, right) {
         (Some(left), Some(right)) if left != right => Err(Cyw43439Error::unsupported()),
         (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
@@ -1039,7 +1052,7 @@ fn rp2350_cyw43439_host_source_clock_hz() -> Option<u64> {
     current_sys_clock_hz()
 }
 
-fn map_gpio_error(error: GpioError) -> Cyw43439Error {
+const fn map_gpio_error(error: GpioError) -> Cyw43439Error {
     match error.kind() {
         GpioErrorKind::Unsupported => Cyw43439Error::unsupported(),
         GpioErrorKind::Invalid => Cyw43439Error::invalid(),
@@ -1050,7 +1063,7 @@ fn map_gpio_error(error: GpioError) -> Cyw43439Error {
     }
 }
 
-fn map_cyw_gpio_error(error: Cyw43439Error) -> GpioError {
+const fn map_cyw_gpio_error(error: Cyw43439Error) -> GpioError {
     match error.kind() {
         fd_net_chipset_infineon_cyw43439::interface::contract::Cyw43439ErrorKind::Unsupported => {
             GpioError::unsupported()

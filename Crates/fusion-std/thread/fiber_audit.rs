@@ -280,10 +280,10 @@ impl<
     /// # Errors
     ///
     /// Returns any honest low-level fiber construction failure.
-    pub fn spawn_managed<'state, const META_FIBER_CAPACITY: usize, const MAX_CONSUMERS: usize>(
-        state: Pin<&'state mut Self>,
+    pub fn spawn_managed<const META_FIBER_CAPACITY: usize, const MAX_CONSUMERS: usize>(
+        state: Pin<&mut Self>,
         stack: FiberStack,
-    ) -> Result<ManagedFiber<'state, Self, META_FIBER_CAPACITY, MAX_CONSUMERS>, FiberError> {
+    ) -> Result<ManagedFiber<'_, Self, META_FIBER_CAPACITY, MAX_CONSUMERS>, FiberError> {
         Fiber::spawn_managed(stack, state)
     }
 
@@ -293,13 +293,12 @@ impl<
     ///
     /// Returns any honest low-level fiber construction failure.
     pub fn spawn_managed_with_publication<
-        'state,
         const META_FIBER_CAPACITY: usize,
         const MAX_CONSUMERS: usize,
     >(
-        state: Pin<&'state mut Self>,
+        state: Pin<&mut Self>,
         stack: FiberStack,
-    ) -> Result<ManagedFiber<'state, Self, META_FIBER_CAPACITY, MAX_CONSUMERS>, FiberError> {
+    ) -> Result<ManagedFiber<'_, Self, META_FIBER_CAPACITY, MAX_CONSUMERS>, FiberError> {
         Fiber::spawn_managed_with_publication(stack, state)
     }
 
@@ -395,13 +394,9 @@ impl<
     }
 }
 
-impl<
-    'a,
-    const METADATA_CAPACITY: usize,
-    const CONTROL_CAPACITY: usize,
-    const STATUS_CAPACITY: usize,
-> FiberRunnable
-    for CurrentFiberPoolChannelService<'a, METADATA_CAPACITY, CONTROL_CAPACITY, STATUS_CAPACITY>
+impl<const METADATA_CAPACITY: usize, const CONTROL_CAPACITY: usize, const STATUS_CAPACITY: usize>
+    FiberRunnable
+    for CurrentFiberPoolChannelService<'_, METADATA_CAPACITY, CONTROL_CAPACITY, STATUS_CAPACITY>
 {
     fn run(mut self: Pin<&mut Self>) -> FiberReturn {
         let service = self.as_mut().get_mut();

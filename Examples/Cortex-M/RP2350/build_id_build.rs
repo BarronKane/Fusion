@@ -143,13 +143,12 @@ fn emit_root_fiber_contracts_env() {
     let output = command.output().unwrap_or_else(|error| {
         panic!("failed to run fusion_std_fiber_task_pipeline for root task contracts: {error}")
     });
-    if !output.status.success() {
-        panic!(
-            "fusion_std_fiber_task_pipeline failed for root task contracts with status {}:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+    assert!(
+        output.status.success(),
+        "fusion_std_fiber_task_pipeline failed for root task contracts with status {}:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     println!(
         "cargo:rustc-env={ROOT_TASK_CONTRACTS_ENV}={}",

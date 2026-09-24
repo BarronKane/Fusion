@@ -24,7 +24,7 @@ pub enum Platform {
     Ios,
     /// Linux and Linux-compatible userspace environments.
     Linux,
-    /// Apple MacOS and closely related desktop Darwin targets.
+    /// Apple macOS and closely related desktop Darwin targets.
     MacOs,
     /// Microsoft Windows targets.
     Windows,

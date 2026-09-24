@@ -32,6 +32,10 @@ pub struct AllocatorLayoutPolicy {
 impl AllocatorLayoutPolicy {
     /// Returns one exact, thin allocator layout policy for static or physically bound memory.
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub const fn exact_static() -> Self {
         Self {
             metadata_granule: NonZeroUsize::new(1).expect("non-zero"),
@@ -45,6 +49,10 @@ impl AllocatorLayoutPolicy {
     /// Returns one hosted virtual-memory allocator layout policy shaped around the supplied page
     /// granule.
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub const fn hosted_vm(page_granule: NonZeroUsize) -> Self {
         Self {
             metadata_granule: page_granule,

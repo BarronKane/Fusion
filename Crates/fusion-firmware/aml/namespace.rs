@@ -85,6 +85,10 @@ impl<'records, 'blocks> AmlLoadedNamespace<'records, 'blocks> {
             .find(|record| record.descriptor.path == path)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn resolve_lookup_path(
         self,
         current_scope_path: AmlResolvedNamePath,

@@ -192,10 +192,13 @@ impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
         }
     }
 
-    fn validate_attach_request(request: TransportAttachmentRequest) -> Result<(), TransportError> {
+    const fn validate_attach_request(
+        request: TransportAttachmentRequest,
+    ) -> Result<(), TransportError> {
         match request.scope {
-            TransportAttachmentScope::SameCourier => Ok(()),
-            TransportAttachmentScope::CrossCourier => Ok(()),
+            TransportAttachmentScope::SameCourier | TransportAttachmentScope::CrossCourier => {
+                Ok(())
+            }
             TransportAttachmentScope::CrossDomain => Err(TransportError::unsupported()),
         }
     }
@@ -225,6 +228,10 @@ impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     ///
     /// This is intentionally inspection-only. It exists to debug channel-integrity failures
     /// without smuggling a second control plane into normal runtime behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn debug_state(&self) -> Result<LocalChannelDebugState, ChannelError> {
         let state = self
             .state
@@ -238,7 +245,7 @@ impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
             head_occupied: state.buffer[state.head].is_some(),
             consumer_count: state.consumer_count(),
             producer_attached: state.producer.is_some(),
-            channel_addr: self as *const Self as usize,
+            channel_addr: core::ptr::from_ref::<Self>(self) as usize,
         })
     }
 }
@@ -292,10 +299,10 @@ impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
             .try_lock()
             .map_err(transport_error_from_sync)?
             .ok_or_else(TransportError::busy)?;
-        if let Some(requested_law) = request.requested_law {
-            if requested_law != state.attachment_law {
-                return Err(TransportError::permission_denied());
-            }
+        if let Some(requested_law) = request.requested_law
+            && requested_law != state.attachment_law
+        {
+            return Err(TransportError::permission_denied());
         }
         if state.producer.is_some() {
             return Err(TransportError::busy());
@@ -316,17 +323,21 @@ impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
             .try_lock()
             .map_err(transport_error_from_sync)?
             .ok_or_else(TransportError::busy)?;
-        if let Some(requested_law) = request.requested_law {
-            if requested_law != state.attachment_law {
-                return Err(TransportError::permission_denied());
-            }
+        if let Some(requested_law) = request.requested_law
+            && requested_law != state.attachment_law
+        {
+            return Err(TransportError::permission_denied());
         }
         if matches!(state.attachment_law, TransportAttachmentLaw::ExclusiveSpsc)
             && state.consumer_count() >= 1
         {
             return Err(TransportError::state_conflict());
         }
-        let Some(slot_index) = state.consumers.iter().position(|slot| slot.is_none()) else {
+        let Some(slot_index) = state
+            .consumers
+            .iter()
+            .position(core::option::Option::is_none)
+        else {
             return Err(TransportError::resource_exhausted());
         };
         let token = state.next_attachment;

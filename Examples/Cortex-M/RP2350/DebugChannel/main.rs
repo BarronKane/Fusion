@@ -24,7 +24,10 @@
 
 use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{
+    AtomicU8,
+    Ordering,
+};
 
 use cortex_m_rt::{
     ExceptionFrame,
@@ -134,16 +137,16 @@ fn build_display() -> Result<Rp2350TimerFourDigitSevenSegmentDisplay, GpioError>
     )
 }
 
-fn set_status(display: &Rp2350TimerFourDigitSevenSegmentDisplay, code: u16) {
+fn set_status(display: Rp2350TimerFourDigitSevenSegmentDisplay, code: u16) {
     let _ = display.set_hex(code);
 }
 
-fn fatal_status(display: &Rp2350TimerFourDigitSevenSegmentDisplay, code: u16) -> ! {
+fn fatal_status(display: Rp2350TimerFourDigitSevenSegmentDisplay, code: u16) -> ! {
     set_status(display, code);
     panic_led_on()
 }
 
-fn status_for_usb_state(state: UsbDeviceState) -> u16 {
+const fn status_for_usb_state(state: UsbDeviceState) -> u16 {
     match state {
         UsbDeviceState::Configured => STATUS_USB_CONFIGURED,
         UsbDeviceState::Default | UsbDeviceState::Addressed | UsbDeviceState::Suspended => {
@@ -156,8 +159,8 @@ fn status_for_usb_state(state: UsbDeviceState) -> u16 {
 }
 
 fn update_usb_state_status(
-    usb: &mut impl UsbDeviceControllerContract,
-    display: &Rp2350TimerFourDigitSevenSegmentDisplay,
+    usb: &impl UsbDeviceControllerContract,
+    display: Rp2350TimerFourDigitSevenSegmentDisplay,
 ) -> UsbDeviceState {
     let state = usb.device_state();
     set_status(display, status_for_usb_state(state));
@@ -165,8 +168,8 @@ fn update_usb_state_status(
 }
 
 fn wait_for_usb_configuration(
-    usb: &mut impl UsbDeviceControllerContract,
-    display: &Rp2350TimerFourDigitSevenSegmentDisplay,
+    usb: &impl UsbDeviceControllerContract,
+    display: Rp2350TimerFourDigitSevenSegmentDisplay,
 ) {
     set_status(display, STATUS_USB_DEVICE_READY);
     let mut saw_host = false;
@@ -197,7 +200,7 @@ fn wait_for_usb_configuration(
 
 fn pump_usb_loopback(
     usb: &mut impl UsbDeviceControllerContract,
-    display: &Rp2350TimerFourDigitSevenSegmentDisplay,
+    display: Rp2350TimerFourDigitSevenSegmentDisplay,
     pending: &mut [u8; 64],
     pending_len: &mut usize,
     saw_bulk_activity: &mut bool,
@@ -236,42 +239,40 @@ fn pump_usb_loopback(
 
 #[fusion_firmware::fusion_firmware_main]
 fn main() -> ! {
-    let display = match build_display() {
-        Ok(display) => display,
-        Err(_) => panic_led_on(),
+    let Ok(display) = build_display() else {
+        panic_led_on();
     };
 
-    set_status(&display, STATUS_STARTUP);
-    set_status(&display, STATUS_DISPLAY_READY);
+    set_status(display, STATUS_STARTUP);
+    set_status(display, STATUS_DISPLAY_READY);
 
-    let mut usb = match system_usb_device_controller() {
-        Ok(usb) => usb,
-        Err(_) => fatal_status(&display, STATUS_ERROR_USB_BIND),
+    let Ok(mut usb) = system_usb_device_controller() else {
+        fatal_status(display, STATUS_ERROR_USB_BIND);
     };
 
-    set_status(&display, STATUS_USB_BOUND);
-    wait_for_usb_configuration(&mut usb, &display);
+    set_status(display, STATUS_USB_BOUND);
+    wait_for_usb_configuration(&usb, display);
 
     let mut pending_loopback = [0_u8; 64];
     let mut pending_loopback_len = 0;
     let mut saw_bulk_activity = false;
 
     loop {
-        let state = update_usb_state_status(&mut usb, &display);
+        let state = update_usb_state_status(&usb, display);
         if matches!(state, UsbDeviceState::Configured)
             && pump_usb_loopback(
                 &mut usb,
-                &display,
+                display,
                 &mut pending_loopback,
                 &mut pending_loopback_len,
                 &mut saw_bulk_activity,
             )
             .is_err()
         {
-            fatal_status(&display, STATUS_ERROR_USB_TRANSFER);
+            fatal_status(display, STATUS_ERROR_USB_TRANSFER);
         } else if matches!(state, UsbDeviceState::Configured) {
             set_status(
-                &display,
+                display,
                 if saw_bulk_activity || pending_loopback_len != 0 {
                     STATUS_USB_BULK_ACTIVITY
                 } else {

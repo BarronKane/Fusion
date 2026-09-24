@@ -29,11 +29,19 @@ impl Default for AmlParserConfig {
 pub struct AmlParser;
 
 impl AmlParser {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn parse_pkg_length(bytes: &[u8]) -> AmlResult<AmlPkgLength> {
         AmlPkgLength::parse(bytes)
     }
 
-    pub fn parse_encoded_name_string<'a>(bytes: &'a [u8]) -> AmlResult<AmlEncodedNameString<'a>> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
+    pub fn parse_encoded_name_string(bytes: &[u8]) -> AmlResult<AmlEncodedNameString<'_>> {
         AmlEncodedNameString::parse(bytes)
     }
 }

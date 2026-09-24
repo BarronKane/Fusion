@@ -43,7 +43,7 @@ impl Cyw43439PackedWlanFirmwareImage {
     #[must_use]
     pub const fn padded_firmware_len(self) -> usize {
         let align = CYW43439_COMBINED_WIFI_ALIGNMENT_BYTES;
-        ((self.firmware_len + align - 1) / align) * align
+        self.firmware_len.div_ceil(align) * align
     }
 
     #[must_use]

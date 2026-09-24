@@ -141,6 +141,7 @@ const RP2350_PIO_SRC_DEST_ISR: u16 = 6;
 const RP2350_PIO_SRC_DEST_OSR: u16 = 7;
 
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_execution_is_default(execution: &PcuIrExecutionConfig) -> bool {
     execution.clocking.divider_integer.is_none()
         && execution.clocking.divider_fractional.is_none()
@@ -175,6 +176,7 @@ const fn rp2350_encode_instr_and_args(instr_bits: u16, arg1: u16, arg2: u16) -> 
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_jmp_condition(condition: PcuIrJumpCondition, target: u8) -> u16 {
     let arg1 = match condition {
         PcuIrJumpCondition::Always => 0,
@@ -194,6 +196,7 @@ pub const fn rp2350_encode_jmp_condition(condition: PcuIrJumpCondition, target: 
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_wait_gpio(polarity: bool, pin: u8) -> u16 {
     rp2350_encode_instr_and_args(
         RP2350_PIO_MAJOR_WAIT,
@@ -207,6 +210,7 @@ pub const fn rp2350_encode_wait_gpio(polarity: bool, pin: u8) -> u16 {
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_wait_pin(polarity: bool, pin: u8) -> u16 {
     rp2350_encode_instr_and_args(
         RP2350_PIO_MAJOR_WAIT,
@@ -228,6 +232,7 @@ const fn rp2350_encode_irq_index(relative: bool, irq: u8) -> u16 {
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_wait_irq(polarity: bool, relative: bool, irq: u8) -> u16 {
     rp2350_encode_instr_and_args(
         RP2350_PIO_MAJOR_WAIT,
@@ -241,6 +246,7 @@ pub const fn rp2350_encode_wait_irq(polarity: bool, relative: bool, irq: u8) -> 
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_wait_jmp_pin(polarity: bool) -> u16 {
     rp2350_encode_instr_and_args(RP2350_PIO_MAJOR_WAIT, 3 | if polarity { 4 } else { 0 }, 0)
 }
@@ -250,6 +256,7 @@ pub const fn rp2350_encode_wait_jmp_pin(polarity: bool) -> u16 {
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_in(source: PcuIrInSource, count: u8) -> u16 {
     let arg1 = match source {
         PcuIrInSource::Pins => RP2350_PIO_SRC_DEST_PINS,
@@ -268,6 +275,7 @@ pub const fn rp2350_encode_in(source: PcuIrInSource, count: u8) -> u16 {
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_out(destination: PcuIrOutDestination, count: u8) -> u16 {
     let arg1 = match destination {
         PcuIrOutDestination::Pins => RP2350_PIO_SRC_DEST_PINS,
@@ -287,6 +295,7 @@ pub const fn rp2350_encode_out(destination: PcuIrOutDestination, count: u8) -> u
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_push(if_full: bool, block: bool) -> u16 {
     rp2350_encode_instr_and_args(
         RP2350_PIO_MAJOR_PUSH,
@@ -300,6 +309,7 @@ pub const fn rp2350_encode_push(if_full: bool, block: bool) -> u16 {
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_pull(if_empty: bool, block: bool) -> u16 {
     rp2350_encode_instr_and_args(
         RP2350_PIO_MAJOR_PULL,
@@ -313,6 +323,7 @@ pub const fn rp2350_encode_pull(if_empty: bool, block: bool) -> u16 {
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_mov(
     destination: PcuIrMovDestination,
     operation: PcuIrMovOperation,
@@ -349,6 +360,7 @@ pub const fn rp2350_encode_mov(
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_irq(action: PcuIrIrqAction, relative: bool, index: u8) -> u16 {
     let arg1 = match action {
         PcuIrIrqAction::Set => 0,
@@ -367,6 +379,7 @@ pub const fn rp2350_encode_irq(action: PcuIrIrqAction, relative: bool, index: u8
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_set(destination: PcuIrSetDestination, value: u8) -> u16 {
     let arg1 = match destination {
         PcuIrSetDestination::Pins => RP2350_PIO_SRC_DEST_PINS,
@@ -382,6 +395,7 @@ pub const fn rp2350_encode_set(destination: PcuIrSetDestination, value: u8) -> u
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[must_use]
 pub const fn rp2350_encode_nop() -> u16 {
     rp2350_encode_instr_and_args(
         RP2350_PIO_MAJOR_MOV,
@@ -675,6 +689,7 @@ pub fn rp2350_build_execution_registers(
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 ))]
 #[doc(hidden)]
+#[allow(clippy::too_many_lines)] // Keep ordered instruction encoding and validation auditable together.
 pub fn lower_rp2350_program<'a>(
     program: &PcuIrProgram<'_>,
     storage: &'a mut [u16],
@@ -801,6 +816,7 @@ pub fn lower_rp2350_program<'a>(
     all(target_os = "none", feature = "sys-cortex-m", feature = "soc-rp2350")
 )))]
 #[doc(hidden)]
+#[allow(clippy::too_many_lines)] // Keep ordered instruction encoding and validation auditable together.
 pub fn lower_rp2350_program<'a>(
     program: &PcuIrProgram<'_>,
     storage: &'a mut [u16],

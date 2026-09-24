@@ -234,10 +234,9 @@ impl MonotonicRuntimeTimeSupport {
             }
         });
         let deadline_wait = deadline_wait_support_for_selected_backend(caps);
-        if deadline_wait.is_some() {
-            caps |= MonotonicRuntimeTimeCaps::SLEEP_UNTIL;
-        } else if caps.contains(MonotonicRuntimeTimeCaps::NOW)
-            && caps.contains(MonotonicRuntimeTimeCaps::SLEEP_FOR)
+        if deadline_wait.is_some()
+            || (caps.contains(MonotonicRuntimeTimeCaps::NOW)
+                && caps.contains(MonotonicRuntimeTimeCaps::SLEEP_FOR))
         {
             caps |= MonotonicRuntimeTimeCaps::SLEEP_UNTIL;
         }
@@ -441,7 +440,7 @@ impl MonotonicRuntimeTime {
     /// Returns an error if the backend cannot surface one truthful monotonic runtime timestamp.
     #[doc(hidden)]
     pub fn raw_now(&self) -> Result<MonotonicRawInstant, ThreadError> {
-        raw_now_for_selected_backend(self)
+        raw_now_for_selected_backend(*self)
     }
 
     /// Converts one canonical instant back into the raw counter space used by the selected backend.
@@ -453,7 +452,9 @@ impl MonotonicRuntimeTime {
     ) -> Option<MonotonicRawInstant> {
         match self.support().raw_bits {
             Some(bits) if bits >= 64 => Some(MonotonicRawInstant::Bits64(deadline.raw())),
-            Some(bits) if bits > 0 => Some(MonotonicRawInstant::Bits32(deadline.raw() as u32)),
+            Some(bits) if bits > 0 => Some(MonotonicRawInstant::Bits32(
+                u32::try_from(deadline.raw() & u64::from(u32::MAX)).unwrap_or(0),
+            )),
             _ => None,
         }
     }
@@ -590,6 +591,7 @@ pub const fn system_monotonic_time() -> MonotonicRuntimeTime {
     MonotonicRuntimeTime::new()
 }
 
+#[allow(clippy::missing_const_for_fn)] // The Cortex-M backend queries target clock configuration at runtime.
 fn monotonic_raw_bits_for_selected_backend(caps: MonotonicRuntimeTimeCaps) -> Option<u32> {
     if !caps.contains(MonotonicRuntimeTimeCaps::NOW) {
         return None;
@@ -605,6 +607,7 @@ fn monotonic_raw_bits_for_selected_backend(caps: MonotonicRuntimeTimeCaps) -> Op
     Some(64)
 }
 
+#[allow(clippy::missing_const_for_fn)] // The Cortex-M backend queries target clock configuration at runtime.
 fn monotonic_tick_hz_for_selected_backend(caps: MonotonicRuntimeTimeCaps) -> Option<u64> {
     if !caps.contains(MonotonicRuntimeTimeCaps::NOW) {
         return None;
@@ -652,7 +655,7 @@ fn deadline_wait_support_for_selected_backend(
 }
 
 fn raw_now_for_selected_backend(
-    clock: &MonotonicRuntimeTime,
+    clock: MonotonicRuntimeTime,
 ) -> Result<MonotonicRawInstant, ThreadError> {
     #[cfg(all(target_os = "none", feature = "sys-cortex-m"))]
     {
@@ -685,7 +688,7 @@ pub fn extend_32_snapshot(high: &AtomicU32, mut raw_now: impl FnMut() -> u32) ->
         let low = raw_now();
         let high_after = high.load(Ordering::Acquire);
         if high_before == high_after {
-            return ((high_before as u64) << 32) | low as u64;
+            return (u64::from(high_before) << 32) | u64::from(low);
         }
     }
 }
@@ -714,9 +717,9 @@ fn extend_32_software(raw: u32) -> u64 {
                 Ordering::Acquire,
             );
             let high = MONOTONIC_EXTENDED32_HIGH.load(Ordering::Acquire);
-            return ((high as u64) << 32) | raw as u64;
+            return (u64::from(high) << 32) | u64::from(raw);
         }
-        return ((observed_high as u64) << 32) | raw as u64;
+        return (u64::from(observed_high) << 32) | u64::from(raw);
     }
 }
 
@@ -764,11 +767,11 @@ fn duration_to_ticks_floor(duration: Duration, tick_hz: u64) -> Result<u64, Thre
     }
 
     #[cfg(not(feature = "sys-cortex-m"))]
-    let whole = (duration.as_secs() as u128)
-        .checked_mul(tick_hz as u128)
+    let whole = u128::from(duration.as_secs())
+        .checked_mul(u128::from(tick_hz))
         .ok_or_else(ThreadError::invalid)?;
     #[cfg(not(feature = "sys-cortex-m"))]
-    let fractional = ((duration.subsec_nanos() as u128) * (tick_hz as u128)) / NANOS_PER_SECOND;
+    let fractional = (u128::from(duration.subsec_nanos()) * u128::from(tick_hz)) / NANOS_PER_SECOND;
     #[cfg(not(feature = "sys-cortex-m"))]
     u64::try_from(whole + fractional).map_err(|_| ThreadError::invalid())
 }
@@ -790,11 +793,11 @@ fn duration_to_ticks_ceil(duration: Duration, tick_hz: u64) -> Result<u64, Threa
     }
 
     #[cfg(not(feature = "sys-cortex-m"))]
-    let whole = (duration.as_secs() as u128)
-        .checked_mul(tick_hz as u128)
+    let whole = u128::from(duration.as_secs())
+        .checked_mul(u128::from(tick_hz))
         .ok_or_else(ThreadError::invalid)?;
     #[cfg(not(feature = "sys-cortex-m"))]
-    let fractional_numerator = (duration.subsec_nanos() as u128) * (tick_hz as u128);
+    let fractional_numerator = u128::from(duration.subsec_nanos()) * u128::from(tick_hz);
     #[cfg(not(feature = "sys-cortex-m"))]
     let fractional = fractional_numerator.div_ceil(NANOS_PER_SECOND);
     #[cfg(not(feature = "sys-cortex-m"))]
@@ -819,7 +822,7 @@ fn ticks_to_duration_floor(ticks: u64, tick_hz: u64) -> Result<Duration, ThreadE
     #[cfg(not(feature = "sys-cortex-m"))]
     let rem_ticks = ticks % tick_hz;
     #[cfg(not(feature = "sys-cortex-m"))]
-    let nanos = ((rem_ticks as u128) * NANOS_PER_SECOND) / (tick_hz as u128);
+    let nanos = (u128::from(rem_ticks) * NANOS_PER_SECOND) / u128::from(tick_hz);
     #[cfg(not(feature = "sys-cortex-m"))]
     let nanos = u32::try_from(nanos).map_err(|_| ThreadError::invalid())?;
     #[cfg(not(feature = "sys-cortex-m"))]
@@ -845,20 +848,26 @@ fn ticks_to_duration_ceil(ticks: u64, tick_hz: u64) -> Result<Duration, ThreadEr
         let (secs, nanos) = if nanos >= NANOS_PER_SECOND_U64 {
             (secs.checked_add(1).ok_or_else(ThreadError::invalid)?, 0_u32)
         } else {
-            (secs, nanos as u32)
+            (
+                secs,
+                u32::try_from(nanos).map_err(|_| ThreadError::invalid())?,
+            )
         };
         return Ok(Duration::new(secs, nanos));
     }
 
     #[cfg(not(feature = "sys-cortex-m"))]
-    let nanos = ((rem_ticks as u128) * NANOS_PER_SECOND).div_ceil(tick_hz as u128);
+    let nanos = (u128::from(rem_ticks) * NANOS_PER_SECOND).div_ceil(u128::from(tick_hz));
     #[cfg(not(feature = "sys-cortex-m"))]
     let nanos = u64::try_from(nanos).map_err(|_| ThreadError::invalid())?;
     #[cfg(not(feature = "sys-cortex-m"))]
     let (secs, nanos) = if nanos >= 1_000_000_000 {
         (secs.checked_add(1).ok_or_else(ThreadError::invalid)?, 0_u32)
     } else {
-        (secs, nanos as u32)
+        (
+            secs,
+            u32::try_from(nanos).map_err(|_| ThreadError::invalid())?,
+        )
     };
     #[cfg(not(feature = "sys-cortex-m"))]
     Ok(Duration::new(secs, nanos))

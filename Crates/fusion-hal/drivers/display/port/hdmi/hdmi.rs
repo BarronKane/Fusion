@@ -141,17 +141,27 @@ pub trait HdmiHardware {
     fn provider_count() -> u8;
     fn output_descriptor(provider: u8) -> Option<&'static DisplayOutputDescriptor>;
 
+    /// # Errors
+    /// Returns a hardware error when connector state cannot be read.
     fn connected(provider: u8) -> DisplayResult<bool>;
+    /// # Errors
+    /// Returns a hardware error when raw descriptors cannot be read.
     fn raw_descriptors(provider: u8) -> DisplayResult<DisplayDescriptorSet<'static>>;
 
+    /// # Errors
+    /// Returns a hardware error when feature support cannot be queried.
     fn feature_capabilities(_provider: u8) -> DisplayResult<DisplayFeatureCapabilities> {
         Ok(DisplayFeatureCapabilities::default())
     }
 
+    /// # Errors
+    /// Returns an error when the feature is unsupported or its value cannot be read.
     fn get_feature(_provider: u8, _feature: DisplayFeature) -> DisplayResult<DisplayFeatureValue> {
         Err(DisplayError::unsupported())
     }
 
+    /// # Errors
+    /// Returns an error when the feature is unsupported or its value cannot be changed.
     fn set_feature(
         _provider: u8,
         _feature: DisplayFeature,
@@ -160,6 +170,8 @@ pub trait HdmiHardware {
         Err(DisplayError::unsupported())
     }
 
+    /// # Errors
+    /// Returns a hardware error when connector state cannot be read.
     fn power_state(provider: u8) -> DisplayResult<DisplayPowerState> {
         if Self::connected(provider)? {
             Ok(DisplayPowerState::On)
@@ -168,30 +180,60 @@ pub trait HdmiHardware {
         }
     }
 
+    /// # Errors
+    /// Returns an error when the power state cannot be changed.
     fn set_power_state(_provider: u8, _state: DisplayPowerState) -> DisplayResult<()> {
         Err(DisplayError::unsupported())
     }
 
+    /// # Errors
+    /// Returns a hardware error when the port descriptor cannot be read.
     fn port_descriptor(provider: u8) -> DisplayResult<DisplayPortDescriptor>;
+    /// # Errors
+    /// Returns a hardware error when port capabilities cannot be read.
     fn port_capabilities(provider: u8) -> DisplayResult<DisplayPortCapabilities>;
+    /// # Errors
+    /// Returns a hardware error when runtime state cannot be read.
     fn runtime_state(provider: u8) -> DisplayResult<HdmiRuntimeState>;
+    /// # Errors
+    /// Returns a hardware or validation error when the configuration cannot be set.
     fn set_config(provider: u8, config: &DisplayActiveConfig) -> DisplayResult<()>;
+    /// # Errors
+    /// Returns a hardware error when the output cannot be enabled.
     fn enable(provider: u8) -> DisplayResult<()>;
+    /// # Errors
+    /// Returns a hardware error when the output cannot be disabled.
     fn disable(provider: u8) -> DisplayResult<()>;
+    /// # Errors
+    /// Returns a hardware error when blanking state cannot be changed.
     fn blank(provider: u8, blanked: bool) -> DisplayResult<()>;
+    /// # Errors
+    /// Returns a hardware error when the surface cannot be attached.
     fn attach_surface(provider: u8, surface: DisplaySurfaceBinding) -> DisplayResult<()>;
+    /// # Errors
+    /// Returns a hardware error when the surface cannot be detached.
     fn detach_surface(provider: u8) -> DisplayResult<()>;
+    /// # Errors
+    /// Returns a hardware or validation error when frame upload fails.
     fn upload_frame(
         provider: u8,
         frame: &DisplayFrameView<'_>,
         region: Option<DisplayRegion>,
     ) -> DisplayResult<DisplayUploadReport>;
+    /// # Errors
+    /// Returns a hardware or validation error when presentation fails.
     fn present(
         provider: u8,
         request: &DisplayPresentRequest,
     ) -> DisplayResult<DisplayPresentReport>;
+    /// # Errors
+    /// Returns a hardware error when queued output work cannot be completed.
     fn flush(provider: u8) -> DisplayResult<()>;
+    /// # Errors
+    /// Returns a hardware error when synchronization with vertical blank fails.
     fn wait_vblank(provider: u8, timeout_ms: u32) -> DisplayResult<()>;
+    /// # Errors
+    /// Returns a hardware error when waiting for hot-plug events fails.
     fn wait_hotplug_event(
         provider: u8,
         timeout_ms: u32,
@@ -496,11 +538,11 @@ impl<'a, H> HdmiPort<'a, H>
 where
     H: HdmiHardware,
 {
-    fn new(hdmi: &'a Hdmi<H>) -> Self {
+    const fn new(hdmi: &'a Hdmi<H>) -> Self {
         Self { hdmi }
     }
 
-    fn provider(&self) -> u8 {
+    const fn provider(&self) -> u8 {
         self.hdmi.provider
     }
 }
@@ -581,7 +623,7 @@ where
     }
 }
 
-impl<'a, H> DisplayPortContract for HdmiPort<'a, H>
+impl<H> DisplayPortContract for HdmiPort<'_, H>
 where
     H: HdmiHardware,
 {

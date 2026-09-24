@@ -108,6 +108,10 @@ impl AmlVm {
         }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn register_regions(
         &mut self,
         namespace: AmlLoadedNamespace<'_, '_>,
@@ -189,6 +193,10 @@ impl AmlVm {
         Ok(report)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn initialize_devices(
         &mut self,
         namespace: AmlLoadedNamespace<'_, '_>,
@@ -214,7 +222,7 @@ impl AmlVm {
                 continue;
             }
 
-            let decision = self.should_run_initializer(
+            let decision = Self::should_run_initializer(
                 namespace,
                 &evaluator,
                 host,
@@ -255,6 +263,10 @@ impl AmlVm {
         Ok(report)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn dispatch_notification_query(
         &mut self,
         namespace: AmlLoadedNamespace<'_, '_>,
@@ -272,6 +284,10 @@ impl AmlVm {
         )
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn dispatch_event_handler(
         &mut self,
         namespace: AmlLoadedNamespace<'_, '_>,
@@ -295,7 +311,6 @@ impl AmlVm {
     }
 
     fn should_run_initializer(
-        &self,
         namespace: AmlLoadedNamespace<'_, '_>,
         evaluator: &AmlPureEvaluator<'_, '_>,
         host: &dyn AmlRegionAccessHost,
@@ -475,12 +490,12 @@ mod tests {
     fn encode_pkg_length(payload_len: usize) -> Vec<u8> {
         let one_byte_value = payload_len + 1;
         if one_byte_value < 0x40 {
-            return vec![one_byte_value as u8];
+            return vec![u8::try_from(one_byte_value).expect("short AML package length fits")];
         }
         let two_byte_value = payload_len + 2;
         vec![
-            0b0100_0000 | ((two_byte_value & 0x0f) as u8),
-            ((two_byte_value >> 4) & 0xff) as u8,
+            0b0100_0000 | u8::try_from(two_byte_value & 0x0f).expect("low nibble fits"),
+            u8::try_from((two_byte_value >> 4) & 0xff).expect("high byte fits"),
         ]
     }
 
@@ -534,7 +549,11 @@ mod tests {
     fn definition_block(payload: &[u8]) -> AmlDefinitionBlock<'static> {
         let mut table = Vec::from([0_u8; 36]);
         table[0..4].copy_from_slice(b"DSDT");
-        table[4..8].copy_from_slice(&((36 + payload.len()) as u32).to_le_bytes());
+        table[4..8].copy_from_slice(
+            &u32::try_from(36 + payload.len())
+                .expect("test DSDT fits in u32")
+                .to_le_bytes(),
+        );
         table[8] = 2;
         table[10..16].copy_from_slice(b"FUSION");
         table[16..24].copy_from_slice(b"AMLVM___");

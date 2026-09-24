@@ -1,6 +1,6 @@
 //! USB class vocabulary layered above USB framework law.
 
-use super::core::*;
+use super::core::UsbCoreContract;
 
 /// Canonical USB standard class-code family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

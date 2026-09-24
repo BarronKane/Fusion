@@ -54,7 +54,7 @@ pub struct ChannelSupport {
 /// Fusion channels are one-way only. Request/reply or duplex interactions are modeled as paired
 /// channels rather than one bidirectional object pretending to be simpler than it is.
 pub trait ChannelBaseContract: TransportAttachmentControlContract {
-    /// ProtocolContract carried by this channel.
+    /// `ProtocolContract` carried by this channel.
     type ProtocolContract: ProtocolContract;
 
     /// Returns the truthful support surface for this channel instance.

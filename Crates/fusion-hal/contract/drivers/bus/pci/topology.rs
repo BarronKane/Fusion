@@ -1,6 +1,9 @@
 //! PCI topology and hierarchy vocabulary.
 
-use super::core::*;
+use super::core::{
+    PciFunctionAddress,
+    PciBus,
+};
 
 /// Topology-adjacent relationship truth for one function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

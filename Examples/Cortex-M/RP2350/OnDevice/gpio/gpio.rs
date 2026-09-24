@@ -84,13 +84,8 @@ pub static RP2350_GPIO_SERVICE_SPAWN_PHASE: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone, Copy)]
 enum Rp2350GpioBatchOp {
-    SetLevel {
-        slot_index: u8,
-        high: bool,
-    },
-    Pause {
-        spins: u8,
-    },
+    SetLevel { slot_index: u8, high: bool },
+    Pause { spins: u8 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -175,14 +170,23 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
             TransportAttachmentLaw::ExclusiveSpsc,
         )
         .map_err(gpio_error_from_channel)?;
-        let statuses = LocalChannel::<Rp2350GpioStatusProtocol, STATUS_CAPACITY, 1>::new_with_attachment_law(
-            TransportAttachmentLaw::ExclusiveSpsc,
-        )
-        .map_err(gpio_error_from_channel)?;
-        let command_producer = commands.attach_producer(request).map_err(gpio_error_from_transport)?;
-        let command_consumer = commands.attach_consumer(request).map_err(gpio_error_from_transport)?;
-        let status_producer = statuses.attach_producer(request).map_err(gpio_error_from_transport)?;
-        let status_consumer = statuses.attach_consumer(request).map_err(gpio_error_from_transport)?;
+        let statuses =
+            LocalChannel::<Rp2350GpioStatusProtocol, STATUS_CAPACITY, 1>::new_with_attachment_law(
+                TransportAttachmentLaw::ExclusiveSpsc,
+            )
+            .map_err(gpio_error_from_channel)?;
+        let command_producer = commands
+            .attach_producer(request)
+            .map_err(gpio_error_from_transport)?;
+        let command_consumer = commands
+            .attach_consumer(request)
+            .map_err(gpio_error_from_transport)?;
+        let status_producer = statuses
+            .attach_producer(request)
+            .map_err(gpio_error_from_transport)?;
+        let status_consumer = statuses
+            .attach_consumer(request)
+            .map_err(gpio_error_from_transport)?;
 
         Ok((
             Self {
@@ -198,7 +202,10 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
     }
 
     fn next_request_id(&self) -> u32 {
-        let next = self.next_request_id.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        let next = self
+            .next_request_id
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
         if next == 0 || next == REQUEST_ID_WRAP_SENTINEL {
             self.next_request_id.store(1, Ordering::Release);
             1
@@ -297,7 +304,7 @@ impl<const MAX_PINS: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPACITY
 
         Ok(Rp2350FiberGpioOutputPin {
             client: &this.client,
-            slot_index: slot_index as u8,
+            slot_index: u8::try_from(slot_index).map_err(|_| GpioError::resource_exhausted())?,
             pin,
         })
     }
@@ -317,7 +324,7 @@ impl<const MAX_PINS: usize, const COMMAND_CAPACITY: usize, const STATUS_CAPACITY
         this.spawned = true;
         RP2350_GPIO_SERVICE_SPAWN_PHASE.store(2, Ordering::Release);
 
-        let service_addr = this as *mut Self as usize;
+        let service_addr = core::ptr::from_mut(this) as usize;
         RP2350_GPIO_SERVICE_SPAWN_PHASE.store(3, Ordering::Release);
         let handle = spawn(move || {
             run_gpio_service::<MAX_PINS, COMMAND_CAPACITY, STATUS_CAPACITY>(service_addr)
@@ -441,7 +448,7 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
                 }
                 Err(error) if error.kind() == ChannelErrorKind::Busy => {
                     RP2350_GPIO_CLIENT_PHASE.store(3, Ordering::Release);
-                    wait_for_service_progress()?
+                    wait_for_service_progress();
                 }
                 Err(error) => return Err(gpio_error_from_channel(error)),
             }
@@ -449,7 +456,11 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
 
         loop {
             RP2350_GPIO_CLIENT_PHASE.store(4, Ordering::Release);
-            match self.client.statuses.try_receive(self.client.status_consumer) {
+            match self
+                .client
+                .statuses
+                .try_receive(self.client.status_consumer)
+            {
                 Ok(Some(Rp2350GpioStatus::Completed {
                     request_id: observed,
                 })) if observed == request_id => {
@@ -463,11 +474,11 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
                 Ok(Some(_)) => return Err(GpioError::state_conflict()),
                 Ok(None) => {
                     RP2350_GPIO_CLIENT_PHASE.store(6, Ordering::Release);
-                    wait_for_service_progress()?
+                    wait_for_service_progress();
                 }
                 Err(error) if error.kind() == ChannelErrorKind::Busy => {
                     RP2350_GPIO_CLIENT_PHASE.store(7, Ordering::Release);
-                    wait_for_service_progress()?
+                    wait_for_service_progress();
                 }
                 Err(error) => return Err(gpio_error_from_channel(error)),
             }
@@ -476,7 +487,7 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
 
     /// Starts one batched GPIO transaction rooted in this pin's service.
     #[must_use]
-    pub fn begin_batch(&self) -> Rp2350FiberGpioBatch<COMMAND_CAPACITY, STATUS_CAPACITY> {
+    pub const fn begin_batch(&self) -> Rp2350FiberGpioBatch<COMMAND_CAPACITY, STATUS_CAPACITY> {
         Rp2350FiberGpioBatch {
             client: self.client,
             ops: [Rp2350GpioBatchOp::Pause { spins: 0 }; RP2350_GPIO_BATCH_MAX_OPS],
@@ -489,7 +500,7 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
     Rp2350FiberGpioBatch<COMMAND_CAPACITY, STATUS_CAPACITY>
 {
     /// Clears the queued batch operations.
-    pub fn clear(&mut self) {
+    pub const fn clear(&mut self) {
         self.count = 0;
     }
 
@@ -497,6 +508,12 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
     #[must_use]
     pub const fn len(&self) -> usize {
         self.count as usize
+    }
+
+    /// Returns whether the batch has no queued operations.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
     }
 
     /// Returns the fixed batch capacity.
@@ -572,13 +589,17 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
                     request_runtime_dispatch();
                     break;
                 }
-                Err(error) if error.kind() == ChannelErrorKind::Busy => wait_for_service_progress()?,
+                Err(error) if error.kind() == ChannelErrorKind::Busy => wait_for_service_progress(),
                 Err(error) => return Err(gpio_error_from_channel(error)),
             }
         }
 
         loop {
-            match self.client.statuses.try_receive(self.client.status_consumer) {
+            match self
+                .client
+                .statuses
+                .try_receive(self.client.status_consumer)
+            {
                 Ok(Some(Rp2350GpioStatus::Completed {
                     request_id: observed,
                 })) if observed == request_id => return Ok(()),
@@ -587,8 +608,8 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
                     kind,
                 })) if observed == request_id => return Err(gpio_error_from_kind(kind)),
                 Ok(Some(_)) => return Err(GpioError::state_conflict()),
-                Ok(None) => wait_for_service_progress()?,
-                Err(error) if error.kind() == ChannelErrorKind::Busy => wait_for_service_progress()?,
+                Ok(None) => wait_for_service_progress(),
+                Err(error) if error.kind() == ChannelErrorKind::Busy => wait_for_service_progress(),
                 Err(error) => return Err(gpio_error_from_channel(error)),
             }
         }
@@ -632,8 +653,8 @@ fn run_gpio_service<
 ) -> ! {
     loop {
         RP2350_GPIO_SERVICE_PHASE.store(1, Ordering::Release);
-        let service_ptr =
-            service_addr as *mut Rp2350FiberGpioService<MAX_PINS, COMMAND_CAPACITY, STATUS_CAPACITY>;
+        let service_ptr = service_addr
+            as *mut Rp2350FiberGpioService<MAX_PINS, COMMAND_CAPACITY, STATUS_CAPACITY>;
         // SAFETY: the service lives in static storage for the life of the example process.
         let service = unsafe { &mut *service_ptr };
         RP2350_GPIO_SERVICE_PHASE.store(2, Ordering::Release);
@@ -644,12 +665,10 @@ fn run_gpio_service<
     }
 }
 
-fn wait_for_service_progress() -> Result<(), GpioError> {
-    if yield_now().is_ok() {
-        return Ok(());
+fn wait_for_service_progress() {
+    if yield_now().is_err() {
+        wait_for_runtime_progress();
     }
-    wait_for_runtime_progress();
-    Ok(())
 }
 
 fn service_wait_for_client() -> Result<(), GpioError> {
@@ -673,7 +692,9 @@ const fn gpio_error_from_kind(kind: GpioErrorKind) -> GpioError {
 
 const fn gpio_error_from_channel(error: ChannelError) -> GpioError {
     match error.kind() {
-        ChannelErrorKind::Unsupported | ChannelErrorKind::ProtocolMismatch => GpioError::unsupported(),
+        ChannelErrorKind::Unsupported | ChannelErrorKind::ProtocolMismatch => {
+            GpioError::unsupported()
+        }
         ChannelErrorKind::Invalid => GpioError::invalid(),
         ChannelErrorKind::Busy => GpioError::busy(),
         ChannelErrorKind::PermissionDenied | ChannelErrorKind::TransportDenied => {

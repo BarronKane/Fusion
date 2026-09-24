@@ -40,6 +40,7 @@ pub enum UsbSpeed {
 
 /// Shared speed-capability truth for a device, controller, or path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct UsbSpeedSupport {
     pub low_speed: bool,
     pub full_speed: bool,
@@ -50,6 +51,7 @@ pub struct UsbSpeedSupport {
 
 /// Shared framework-capability truth for one USB path or function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct UsbCoreCapabilities {
     pub control_transfer: bool,
     pub bulk_transfer: bool,
@@ -75,6 +77,7 @@ pub enum UsbImplementationKind {
 
 /// Truthful capability summary for one USB provider surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct UsbSupport {
     pub implementation: UsbImplementationKind,
     pub host_controller: bool,

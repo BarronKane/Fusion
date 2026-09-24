@@ -223,7 +223,7 @@ fn print_rule(title: &str) {
     println!("\n== {title} ==");
 }
 
-fn allocator_domain_id_value(id: AllocatorDomainId) -> u16 {
+const fn allocator_domain_id_value(id: AllocatorDomainId) -> u16 {
     id.0
 }
 
@@ -234,14 +234,16 @@ fn print_allocator_domain_slot(domain: Option<AllocatorDomainId>) {
     }
 }
 
-fn allocator_domain_kind_name(kind: AllocatorDomainKind) -> &'static str {
+const fn allocator_domain_kind_name(kind: AllocatorDomainKind) -> &'static str {
     match kind {
         AllocatorDomainKind::Default => "default",
         AllocatorDomainKind::Explicit => "explicit",
     }
 }
 
-fn allocator_layout_realization_name(realization: AllocatorLayoutRealization) -> &'static str {
+const fn allocator_layout_realization_name(
+    realization: AllocatorLayoutRealization,
+) -> &'static str {
     match realization {
         AllocatorLayoutRealization::LazyVirtual => "lazy-virtual",
         AllocatorLayoutRealization::EagerPhysical => "eager-physical",
@@ -256,7 +258,7 @@ fn allocator_service_error_kind_name(kind: AllocatorChannelServiceErrorKind) -> 
     }
 }
 
-fn insight_availability_name(
+const fn insight_availability_name(
     availability: fusion_sys::channel::insight::InsightAvailabilityKind,
 ) -> &'static str {
     match availability {
@@ -267,7 +269,7 @@ fn insight_availability_name(
     }
 }
 
-fn insight_channel_class_name(class: InsightChannelClass) -> &'static str {
+const fn insight_channel_class_name(class: InsightChannelClass) -> &'static str {
     match class {
         InsightChannelClass::Timeline => "timeline",
         InsightChannelClass::State => "state",
@@ -276,14 +278,14 @@ fn insight_channel_class_name(class: InsightChannelClass) -> &'static str {
     }
 }
 
-fn insight_capture_mode_name(capture: InsightCaptureMode) -> &'static str {
+const fn insight_capture_mode_name(capture: InsightCaptureMode) -> &'static str {
     match capture {
         InsightCaptureMode::Lossy => "lossy",
         InsightCaptureMode::Exact => "exact",
     }
 }
 
-fn timeline_name(event: DemoTimelineEvent) -> &'static str {
+const fn timeline_name(event: DemoTimelineEvent) -> &'static str {
     match event {
         DemoTimelineEvent::FiberStarted => "fiber-started",
         DemoTimelineEvent::MetadataPump => "metadata-pump",
@@ -377,6 +379,7 @@ fn print_metadata_message(message: AllocatorDomainMetadataMessage) {
     }
 }
 
+#[allow(clippy::large_types_passed_by_value)] // Matching consumes this owned protocol payload once.
 fn print_status_message(
     message: AllocatorControlStatusMessage,
     member_cache: &mut Vec<(MemoryPoolMemberId, MemoryPoolMemberInfo)>,
@@ -401,8 +404,8 @@ fn print_status_message(
                 "status: domain-pool-member {}",
                 allocator_domain_id_value(domain)
             );
-            print_member_info(member);
-            record_member(member_cache, member);
+            print_member_info(&member);
+            record_member(member_cache, &member);
         }
         AllocatorControlStatusMessage::DomainPoolMembersComplete { domain } => {
             println!(
@@ -438,11 +441,13 @@ fn print_timeline_message(message: DemoTimelineEvent) {
     println!("insight.timeline: {}", timeline_name(message));
 }
 
-fn pool_member_id_value(id: MemoryPoolMemberId) -> u32 {
+const fn pool_member_id_value(id: MemoryPoolMemberId) -> u32 {
     id.0
 }
 
-fn memory_pool_extent_disposition_name(disposition: MemoryPoolExtentDisposition) -> &'static str {
+const fn memory_pool_extent_disposition_name(
+    disposition: MemoryPoolExtentDisposition,
+) -> &'static str {
     match disposition {
         MemoryPoolExtentDisposition::Free => "free",
         MemoryPoolExtentDisposition::Leased(_) => "leased",
@@ -465,7 +470,7 @@ fn print_relative_range(label: &str, offset: usize, len: usize) {
     );
 }
 
-fn print_member_info(member: MemoryPoolMemberInfo) {
+fn print_member_info(member: &MemoryPoolMemberInfo) {
     let resource = member.resource.range();
     println!("  member: {}", pool_member_id_value(member.id));
     print_absolute_range("    resource", resource.base.get(), resource.len);
@@ -521,12 +526,12 @@ fn print_extent_info(
 
 fn record_member(
     cache: &mut Vec<(MemoryPoolMemberId, MemoryPoolMemberInfo)>,
-    member: MemoryPoolMemberInfo,
+    member: &MemoryPoolMemberInfo,
 ) {
     if let Some(slot) = cache.iter_mut().find(|(id, _)| *id == member.id) {
-        slot.1 = member;
+        slot.1 = *member;
     } else {
-        cache.push((member.id, member));
+        cache.push((member.id, *member));
     }
 }
 
@@ -577,7 +582,7 @@ fn print_fiber_metadata_message(message: FiberMetadataMessage) {
     }
 }
 
-fn fiber_state_name(state: fusion_sys::fiber::FiberState) -> &'static str {
+const fn fiber_state_name(state: fusion_sys::fiber::FiberState) -> &'static str {
     match state {
         fusion_sys::fiber::FiberState::Created => "created",
         fusion_sys::fiber::FiberState::Running => "running",
@@ -658,6 +663,7 @@ fn drain_audit(channel: &LocalInsightChannel<DemoAuditInsightProtocol, 16>, cons
     }
 }
 
+#[allow(clippy::too_many_lines)] // The example intentionally shows each protocol step in execution order.
 fn main() {
     let support = FiberSystem::new().support();
     if !support.context.caps.contains(ContextCaps::MAKE) {

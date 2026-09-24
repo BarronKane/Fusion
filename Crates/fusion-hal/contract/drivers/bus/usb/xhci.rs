@@ -1,8 +1,8 @@
 //! xHCI-specific host-controller vocabulary.
 
-use super::controller::*;
-use super::core::*;
-use super::host::*;
+use super::controller::UsbControllerContract;
+use super::core::UsbSpecRevision;
+use super::host::UsbHostControllerContract;
 
 /// Observable xHCI context-size mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,6 +23,7 @@ pub struct XhciSupportedProtocol {
 
 /// xHCI capability-register truth that does not belong in the generic USB controller lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct XhciCapabilities {
     pub max_device_slots: u8,
     pub max_interrupters: u16,

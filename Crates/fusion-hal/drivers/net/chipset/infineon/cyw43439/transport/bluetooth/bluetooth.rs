@@ -96,15 +96,19 @@ impl Cyw43439BluetoothPatchState {
     }
 }
 
-fn round_up_4(value: usize) -> usize {
+const fn round_up_4(value: usize) -> usize {
     (value + 3) & !3
 }
 
 #[must_use]
-pub fn bt_shared_round_up_4(value: usize) -> usize {
+pub const fn bt_shared_round_up_4(value: usize) -> usize {
     round_up_4(value)
 }
 
+///
+/// # Errors
+///
+/// Returns a typed chip-interface error when the operation fails.
 pub fn for_each_patch_data_record(
     patch: &[u8],
     mut f: impl FnMut(u32, &[u8]) -> Result<(), Cyw43439Error>,
@@ -243,12 +247,20 @@ where
     H: Cyw43439HardwareContract,
 {
     /// Acquires one Bluetooth transport lease from the underlying hardware substrate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn acquire(hardware: &'a mut H) -> Result<Self, Cyw43439Error> {
         hardware.acquire_transport(Cyw43439Radio::Bluetooth)?;
         Ok(Self { hardware })
     }
 
     /// Encodes and writes one packet-prefixed Bluetooth transport frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_packet(
         &mut self,
         packet_type: Cyw43439BluetoothPacketType,
@@ -270,6 +282,10 @@ where
     }
 
     /// Encodes and writes one HCI command packet with caller-owned scratch storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_command(
         &mut self,
         header: Cyw43439BluetoothCommandHeader,
@@ -284,19 +300,28 @@ where
         let Some(body_len) = header_bytes.len().checked_add(parameters.len()) else {
             return Err(Cyw43439Error::resource_exhausted());
         };
-        if out.len() < body_len + 1 {
+        let Some(total_len) = body_len.checked_add(1) else {
+            return Err(Cyw43439Error::resource_exhausted());
+        };
+        if out.len() < total_len {
             return Err(Cyw43439Error::resource_exhausted());
         }
 
-        out[1..1 + header_bytes.len()].copy_from_slice(&header_bytes);
-        out[1 + header_bytes.len()..1 + body_len].copy_from_slice(parameters);
+        let header_start = 1;
+        out[header_start..][..header_bytes.len()].copy_from_slice(&header_bytes);
+        let parameters_start = header_start + header_bytes.len();
+        out[parameters_start..][..parameters.len()].copy_from_slice(parameters);
         out[0] = Cyw43439BluetoothPacketType::Command.as_u8();
         self.hardware
-            .write_controller_transport(Cyw43439Radio::Bluetooth, &out[..1 + body_len])?;
-        Ok(1 + body_len)
+            .write_controller_transport(Cyw43439Radio::Bluetooth, &out[..total_len])?;
+        Ok(total_len)
     }
 
     /// Encodes and writes one HCI ACL packet with caller-owned scratch storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_acl(
         &mut self,
         header: Cyw43439BluetoothAclHeader,
@@ -311,19 +336,28 @@ where
         let Some(body_len) = header_bytes.len().checked_add(payload.len()) else {
             return Err(Cyw43439Error::resource_exhausted());
         };
-        if out.len() < body_len + 1 {
+        let Some(total_len) = body_len.checked_add(1) else {
+            return Err(Cyw43439Error::resource_exhausted());
+        };
+        if out.len() < total_len {
             return Err(Cyw43439Error::resource_exhausted());
         }
 
         out[0] = Cyw43439BluetoothPacketType::AclData.as_u8();
-        out[1..1 + header_bytes.len()].copy_from_slice(&header_bytes);
-        out[1 + header_bytes.len()..1 + body_len].copy_from_slice(payload);
+        let header_start = 1;
+        out[header_start..][..header_bytes.len()].copy_from_slice(&header_bytes);
+        let payload_start = header_start + header_bytes.len();
+        out[payload_start..][..payload.len()].copy_from_slice(payload);
         self.hardware
-            .write_controller_transport(Cyw43439Radio::Bluetooth, &out[..1 + body_len])?;
-        Ok(1 + body_len)
+            .write_controller_transport(Cyw43439Radio::Bluetooth, &out[..total_len])?;
+        Ok(total_len)
     }
 
     /// Reads one packet-prefixed Bluetooth transport frame into caller-owned storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_packet<'b>(
         &mut self,
         out: &'b mut [u8],
@@ -651,6 +685,50 @@ mod tests {
                 0x02,
                 0x03,
             ]
+        );
+    }
+
+    #[test]
+    fn zero_length_command_and_acl_payloads_encode_without_panicking() {
+        let mut hardware = FakeHardware::default();
+        {
+            let mut lease = Cyw43439BluetoothTransportLease::acquire(&mut hardware).unwrap();
+            let mut scratch = [0_u8; 8];
+            let command_len = lease
+                .write_command(
+                    Cyw43439BluetoothCommandHeader {
+                        opcode: 0x0c03,
+                        parameter_length: 0,
+                    },
+                    &[],
+                    &mut scratch,
+                )
+                .unwrap();
+            assert_eq!(command_len, 4);
+            let acl_len = lease
+                .write_acl(
+                    Cyw43439BluetoothAclHeader {
+                        handle_and_flags: 0x2041,
+                        payload_length: 0,
+                    },
+                    &[],
+                    &mut scratch,
+                )
+                .unwrap();
+            assert_eq!(acl_len, 5);
+        }
+        assert_eq!(
+            hardware.writes,
+            [
+                vec![Cyw43439BluetoothPacketType::Command.as_u8(), 0x03, 0x0c, 0],
+                vec![
+                    Cyw43439BluetoothPacketType::AclData.as_u8(),
+                    0x41,
+                    0x20,
+                    0,
+                    0
+                ],
+            ],
         );
     }
 

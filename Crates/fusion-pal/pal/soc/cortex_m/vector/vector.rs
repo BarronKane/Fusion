@@ -93,7 +93,7 @@ impl<T> ScopeStorageCell<T> {
         Self(UnsafeCell::new(value))
     }
 
-    fn get(&self) -> *mut T {
+    const fn get(&self) -> *mut T {
         self.0.get()
     }
 }
@@ -360,10 +360,7 @@ impl VectorOwnershipControlContract for CortexMVector {
         }
 
         let slot_count = support.slot_count;
-        if let Err(error) = adopt_scope(scope.0, slot_count) {
-            VECTOR_BUILDER_ACTIVE[scope.0].store(false, Ordering::Release);
-            return Err(error);
-        }
+        adopt_scope(scope.0, slot_count);
 
         ACTIVE_TOPOLOGY.store(topology_to_raw(mode.topology), Ordering::Release);
         SCOPE_OWNERSHIP[scope.0].store(OWNERSHIP_ADOPTED, Ordering::Release);
@@ -474,7 +471,7 @@ impl VectorTableBuilderControlContract for CortexMVectorBuilder {
             return Err(VectorError::world_mismatch());
         }
 
-        let index = system_exception_index(binding.exception).ok_or_else(VectorError::reserved)?;
+        let index = system_exception_index(binding.exception);
         if read_system_exception_bound(self.scope_index, index) {
             return Err(VectorError::already_bound());
         }
@@ -570,9 +567,9 @@ impl VectorSealedQueryContract for CortexMSealedVectorTable {
                 VectorDispatchLane::Inline => false,
             }),
             SlotState::Inline { .. } => {
-                let deferred = match read_slot_meta(self.scope_index, slot_index).inline_eligibility
-                {
-                    Some(eligibility) => match eligibility.fallback_lane {
+                let deferred = read_slot_meta(self.scope_index, slot_index)
+                    .inline_eligibility
+                    .is_some_and(|eligibility| match eligibility.fallback_lane {
                         VectorDispatchLane::DeferredPrimary => {
                             pending_word(&PRIMARY_PENDING[self.scope_index], slot_index)
                         }
@@ -580,9 +577,7 @@ impl VectorSealedQueryContract for CortexMSealedVectorTable {
                             pending_word(&SECONDARY_PENDING[self.scope_index], slot_index)
                         }
                         VectorDispatchLane::Inline => false,
-                    },
-                    None => false,
-                };
+                    });
                 Ok(irq_pending(slot.0) || deferred)
             }
             SlotState::Foreign | SlotState::Reserved | SlotState::Unbound => Ok(false),
@@ -595,37 +590,36 @@ impl VectorSealedQueryContract for CortexMSealedVectorTable {
         output: &mut [VectorDispatchCookie],
     ) -> Result<usize, VectorError> {
         match lane {
-            VectorDispatchLane::DeferredPrimary => take_pending_cookies(
+            VectorDispatchLane::DeferredPrimary => Ok(take_pending_cookies(
                 self.scope_index,
                 VectorDispatchLane::DeferredPrimary,
                 &PRIMARY_PENDING[self.scope_index],
                 self.slot_count,
                 output,
-            ),
-            VectorDispatchLane::DeferredSecondary => take_pending_cookies(
+            )),
+            VectorDispatchLane::DeferredSecondary => Ok(take_pending_cookies(
                 self.scope_index,
                 VectorDispatchLane::DeferredSecondary,
                 &SECONDARY_PENDING[self.scope_index],
                 self.slot_count,
                 output,
-            ),
+            )),
             VectorDispatchLane::Inline => Err(VectorError::invalid()),
         }
     }
 }
 
-/// Binds the reserved PendSV deferred-dispatch handler into one owned Cortex-M vector table.
+/// Binds the reserved `PendSV` deferred-dispatch handler into one owned Cortex-M vector table.
 ///
 /// # Errors
 ///
 /// Returns any honest ownership, state, or priority-programming failure.
 pub fn bind_reserved_pendsv_dispatch(
-    builder: &mut PlatformVectorBuilder,
+    builder: &PlatformVectorBuilder,
     priority: Option<VectorPriority>,
     handler: VectorInlineHandler,
 ) -> Result<(), VectorError> {
-    let index =
-        system_exception_index(SystemException::PendSv).ok_or_else(VectorError::reserved)?;
+    let index = system_exception_index(SystemException::PendSv);
     if let Some(priority) = priority {
         set_system_exception_priority(SystemException::PendSv, priority)?;
     }
@@ -652,13 +646,13 @@ pub fn bind_reserved_pendsv_dispatch(
     Ok(())
 }
 
+#[allow(clippy::needless_pass_by_ref_mut)] // The shared builder contract requires mutable access for bind().
 pub(crate) fn bind_reserved_runtime_dispatch(
     builder: &mut PlatformVectorBuilder,
     priority: Option<VectorPriority>,
     handler: VectorInlineHandler,
 ) -> Result<(), VectorError> {
-    let index =
-        system_exception_index(SystemException::PendSv).ok_or_else(VectorError::reserved)?;
+    let index = system_exception_index(SystemException::PendSv);
     if let Some(priority) = priority {
         set_system_exception_priority(SystemException::PendSv, priority)?;
     }
@@ -738,24 +732,28 @@ pub fn take_pending_active_scope(
     let slot_count = u16::try_from(crate::pal::soc::cortex_m::hal::soc::board::irqs().len())
         .map_err(|_| VectorError::invalid())?;
     match lane {
-        VectorDispatchLane::DeferredPrimary => take_pending_cookies(
+        VectorDispatchLane::DeferredPrimary => Ok(take_pending_cookies(
             scope_index,
             VectorDispatchLane::DeferredPrimary,
             &PRIMARY_PENDING[scope_index],
             slot_count,
             output,
-        ),
-        VectorDispatchLane::DeferredSecondary => take_pending_cookies(
+        )),
+        VectorDispatchLane::DeferredSecondary => Ok(take_pending_cookies(
             scope_index,
             VectorDispatchLane::DeferredSecondary,
             &SECONDARY_PENDING[scope_index],
             slot_count,
             output,
-        ),
+        )),
         VectorDispatchLane::Inline => Err(VectorError::invalid()),
     }
 }
 
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn request_reserved_pendsv_dispatch() -> Result<(), VectorError> {
     let topology = active_topology();
     let scope_index =
@@ -774,8 +772,8 @@ const fn map_hardware_error(error: crate::contract::pal::HardwareError) -> Vecto
         crate::contract::pal::HardwareErrorKind::ResourceExhausted => {
             VectorError::resource_exhausted()
         }
-        crate::contract::pal::HardwareErrorKind::StateConflict => VectorError::state_conflict(),
-        crate::contract::pal::HardwareErrorKind::Busy => VectorError::state_conflict(),
+        crate::contract::pal::HardwareErrorKind::StateConflict
+        | crate::contract::pal::HardwareErrorKind::Busy => VectorError::state_conflict(),
         crate::contract::pal::HardwareErrorKind::Platform(code) => VectorError::platform(code),
     }
 }
@@ -892,7 +890,7 @@ fn read_original_vector_entry(scope_index: usize, entry_index: usize) -> usize {
     unsafe { (*ORIGINAL_VECTOR_TABLES[scope_index].get()).0[entry_index] }
 }
 
-fn adopt_scope(scope_index: usize, slot_count: u16) -> Result<(), VectorError> {
+fn adopt_scope(scope_index: usize, slot_count: u16) {
     let _guard = CortexMInterruptMaskGuard::enter();
     let entry_count = SYSTEM_VECTOR_ENTRY_COUNT + usize::from(slot_count);
     // SAFETY: VTOR is the architected vector-table base register for the active execution domain.
@@ -917,14 +915,13 @@ fn adopt_scope(scope_index: usize, slot_count: u16) -> Result<(), VectorError> {
         ptr::write_volatile(
             CORTEX_M_SCB_VTOR,
             core::ptr::addr_of!((*OWNED_VECTOR_TABLES[scope_index].get()).0) as usize,
-        )
+        );
     };
     cortex_m_data_sync_barrier();
     cortex_m_instruction_sync_barrier();
-    Ok(())
 }
 
-fn validate_slot(slot: IrqSlot, slot_count: u16) -> Result<(), VectorError> {
+const fn validate_slot(slot: IrqSlot, slot_count: u16) -> Result<(), VectorError> {
     if slot.0 >= slot_count {
         Err(VectorError::invalid())
     } else {
@@ -996,8 +993,8 @@ fn slot_state_for(
     Ok(read_slot_meta(scope_index, usize::from(slot.0)).state)
 }
 
-fn system_exception_index(exception: SystemException) -> Option<usize> {
-    Some(match exception {
+const fn system_exception_index(exception: SystemException) -> usize {
+    match exception {
         SystemException::Nmi => 2,
         SystemException::HardFault => 3,
         SystemException::MemManage => 4,
@@ -1007,16 +1004,14 @@ fn system_exception_index(exception: SystemException) -> Option<usize> {
         SystemException::SVCall => 11,
         SystemException::PendSv => 14,
         SystemException::SysTick => 15,
-    })
+    }
 }
 
 fn set_system_exception_priority(
     exception: SystemException,
     priority: VectorPriority,
 ) -> Result<(), VectorError> {
-    let Some(index) = system_exception_index(exception) else {
-        return Err(VectorError::reserved());
-    };
+    let index = system_exception_index(exception);
     if index < 4 {
         return Err(VectorError::reserved());
     }
@@ -1062,7 +1057,7 @@ fn take_pending_cookies(
     words: &[AtomicU32; VECTOR_PENDING_WORDS],
     slot_count: u16,
     output: &mut [VectorDispatchCookie],
-) -> Result<usize, VectorError> {
+) -> usize {
     let mut written = 0;
     for slot in 0..usize::from(slot_count) {
         if written >= output.len() {
@@ -1101,7 +1096,7 @@ fn take_pending_cookies(
             | SlotState::Deferred { .. } => {}
         }
     }
-    Ok(written)
+    written
 }
 
 fn irq_pending(irqn: u16) -> bool {
@@ -1122,15 +1117,14 @@ fn dispatch_irq_slot(slot_index: usize) {
         SlotState::Inline { .. } => {
             if let Some(handler) = meta.inline {
                 let stack = meta.inline_stack;
-                if let Some(eligibility) = meta.inline_eligibility {
-                    if !inline_stack_allows(
+                if let Some(eligibility) = meta.inline_eligibility
+                    && (!inline_stack_allows(
                         stack,
                         eligibility.required_current_exception_stack_bytes,
-                    ) || !unsafe { (eligibility.allow_now)(eligibility.context) }
-                    {
-                        mark_slot_pending(scope_index, slot_index, eligibility.fallback_lane);
-                        return;
-                    }
+                    ) || !unsafe { (eligibility.allow_now)(eligibility.context) })
+                {
+                    mark_slot_pending(scope_index, slot_index, eligibility.fallback_lane);
+                    return;
                 }
                 // SAFETY: only one owned-table builder can install inline handlers into this
                 // scope's adopted vector table, and the installed slot state stores the matching
@@ -1177,7 +1171,7 @@ fn validate_inline_stack_policy(
             let Some(top) = reserved.checked_top() else {
                 return Err(VectorError::invalid());
             };
-            if top % CORTEX_M_INLINE_STACK_ALIGNMENT_BYTES != 0 {
+            if !top.is_multiple_of(CORTEX_M_INLINE_STACK_ALIGNMENT_BYTES) {
                 return Err(VectorError::invalid());
             }
             if reserved_stack_in_use(scope_index, reserved) {
@@ -1402,7 +1396,7 @@ unsafe extern "C" {
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 unsafe fn call_inline_handler_on_reserved_stack(handler: VectorInlineHandler, stack_top: usize) {
     unsafe {
-        fusion_pal_cortex_m_call_inline_handler_on_reserved_stack(handler as usize, stack_top)
+        fusion_pal_cortex_m_call_inline_handler_on_reserved_stack(handler as usize, stack_top);
     };
 }
 

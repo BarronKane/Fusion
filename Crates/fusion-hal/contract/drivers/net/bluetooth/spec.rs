@@ -42,7 +42,7 @@ pub enum BluetoothCanonicalFrame<'a> {
     LeAir(BluetoothLeAirFrame<'a>),
 }
 
-impl<'a> BluetoothCanonicalFrame<'a> {
+impl BluetoothCanonicalFrame<'_> {
     /// Returns the active canonical frame family.
     #[must_use]
     pub const fn kind(self) -> BluetoothCanonicalFrameKind {

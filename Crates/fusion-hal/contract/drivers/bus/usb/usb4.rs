@@ -1,7 +1,10 @@
 //! USB4 routed/fabric vocabulary.
 
-use super::core::*;
-use super::error::*;
+use super::core::{
+    UsbSpecRevision,
+    UsbCoreContract,
+};
+use super::error::UsbError;
 
 /// Observable USB4 router lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -15,6 +18,7 @@ pub enum Usb4RouterState {
 
 /// USB4 routed/fabric capability truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct Usb4Capabilities {
     pub usb3_tunneling: bool,
     pub pcie_tunneling: bool,

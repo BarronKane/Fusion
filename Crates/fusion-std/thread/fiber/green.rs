@@ -238,19 +238,16 @@ impl CarrierLoopContext {
     fn store_observation(&self, observation: CarrierObservation) {
         self.observed_thread_id
             .store(observation.thread_id.0, Ordering::Release);
-        match observation.location.logical_cpu {
-            Some(logical_cpu) => {
-                self.observed_logical_cpu_group
-                    .store(logical_cpu.group.0, Ordering::Release);
-                self.observed_logical_cpu_index
-                    .store(logical_cpu.index, Ordering::Release);
-            }
-            None => {
-                self.observed_logical_cpu_group
-                    .store(UNKNOWN_U16_FIELD, Ordering::Release);
-                self.observed_logical_cpu_index
-                    .store(UNKNOWN_U16_FIELD, Ordering::Release);
-            }
+        if let Some(logical_cpu) = observation.location.logical_cpu {
+            self.observed_logical_cpu_group
+                .store(logical_cpu.group.0, Ordering::Release);
+            self.observed_logical_cpu_index
+                .store(logical_cpu.index, Ordering::Release);
+        } else {
+            self.observed_logical_cpu_group
+                .store(UNKNOWN_U16_FIELD, Ordering::Release);
+            self.observed_logical_cpu_index
+                .store(UNKNOWN_U16_FIELD, Ordering::Release);
         }
         self.observed_core.store(
             observation
@@ -603,6 +600,8 @@ impl Drop for GreenPoolMetadata {
 
 #[repr(C)]
 #[derive(Debug)]
+// Keeping backing handles inline avoids allocation in the no_std pool bootstrap path.
+#[allow(clippy::large_enum_variant)]
 enum GreenPoolControlBacking {
     VirtualCachedRegion(Region),
     Owned {
@@ -985,7 +984,7 @@ fn ensure_yield_budget_watchdog_started(
 }
 
 impl GreenPoolInner {
-    fn runtime_tick(&self) -> u64 {
+    fn runtime_tick() -> u64 {
         FUSION_GREEN_RUNTIME_SINK_PHASE.store(1, Ordering::Release);
         current_monotonic_nanos().unwrap_or(0)
     }
@@ -997,7 +996,7 @@ impl GreenPoolInner {
             return Ok(());
         };
         runtime_sink
-            .record_context(courier_id, context_id, self.runtime_tick())
+            .record_context(courier_id, context_id, Self::runtime_tick())
             .map_err(fiber_error_from_runtime_sink)
     }
 
@@ -1012,7 +1011,7 @@ impl GreenPoolInner {
         let available_slots = self.tasks.available_slots()?;
         FUSION_GREEN_RUNTIME_SINK_PHASE.store(12, Ordering::Release);
         let responsiveness = runtime_sink
-            .evaluate_responsiveness(courier_id, self.runtime_tick())
+            .evaluate_responsiveness(courier_id, Self::runtime_tick())
             .map_err(fiber_error_from_runtime_sink)?;
         FUSION_GREEN_RUNTIME_SINK_PHASE.store(13, Ordering::Release);
         let summary = CourierRuntimeSummary::new(
@@ -1033,7 +1032,7 @@ impl GreenPoolInner {
         });
         FUSION_GREEN_RUNTIME_SINK_PHASE.store(14, Ordering::Release);
         runtime_sink
-            .record_runtime_summary(courier_id, summary, self.runtime_tick())
+            .record_runtime_summary(courier_id, summary, Self::runtime_tick())
             .map_err(fiber_error_from_runtime_sink)?;
         FUSION_GREEN_RUNTIME_SINK_PHASE.store(15, Ordering::Release);
         Ok(())
@@ -1061,7 +1060,7 @@ impl GreenPoolInner {
                 .is_ok()
         {
             launch_control
-                .register_child_courier(launch_request, self.runtime_tick(), fiber)
+                .register_child_courier(launch_request, Self::runtime_tick(), fiber)
                 .map_err(fiber_error_from_launch_control)?;
         }
         runtime_sink
@@ -1078,7 +1077,7 @@ impl GreenPoolInner {
                 class,
                 is_root,
                 None,
-                self.runtime_tick(),
+                Self::runtime_tick(),
             )
             .map_err(fiber_error_from_runtime_sink)?;
         self.publish_runtime_context()?;
@@ -1105,7 +1104,7 @@ impl GreenPoolInner {
                     claim_awareness: fusion_sys::claims::ClaimAwareness::Blind,
                     claim_context: None,
                 },
-                self.runtime_tick(),
+                Self::runtime_tick(),
             )
             .map_err(fiber_error_from_runtime_sink)?;
         FUSION_GREEN_RUNTIME_SINK_PHASE.store(21, Ordering::Release);
@@ -1121,7 +1120,7 @@ impl GreenPoolInner {
             return Ok(());
         };
         runtime_sink
-            .mark_fiber_terminal(courier_id, fiber, terminal, self.runtime_tick())
+            .mark_fiber_terminal(courier_id, fiber, terminal, Self::runtime_tick())
             .map_err(fiber_error_from_runtime_sink)?;
         self.publish_runtime_summary()
     }

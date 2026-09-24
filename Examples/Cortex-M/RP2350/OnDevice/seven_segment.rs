@@ -77,12 +77,8 @@ pub static RP2350_DISPLAY_LAST_DIGITS: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone, Copy)]
 enum Rp2350SevenSegmentCommandKind {
-    SetGlyphs {
-        glyphs: [SevenSegmentGlyph; 4],
-    },
-    SetHex {
-        value: u16,
-    },
+    SetGlyphs { glyphs: [SevenSegmentGlyph; 4] },
+    SetHex { value: u16 },
     Clear,
 }
 
@@ -250,7 +246,7 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
 
     /// Returns one channel-backed display handle.
     #[must_use]
-    pub fn client_handle(
+    pub const fn client_handle(
         &'static self,
     ) -> Rp2350FiberFourDigitSevenSegmentDisplay<COMMAND_CAPACITY, STATUS_CAPACITY> {
         Rp2350FiberFourDigitSevenSegmentDisplay {
@@ -271,7 +267,7 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
         }
         this.spawned = true;
 
-        let service_addr = this as *mut Self as usize;
+        let service_addr = core::ptr::from_mut(this) as usize;
         let handle = spawn(move || {
             run_seven_segment_service::<COMMAND_CAPACITY, STATUS_CAPACITY>(service_addr)
         })
@@ -302,7 +298,11 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
         Ok(())
     }
 
-    fn handle_command(&mut self, command: Rp2350SevenSegmentCommand) -> Result<(), GpioError> {
+    #[allow(clippy::unnecessary_wraps)] // Preserve the status protocol's failure path for fallible commands.
+    const fn handle_command(
+        &mut self,
+        command: Rp2350SevenSegmentCommand,
+    ) -> Result<(), GpioError> {
         match command.kind {
             Rp2350SevenSegmentCommandKind::SetGlyphs { glyphs } => {
                 self.glyphs = glyphs;
@@ -319,7 +319,7 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
         }
     }
 
-    fn refresh_turn(&mut self) -> Result<(), GpioError> {
+    fn refresh_turn(&self) -> Result<(), GpioError> {
         let mut frames = [[0_u8; 2]; RP2350_SHIFT_REGISTER_FRAME_CYCLE_LEN];
         for (index, frame) in frames.iter_mut().enumerate() {
             *frame = [
@@ -329,10 +329,14 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
         }
         RP2350_DISPLAY_SERVICE_HEARTBEAT.fetch_add(1, Ordering::AcqRel);
         RP2350_DISPLAY_ACTIVE_DIGIT.store(3, Ordering::Release);
-        RP2350_DISPLAY_LAST_DIGITS
-            .store(u32::from(frames[RP2350_SHIFT_REGISTER_FRAME_CYCLE_LEN - 1][0]), Ordering::Release);
-        RP2350_DISPLAY_LAST_SEGMENTS
-            .store(u32::from(frames[RP2350_SHIFT_REGISTER_FRAME_CYCLE_LEN - 1][1]), Ordering::Release);
+        RP2350_DISPLAY_LAST_DIGITS.store(
+            u32::from(frames[RP2350_SHIFT_REGISTER_FRAME_CYCLE_LEN - 1][0]),
+            Ordering::Release,
+        );
+        RP2350_DISPLAY_LAST_SEGMENTS.store(
+            u32::from(frames[RP2350_SHIFT_REGISTER_FRAME_CYCLE_LEN - 1][1]),
+            Ordering::Release,
+        );
         self.register
             .write_frame_cycle(frames, DISPLAY_REFRESH_FRAMES_PER_TURN)?;
         Ok(())
@@ -342,9 +346,7 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
         loop {
             match self.client.statuses.try_send(self.status_producer, status) {
                 Ok(()) => return Ok(()),
-                Err(error) if error.kind() == ChannelErrorKind::Busy => {
-                    service_wait_for_client()?
-                }
+                Err(error) if error.kind() == ChannelErrorKind::Busy => service_wait_for_client()?,
                 Err(error) => return Err(gpio_error_from_channel(error)),
             }
         }
@@ -381,7 +383,7 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
         self.perform(Rp2350SevenSegmentCommandKind::Clear)
     }
 
-    fn perform(&self, kind: Rp2350SevenSegmentCommandKind) -> Result<(), GpioError> {
+    fn perform(self, kind: Rp2350SevenSegmentCommandKind) -> Result<(), GpioError> {
         let request_id = self.client.next_request_id();
         let command = Rp2350SevenSegmentCommand { request_id, kind };
 
@@ -396,14 +398,18 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
                     break;
                 }
                 Err(error) if error.kind() == ChannelErrorKind::Busy => {
-                    wait_for_service_progress()?
+                    wait_for_service_progress();
                 }
                 Err(error) => return Err(gpio_error_from_channel(error)),
             }
         }
 
         loop {
-            match self.client.statuses.try_receive(self.client.status_consumer) {
+            match self
+                .client
+                .statuses
+                .try_receive(self.client.status_consumer)
+            {
                 Ok(Some(Rp2350SevenSegmentStatus::Completed {
                     request_id: observed,
                 })) if observed == request_id => return Ok(()),
@@ -412,9 +418,9 @@ impl<const COMMAND_CAPACITY: usize, const STATUS_CAPACITY: usize>
                     kind,
                 })) if observed == request_id => return Err(gpio_error_from_kind(kind)),
                 Ok(Some(_)) => return Err(GpioError::state_conflict()),
-                Ok(None) => wait_for_service_progress()?,
+                Ok(None) => wait_for_service_progress(),
                 Err(error) if error.kind() == ChannelErrorKind::Busy => {
-                    wait_for_service_progress()?
+                    wait_for_service_progress();
                 }
                 Err(error) => return Err(gpio_error_from_channel(error)),
             }
@@ -427,7 +433,10 @@ fn run_seven_segment_service<const COMMAND_CAPACITY: usize, const STATUS_CAPACIT
 ) -> ! {
     loop {
         let service_ptr = service_addr
-            as *mut Rp2350FiberFourDigitSevenSegmentDisplayService<COMMAND_CAPACITY, STATUS_CAPACITY>;
+            as *mut Rp2350FiberFourDigitSevenSegmentDisplayService<
+                COMMAND_CAPACITY,
+                STATUS_CAPACITY,
+            >;
         // SAFETY: the service lives in static storage for the life of the example process.
         let service = unsafe { &mut *service_ptr };
         let _ = service.pump();
@@ -486,12 +495,10 @@ const fn digit_output_byte(active: Option<usize>, polarity: SevenSegmentPolarity
     }
 }
 
-fn wait_for_service_progress() -> Result<(), GpioError> {
-    if yield_now().is_ok() {
-        return Ok(());
+fn wait_for_service_progress() {
+    if yield_now().is_err() {
+        wait_for_runtime_progress();
     }
-    wait_for_runtime_progress();
-    Ok(())
 }
 
 fn service_wait_for_client() -> Result<(), GpioError> {
@@ -515,7 +522,9 @@ const fn gpio_error_from_kind(kind: GpioErrorKind) -> GpioError {
 
 const fn gpio_error_from_channel(error: ChannelError) -> GpioError {
     match error.kind() {
-        ChannelErrorKind::Unsupported | ChannelErrorKind::ProtocolMismatch => GpioError::unsupported(),
+        ChannelErrorKind::Unsupported | ChannelErrorKind::ProtocolMismatch => {
+            GpioError::unsupported()
+        }
         ChannelErrorKind::Invalid => GpioError::invalid(),
         ChannelErrorKind::Busy => GpioError::busy(),
         ChannelErrorKind::PermissionDenied | ChannelErrorKind::TransportDenied => {

@@ -11,6 +11,12 @@ path = "src/main.rs"
 
 [dependencies]
 fusion-firmware = { path = "../../.." }
+fusion-std = { path = "../../../../fusion-std", default-features = false }
 fusion-sys = { path = "../../../../fusion-sys" }
 
 [workspace]
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"

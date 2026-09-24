@@ -286,7 +286,8 @@ impl PcuBaseContract for CortexMPcu {
             } else {
                 PcuImplementationKind::Unsupported
             },
-            executor_count: cortex_m_executors().len() as u8,
+            executor_count: u8::try_from(cortex_m_executors().len())
+                .expect("executor count fits u8"),
             primitive_support: cortex_m_primitive_support(has_pio),
             value_type_support: PcuFeatureSupport::new(
                 crate::contract::drivers::pcu::PcuValueTypeCaps::empty(),
@@ -601,7 +602,7 @@ mod lease_tests {
     }
 }
 
-fn pio_stream_profile_error(error: PcuPioU32StreamProfileError) -> PcuError {
+const fn pio_stream_profile_error(error: PcuPioU32StreamProfileError) -> PcuError {
     match error {
         PcuPioU32StreamProfileError::InvalidPortCount
         | PcuPioU32StreamProfileError::InvalidPortShape
@@ -693,7 +694,7 @@ fn cortex_m_install_pio_program(
         return Err(error);
     }
     if let Err(error) =
-        cortex_m_initialize_pio_lanes(&lane_claim, program.execution.wrap_target.unwrap_or(0))
+        cortex_m_initialize_pio_lanes(lane_claim, program.execution.wrap_target.unwrap_or(0))
     {
         let _ = system_pio().unload_program(&engine_claim, lease);
         return Err(error);
@@ -702,11 +703,11 @@ fn cortex_m_install_pio_program(
 }
 
 #[cfg(feature = "soc-rp2350")]
-fn cortex_m_initialize_pio_lanes(claim: &PioLaneClaim, initial_pc: u8) -> Result<(), PcuError> {
-    board::initialize_pio_lanes(claim, initial_pc)
+fn cortex_m_initialize_pio_lanes(claim: PioLaneClaim, initial_pc: u8) -> Result<(), PcuError> {
+    board::initialize_pio_lanes(&claim, initial_pc)
 }
 
 #[cfg(not(feature = "soc-rp2350"))]
-fn cortex_m_initialize_pio_lanes(_claim: &PioLaneClaim, _initial_pc: u8) -> Result<(), PcuError> {
+fn cortex_m_initialize_pio_lanes(_claim: PioLaneClaim, _initial_pc: u8) -> Result<(), PcuError> {
     Err(PcuError::unsupported())
 }

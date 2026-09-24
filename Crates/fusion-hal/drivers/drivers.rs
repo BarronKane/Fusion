@@ -1,4 +1,4 @@
-//! DriverContract implementations layered over PAL substrate truth.
+//! `DriverContract` implementations layered over PAL substrate truth.
 
 #[path = "acpi/acpi.rs"]
 pub mod acpi;

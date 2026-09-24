@@ -1,4 +1,44 @@
-use super::*;
+use super::{
+    FiberPoolMemoryFootprint,
+    AsyncRuntimeMemoryFootprint,
+    ExecutorConfig,
+    MemoryResourceHandle,
+    ExtentLease,
+    CurrentFiberPool,
+    CurrentFiberAsyncRuntime,
+    CurrentAsyncRuntime,
+    CurrentFiberAsyncRuntimeError,
+    CourierRuntimeSummary,
+    CourierResponsiveness,
+    CourierRunState,
+    system_monotonic_time,
+    MonotonicRawInstant,
+    ResourceBackingKind,
+    ResourceRange,
+    MemoryResource,
+    BoundMemoryResource,
+    BoundResourceSpec,
+    MemBaseContract,
+    CurrentFiberAsyncBootstrap,
+    FiberPoolBootstrap,
+    NonZeroUsize,
+    RuntimeSizingStrategy,
+    CourierId,
+    ContextId,
+    CourierRuntimeSink,
+    CourierLaunchControl,
+    CourierChildLaunchRequest,
+    CurrentFiberAsyncRuntimeBackingPlan,
+    AllocatorLayoutPolicy,
+    FiberPlanningSupport,
+    ExecutorPlanningSupport,
+    RuntimeBackingRequest,
+    ensure_runtime_reserved_wake_vectors_best_effort,
+    uses_explicit_bound_runtime_backing,
+    allocate_owned_runtime_slab,
+    RuntimeBackingError,
+    RuntimeBackingErrorKind,
+};
 
 /// Exact configured memory footprint for one combined current-thread fiber + async bundle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -427,6 +467,9 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
     }
 
     /// Returns the one-slab backing plan under one explicit allocator layout policy.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn backing_plan_with_allocator_layout_policy(
         self,
         layout_policy: AllocatorLayoutPolicy,
@@ -436,6 +479,9 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
 
     /// Returns the one-slab backing plan under one explicit fiber-planning surface and allocator
     /// layout policy.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn backing_plan_with_fiber_planning_support_and_allocator_layout_policy(
         self,
         fiber_planning: FiberPlanningSupport,
@@ -450,6 +496,9 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
 
     /// Returns the one-slab backing plan under explicit fiber/executor planning surfaces and one
     /// explicit allocator layout policy.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn backing_plan_with_planning_support_and_allocator_layout_policy(
         self,
         fiber_planning: FiberPlanningSupport,
@@ -466,6 +515,9 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
 
     /// Returns the one-slab backing plan for a caller that can guarantee at least `base_align`
     /// alignment under one explicit allocator layout policy.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn backing_plan_for_base_alignment_with_allocator_layout_policy(
         self,
         base_align: usize,
@@ -481,6 +533,9 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
 
     /// Returns the one-slab backing plan for a caller that can guarantee at least `base_align`
     /// alignment under one explicit fiber-planning surface and allocator layout policy.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn backing_plan_for_base_alignment_with_fiber_planning_support_and_allocator_layout_policy(
         self,
         base_align: usize,
@@ -497,6 +552,9 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
 
     /// Returns the one-slab backing plan for a caller that can guarantee at least `base_align`
     /// alignment under explicit fiber/executor planning surfaces and one allocator layout policy.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn backing_plan_for_base_alignment_with_planning_support_and_allocator_layout_policy(
         self,
         base_align: usize,
@@ -631,6 +689,8 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
     /// # Errors
     ///
     /// Returns any honest sizing, partitioning, or bootstrap failure.
+    // Ownership transfers here; partitioned handles retain the governed backing lifetime.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn from_bound_slab_parts(
         self,
         slab: MemoryResourceHandle,
@@ -705,7 +765,7 @@ impl<'a> CurrentFiberAsyncBootstrap<'a> {
     }
 }
 
-pub(super) fn current_runtime_error_from_owned_backing(
+pub(super) const fn current_runtime_error_from_owned_backing(
     error: RuntimeBackingError,
 ) -> CurrentFiberAsyncRuntimeError {
     let executor_error = match error.kind() {

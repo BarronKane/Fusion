@@ -146,7 +146,7 @@ impl<'a> Facs<'a> {
 
     /// Returns the total FACS length.
     #[must_use]
-    pub fn length(&self) -> usize {
+    pub const fn length(&self) -> usize {
         self.bytes.len()
     }
 

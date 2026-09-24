@@ -34,7 +34,7 @@ use crate::transport::{
 
 /// Coarse shared-chip runtime state for one active CYW43439 chipset instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Cyw43439ChipState {
+pub enum Cyw43439ChipState {
     Cold,
     Powered,
     Clocked,
@@ -45,7 +45,7 @@ pub(crate) enum Cyw43439ChipState {
 
 /// The host-side transport profile currently surfaced by one CYW43439 chipset binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct Cyw43439TransportProfile {
+pub struct Cyw43439TransportProfile {
     pub bluetooth: Option<Cyw43439BluetoothTransport>,
     pub bluetooth_clock: Option<Cyw43439BluetoothTransportClockProfile>,
     pub wifi: Option<Cyw43439WlanTransport>,
@@ -55,14 +55,16 @@ pub(crate) struct Cyw43439TransportProfile {
 
 /// Clock truth currently surfaced by one CYW43439 chipset binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct Cyw43439ClockProfile {
+pub struct Cyw43439ClockProfile {
     pub reference_clock_hz: Option<u32>,
     pub sleep_clock_hz: Option<u32>,
 }
 
 /// Boot-readiness truth currently surfaced by one CYW43439 chipset binding.
+// Each flag is an independent firmware-image availability or boot capability fact.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct Cyw43439BootReadiness {
+pub struct Cyw43439BootReadiness {
     pub state: Cyw43439ChipState,
     pub transport: Cyw43439TransportProfile,
     pub clocks: Cyw43439ClockProfile,
@@ -76,7 +78,7 @@ pub(crate) struct Cyw43439BootReadiness {
 
 /// Shared internal CYW43439 chipset wrapper used by the Bluetooth and Wi-Fi driver facets.
 #[derive(Debug)]
-pub(crate) struct Cyw43439Chipset<H: Cyw43439HardwareContract = UnsupportedBackend> {
+pub struct Cyw43439Chipset<H: Cyw43439HardwareContract = UnsupportedBackend> {
     pub(crate) hardware: H,
     state: Cyw43439ChipState,
     activity_depth: u32,
@@ -101,7 +103,7 @@ where
 
     #[allow(dead_code)]
     #[must_use]
-    pub(crate) fn state(&self) -> Cyw43439ChipState {
+    pub(crate) const fn state(&self) -> Cyw43439ChipState {
         self.state
     }
 
@@ -185,22 +187,22 @@ where
     }
 
     #[allow(dead_code)]
-    pub(crate) fn mark_clocked(&mut self) {
+    pub(crate) const fn mark_clocked(&mut self) {
         self.state = Cyw43439ChipState::Clocked;
     }
 
     #[allow(dead_code)]
-    pub(crate) fn mark_firmware_loaded(&mut self) {
+    pub(crate) const fn mark_firmware_loaded(&mut self) {
         self.state = Cyw43439ChipState::FirmwareLoaded;
     }
 
     #[allow(dead_code)]
-    pub(crate) fn mark_ready(&mut self) {
+    pub(crate) const fn mark_ready(&mut self) {
         self.state = Cyw43439ChipState::Ready;
     }
 
     #[allow(dead_code)]
-    pub(crate) fn mark_low_power(&mut self) {
+    pub(crate) const fn mark_low_power(&mut self) {
         self.state = Cyw43439ChipState::LowPower;
     }
 
@@ -335,12 +337,10 @@ where
             this.hardware
                 .set_facet_enabled(Cyw43439Radio::Wifi, enabled)
                 .map_err(map_wifi_error)?;
-            if enabled {
-                if let Err(error) = Cyw43439Bootstrap::ensure_wlan_runtime_ready(this) {
-                    let _ = this.hardware.set_facet_enabled(Cyw43439Radio::Wifi, false);
-                    this.refresh_power_state_from_hardware();
-                    return Err(map_wifi_error(error));
-                }
+            if enabled && let Err(error) = Cyw43439Bootstrap::ensure_wlan_runtime_ready(this) {
+                let _ = this.hardware.set_facet_enabled(Cyw43439Radio::Wifi, false);
+                this.refresh_power_state_from_hardware();
+                return Err(map_wifi_error(error));
             }
             this.refresh_power_state_from_hardware();
             Ok(())
@@ -367,11 +367,11 @@ where
         }
     }
 
-    pub(crate) fn chipset(&self) -> Option<&Cyw43439Chipset<H>> {
+    pub(crate) const fn chipset(&self) -> Option<&Cyw43439Chipset<H>> {
         self.chipset.as_ref()
     }
 
-    pub(crate) fn take_chipset(&mut self) -> Option<Cyw43439Chipset<H>> {
+    pub(crate) const fn take_chipset(&mut self) -> Option<Cyw43439Chipset<H>> {
         self.chipset.take()
     }
 
@@ -380,7 +380,7 @@ where
     }
 }
 
-pub(crate) fn map_bluetooth_error(error: Cyw43439Error) -> BluetoothError {
+pub const fn map_bluetooth_error(error: Cyw43439Error) -> BluetoothError {
     match error.kind() {
         Cyw43439ErrorKind::Unsupported => BluetoothError::unsupported(),
         Cyw43439ErrorKind::Invalid => BluetoothError::invalid(),
@@ -391,7 +391,7 @@ pub(crate) fn map_bluetooth_error(error: Cyw43439Error) -> BluetoothError {
     }
 }
 
-pub(crate) fn map_wifi_error(error: Cyw43439Error) -> WifiError {
+pub const fn map_wifi_error(error: Cyw43439Error) -> WifiError {
     match error.kind() {
         Cyw43439ErrorKind::Unsupported => WifiError::unsupported(),
         Cyw43439ErrorKind::Invalid => WifiError::invalid(),

@@ -125,7 +125,7 @@ impl<'a> RuntimeVectorBrokerGuard<'a> {
             match lock.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => return Ok(Self { lock }),
                 Err(true) => spin_loop(),
-                Err(false) => continue,
+                Err(false) => {}
             }
         }
     }
@@ -145,6 +145,11 @@ unsafe extern "C" fn reserved_runtime_dispatch_handler() {
     crate::sys::runtime_dispatch::dispatch_pending_runtime_callbacks();
 }
 
+/// Ensures the backend's reserved runtime wake vectors are installed.
+///
+/// # Errors
+///
+/// Returns an error when the backend cannot provide the required vector support or setup fails.
 pub fn ensure_runtime_reserved_wake_vectors() -> Result<(), VectorError> {
     RUNTIME_VECTOR_BROKER.ensure()
 }
@@ -153,6 +158,11 @@ pub fn ensure_runtime_reserved_wake_vectors_best_effort() {
     let _ = ensure_runtime_reserved_wake_vectors();
 }
 
+/// Runs `bind` while holding the runtime vector builder's serialization guard.
+///
+/// # Errors
+///
+/// Returns an error when runtime vector setup failed or another operation owns the builder.
 pub fn with_runtime_vector_builder<R>(
     bind: impl FnOnce(&mut PlatformVectorBuilder) -> R,
 ) -> Result<R, VectorError> {

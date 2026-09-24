@@ -21,6 +21,8 @@ struct FiberStackClassPools {
 }
 
 #[derive(Debug)]
+// The large inline variant avoids heap allocation in the no_std fiber stack path.
+#[allow(clippy::large_enum_variant)]
 enum FiberStackStore {
     Legacy(FiberStackSlab),
     Classes(FiberStackClassPools),
@@ -107,6 +109,8 @@ enum FiberStackBackingState {
 }
 
 #[derive(Debug)]
+// Explicit backing handles stay inline to keep construction heap-free on embedded targets.
+#[allow(clippy::large_enum_variant)]
 enum FiberStackSlabStorage {
     VirtualCombined(Region),
     Explicit {

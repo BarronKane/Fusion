@@ -192,7 +192,7 @@ fn validate_stack_layout(stack: ContextStackLayout) -> Result<usize, ContextErro
         .checked_add(stack.len.get())
         .ok_or_else(ContextError::invalid)?;
 
-    if top % STACK_ALIGNMENT != 0 {
+    if !top.is_multiple_of(STACK_ALIGNMENT) {
         return Err(ContextError::invalid());
     }
     if stack.len.get() < STACK_ALIGNMENT {

@@ -21,6 +21,7 @@ use fusion_sys::transport::{
 };
 
 #[test]
+#[allow(clippy::too_many_lines)] // One integration test exercises the complete channel request/response flow.
 fn allocator_channel_service_advertises_domains_and_serves_audits() {
     let allocator = Allocator::<4, 4>::system_default().expect("allocator should build");
     let default_domain = allocator
@@ -53,7 +54,9 @@ fn allocator_channel_service_advertises_domains_and_serves_audits() {
         fusion_sys::alloc::AllocatorDomainMetadataMessage::Advertised(info) => {
             assert_eq!(info.id, default_domain);
         }
-        other => panic!("unexpected metadata message: {other:?}"),
+        other @ fusion_sys::alloc::AllocatorDomainMetadataMessage::Withdrawn(_) => {
+            panic!("unexpected metadata message: {other:?}");
+        }
     }
 
     service
@@ -254,7 +257,9 @@ fn allocator_channel_service_can_run_on_managed_fiber() {
         fusion_sys::alloc::AllocatorDomainMetadataMessage::Advertised(info) => {
             assert_eq!(info.id, default_domain);
         }
-        other => panic!("unexpected metadata message: {other:?}"),
+        other @ fusion_sys::alloc::AllocatorDomainMetadataMessage::Withdrawn(_) => {
+            panic!("unexpected metadata message: {other:?}");
+        }
     }
 
     fiber

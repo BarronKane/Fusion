@@ -1,8 +1,15 @@
 //! USB topology and port-model vocabulary.
 
-use super::core::*;
-use super::error::*;
-use super::typec::*;
+use super::core::{
+    UsbSpeed,
+    UsbCoreContract,
+};
+use super::error::UsbError;
+use super::typec::{
+    UsbTypecOrientation,
+    UsbDataRole,
+    UsbPowerRole,
+};
 
 /// Canonical host-visible USB device address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -33,6 +40,7 @@ pub enum UsbConnectorKind {
 
 /// Canonical topology status for one USB port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct UsbPortStatus {
     pub connected: bool,
     pub enabled: bool,

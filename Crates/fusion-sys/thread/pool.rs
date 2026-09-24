@@ -492,7 +492,7 @@ impl PoolSlot {
         }
     }
 
-    fn select_worker_for_submission(
+    const fn select_worker_for_submission(
         &mut self,
         preferred_worker: Option<usize>,
     ) -> Result<usize, ThreadError> {
@@ -509,7 +509,11 @@ impl PoolSlot {
         Ok(worker_index)
     }
 
-    fn publish_worker_observation(&mut self, worker_index: usize, observation: CarrierObservation) {
+    const fn publish_worker_observation(
+        &mut self,
+        worker_index: usize,
+        observation: CarrierObservation,
+    ) {
         if worker_index < self.worker_observations.len() {
             self.worker_observations[worker_index] = Some(observation);
         }
@@ -705,7 +709,10 @@ impl SystemThreadPool {
             let preferred_worker = slot.preferred_worker_for_current();
             let worker_index = slot.enqueue(work, preferred_worker)?;
             FUSION_SYSTEM_POOL_SUBMIT_COUNT.fetch_add(1, Ordering::AcqRel);
-            FUSION_SYSTEM_POOL_LAST_SUBMIT_WORKER.store(worker_index as u32, Ordering::Release);
+            FUSION_SYSTEM_POOL_LAST_SUBMIT_WORKER.store(
+                u32::try_from(worker_index).unwrap_or(u32::MAX),
+                Ordering::Release,
+            );
             Ok((
                 slot.worker_semaphore_ptr(worker_index)?,
                 slot.companion_worker_for_submission(worker_index)
@@ -748,7 +755,7 @@ impl SystemThreadPool {
 
         let mut handles: [Option<ThreadHandle>; MAX_POOL_WORKERS] = array::from_fn(|_| None);
         let worker_count = {
-            let worker_count = with_slot(slot_index, |slot| {
+            with_slot(slot_index, |slot| {
                 slot.accepting = false;
                 slot.shutting_down = true;
                 if !matches!(slot.shutdown_policy, SystemShutdownPolicy::Drain) {
@@ -761,8 +768,7 @@ impl SystemThreadPool {
                 }
                 slot.release_shutdown_wakeups()?;
                 Ok(worker_count)
-            })?;
-            worker_count
+            })?
         };
 
         for handle in handles.into_iter().take(worker_count).flatten() {
@@ -877,6 +883,7 @@ fn allocate_pool_slot(
     Ok(slot_index)
 }
 
+#[allow(clippy::too_many_lines)] // Worker startup keeps per-placement setup and rollback paths together.
 fn spawn_workers(
     slot_index: usize,
     system: ThreadSystem,
@@ -922,7 +929,6 @@ fn spawn_workers(
                     slot.worker_stack_backing[worker_index] = owned_backing;
                     Ok(())
                 })?;
-                continue;
             }
             Some(WorkerPlacement::CoreClasses(classes)) => {
                 let PreparedWorkerStack {
@@ -956,7 +962,6 @@ fn spawn_workers(
                     slot.worker_stack_backing[worker_index] = owned_backing;
                     Ok(())
                 })?;
-                continue;
             }
             None => {
                 let PreparedWorkerStack {
@@ -983,7 +988,6 @@ fn spawn_workers(
                     slot.worker_stack_backing[worker_index] = owned_backing;
                     Ok(())
                 })?;
-                continue;
             }
         }
     }

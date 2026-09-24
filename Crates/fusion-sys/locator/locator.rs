@@ -53,6 +53,10 @@ impl<'a, const MAX_DEPTH: usize> ContextChain<'a, MAX_DEPTH> {
         }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn push(&mut self, name: &'a str) -> Result<(), FusionLocatorError> {
         if !is_valid_courier_local_name(name) {
             return Err(FusionLocatorError::invalid());
@@ -80,7 +84,7 @@ impl<'a, const MAX_DEPTH: usize> ContextChain<'a, MAX_DEPTH> {
     }
 }
 
-impl<'a, const MAX_DEPTH: usize> Default for ContextChain<'a, MAX_DEPTH> {
+impl<const MAX_DEPTH: usize> Default for ContextChain<'_, MAX_DEPTH> {
     fn default() -> Self {
         Self::new()
     }
@@ -95,6 +99,10 @@ pub struct QualifiedCourierName<'a, const MAX_CHAIN: usize> {
 }
 
 impl<'a, const MAX_CHAIN: usize> QualifiedCourierName<'a, MAX_CHAIN> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn new(courier: &'a str, domain: &'a str) -> Result<Self, FusionLocatorError> {
         if !is_valid_courier_local_name(courier) || domain.is_empty() {
             return Err(FusionLocatorError::invalid());
@@ -106,6 +114,10 @@ impl<'a, const MAX_CHAIN: usize> QualifiedCourierName<'a, MAX_CHAIN> {
         })
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn parse(input: &'a str) -> Result<Self, FusionLocatorError> {
         let Some(domain_start) = input.rfind('[') else {
             return Err(FusionLocatorError::invalid());
@@ -133,6 +145,10 @@ impl<'a, const MAX_CHAIN: usize> QualifiedCourierName<'a, MAX_CHAIN> {
         Ok(qualified)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn push_context_root(&mut self, name: &'a str) -> Result<(), FusionLocatorError> {
         self.context_chain.push(name)
     }
@@ -181,6 +197,10 @@ pub enum FusionSurfaceKind<'a> {
 }
 
 impl<'a> FusionSurfaceKind<'a> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn parse(input: &'a str) -> Result<Self, FusionLocatorError> {
         if input.is_empty() || input.contains('/') {
             return Err(FusionLocatorError::invalid());
@@ -213,6 +233,10 @@ pub struct FusionSurfaceRef<'a, const MAX_CHAIN: usize> {
 }
 
 impl<'a, const MAX_CHAIN: usize> FusionSurfaceRef<'a, MAX_CHAIN> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn new(
         courier: QualifiedCourierName<'a, MAX_CHAIN>,
         kind: FusionSurfaceKind<'a>,
@@ -228,6 +252,10 @@ impl<'a, const MAX_CHAIN: usize> FusionSurfaceRef<'a, MAX_CHAIN> {
         })
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn parse(input: &'a str) -> Result<Self, FusionLocatorError> {
         let Some(rest) = input.strip_prefix("fusion://") else {
             return Err(FusionLocatorError::invalid());

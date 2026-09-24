@@ -208,10 +208,10 @@ impl<
     /// # Errors
     ///
     /// Returns any honest low-level fiber construction failure.
-    pub fn spawn_managed<'state, const META_CAPACITY: usize, const MAX_CONSUMERS: usize>(
-        state: Pin<&'state mut Self>,
+    pub fn spawn_managed<const META_CAPACITY: usize, const MAX_CONSUMERS: usize>(
+        state: Pin<&mut Self>,
         stack: FiberStack,
-    ) -> Result<ManagedFiber<'state, Self, META_CAPACITY, MAX_CONSUMERS>, FiberError> {
+    ) -> Result<ManagedFiber<'_, Self, META_CAPACITY, MAX_CONSUMERS>, FiberError> {
         Fiber::spawn_managed(stack, state)
     }
 
@@ -231,7 +231,7 @@ impl<
         }
 
         while let Some(request) = self.control_channel.try_receive(self.control_consumer)? {
-            self.handle_request(request)?;
+            self.handle_request(request);
             self.flush_pending_status()?;
             self.flush_pending_stream()?;
             self.flush_metadata()?;
@@ -291,10 +291,7 @@ impl<
         }
     }
 
-    fn handle_request(
-        &mut self,
-        request: AllocatorControlRequest,
-    ) -> Result<(), AllocatorChannelServiceError> {
+    fn handle_request(&mut self, request: AllocatorControlRequest) {
         match request {
             AllocatorControlRequest::ReadDomainAudit { domain } => {
                 self.pending_status = Some(match self.allocator.domain_audit(domain) {
@@ -304,7 +301,6 @@ impl<
                         reason: error.kind,
                     },
                 });
-                Ok(())
             }
             AllocatorControlRequest::ReadDomainPoolStats { domain } => {
                 self.pending_status = Some(match self.allocator.domain_pool_stats(domain) {
@@ -314,49 +310,37 @@ impl<
                         reason: error.kind,
                     },
                 });
-                Ok(())
             }
             AllocatorControlRequest::ReadDomainPoolMembers { domain } => {
-                match self.allocator.domain(domain) {
-                    Some(_) => {
-                        self.pending_stream = Some(PendingStatusStream::PoolMembers {
-                            domain,
-                            next_index: 0,
-                        });
-                        Ok(())
-                    }
-                    None => {
-                        self.pending_status = Some(AllocatorControlStatusMessage::Rejected {
-                            domain: Some(domain),
-                            reason: AllocErrorKind::InvalidDomain,
-                        });
-                        Ok(())
-                    }
+                if self.allocator.domain(domain).is_some() {
+                    self.pending_stream = Some(PendingStatusStream::PoolMembers {
+                        domain,
+                        next_index: 0,
+                    });
+                } else {
+                    self.pending_status = Some(AllocatorControlStatusMessage::Rejected {
+                        domain: Some(domain),
+                        reason: AllocErrorKind::InvalidDomain,
+                    });
                 }
             }
             AllocatorControlRequest::ReadDomainPoolExtents { domain } => {
-                match self.allocator.domain(domain) {
-                    Some(_) => {
-                        self.pending_stream = Some(PendingStatusStream::PoolExtents {
-                            domain,
-                            next_index: 0,
-                        });
-                        Ok(())
-                    }
-                    None => {
-                        self.pending_status = Some(AllocatorControlStatusMessage::Rejected {
-                            domain: Some(domain),
-                            reason: AllocErrorKind::InvalidDomain,
-                        });
-                        Ok(())
-                    }
+                if self.allocator.domain(domain).is_some() {
+                    self.pending_stream = Some(PendingStatusStream::PoolExtents {
+                        domain,
+                        next_index: 0,
+                    });
+                } else {
+                    self.pending_status = Some(AllocatorControlStatusMessage::Rejected {
+                        domain: Some(domain),
+                        reason: AllocErrorKind::InvalidDomain,
+                    });
                 }
             }
             AllocatorControlRequest::RepublishDomains => {
                 self.next_metadata = 0;
                 self.pending_status =
                     Some(AllocatorControlStatusMessage::MetadataRepublishScheduled);
-                Ok(())
             }
         }
     }
@@ -437,7 +421,6 @@ impl<
 }
 
 impl<
-    'a,
     const DOMAINS: usize,
     const RESOURCES: usize,
     const EXTENTS: usize,
@@ -446,7 +429,7 @@ impl<
     const STATUS_CAPACITY: usize,
 > FiberRunnable
     for AllocatorChannelService<
-        'a,
+        '_,
         DOMAINS,
         RESOURCES,
         EXTENTS,

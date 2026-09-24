@@ -66,6 +66,7 @@ const fn copy_ascii_fixed<const N: usize>(value: &str) -> [u8; N] {
     out
 }
 
+#[must_use]
 pub const fn option_or<'a>(value: Option<&'a str>, fallback: &'a str) -> &'a str {
     match value {
         Some(value) => value,
@@ -73,6 +74,7 @@ pub const fn option_or<'a>(value: Option<&'a str>, fallback: &'a str) -> &'a str
     }
 }
 
+#[must_use]
 pub const fn option_is_one(value: Option<&str>) -> bool {
     match value {
         Some(value) => {
@@ -99,10 +101,7 @@ macro_rules! fusion_rp2350_export_build_id {
                 $crate::build_id::option_or(option_env!("FUSION_RP2350_BUILD_PROFILE"), "unknown"),
                 $crate::build_id::option_or(option_env!("FUSION_RP2350_BUILD_TARGET"), "unknown"),
                 $crate::build_id::option_or(option_env!("FUSION_RP2350_BUILD_GIT_SHA"), "nogit"),
-                $crate::build_id::option_or(
-                    option_env!("FUSION_RP2350_BUILD_FEATURES_HASH"),
-                    "0",
-                ),
+                $crate::build_id::option_or(option_env!("FUSION_RP2350_BUILD_FEATURES_HASH"), "0"),
                 $crate::build_id::option_is_one(option_env!("FUSION_RP2350_BUILD_DIRTY")),
             );
     };

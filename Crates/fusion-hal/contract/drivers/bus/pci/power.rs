@@ -12,6 +12,7 @@ pub enum PciPowerState {
 
 /// PCI power-management and wake truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct PciPowerProfile {
     pub capability_version: Option<u8>,
     pub current_state: Option<PciPowerState>,

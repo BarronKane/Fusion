@@ -33,7 +33,7 @@ use crate::lock_fusion_firmware_tests;
 const ROOT_LAUNCH_EPOCH: u64 = 1;
 const DRIVER_LAUNCH_EPOCH: u64 = 2;
 
-fn local_runtime_seal(id: u64) -> LocalAdmissionSeal {
+const fn local_runtime_seal(id: u64) -> LocalAdmissionSeal {
     LocalAdmissionSeal::new(
         ImageSealId::new(id),
         ClaimsDigest::zero(),
@@ -109,6 +109,7 @@ fn cyw43439_bluetooth_driver_launch_request() -> CourierChildLaunchRequest<'stat
     }
 }
 
+#[allow(clippy::large_types_passed_by_value)] // The registration API consumes this launch request.
 fn ensure_child_registered(
     request: CourierChildLaunchRequest<'static>,
     launch_epoch: u64,

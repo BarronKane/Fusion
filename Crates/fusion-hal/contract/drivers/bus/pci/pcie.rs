@@ -1,12 +1,12 @@
 //! PCI Express-specific vocabulary.
 
-use super::core::*;
+use super::core::PciExtendedCapabilityRecord;
 
-/// PCIe capability structure version.
+/// `PCIe` capability structure version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PciExpressVersion(pub u8);
 
-/// PCIe link-generation truth.
+/// `PCIe` link-generation truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PciLinkSpeed {
     Gen1,
@@ -18,11 +18,11 @@ pub enum PciLinkSpeed {
     Other(u8),
 }
 
-/// PCIe link width.
+/// `PCIe` link width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PciLinkWidth(pub u8);
 
-/// PCIe device/port role.
+/// `PCIe` device/port role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PciExpressDevicePortType {
     Endpoint,
@@ -37,8 +37,9 @@ pub enum PciExpressDevicePortType {
     Reserved(u8),
 }
 
-/// PCIe capability and current link-state truth.
+/// `PCIe` capability and current link-state truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct PciExpressProfile {
     pub capability_version: Option<PciExpressVersion>,
     pub device_port_type: Option<PciExpressDevicePortType>,
@@ -56,7 +57,7 @@ pub struct PciExpressProfile {
 
 /// PCIe-specific lane for one PCI function.
 pub trait PciExpressContract {
-    /// Returns one truthful PCIe capability/profile snapshot when this function participates in
+    /// Returns one truthful `PCIe` capability/profile snapshot when this function participates in
     /// PCI Express.
     fn pcie_profile(&self) -> Option<PciExpressProfile>;
 

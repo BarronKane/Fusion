@@ -16,7 +16,7 @@ impl CourierBaseContract for DemoCourier {
         self.id
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "demo"
     }
 

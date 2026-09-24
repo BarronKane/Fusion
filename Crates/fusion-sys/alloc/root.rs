@@ -229,6 +229,10 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
 
     /// Returns the minimum resource request needed to host one allocator-managed pool extent on
     /// one owned resource under one explicit allocator layout policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn resource_request_for_extent_request_with_layout_policy(
         request: MemoryPoolExtentRequest,
         layout_policy: AllocatorLayoutPolicy,
@@ -408,7 +412,7 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             .domain_record(id)
             .ok_or_else(AllocError::invalid_domain)?;
         let extent = record.assign_extent(&backing_request)?;
-        Ok(ExtentLease::new(extent, request)?)
+        ExtentLease::new(extent, request)
     }
 
     /// Returns one pool-member snapshot for `domain` by stable stream index.
@@ -430,7 +434,7 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             .as_ref()
             .map(|pool| pool.member_info_at(index))
             .transpose()
-            .map(|maybe| maybe.flatten())
+            .map(core::option::Option::flatten)
     }
 
     /// Returns one tracked pool-extent snapshot for `domain` by stable stream index.
@@ -452,7 +456,7 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
             .as_ref()
             .map(|pool| pool.extent_info_at(index))
             .transpose()
-            .map(|maybe| maybe.flatten())
+            .map(core::option::Option::flatten)
     }
 
     /// Returns a slab strategy view for `domain`.
@@ -924,16 +928,15 @@ impl<const DOMAINS: usize, const RESOURCES: usize, const EXTENTS: usize>
                     *binding.handle.info(),
                 ));
                 let mut contributor = MemoryPoolContributor::explicit_ready(binding.handle);
-                if control_region.is_none() {
-                    if let Some((region, usable_range)) =
+                if control_region.is_none()
+                    && let Some((region, usable_range)) =
                         reserve_pool_control_region::<RESOURCES, EXTENTS>(
                             &contributor.handle,
                             contributor.usable_range,
                         )?
-                    {
-                        control_region = Some(region);
-                        contributor.usable_range = usable_range;
-                    }
+                {
+                    control_region = Some(region);
+                    contributor.usable_range = usable_range;
                 }
                 pool_builder.add_contributor(contributor)?;
                 contributor_count += 1;
@@ -1041,11 +1044,7 @@ fn reserve_pool_control_region<const RESOURCES: usize, const EXTENTS: usize>(
     let control_region = handle
         .subview(control_range)
         .map_err(|_| AllocError::invalid_request())
-        .and_then(|view| {
-            // SAFETY: the control block lives inside the contributor resource, which remains owned
-            // by the pool for at least as long as the control block itself.
-            Ok(unsafe { view.raw_region() })
-        })?;
+        .map(|view| unsafe { view.raw_region() })?;
     let remaining = ResourceRange::new(
         usable_range
             .offset

@@ -63,7 +63,7 @@ pub struct GpuRasterSubmission<'a> {
     pub parameters: PcuInvocationParameters<'a>,
 }
 
-impl<'a> GpuRasterSubmission<'a> {
+impl GpuRasterSubmission<'_> {
     /// Validates this raster submission against the framebuffer and pipeline it references.
     ///
     /// # Errors
@@ -121,7 +121,7 @@ pub struct GpuMeshSubmission<'a> {
     pub parameters: PcuInvocationParameters<'a>,
 }
 
-impl<'a> GpuMeshSubmission<'a> {
+impl GpuMeshSubmission<'_> {
     /// Validates this mesh submission against the framebuffer and pipeline it references.
     ///
     /// # Errors
@@ -153,7 +153,7 @@ pub struct GpuRayTraceSubmission<'a> {
     pub parameters: PcuInvocationParameters<'a>,
 }
 
-impl<'a> GpuRayTraceSubmission<'a> {
+impl GpuRayTraceSubmission<'_> {
     /// Validates this ray-trace submission against the framebuffer and pipeline it references.
     ///
     /// # Errors
@@ -207,7 +207,7 @@ impl<'a> GpuFillSubmission<'a> {
     }
 }
 
-fn validate_dynamic_state(
+const fn validate_dynamic_state(
     viewport_state: crate::GpuViewportState,
     scissor_state: crate::GpuScissorState,
     dynamic_state: GpuDynamicDrawState,

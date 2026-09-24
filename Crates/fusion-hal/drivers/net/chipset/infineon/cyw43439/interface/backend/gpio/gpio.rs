@@ -244,6 +244,8 @@ const CYW43439_WIFI_ADAPTERS: [WifiAdapterDescriptor; 1] = [WifiAdapterDescripto
 }];
 
 /// CYW43439 backend composed over owned GPIO pins.
+// These booleans track independent hardware resources, claims, and readiness facts.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub struct GpioBackend<
     ClockPin: GpioHardwarePin,
@@ -304,6 +306,8 @@ impl<
 > GpioBackend<ClockPin, ChipSelectPin, DataIrqPin, PowerPin, ResetPin, WakePin>
 {
     /// Creates one GPIO-composed CYW43439 combo-chip backend.
+    // The arguments correspond to independently owned pins and board configuration.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         clock: GpioPin<ClockPin>,
@@ -369,7 +373,7 @@ impl<
         }
     }
 
-    fn radio_available(&self, radio: Cyw43439Radio) -> bool {
+    const fn radio_available(&self, radio: Cyw43439Radio) -> bool {
         match radio {
             Cyw43439Radio::Bluetooth => self.bluetooth_available,
             Cyw43439Radio::Wifi => self.wifi_available,
@@ -393,46 +397,46 @@ impl<
         }
     }
 
-    fn claim_flag_mut(&mut self, radio: Cyw43439Radio) -> &mut bool {
+    const fn claim_flag_mut(&mut self, radio: Cyw43439Radio) -> &mut bool {
         match radio {
             Cyw43439Radio::Bluetooth => &mut self.bluetooth_claimed,
             Cyw43439Radio::Wifi => &mut self.wifi_claimed,
         }
     }
 
-    fn claim_flag(&self, radio: Cyw43439Radio) -> bool {
+    const fn claim_flag(&self, radio: Cyw43439Radio) -> bool {
         match radio {
             Cyw43439Radio::Bluetooth => self.bluetooth_claimed,
             Cyw43439Radio::Wifi => self.wifi_claimed,
         }
     }
 
-    fn enabled_flag_mut(&mut self, radio: Cyw43439Radio) -> &mut bool {
+    const fn enabled_flag_mut(&mut self, radio: Cyw43439Radio) -> &mut bool {
         match radio {
             Cyw43439Radio::Bluetooth => &mut self.bluetooth_enabled,
             Cyw43439Radio::Wifi => &mut self.wifi_enabled,
         }
     }
 
-    fn enabled_flag(&self, radio: Cyw43439Radio) -> bool {
+    const fn enabled_flag(&self, radio: Cyw43439Radio) -> bool {
         match radio {
             Cyw43439Radio::Bluetooth => self.bluetooth_enabled,
             Cyw43439Radio::Wifi => self.wifi_enabled,
         }
     }
 
-    fn any_enabled(&self) -> bool {
+    const fn any_enabled(&self) -> bool {
         self.bluetooth_enabled || self.wifi_enabled
     }
 
-    fn transport_acquired_flag_mut(&mut self, radio: Cyw43439Radio) -> &mut bool {
+    const fn transport_acquired_flag_mut(&mut self, radio: Cyw43439Radio) -> &mut bool {
         match radio {
             Cyw43439Radio::Bluetooth => &mut self.bluetooth_transport_acquired,
             Cyw43439Radio::Wifi => &mut self.wifi_transport_acquired,
         }
     }
 
-    fn transport_acquired_flag(&self, radio: Cyw43439Radio) -> bool {
+    const fn transport_acquired_flag(&self, radio: Cyw43439Radio) -> bool {
         match radio {
             Cyw43439Radio::Bluetooth => self.bluetooth_transport_acquired,
             Cyw43439Radio::Wifi => self.wifi_transport_acquired,
@@ -449,12 +453,12 @@ impl<
     }
 
     #[must_use]
-    pub fn bluetooth_transport_target_rate(&self) -> Option<u32> {
+    pub const fn bluetooth_transport_target_rate(&self) -> Option<u32> {
         self.bluetooth_target_rate
     }
 
     #[must_use]
-    pub fn wifi_transport_target_clock_hz(&self) -> Option<u32> {
+    pub const fn wifi_transport_target_clock_hz(&self) -> Option<u32> {
         self.wifi_target_clock_hz
     }
 
@@ -589,7 +593,7 @@ impl<
         Ok(())
     }
 
-    fn shared_bus_half_cycle_pause(&self) {
+    fn shared_bus_half_cycle_pause() {
         for _ in 0..CYW43439_SHARED_SPI_HALF_CYCLE_SPINS {
             core::hint::spin_loop();
         }
@@ -601,7 +605,7 @@ impl<
 
     fn shared_bus_deselect(&mut self) -> Result<(), Cyw43439Error> {
         self.chip_select.set_level(true).map_err(map_gpio_error)?;
-        self.shared_bus_half_cycle_pause();
+        Self::shared_bus_half_cycle_pause();
         Ok(())
     }
 
@@ -609,41 +613,41 @@ impl<
         self.data_irq
             .configure_output(initial_high)
             .map_err(map_gpio_error)?;
-        self.shared_bus_half_cycle_pause();
+        Self::shared_bus_half_cycle_pause();
         Ok(())
     }
 
     fn shared_bus_release_data_input(&mut self) -> Result<(), Cyw43439Error> {
         self.data_irq.configure_input().map_err(map_gpio_error)?;
-        self.shared_bus_half_cycle_pause();
+        Self::shared_bus_half_cycle_pause();
         Ok(())
     }
 
     fn shared_bus_write_bit(&mut self, high: bool) -> Result<(), Cyw43439Error> {
         self.data_irq.set_level(high).map_err(map_gpio_error)?;
-        self.shared_bus_half_cycle_pause();
+        Self::shared_bus_half_cycle_pause();
         self.clock.set_level(true).map_err(map_gpio_error)?;
-        self.shared_bus_half_cycle_pause();
+        Self::shared_bus_half_cycle_pause();
         self.clock.set_level(false).map_err(map_gpio_error)?;
-        self.shared_bus_half_cycle_pause();
+        Self::shared_bus_half_cycle_pause();
         Ok(())
     }
 
     fn shared_bus_read_bit(&mut self) -> Result<bool, Cyw43439Error> {
         if self.shared_bus_high_speed {
             let sampled = self.data_irq.read().map_err(map_gpio_error)?;
-            self.shared_bus_half_cycle_pause();
+            Self::shared_bus_half_cycle_pause();
             self.clock.set_level(true).map_err(map_gpio_error)?;
-            self.shared_bus_half_cycle_pause();
+            Self::shared_bus_half_cycle_pause();
             self.clock.set_level(false).map_err(map_gpio_error)?;
-            self.shared_bus_half_cycle_pause();
+            Self::shared_bus_half_cycle_pause();
             return Ok(sampled);
         }
 
         self.clock.set_level(true).map_err(map_gpio_error)?;
-        self.shared_bus_half_cycle_pause();
+        Self::shared_bus_half_cycle_pause();
         self.clock.set_level(false).map_err(map_gpio_error)?;
-        self.shared_bus_half_cycle_pause();
+        Self::shared_bus_half_cycle_pause();
         self.data_irq.read().map_err(map_gpio_error)
     }
 
@@ -688,12 +692,8 @@ impl<
     }
 
     const fn swap16x2_encode_u32(value: u32) -> [u8; 4] {
-        [
-            (value >> 8) as u8,
-            value as u8,
-            (value >> 24) as u8,
-            (value >> 16) as u8,
-        ]
+        let bytes = value.to_le_bytes();
+        [bytes[1], bytes[0], bytes[3], bytes[2]]
     }
 
     const fn swap16x2_decode_u32(bytes: [u8; 4]) -> u32 {
@@ -873,7 +873,7 @@ impl<
         Ok(())
     }
 
-    fn validate_wl_gpio(&self, wl_gpio: u8) -> Result<GpioCapabilities, Cyw43439Error> {
+    fn validate_wl_gpio(wl_gpio: u8) -> Result<GpioCapabilities, Cyw43439Error> {
         CYW43439_WL_GPIO_PINS
             .iter()
             .find(|descriptor| descriptor.pin == wl_gpio)
@@ -882,7 +882,7 @@ impl<
     }
 
     fn configure_wl_gpio_mode(&mut self, wl_gpio: u8) -> Result<GpioCapabilities, Cyw43439Error> {
-        let capabilities = self.validate_wl_gpio(wl_gpio)?;
+        let capabilities = Self::validate_wl_gpio(wl_gpio)?;
         let gpio_mask = 1_u32 << wl_gpio;
         let gpio_control_addr =
             CYW43439_GSPI_CHIPCOMMON_BASE_ADDRESS + CYW43439_GSPI_CHIPCOMMON_GPIOCONTROL_OFFSET;
@@ -901,7 +901,7 @@ impl<
     }
 
     fn read_wl_gpio_internal(&mut self, wl_gpio: u8) -> Result<bool, Cyw43439Error> {
-        self.validate_wl_gpio(wl_gpio)?;
+        Self::validate_wl_gpio(wl_gpio)?;
         let gpio_in_addr =
             CYW43439_GSPI_CHIPCOMMON_BASE_ADDRESS + CYW43439_GSPI_CHIPCOMMON_GPIOIN_OFFSET;
         let gpio_in = self.shared_bus_read_backplane_u32(gpio_in_addr)?;
@@ -936,7 +936,7 @@ impl<
     }
 
     fn set_wl_gpio_level_internal(&mut self, wl_gpio: u8, high: bool) -> Result<(), Cyw43439Error> {
-        let capabilities = self.validate_wl_gpio(wl_gpio)?;
+        let capabilities = Self::validate_wl_gpio(wl_gpio)?;
         if !capabilities.contains(GpioCapabilities::OUTPUT) {
             return Err(Cyw43439Error::unsupported());
         }
@@ -973,7 +973,7 @@ impl<
                 register,
                 &payload[..chunk_len],
             )?;
-            address += chunk_len as u32;
+            address += u32::try_from(chunk_len).map_err(|_| Cyw43439Error::invalid())?;
             payload = &payload[chunk_len..];
         }
         Ok(())
@@ -998,7 +998,7 @@ impl<
                 chunk_len,
                 &mut out[..chunk_len],
             )?;
-            address += chunk_len as u32;
+            address += u32::try_from(chunk_len).map_err(|_| Cyw43439Error::invalid())?;
             out = &mut out[chunk_len..];
         }
         Ok(())
@@ -1109,11 +1109,11 @@ impl<
         Ok(indices)
     }
 
-    fn bluetooth_circ_buf_count(in_val: u32, out_val: u32) -> u32 {
+    const fn bluetooth_circ_buf_count(in_val: u32, out_val: u32) -> u32 {
         in_val.wrapping_sub(out_val) & (CYW43439_BTSDIO_FWBUF_SIZE - 1)
     }
 
-    fn bluetooth_circ_buf_space(in_val: u32, out_val: u32) -> u32 {
+    const fn bluetooth_circ_buf_space(in_val: u32, out_val: u32) -> u32 {
         Self::bluetooth_circ_buf_count(out_val, in_val.wrapping_add(4))
     }
 
@@ -1166,7 +1166,7 @@ impl<
                 &mut chunk[..chunk_len],
             );
             self.shared_bus_write_backplane_bytes(
-                write_addr + local_offset as u32,
+                write_addr + u32::try_from(local_offset).map_err(|_| Cyw43439Error::invalid())?,
                 &chunk[..chunk_len],
             )?;
             local_offset += chunk_len;
@@ -1183,16 +1183,16 @@ impl<
         aligned_len: usize,
     ) -> Result<u32, Cyw43439Error> {
         let ring_len = CYW43439_BTSDIO_FWBUF_SIZE as usize;
-        let offset = offset as usize;
+        let offset = usize::try_from(offset).map_err(|_| Cyw43439Error::invalid())?;
         if offset + aligned_len <= ring_len {
             self.bluetooth_mem_write_framed_segment(
-                base_addr + offset as u32,
+                base_addr + u32::try_from(offset).map_err(|_| Cyw43439Error::invalid())?,
                 header,
                 body,
                 0,
                 aligned_len,
             )?;
-            return Ok(offset as u32);
+            return u32::try_from(offset).map_err(|_| Cyw43439Error::invalid());
         }
 
         let first_len = ring_len - offset;
@@ -1202,7 +1202,7 @@ impl<
         }
 
         self.bluetooth_mem_write_framed_segment(
-            base_addr + offset as u32,
+            base_addr + u32::try_from(offset).map_err(|_| Cyw43439Error::invalid())?,
             header,
             body,
             0,
@@ -1215,7 +1215,7 @@ impl<
             first_len,
             aligned_len - first_len,
         )?;
-        Ok(offset as u32)
+        u32::try_from(offset).map_err(|_| Cyw43439Error::invalid())
     }
 
     fn bluetooth_write_patch_record(
@@ -1229,9 +1229,7 @@ impl<
 
         let mut staging = [0_u8; CYW43439_BT_PATCH_STAGING_BYTES];
         let mut write_addr = CYW43439_BTFW_MEM_OFFSET + dest_addr;
-        let mut write_len = 0_usize;
-
-        if (write_addr & 0x3) != 0 {
+        let mut write_len = if (write_addr & 0x3) != 0 {
             let aligned_addr = write_addr & !0x3;
             let leading = (write_addr & 0x3) as usize;
             let prefix = self
@@ -1239,8 +1237,10 @@ impl<
                 .to_le_bytes();
             staging[..leading].copy_from_slice(&prefix[..leading]);
             write_addr = aligned_addr;
-            write_len = leading;
-        }
+            leading
+        } else {
+            0
+        };
 
         if staging.len() < write_len + payload.len() {
             return Err(Cyw43439Error::resource_exhausted());
@@ -1248,7 +1248,8 @@ impl<
         staging[write_len..write_len + payload.len()].copy_from_slice(payload);
         write_len += payload.len();
 
-        let end_addr = write_addr + write_len as u32;
+        let end_addr =
+            write_addr + u32::try_from(write_len).map_err(|_| Cyw43439Error::invalid())?;
         if (end_addr & 0x3) != 0 {
             let aligned_tail = end_addr & !0x3;
             let tail_word = self
@@ -1694,6 +1695,8 @@ impl<
         Ok(())
     }
 
+    // This dispatch coordinates WLAN and Bluetooth state transitions and must remain ordered.
+    #[allow(clippy::too_many_lines)]
     fn write_controller_transport(
         &mut self,
         radio: Cyw43439Radio,
@@ -1736,17 +1739,21 @@ impl<
                 Self::bluetooth_circ_buf_space(indices.host2bt_in_val, indices.host2bt_out_val);
             CYW43439_BLUETOOTH_LAST_SPACE.store(space, Ordering::Release);
             CYW43439_BLUETOOTH_PHASE.store(22, Ordering::Release);
-            if aligned_len as u32 > space {
+            if u32::try_from(aligned_len).map_err(|_| Cyw43439Error::invalid())? > space {
                 CYW43439_BLUETOOTH_LAST_ERROR.store(23, Ordering::Release);
                 return Err(Cyw43439Error::busy());
             }
 
             let mut header = [0_u8; 4];
-            header[0] = (body_len & 0xff) as u8;
-            header[1] = ((body_len >> 8) & 0xff) as u8;
+            header[0] = u8::try_from(body_len & 0xff).map_err(|_| Cyw43439Error::invalid())?;
+            header[1] =
+                u8::try_from((body_len >> 8) & 0xff).map_err(|_| Cyw43439Error::invalid())?;
             header[2] = 0;
             header[3] = payload[0];
-            CYW43439_BLUETOOTH_LAST_WRITE_LEN.store(payload.len() as u32, Ordering::Release);
+            CYW43439_BLUETOOTH_LAST_WRITE_LEN.store(
+                u32::try_from(payload.len()).map_err(|_| Cyw43439Error::invalid())?,
+                Ordering::Release,
+            );
             CYW43439_BLUETOOTH_LAST_RING_HEADER
                 .store(u32::from_le_bytes(header), Ordering::Release);
             for (index, word) in CYW43439_BLUETOOTH_LAST_WRITE_WORDS.iter().enumerate() {
@@ -1796,7 +1803,9 @@ impl<
                 word.store(u32::from_le_bytes(bytes), Ordering::Release);
             }
 
-            let new_h2b_in = indices.host2bt_in_val.wrapping_add(aligned_len as u32)
+            let new_h2b_in = indices
+                .host2bt_in_val
+                .wrapping_add(u32::try_from(aligned_len).map_err(|_| Cyw43439Error::invalid())?)
                 & (CYW43439_BTSDIO_FWBUF_SIZE - 1);
             CYW43439_BLUETOOTH_PHASE.store(23, Ordering::Release);
             self.bluetooth_shared_reg_write(layout.host2bt_in_addr, new_h2b_in)
@@ -1876,13 +1885,12 @@ impl<
                 self.bluetooth_mem_read_ring(
                     layout.bt2host_buf_addr,
                     body_offset,
-                    &mut out[1..1 + body_len],
+                    &mut out[1..][..body_len],
                 )?;
             }
-            let new_b2h_out = indices
-                .bt2host_out_val
-                .wrapping_add(4 + total_aligned as u32)
-                & (CYW43439_BTSDIO_FWBUF_SIZE - 1);
+            let new_b2h_out = indices.bt2host_out_val.wrapping_add(
+                4 + u32::try_from(total_aligned).map_err(|_| Cyw43439Error::invalid())?,
+            ) & (CYW43439_BTSDIO_FWBUF_SIZE - 1);
             self.bluetooth_shared_reg_write(layout.bt2host_out_addr, new_b2h_out)?;
             self.bluetooth_toggle_data_valid()?;
             return Ok(body_len + 1);
@@ -1932,7 +1940,7 @@ impl<
     }
 
     fn wl_gpio_capabilities(&self, wl_gpio: u8) -> Result<GpioCapabilities, Cyw43439Error> {
-        self.validate_wl_gpio(wl_gpio)
+        Self::validate_wl_gpio(wl_gpio)
     }
 
     fn configure_wl_gpio_input(&mut self, wl_gpio: u8) -> Result<(), Cyw43439Error> {
@@ -2054,7 +2062,9 @@ impl<
     }
 }
 
-fn map_gpio_error(error: fusion_hal::contract::drivers::bus::gpio::GpioError) -> Cyw43439Error {
+const fn map_gpio_error(
+    error: fusion_hal::contract::drivers::bus::gpio::GpioError,
+) -> Cyw43439Error {
     match error.kind() {
         fusion_hal::contract::drivers::bus::gpio::GpioErrorKind::Unsupported => {
             Cyw43439Error::unsupported()
@@ -2084,6 +2094,7 @@ mod tests {
     };
     use fusion_hal::contract::drivers::bus::gpio::{
         GpioCapabilities,
+        GpioControllerDescriptor,
         GpioDriveStrength,
         GpioError,
         GpioFunction,
@@ -2121,6 +2132,14 @@ mod tests {
     impl GpioHardwarePin for FakePin {
         fn pin(&self) -> u8 {
             self.pin
+        }
+
+        fn controller(&self) -> &'static GpioControllerDescriptor {
+            const CONTROLLER: GpioControllerDescriptor = GpioControllerDescriptor {
+                id: "test-cyw43439-gpio",
+                name: "Test CYW43439 GPIO",
+            };
+            &CONTROLLER
         }
 
         fn capabilities(&self) -> GpioCapabilities {
@@ -2179,6 +2198,7 @@ mod tests {
             Cyw43439FirmwareAssets::default(),
             true,
             true,
+            None,
         )
     }
 
@@ -2252,6 +2272,7 @@ mod tests {
             Cyw43439FirmwareAssets::default(),
             true,
             true,
+            None,
         );
 
         backend.claim_controller(Cyw43439Radio::Bluetooth).unwrap();

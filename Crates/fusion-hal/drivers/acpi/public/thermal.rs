@@ -100,6 +100,10 @@ where
         }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn provider(&self) -> Result<&'static AcpiProviderDescriptor, AcpiError> {
         H::provider(self.provider).ok_or_else(AcpiError::invalid)
     }

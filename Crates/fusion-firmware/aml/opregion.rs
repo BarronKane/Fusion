@@ -43,6 +43,10 @@ pub struct AmlOpRegionDescriptor {
 
 /// Host handler for one AML address-space class.
 pub trait AmlOpRegionHandler {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     fn read(
         &self,
         region: &AmlOpRegionDescriptor,
@@ -50,6 +54,10 @@ pub trait AmlOpRegionHandler {
         width: AmlAccessWidth,
     ) -> AmlResult<u64>;
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     fn write(
         &self,
         region: &AmlOpRegionDescriptor,

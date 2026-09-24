@@ -105,13 +105,16 @@ impl<'a> GpuFramebufferAttachment<'a> {
 
     #[must_use]
     pub const fn is_role_compatible(self) -> bool {
-        match (self.role, self.format.class()) {
+        matches!(
+            (self.role, self.format.class()),
             (GpuAttachmentRole::Color { .. }, GpuFormatClass::Color)
-            | (GpuAttachmentRole::Depth, GpuFormatClass::Depth)
-            | (GpuAttachmentRole::Stencil, GpuFormatClass::Stencil)
-            | (GpuAttachmentRole::DepthStencil, GpuFormatClass::DepthStencil) => true,
-            _ => false,
-        }
+                | (GpuAttachmentRole::Depth, GpuFormatClass::Depth)
+                | (GpuAttachmentRole::Stencil, GpuFormatClass::Stencil)
+                | (
+                    GpuAttachmentRole::DepthStencil,
+                    GpuFormatClass::DepthStencil
+                )
+        )
     }
 }
 
@@ -217,10 +220,10 @@ impl<'a> GpuFramebuffer<'a> {
                 return Err(GpuFramebufferValidationError::RoleFormatMismatch);
             }
 
-            if let Some(first) = self.attachments.first().copied() {
-                if attachment.samples != first.samples {
-                    return Err(GpuFramebufferValidationError::AttachmentSampleMismatch);
-                }
+            if let Some(first) = self.attachments.first().copied()
+                && attachment.samples != first.samples
+            {
+                return Err(GpuFramebufferValidationError::AttachmentSampleMismatch);
             }
 
             match attachment.role {
@@ -264,14 +267,13 @@ impl<'a> GpuFramebuffer<'a> {
         if self.extensions.depth_stencil.is_some() && !self.has_depth_or_stencil_attachment() {
             return Err(GpuFramebufferValidationError::DepthStencilExtensionWithoutAttachment);
         }
-        if let Some(multisample) = self.extensions.multisample {
-            if let Some(samples) = self.attachment_samples() {
-                if !multisample.max_samples.supports(samples) {
-                    return Err(
-                        GpuFramebufferValidationError::MultisampleExtensionBelowAttachmentSampleCount,
-                    );
-                }
-            }
+        if let Some(multisample) = self.extensions.multisample
+            && let Some(samples) = self.attachment_samples()
+            && !multisample.max_samples.supports(samples)
+        {
+            return Err(
+                GpuFramebufferValidationError::MultisampleExtensionBelowAttachmentSampleCount,
+            );
         }
 
         Ok(())

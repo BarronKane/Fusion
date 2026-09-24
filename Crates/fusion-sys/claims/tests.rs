@@ -10,7 +10,7 @@ type DemoRegistry<'a> = ClaimContextRegistry<'a, 4, 4, 4, 16>;
 type DemoAuthority<'a> = CourierAuthorityRegistry<'a, 4, 4, 4, 4, 16>;
 type TinyRegistry<'a> = ClaimContextRegistry<'a, 1, 1, 1, 4>;
 
-fn local_seal(id: u64) -> LocalAdmissionSeal {
+const fn local_seal(id: u64) -> LocalAdmissionSeal {
     LocalAdmissionSeal::new(
         ImageSealId::new(id),
         ClaimsDigest::zero(),
@@ -20,7 +20,7 @@ fn local_seal(id: u64) -> LocalAdmissionSeal {
     )
 }
 
-fn black_courier(context: ClaimContextId) -> CourierSupport {
+const fn black_courier(context: ClaimContextId) -> CourierSupport {
     CourierSupport {
         caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS,
         implementation: CourierImplementationKind::Native,
@@ -31,11 +31,11 @@ fn black_courier(context: ClaimContextId) -> CourierSupport {
     }
 }
 
-fn black_courier_descriptor<'a>(
+const fn black_courier_descriptor(
     courier: CourierId,
-    principal: PrincipalId<'a>,
+    principal: PrincipalId<'_>,
     parent: Option<CourierId>,
-) -> CourierAuthorityDescriptor<'a> {
+) -> CourierAuthorityDescriptor<'_> {
     CourierAuthorityDescriptor {
         courier,
         principal,

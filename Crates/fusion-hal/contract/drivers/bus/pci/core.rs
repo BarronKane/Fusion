@@ -2,10 +2,10 @@
 //!
 //! This lane owns the nouns every PCI consumer should be able to rely on without dragging in
 //! platform discovery or PCIe-specific link theology. It also deliberately avoids one fake global
-//! `PciVersion`: transport family, configuration model, PCIe capability version, link generation,
+//! `PciVersion`: transport family, configuration model, `PCIe` capability version, link generation,
 //! and optional capabilities are different axes and stay different here.
 
-use super::error::*;
+use super::error::PciError;
 
 /// Coarse implementation kind surfaced by one PCI provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18,6 +18,7 @@ pub enum PciImplementationKind {
 
 /// Truthful capability summary for one PCI provider surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct PciSupport {
     pub implementation: PciImplementationKind,
     pub pcie: bool,
@@ -209,7 +210,7 @@ impl PciHeaderType {
     }
 }
 
-/// Broad function kind or PCIe role truth.
+/// Broad function kind or `PCIe` role truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PciFunctionKind {
     Endpoint,
@@ -239,7 +240,7 @@ pub struct PciFunctionIdentity {
     pub revision_id: u8,
 }
 
-/// Shared function-profile truth independent of optional PCIe lanes.
+/// Shared function-profile truth independent of optional `PCIe` lanes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PciFunctionProfile {
     pub transport_family: PciTransportFamily,
@@ -387,7 +388,7 @@ pub struct PciCapabilityRecord {
     pub next: Option<PciConfigOffset>,
 }
 
-/// Extended PCIe capability IDs.
+/// Extended `PCIe` capability IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PciExtendedCapabilityId {
     AdvancedErrorReporting,

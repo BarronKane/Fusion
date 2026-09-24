@@ -1,4 +1,26 @@
-use super::*;
+use super::{
+    DomainRegistry,
+    CourierPlan,
+    CourierId,
+    ChildCourierLaunchRecord,
+    CourierRecord,
+    CourierMetadataEntry,
+    CourierMetadataSubject,
+    FiberId,
+    ContextId,
+    CourierObligationRecord,
+    CourierObligationId,
+    CourierFiberRecord,
+    CourierMetadata,
+    ContextBaseContract,
+    CourierBaseContract,
+    CourierSupport,
+    CourierVisibilityControlContract,
+    CourierVisibility,
+    ContextProjectionKind,
+    ContextRecord,
+    ContextSupport,
+};
 
 /// Borrowed view of one courier inside the fixed-capacity domain registry.
 #[derive(Debug, Clone, Copy)]
@@ -46,7 +68,7 @@ impl<
     >
 {
     #[must_use]
-    pub fn visible_contexts(
+    pub const fn visible_contexts(
         self,
     ) -> VisibleContexts<
         'registry,
@@ -66,17 +88,21 @@ impl<
     }
 
     #[must_use]
-    pub fn plan(self) -> CourierPlan {
+    pub const fn plan(self) -> CourierPlan {
         self.record().descriptor.plan
     }
 
     #[must_use]
-    pub fn parent_courier(self) -> Option<CourierId> {
+    pub const fn parent_courier(self) -> Option<CourierId> {
         self.record().parent
     }
 
     #[must_use]
-    pub fn launch_record(self) -> Option<&'registry ChildCourierLaunchRecord<'a>> {
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
+    pub const fn launch_record(self) -> Option<&'registry ChildCourierLaunchRecord<'a>> {
         let record: &'registry CourierRecord<
             'a,
             MAX_VISIBLE,
@@ -89,7 +115,10 @@ impl<
         record.launch.as_ref()
     }
 
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn pedigree<const MAX_DEPTH: usize>(
         self,
     ) -> Result<crate::courier::CourierPedigree<'a, MAX_DEPTH>, crate::domain::DomainError> {
@@ -97,15 +126,19 @@ impl<
     }
 
     #[must_use]
-    pub fn scope_role(self) -> crate::courier::CourierScopeRole {
+    pub const fn scope_role(self) -> crate::courier::CourierScopeRole {
         self.record().descriptor.scope_role
     }
 
     #[must_use]
-    pub fn is_context_root(self) -> bool {
+    pub const fn is_context_root(self) -> bool {
         self.scope_role().is_context_root()
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn qualified_name<const MAX_CHAIN: usize>(
         self,
     ) -> Result<crate::locator::QualifiedCourierName<'a, MAX_CHAIN>, crate::domain::DomainError>
@@ -114,7 +147,10 @@ impl<
             .qualified_courier_name::<MAX_CHAIN>(self.record().descriptor.id)
     }
 
-    #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn metadata_entries(self) -> impl Iterator<Item = &'registry CourierMetadataEntry<'a>> {
         let record: &'registry CourierRecord<
             'a,
@@ -128,12 +164,10 @@ impl<
         record.app_metadata.iter()
     }
 
-    #[must_use]
     pub fn courier_metadata(self) -> impl Iterator<Item = &'registry CourierMetadataEntry<'a>> {
         self.metadata_entries_for(CourierMetadataSubject::Courier)
     }
 
-    #[must_use]
     pub fn fiber_metadata(
         self,
         fiber: FiberId,
@@ -141,7 +175,6 @@ impl<
         self.metadata_entries_for(CourierMetadataSubject::Fiber(fiber))
     }
 
-    #[must_use]
     pub fn child_courier_metadata(
         self,
         child: CourierId,
@@ -149,7 +182,6 @@ impl<
         self.metadata_entries_for(CourierMetadataSubject::ChildCourier(child))
     }
 
-    #[must_use]
     pub fn context_metadata(
         self,
         context: ContextId,
@@ -157,12 +189,14 @@ impl<
         self.metadata_entries_for(CourierMetadataSubject::Context(context))
     }
 
-    #[must_use]
     pub fn async_metadata(self) -> impl Iterator<Item = &'registry CourierMetadataEntry<'a>> {
         self.metadata_entries_for(CourierMetadataSubject::AsyncLane)
     }
 
-    #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn metadata_entries_for(
         self,
         subject: CourierMetadataSubject,
@@ -180,6 +214,10 @@ impl<
     }
 
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn metadata_entry_for(
         self,
         subject: CourierMetadataSubject,
@@ -244,6 +282,10 @@ impl<
         self.record().obligations.len()
     }
 
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn obligations(self) -> impl Iterator<Item = &'registry CourierObligationRecord<'a>> {
         let record: &'registry CourierRecord<
             'a,
@@ -258,6 +300,10 @@ impl<
     }
 
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn obligation(
         self,
         obligation: CourierObligationId,
@@ -274,6 +320,10 @@ impl<
         record.obligations.obligation(obligation)
     }
 
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn child_couriers(self) -> impl Iterator<Item = &'registry ChildCourierLaunchRecord<'a>> {
         let record: &'registry CourierRecord<
             'a,
@@ -292,6 +342,10 @@ impl<
         self.record().fibers.len()
     }
 
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn fibers(self) -> impl Iterator<Item = &'registry CourierFiberRecord> {
         let record: &'registry CourierRecord<
             'a,
@@ -306,11 +360,15 @@ impl<
     }
 
     #[must_use]
-    pub fn runtime_ledger(self) -> crate::courier::CourierRuntimeLedger {
+    pub const fn runtime_ledger(self) -> crate::courier::CourierRuntimeLedger {
         self.record().runtime
     }
 
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn fiber(self, fiber: FiberId) -> Option<&'registry CourierFiberRecord> {
         let record: &'registry CourierRecord<
             'a,
@@ -325,7 +383,7 @@ impl<
     }
 
     #[must_use]
-    pub fn metadata(self) -> CourierMetadata<'registry> {
+    pub const fn metadata(self) -> CourierMetadata<'registry> {
         CourierMetadata {
             id: self.record().descriptor.id,
             name: self.record().descriptor.name,
@@ -334,7 +392,9 @@ impl<
         }
     }
 
-    fn record(&self) -> &CourierRecord<'a, MAX_VISIBLE, MAX_CHILDREN, MAX_FIBERS, MAX_METADATA> {
+    const fn record(
+        &self,
+    ) -> &CourierRecord<'a, MAX_VISIBLE, MAX_CHILDREN, MAX_FIBERS, MAX_METADATA> {
         self.registry.couriers[self.index]
             .as_ref()
             .expect("courier handle should only point at live couriers")
@@ -342,8 +402,6 @@ impl<
 }
 
 impl<
-    'registry,
-    'a,
     const MAX_COURIERS: usize,
     const MAX_CONTEXTS: usize,
     const MAX_VISIBLE: usize,
@@ -352,8 +410,8 @@ impl<
     const MAX_METADATA: usize,
 > CourierBaseContract
     for CourierHandle<
-        'registry,
-        'a,
+        '_,
+        '_,
         MAX_COURIERS,
         MAX_CONTEXTS,
         MAX_VISIBLE,
@@ -376,8 +434,6 @@ impl<
 }
 
 impl<
-    'registry,
-    'a,
     const MAX_COURIERS: usize,
     const MAX_CONTEXTS: usize,
     const MAX_VISIBLE: usize,
@@ -386,8 +442,8 @@ impl<
     const MAX_METADATA: usize,
 > CourierVisibilityControlContract
     for CourierHandle<
-        'registry,
-        'a,
+        '_,
+        '_,
         MAX_COURIERS,
         MAX_CONTEXTS,
         MAX_VISIBLE,
@@ -441,7 +497,6 @@ pub struct ContextHandle<
 }
 
 impl<
-    'registry,
     'a,
     const MAX_COURIERS: usize,
     const MAX_CONTEXTS: usize,
@@ -451,7 +506,7 @@ impl<
     const MAX_METADATA: usize,
 >
     ContextHandle<
-        'registry,
+        '_,
         'a,
         MAX_COURIERS,
         MAX_CONTEXTS,
@@ -461,7 +516,7 @@ impl<
         MAX_METADATA,
     >
 {
-    fn record(&self) -> &ContextRecord<'a> {
+    const fn record(&self) -> &ContextRecord<'a> {
         self.registry.contexts[self.index]
             .as_ref()
             .expect("context handle should only point at live contexts")
@@ -469,8 +524,6 @@ impl<
 }
 
 impl<
-    'registry,
-    'a,
     const MAX_COURIERS: usize,
     const MAX_CONTEXTS: usize,
     const MAX_VISIBLE: usize,
@@ -479,8 +532,8 @@ impl<
     const MAX_METADATA: usize,
 > ContextBaseContract
     for ContextHandle<
-        'registry,
-        'a,
+        '_,
+        '_,
         MAX_COURIERS,
         MAX_CONTEXTS,
         MAX_VISIBLE,

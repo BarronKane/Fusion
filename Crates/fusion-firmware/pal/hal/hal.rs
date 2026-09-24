@@ -1,7 +1,7 @@
 //! Dynamic bare-metal hardware-enumeration lane.
 //!
 //! This lane is reserved for machines where Fusion must discover reachable hardware and
-//! firmware-described devices at runtime rather than consuming a closed-world SoC composition.
+//! firmware-described devices at runtime rather than consuming a closed-world `SoC` composition.
 
 #![allow(clippy::module_inception)]
 

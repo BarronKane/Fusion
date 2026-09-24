@@ -37,10 +37,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let samples = selected_samples()?;
     println!("async_lifecycle_probe");
-    println!(
-        "  config: samples={} task_capacity={}",
-        samples, PROBE_TASK_CAPACITY
-    );
+    println!("  config: samples={samples} task_capacity={PROBE_TASK_CAPACITY}");
 
     for workers in [1_usize, 2, 4] {
         print_thread_async_report(workers, samples)?;

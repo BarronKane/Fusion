@@ -1,3 +1,10 @@
+// Callback signatures mirror the runtime ABI, and each test owns its local fixtures.
+#![allow(
+    clippy::items_after_statements,
+    clippy::too_many_arguments,
+    clippy::unnecessary_wraps
+)]
+
 use std::sync::{
     Arc,
     Mutex as StdMutex,
@@ -129,6 +136,7 @@ unsafe fn test_runtime_sink_record_context(
     let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
     let mut state = state.lock().expect("test runtime sink mutex should lock");
     state.ledger.record_context(runtime_context, tick);
+    drop(state);
     Ok(())
 }
 
@@ -153,6 +161,7 @@ unsafe fn test_runtime_sink_register_fiber(
         tick,
     ));
     state.ledger.register_fiber(class);
+    drop(state);
     Ok(())
 }
 
@@ -168,6 +177,7 @@ unsafe fn test_runtime_sink_update_fiber(
         return Err(fusion_sys::courier::CourierRuntimeSinkError::NotFound);
     };
     record.update_from_snapshot(snapshot, tick);
+    drop(state);
     Ok(())
 }
 
@@ -189,6 +199,7 @@ unsafe fn test_runtime_sink_mark_fiber_terminal(
     record.mark_terminal(terminal, tick);
     state.ledger.release_fiber(record.class);
     state.fiber = Some(record);
+    drop(state);
     Ok(())
 }
 
@@ -201,6 +212,7 @@ unsafe fn test_runtime_sink_record_runtime_summary(
     let state = unsafe { &*context.cast::<StdMutex<TestRuntimeSinkState>>() };
     let mut state = state.lock().expect("test runtime sink mutex should lock");
     state.ledger.record_summary(summary, tick);
+    drop(state);
     Ok(())
 }
 
@@ -246,6 +258,7 @@ unsafe fn test_runtime_sink_upsert_metadata(
     state.metadata = Some(fusion_sys::courier::CourierMetadataEntry::new(
         subject, key, value, tick,
     ));
+    drop(state);
     Ok(())
 }
 
@@ -262,6 +275,7 @@ unsafe fn test_runtime_sink_remove_metadata(
         .is_some_and(|entry| entry.subject == subject && entry.key == key)
     {
         state.metadata = None;
+        drop(state);
         return Ok(());
     }
     Err(fusion_sys::courier::CourierRuntimeSinkError::NotFound)
@@ -282,6 +296,7 @@ unsafe fn test_runtime_sink_register_obligation(
         tick,
     );
     state.obligation = Some(record);
+    drop(state);
     Ok(record.id)
 }
 
@@ -301,6 +316,7 @@ unsafe fn test_runtime_sink_record_obligation_progress(
     }
     record.last_progress_tick = tick;
     record.responsiveness = CourierResponsiveness::Responsive;
+    drop(state);
     Ok(())
 }
 
@@ -316,6 +332,7 @@ unsafe fn test_runtime_sink_remove_obligation(
         .is_some_and(|record| record.id == obligation)
     {
         state.obligation = None;
+        drop(state);
         return Ok(());
     }
     Err(fusion_sys::courier::CourierRuntimeSinkError::NotFound)
@@ -338,9 +355,9 @@ const TEST_RUNTIME_SINK_VTABLE: fusion_sys::courier::CourierRuntimeSinkVTable =
         remove_obligation: test_runtime_sink_remove_obligation,
     };
 
-fn test_runtime_sink(state: &StdMutex<TestRuntimeSinkState>) -> CourierRuntimeSink {
+const fn test_runtime_sink(state: &StdMutex<TestRuntimeSinkState>) -> CourierRuntimeSink {
     CourierRuntimeSink::new(
-        (state as *const StdMutex<TestRuntimeSinkState>) as *mut (),
+        core::ptr::from_ref::<StdMutex<TestRuntimeSinkState>>(state) as *mut (),
         &TEST_RUNTIME_SINK_VTABLE,
     )
 }

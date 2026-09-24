@@ -169,7 +169,7 @@ where
 {
     /// Wraps one already-owned hardware-facing GPIO pin.
     #[must_use]
-    pub fn from_inner(inner: P) -> Self {
+    pub const fn from_inner(inner: P) -> Self {
         Self { inner }
     }
 
@@ -260,7 +260,7 @@ where
     H: GpioHardware,
 {
     fn controller(&self) -> &'static GpioControllerDescriptor {
-        Gpio::controller(self).unwrap_or_else(|_| panic!("invalid gpio provider {}", self.provider))
+        Self::controller(self).unwrap_or_else(|_| panic!("invalid gpio provider {}", self.provider))
     }
 
     fn support(&self) -> GpioSupport {
@@ -279,7 +279,7 @@ where
     type Pin = GpioPin<H::Pin>;
 
     fn take_pin(&self, pin: u8) -> Result<Self::Pin, GpioError> {
-        Gpio::take_pin(self, pin)
+        Self::take_pin(self, pin)
     }
 }
 
@@ -430,6 +430,7 @@ mod tests {
         GpioHardware as GpioHardwareContract,
         GpioHardwarePin as GpioHardwarePinContract,
     };
+    use fusion_hal::contract::drivers::driver::DriverRegistry;
 
     const TEST_CONTROLLER_A: GpioControllerDescriptor = GpioControllerDescriptor {
         id: "test-gpio-a",
@@ -450,7 +451,9 @@ mod tests {
         capabilities: GpioCapabilities::OUTPUT,
     }];
     const TEST_SUPPORT: GpioSupport = GpioSupport {
-        caps: GpioProviderCaps::ENUMERATE | GpioProviderCaps::CLAIM,
+        caps: GpioProviderCaps::from_bits_retain(
+            GpioProviderCaps::ENUMERATE.bits() | GpioProviderCaps::CLAIM.bits(),
+        ),
         implementation: GpioImplementationKind::Native,
         pin_count: 1,
     };

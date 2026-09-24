@@ -161,7 +161,7 @@ pub struct MemoryPoolMemberInfo {
 }
 
 impl MemoryPoolMemberInfo {
-    pub(super) fn from_member(member: &MemoryPoolMember, stats: MemberUsageStats) -> Self {
+    pub(super) const fn from_member(member: &MemoryPoolMember, stats: MemberUsageStats) -> Self {
         Self {
             id: member.id,
             resource: member.handle.resolved().info,

@@ -1,3 +1,7 @@
+// Keep one-off runtime fixtures next to the test that owns their lifecycle.
+#![allow(clippy::items_after_statements)]
+
+use fusion_sys::courier::CourierScopeRole;
 use super::*;
 
 #[test]
@@ -501,6 +505,7 @@ fn current_fiber_pool_publishes_courier_truth_to_runtime_sink() {
         .expect("runtime sink should retain the fiber record");
     assert_eq!(record.state, fusion_sys::fiber::FiberState::Completed);
     assert!(record.is_root);
+    drop(sink_state);
 
     fibers
         .shutdown()
@@ -527,6 +532,7 @@ fn current_fiber_pool_realizes_child_launch_against_domain_registry() {
         .register_courier(CourierDescriptor {
             id: ROOT_COURIER,
             name: "kernel",
+            scope_role: CourierScopeRole::ContextRoot,
             caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
             visibility: CourierVisibility::Full,
             claim_awareness: ClaimAwareness::Black,
@@ -547,6 +553,7 @@ fn current_fiber_pool_realizes_child_launch_against_domain_registry() {
                 descriptor: CourierLaunchDescriptor {
                     id: CHILD_COURIER,
                     name: "httpd",
+                    scope_role: CourierScopeRole::Leaf,
                     caps: CourierCaps::ENUMERATE_VISIBLE_CONTEXTS | CourierCaps::SPAWN_SUB_FIBERS,
                     visibility: CourierVisibility::Scoped,
                     claim_awareness: ClaimAwareness::Black,

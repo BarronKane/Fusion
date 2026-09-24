@@ -25,7 +25,6 @@ use fusion_hal::contract::drivers::driver::{
     DriverUsefulness,
 };
 
-include!(concat!(env!("OUT_DIR"), "/fdxe_shared.rs"));
 include!(concat!(env!("OUT_DIR"), "/selected_fdxe_requests.rs"));
 
 #[cfg(target_os = "none")]
@@ -364,7 +363,7 @@ pub struct StackDriverStorage<const WORDS: usize> {
 impl<const WORDS: usize> StackDriverStorage<WORDS> {
     /// Creates one empty stack driver-storage block.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             words: [const { core::mem::MaybeUninit::uninit() }; WORDS],
         }
@@ -372,7 +371,7 @@ impl<const WORDS: usize> StackDriverStorage<WORDS> {
 
     /// Returns this storage as one one-shot placement slot.
     #[must_use]
-    pub fn slot(&mut self) -> StackDriverSlot<'_> {
+    pub const fn slot(&mut self) -> StackDriverSlot<'_> {
         StackDriverSlot {
             ptr: self.words.as_mut_ptr().cast(),
             len_bytes: core::mem::size_of::<[core::mem::MaybeUninit<usize>; WORDS]>(),
@@ -396,7 +395,7 @@ pub struct StackDriverSlot<'a> {
     marker: core::marker::PhantomData<&'a mut [u8]>,
 }
 
-impl<'a> StackDriverSlot<'a> {
+impl StackDriverSlot<'_> {
     fn place<T>(self, value: T) -> Result<*mut T, DriverError> {
         if core::mem::size_of::<T>() > self.len_bytes
             || core::mem::align_of::<T>() > self.align_bytes
@@ -405,7 +404,7 @@ impl<'a> StackDriverSlot<'a> {
         }
 
         let ptr = self.ptr.cast::<T>();
-        if (ptr as usize) % core::mem::align_of::<T>() != 0 {
+        if !(ptr as usize).is_multiple_of(core::mem::align_of::<T>()) {
             return Err(DriverError::invalid());
         }
 
@@ -424,7 +423,7 @@ pub struct StackBluetoothAdapter<'a> {
     marker: core::marker::PhantomData<&'a mut ()>,
 }
 
-impl<'a> StackBluetoothAdapter<'a> {
+impl StackBluetoothAdapter<'_> {
     /// Returns the truthful metadata for the selected driver family that created this adapter.
     #[must_use]
     pub const fn metadata(&self) -> &'static DriverMetadata {
@@ -463,7 +462,7 @@ pub struct StackWifiAdapter<'a> {
     marker: core::marker::PhantomData<&'a mut ()>,
 }
 
-impl<'a> StackWifiAdapter<'a> {
+impl StackWifiAdapter<'_> {
     /// Returns the truthful metadata for the selected driver family that created this adapter.
     #[must_use]
     pub const fn metadata(&self) -> &'static DriverMetadata {
@@ -510,6 +509,10 @@ unsafe fn as_wifi_adapter<T: WifiAdapterContract>(
 
 /// Places one concrete Bluetooth adapter into caller-owned stack storage and returns the bound
 /// public contract wrapper.
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
 pub fn bind_bluetooth_adapter<'a, T>(
     slot: StackDriverSlot<'a>,
     metadata: &'static DriverMetadata,
@@ -530,6 +533,10 @@ where
 
 /// Places one concrete Wi-Fi adapter into caller-owned stack storage and returns the bound public
 /// contract wrapper.
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
 pub fn bind_wifi_adapter<'a, T>(
     slot: StackDriverSlot<'a>,
     metadata: &'static DriverMetadata,
@@ -547,3 +554,5 @@ where
         marker: core::marker::PhantomData,
     })
 }
+
+include!(concat!(env!("OUT_DIR"), "/fdxe_shared.rs"));

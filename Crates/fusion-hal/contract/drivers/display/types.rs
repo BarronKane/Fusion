@@ -56,6 +56,7 @@ pub struct DisplayDescriptorSet<'a> {
 
 /// Supported pixel-format truth for one sink or port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Independent public capability/state flags.
 pub struct DisplayPixelFormatSupport {
     pub rgb565: bool,
     pub rgb888: bool,
@@ -70,6 +71,7 @@ pub struct DisplayPixelFormatSupport {
 
 /// Supported color-space truth for one sink or port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Independent public capability/state flags.
 pub struct DisplayColorSpaceSupport {
     pub rgb: bool,
     pub ycbcr444: bool,
@@ -96,6 +98,7 @@ pub struct DisplayAudioCapabilities {
 
 /// Sink HDR-capability truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Independent public capability/state flags.
 pub struct DisplayHdrCapabilities {
     pub hdr_static_metadata: bool,
     pub hdr10: bool,
@@ -116,6 +119,7 @@ pub struct DisplayVrrCapabilities {
 
 /// Sink scaling capability truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Independent public capability/state flags.
 pub struct DisplayScalingCapabilities {
     pub source_scaling: bool,
     pub sink_scaling: bool,
@@ -149,6 +153,7 @@ pub struct DisplaySinkCapabilities<'a> {
 
 /// Feature-management capability truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Independent public capability/state flags.
 pub struct DisplayFeatureCapabilities {
     pub brightness: bool,
     pub contrast: bool,
@@ -167,6 +172,7 @@ pub struct DisplayControlState {
 
 /// One negotiation request from caller policy into sink/port truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::struct_excessive_bools)] // Independent public capability/state flags.
 pub struct DisplayNegotiationRequest<'a> {
     pub preferred_modes: &'a [DisplayMode],
     pub preferred_pixel_formats: DisplayPixelFormatSupport,
@@ -211,6 +217,7 @@ pub struct DisplayNegotiationResult {
 
 /// Static descriptor for one surfaced display port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::struct_excessive_bools)] // Independent public capability/state flags.
 pub struct DisplayPortDescriptor {
     pub connector: DisplayConnectorKind,
     pub hotplug_supported: bool,
@@ -224,6 +231,7 @@ pub struct DisplayPortDescriptor {
 
 /// Current display-port state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::struct_excessive_bools)] // Independent public capability/state flags.
 pub struct DisplayPortState {
     pub connected: bool,
     pub enabled: bool,

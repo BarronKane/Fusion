@@ -1,7 +1,28 @@
-use super::*;
+use super::{
+    CourierRuntimeSinkVTable,
+    CourierLaunchControlVTable,
+    CourierId,
+    ContextId,
+    CourierRuntimeSinkError,
+    DomainRegistry,
+    CourierChildLaunchRequest,
+    FiberId,
+    CourierLaunchControlError,
+    CourierDescriptor,
+    ManagedFiberSnapshot,
+    CourierFiberClass,
+    FiberMetadataAttachment,
+    FiberTerminalStatus,
+    CourierRuntimeLedger,
+    CourierFiberRecord,
+    CourierResponsiveness,
+    CourierMetadataSubject,
+    CourierObligationSpec,
+    CourierObligationId,
+};
 
+#[allow(clippy::too_many_lines)] // The function constructs one coherent table of erased callbacks.
 pub(super) fn runtime_sink_vtable<
-    'a,
     const MAX_COURIERS: usize,
     const MAX_CONTEXTS: usize,
     const MAX_VISIBLE: usize,
@@ -138,6 +159,7 @@ pub(super) fn launch_control_vtable<
     }
 }
 
+#[allow(clippy::extra_unused_lifetimes, clippy::too_many_arguments)] // Erased callback context and fields must match the vtable contract.
 unsafe fn runtime_sink_record_context<
     'a,
     const MAX_COURIERS: usize,
@@ -168,6 +190,11 @@ unsafe fn runtime_sink_record_context<
         .map_err(Into::into)
 }
 
+#[allow(
+    clippy::extra_unused_lifetimes,
+    clippy::too_many_arguments,
+    clippy::large_types_passed_by_value
+)] // Erased callback context and fields must match the vtable contract.
 unsafe fn launch_control_register_child_courier<
     'a,
     const MAX_COURIERS: usize,
@@ -215,6 +242,7 @@ unsafe fn launch_control_register_child_courier<
         .map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes, clippy::too_many_arguments)] // The raw callback context carries registry lifetime and values through the erased ABI.
 unsafe fn runtime_sink_register_fiber<
     'a,
     const MAX_COURIERS: usize,
@@ -257,6 +285,7 @@ unsafe fn runtime_sink_register_fiber<
         .map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes)] // The raw callback context carries the registry lifetime out of band.
 unsafe fn runtime_sink_update_fiber<
     'a,
     const MAX_COURIERS: usize,
@@ -287,6 +316,7 @@ unsafe fn runtime_sink_update_fiber<
         .map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes)] // The raw callback context carries the registry lifetime out of band.
 unsafe fn runtime_sink_mark_fiber_terminal<
     'a,
     const MAX_COURIERS: usize,
@@ -318,6 +348,7 @@ unsafe fn runtime_sink_mark_fiber_terminal<
         .map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes)] // The raw callback context carries the registry lifetime out of band.
 unsafe fn runtime_sink_record_runtime_summary<
     'a,
     const MAX_COURIERS: usize,
@@ -348,6 +379,7 @@ unsafe fn runtime_sink_record_runtime_summary<
         .map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes)] // The raw callback context carries the registry lifetime out of band.
 unsafe fn runtime_sink_runtime_ledger<
     'a,
     const MAX_COURIERS: usize,
@@ -374,6 +406,7 @@ unsafe fn runtime_sink_runtime_ledger<
     registry.runtime_ledger(courier).map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes)] // The raw callback context carries the registry lifetime out of band.
 unsafe fn runtime_sink_fiber_record<
     'a,
     const MAX_COURIERS: usize,
@@ -401,6 +434,7 @@ unsafe fn runtime_sink_fiber_record<
     registry.fiber_record(courier, fiber).map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes)] // The raw callback context carries the registry lifetime out of band.
 unsafe fn runtime_sink_evaluate_responsiveness<
     'a,
     const MAX_COURIERS: usize,
@@ -430,6 +464,7 @@ unsafe fn runtime_sink_evaluate_responsiveness<
         .map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes)] // The raw callback context carries the registry lifetime out of band.
 unsafe fn runtime_sink_upsert_metadata<
     'a,
     const MAX_COURIERS: usize,
@@ -477,6 +512,7 @@ unsafe fn runtime_sink_upsert_metadata<
     .map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes)] // The raw callback context carries the registry lifetime out of band.
 unsafe fn runtime_sink_remove_metadata<
     'a,
     const MAX_COURIERS: usize,
@@ -507,6 +543,7 @@ unsafe fn runtime_sink_remove_metadata<
         .map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes)] // The raw callback context carries the registry lifetime out of band.
 unsafe fn runtime_sink_register_obligation<
     'a,
     const MAX_COURIERS: usize,
@@ -537,6 +574,7 @@ unsafe fn runtime_sink_register_obligation<
         .map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes)] // The raw callback context carries the registry lifetime out of band.
 unsafe fn runtime_sink_record_obligation_progress<
     'a,
     const MAX_COURIERS: usize,
@@ -567,6 +605,7 @@ unsafe fn runtime_sink_record_obligation_progress<
         .map_err(Into::into)
 }
 
+#[allow(clippy::extra_unused_lifetimes)] // The raw callback context carries the registry lifetime out of band.
 unsafe fn runtime_sink_remove_obligation<
     'a,
     const MAX_COURIERS: usize,

@@ -78,7 +78,7 @@ const BENCH_POOL_CAPACITY: usize = 64;
 const BENCH_LIFECYCLE_GROWTH_TOTAL: usize = THROUGHPUT_BATCH_SIZE;
 const OVERRIDE_STACK_BYTES: usize = 512;
 const THROUGHPUT_BATCH_SIZE: usize = 16;
-const THROUGHPUT_BATCH_SEMAPHORE_MAX: u32 = THROUGHPUT_BATCH_SIZE as u32;
+const THROUGHPUT_BATCH_SEMAPHORE_MAX: u32 = 16;
 const MULTI_YIELD_COUNT: usize = 10;
 const ASYNC_CONTENTION_TASKS: usize = 32;
 const ASYNC_CONTENTION_YIELDS: usize = 32;
@@ -359,7 +359,7 @@ const fn bench_pool_config() -> FiberPoolConfig<'static> {
 }
 
 pub fn baseline_direct_noop(b: &mut Bencher) {
-    fn noop() -> usize {
+    const fn noop() -> usize {
         7
     }
 

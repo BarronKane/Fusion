@@ -67,7 +67,7 @@ pub enum AsyncTaskLifecycleRecord {
     },
 }
 
-/// ProtocolContract for async task lifecycle insight records.
+/// `ProtocolContract` for async task lifecycle insight records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AsyncTaskLifecycleProtocol;
 
@@ -76,12 +76,15 @@ impl fusion_sys::transport::protocol::ProtocolContract for AsyncTaskLifecyclePro
 
     const DESCRIPTOR: fusion_sys::transport::protocol::ProtocolDescriptor =
         fusion_sys::transport::protocol::ProtocolDescriptor {
-            id: fusion_sys::transport::protocol::ProtocolId(0x4655_5349_4f4e_4153_594e_435f_544c_0001),
+            id: fusion_sys::transport::protocol::ProtocolId(
+                0x4655_5349_4f4e_4153_594e_435f_544c_0001,
+            ),
             version: fusion_sys::transport::protocol::ProtocolVersion::new(1, 0, 0),
             caps: fusion_sys::transport::protocol::ProtocolCaps::DEBUG_VIEW,
             bootstrap: fusion_sys::transport::protocol::ProtocolBootstrapKind::Immediate,
             debug_view: fusion_sys::transport::protocol::ProtocolDebugView::Structured,
-            transport: fusion_sys::transport::protocol::ProtocolTransportRequirements::message_local(),
+            transport:
+                fusion_sys::transport::protocol::ProtocolTransportRequirements::message_local(),
             implementation: fusion_sys::transport::protocol::ProtocolImplementationKind::Native,
         };
 }
@@ -117,7 +120,7 @@ pub struct AsyncTaskLifecycleInsight<'a> {
     core: Option<&'a ExecutorCore>,
 }
 
-impl<'a> AsyncTaskLifecycleInsight<'a> {
+impl AsyncTaskLifecycleInsight<'_> {
     /// Returns the configured support surface for async task lifecycle insight.
     #[must_use]
     pub const fn support(&self) -> InsightSupport {
@@ -129,7 +132,7 @@ impl<'a> AsyncTaskLifecycleInsight<'a> {
 
     /// Returns `true` when one consumer is currently attached.
     #[must_use]
-    pub fn is_observed(&self) -> bool {
+    pub const fn is_observed(&self) -> bool {
         #[cfg(feature = "debug-insights")]
         {
             let Some(core) = self.core else {
@@ -150,7 +153,10 @@ impl<'a> AsyncTaskLifecycleInsight<'a> {
     }
 
     /// Attaches one consumer to the async task lifecycle insight lane.
-    pub fn attach_consumer(
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
+    pub const fn attach_consumer(
         &self,
         request: TransportAttachmentRequest,
     ) -> Result<usize, TransportError> {
@@ -179,7 +185,10 @@ impl<'a> AsyncTaskLifecycleInsight<'a> {
     }
 
     /// Detaches one consumer from the async task lifecycle insight lane.
-    pub fn detach_consumer(&self, consumer: usize) -> Result<(), TransportError> {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
+    pub const fn detach_consumer(&self, consumer: usize) -> Result<(), TransportError> {
         #[cfg(feature = "debug-insights")]
         {
             let Some(core) = self.core else {
@@ -203,7 +212,10 @@ impl<'a> AsyncTaskLifecycleInsight<'a> {
     }
 
     /// Receives one pending async task lifecycle record, if present.
-    pub fn try_receive(
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
+    pub const fn try_receive(
         &self,
         consumer: usize,
     ) -> Result<Option<AsyncTaskLifecycleRecord>, ChannelError> {
@@ -540,7 +552,7 @@ pub fn current_async_courier_responsiveness() -> Result<CourierResponsiveness, E
     let core = executor_core_from_context(context)?;
     let runtime_sink = core.runtime_sink.ok_or(ExecutorError::Unsupported)?;
     runtime_sink
-        .evaluate_responsiveness(courier_id, core.runtime_tick())
+        .evaluate_responsiveness(courier_id, ExecutorCore::runtime_tick())
         .map_err(executor_error_from_runtime_sink)
 }
 
@@ -554,7 +566,7 @@ fn current_async_runtime_subjects()
         runtime_sink,
         courier_id,
         current_async_context_id()?,
-        core.runtime_tick(),
+        ExecutorCore::runtime_tick(),
     ))
 }
 
@@ -646,7 +658,7 @@ pub fn remove_current_async_courier_obligation(
         .map_err(executor_error_from_runtime_sink)
 }
 
-fn executor_core_from_context(
+const fn executor_core_from_context(
     context: CurrentAsyncTaskContext,
 ) -> Result<&'static ExecutorCore, ExecutorError> {
     let core = context.core as *const ExecutorCore;
@@ -712,11 +724,11 @@ fn mark_current_async_requeue() -> bool {
 fn take_current_async_requeue() -> bool {
     #[cfg(feature = "std")]
     {
-        return unsafe {
+        unsafe {
             let value = CURRENT_ASYNC_TASK_REQUEUE_STD;
             CURRENT_ASYNC_TASK_REQUEUE_STD = false;
             value
-        };
+        }
     }
 
     #[cfg(not(feature = "std"))]
@@ -979,10 +991,10 @@ impl Future for AsyncSleepFor {
             };
             self.inner = Some(async_sleep_until_instant(deadline));
         }
-        match self.inner.as_mut() {
-            Some(inner) => Pin::new(inner).poll(cx),
-            None => Poll::Ready(Err(executor_invalid())),
-        }
+        self.inner.as_mut().map_or_else(
+            || Poll::Ready(Err(executor_invalid())),
+            |inner| Pin::new(inner).poll(cx),
+        )
     }
 }
 

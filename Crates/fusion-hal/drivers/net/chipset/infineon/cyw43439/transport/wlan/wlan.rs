@@ -253,7 +253,7 @@ impl Cyw43439GspiFunctionInfo {
         Self {
             enabled: (raw & 0x0001) != 0,
             ready: (raw & 0x0002) != 0,
-            max_packet_size: ((raw >> 2) & 0x3fff) as u16,
+            max_packet_size: ((raw >> 2) & 0x3fff),
         }
     }
 }
@@ -319,7 +319,7 @@ pub const CYW43439_GSPI_SDIO_SLEEP_CSR: u32 = 0x1001f;
 pub const CYW43439_GSPI_SDIOD_CCCR_BRCM_CARDCAP: u32 = 0x00F0;
 pub const CYW43439_GSPI_WLAN_ARMCM3_BASE_ADDRESS: u32 = 0x1800_3000;
 pub const CYW43439_GSPI_SOCSRAM_BASE_ADDRESS: u32 = 0x1800_4000;
-pub const CYW43439_GSPI_WRAPPER_REGISTER_OFFSET: u32 = 0x100000;
+pub const CYW43439_GSPI_WRAPPER_REGISTER_OFFSET: u32 = 0x0010_0000;
 pub const CYW43439_GSPI_SOCSRAM_BANKX_INDEX: u32 = CYW43439_GSPI_SOCSRAM_BASE_ADDRESS + 0x10;
 pub const CYW43439_GSPI_SOCSRAM_BANKX_PDA: u32 = CYW43439_GSPI_SOCSRAM_BASE_ADDRESS + 0x44;
 pub const CYW43439_GSPI_AI_IOCTRL_OFFSET: u32 = 0x408;
@@ -474,6 +474,10 @@ where
     }
 
     /// Acquires one WLAN transport lease from the underlying hardware substrate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn acquire(hardware: &'a mut H) -> Result<Self, Cyw43439Error> {
         hardware.acquire_transport(Cyw43439Radio::Wifi)?;
         Ok(Self {
@@ -493,6 +497,10 @@ where
     }
 
     /// Reads one 32-bit F0 register value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_f0_u32(&mut self, register: Cyw43439GspiF0Register) -> Result<u32, Cyw43439Error> {
         let mut out = [0_u8; 4];
         self.read_register_bytes(
@@ -505,6 +513,10 @@ where
     }
 
     /// Reads one 8-bit F0 register value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_f0_u8(&mut self, register: Cyw43439GspiF0Register) -> Result<u8, Cyw43439Error> {
         let mut out = [0_u8; 1];
         self.read_register_bytes(Cyw43439GspiFunction::F0, register.address(), 1, &mut out)?;
@@ -512,6 +524,10 @@ where
     }
 
     /// Reads one 16-bit F0 register value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_f0_u16(&mut self, register: Cyw43439GspiF0Register) -> Result<u16, Cyw43439Error> {
         let mut out = [0_u8; 2];
         self.read_register_bytes(Cyw43439GspiFunction::F0, register.address(), 2, &mut out)?;
@@ -519,6 +535,10 @@ where
     }
 
     /// Writes one 8-bit F0 register value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_f0_u8(
         &mut self,
         register: Cyw43439GspiF0Register,
@@ -528,11 +548,15 @@ where
             Cyw43439GspiFunction::F0,
             register.address(),
             1,
-            value as u32,
+            u32::from(value),
         )
     }
 
     /// Writes one 16-bit F0 register value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_f0_u16(
         &mut self,
         register: Cyw43439GspiF0Register,
@@ -542,11 +566,15 @@ where
             Cyw43439GspiFunction::F0,
             register.address(),
             2,
-            value as u32,
+            u32::from(value),
         )
     }
 
     /// Writes one 32-bit F0 register value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_f0_u32(
         &mut self,
         register: Cyw43439GspiF0Register,
@@ -556,6 +584,10 @@ where
     }
 
     /// Reads one raw function-0 bus register value outside the fixed F0 enum.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_bus_u8(&mut self, address: u32) -> Result<u8, Cyw43439Error> {
         let mut out = [0_u8; 1];
         self.read_register_bytes(Cyw43439GspiFunction::F0, address, 1, &mut out)?;
@@ -563,11 +595,19 @@ where
     }
 
     /// Writes one raw function-0 bus register value outside the fixed F0 enum.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_bus_u8(&mut self, address: u32, value: u8) -> Result<(), Cyw43439Error> {
-        self.write_register_word(Cyw43439GspiFunction::F0, address, 1, value as u32)
+        self.write_register_word(Cyw43439GspiFunction::F0, address, 1, u32::from(value))
     }
 
     /// Reads one direct function-1 register without backplane window translation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_f1_u8(&mut self, address: u32) -> Result<u8, Cyw43439Error> {
         let mut out = [0_u8; 1];
         self.read_register_bytes(Cyw43439GspiFunction::F1, address, 1, &mut out)?;
@@ -575,11 +615,19 @@ where
     }
 
     /// Writes one direct function-1 register without backplane window translation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_f1_u8(&mut self, address: u32, value: u8) -> Result<(), Cyw43439Error> {
-        self.write_register_word(Cyw43439GspiFunction::F1, address, 1, value as u32)
+        self.write_register_word(Cyw43439GspiFunction::F1, address, 1, u32::from(value))
     }
 
     /// Reads one 8-bit backplane register value via F1.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_backplane_u8(&mut self, address: u32) -> Result<u8, Cyw43439Error> {
         let mut out = [0_u8; 1];
         self.set_backplane_window(address)?;
@@ -590,6 +638,10 @@ where
     }
 
     /// Reads one 32-bit backplane register value via F1.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_backplane_u32(&mut self, address: u32) -> Result<u32, Cyw43439Error> {
         let mut out = [0_u8; 4];
         self.set_backplane_window(address)?;
@@ -600,6 +652,10 @@ where
     }
 
     /// Reads an arbitrary backplane byte slice via F1 in SPI-sized chunks.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_backplane_bytes(
         &mut self,
         mut address: u32,
@@ -622,21 +678,29 @@ where
                 chunk_len,
                 &mut out[..chunk_len],
             )?;
-            address += chunk_len as u32;
+            address += u32::try_from(chunk_len).map_err(|_| Cyw43439Error::invalid())?;
             out = &mut out[chunk_len..];
         }
         Ok(())
     }
 
     /// Writes one 8-bit backplane register value via F1.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_backplane_u8(&mut self, address: u32, value: u8) -> Result<(), Cyw43439Error> {
         self.set_backplane_window(address)?;
         let register = (address & CYW43439_GSPI_BACKPLANE_ADDR_MASK)
             | CYW43439_GSPI_BACKPLANE_ACCESS_2_4B_FLAG;
-        self.write_register_word(Cyw43439GspiFunction::F1, register, 1, value as u32)
+        self.write_register_word(Cyw43439GspiFunction::F1, register, 1, u32::from(value))
     }
 
     /// Writes one 32-bit backplane register value via F1.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_backplane_u32(&mut self, address: u32, value: u32) -> Result<(), Cyw43439Error> {
         self.set_backplane_window(address)?;
         let register = (address & CYW43439_GSPI_BACKPLANE_ADDR_MASK)
@@ -645,6 +709,10 @@ where
     }
 
     /// Writes an arbitrary backplane byte slice via F1 in SPI-sized chunks.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_backplane_bytes(
         &mut self,
         mut address: u32,
@@ -662,13 +730,17 @@ where
             let register = (address & CYW43439_GSPI_BACKPLANE_ADDR_MASK)
                 | CYW43439_GSPI_BACKPLANE_ACCESS_2_4B_FLAG;
             self.write_function_bytes(Cyw43439GspiFunction::F1, register, &payload[..chunk_len])?;
-            address += chunk_len as u32;
+            address += u32::try_from(chunk_len).map_err(|_| Cyw43439Error::invalid())?;
             payload = &payload[chunk_len..];
         }
         Ok(())
     }
 
     /// Reads the gSPI bus-control register.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_bus_control(&mut self) -> Result<Cyw43439GspiBusControlFlags, Cyw43439Error> {
         Ok(Cyw43439GspiBusControlFlags::from_bits_retain(
             (self.read_f0_u32(Cyw43439GspiF0Register::BusControl)? & 0xffff) as u16,
@@ -676,6 +748,10 @@ where
     }
 
     /// Writes the gSPI bus-control register.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn write_bus_control(
         &mut self,
         flags: Cyw43439GspiBusControlFlags,
@@ -684,6 +760,10 @@ where
     }
 
     /// Reads the gSPI bus-status control register.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_bus_status_control(
         &mut self,
     ) -> Result<Cyw43439GspiBusStatusControlFlags, Cyw43439Error> {
@@ -693,6 +773,10 @@ where
     }
 
     /// Reads the F1 or F2 function info register.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_function_info(
         &mut self,
         function: Cyw43439GspiFunction,
@@ -708,6 +792,10 @@ where
     }
 
     /// Reads the documented gSPI status register.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn read_status_register(&mut self) -> Result<Cyw43439GspiStatus, Cyw43439Error> {
         Ok(Cyw43439GspiStatus::decode(
             self.read_f0_u32(Cyw43439GspiF0Register::Status)?,
@@ -716,6 +804,10 @@ where
 
     /// Polls the documented F0 test register until the bring-up pattern appears or attempts are
     /// exhausted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation fails.
     pub fn poll_test_pattern(&mut self, attempts: u32) -> Result<bool, Cyw43439Error> {
         for _ in 0..attempts {
             if self.read_f0_u32(Cyw43439GspiF0Register::TestRead)? == CYW43439_GSPI_TEST_PATTERN {
@@ -1097,7 +1189,7 @@ mod tests {
             .unwrap()
             .to_le_bytes();
         let mut expected = Vec::from(command);
-        expected.extend_from_slice(&(flags.bits() as u32).to_le_bytes());
+        expected.extend_from_slice(&u32::from(flags.bits()).to_le_bytes());
         assert_eq!(hardware.writes, [expected]);
     }
 

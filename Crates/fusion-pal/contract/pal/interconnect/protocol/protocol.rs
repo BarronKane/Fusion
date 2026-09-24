@@ -60,6 +60,9 @@ pub enum ProtocolDebugView {
 }
 
 /// Transport requirements declared by a protocol.
+// These booleans are independent contract declarations; collapsing them into enums would obscure
+// the wire-level capabilities each flag represents.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProtocolTransportRequirements {
     /// Required direction model.

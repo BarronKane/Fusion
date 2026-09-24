@@ -623,6 +623,10 @@ impl ExtentLease {
 
     /// Returns the owned payload region backing this extent.
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn region(&self) -> Region {
         Region {
             base: self
@@ -655,6 +659,10 @@ impl ExtentLease {
 
     /// Returns the stable writable base pointer for this extent payload.
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn as_non_null(&self) -> NonNull<u8> {
         self.region()
             .base

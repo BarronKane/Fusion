@@ -282,9 +282,8 @@ pub fn system_runtime_construction_support() -> RuntimeConstructionSupport {
         can_inventory_owned_regions || support.backings.contains(MemBackingCaps::BORROWED);
     let preferred_backing = match (can_acquire_runtime_backing, can_bind_explicit_backing) {
         (true, false) => RuntimeBackingPreference::PlatformAcquired,
-        (false, true) => RuntimeBackingPreference::ExplicitBound,
+        (false, _) => RuntimeBackingPreference::ExplicitBound,
         (true, true) => RuntimeBackingPreference::Mixed,
-        (false, false) => RuntimeBackingPreference::ExplicitBound,
     };
 
     RuntimeConstructionSupport {

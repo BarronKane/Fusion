@@ -27,6 +27,10 @@ use super::{
     PcuProgramId,
 };
 
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn streaming_parallel_tx(
     id: PcuProgramId,
     bit_count: u8,
@@ -348,6 +352,10 @@ pub fn decrement_stream_transform(
     streaming_decrement_word_transform(id, instructions)
 }
 
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn shift_left_stream_transform(
     id: PcuProgramId,
     bit_count: u8,
@@ -356,6 +364,10 @@ pub fn shift_left_stream_transform(
     streaming_shifted_word_transform(id, bit_count, PcuIrShiftDirection::Left, instructions)
 }
 
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn shift_right_stream_transform(
     id: PcuProgramId,
     bit_count: u8,
@@ -364,6 +376,10 @@ pub fn shift_right_stream_transform(
     streaming_shifted_word_transform(id, bit_count, PcuIrShiftDirection::Right, instructions)
 }
 
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn extract_bits_stream_transform(
     id: PcuProgramId,
     offset: u8,
@@ -373,6 +389,10 @@ pub fn extract_bits_stream_transform(
     streaming_extract_bits_word_transform(id, offset, width, instructions)
 }
 
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn mask_lower_stream_transform(
     id: PcuProgramId,
     bit_count: u8,
@@ -389,6 +409,10 @@ pub fn byte_swap32_stream_transform(
     streaming_byte_swap32_word_transform(id, instructions)
 }
 
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn clocked_parallel_scanline_tx<'a>(
     id: PcuProgramId,
     bit_count: u8,

@@ -16,7 +16,7 @@
 //! - expose the ECAM allocation descriptors that map PCI segment and bus ranges
 //!   to physical configuration-space windows.
 //!
-//! This is enough for early PCIe topology discovery. Anything beyond that,
+//! This is enough for early `PCIe` topology discovery. Anything beyond that,
 //! such as actual bus walks, config-space probing, or driver binding, belongs
 //! to later layers that consume these allocations instead of pretending that
 //! the table itself is the whole PCI subsystem.
@@ -46,7 +46,7 @@ struct RawMcfgAllocation {
     reserved: u32,
 }
 
-/// One PCIe enhanced-configuration allocation entry from MCFG.
+/// One `PCIe` enhanced-configuration allocation entry from MCFG.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct McfgAllocation {
     /// Base address of the enhanced-configuration window.
@@ -80,7 +80,10 @@ impl<'a> Mcfg<'a> {
         }
         let header: RawMcfgHeader = read_unaligned_copy(payload)?;
         let allocations = &payload[size_of::<RawMcfgHeader>()..];
-        if allocations.len() % size_of::<RawMcfgAllocation>() != 0 {
+        if !allocations
+            .len()
+            .is_multiple_of(size_of::<RawMcfgAllocation>())
+        {
             return Err(AcpiError::invalid_layout());
         }
         Ok(Self {
@@ -144,6 +147,7 @@ pub struct McfgAllocationIter<'a> {
     offset: usize,
 }
 
+#[allow(clippy::copy_iterator)] // A copied cursor provides an independent table traversal.
 impl Iterator for McfgAllocationIter<'_> {
     type Item = McfgAllocation;
 

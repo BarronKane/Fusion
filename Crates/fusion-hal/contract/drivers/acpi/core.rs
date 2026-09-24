@@ -87,7 +87,8 @@ impl AcpiDeciKelvin {
     }
 
     #[must_use]
-    pub const fn as_celsius_milli(self) -> i32 {
-        ((self.0 as i32) * 100) - 273_150
+    pub fn as_celsius_milli(self) -> i32 {
+        let milli = i64::from(self.0) * 100 - 273_150;
+        i32::try_from(milli).unwrap_or(i32::MAX)
     }
 }

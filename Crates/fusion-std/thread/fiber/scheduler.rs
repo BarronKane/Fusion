@@ -466,8 +466,8 @@ struct GreenTaskSlot {
 }
 
 impl GreenTaskSlot {
-    fn new(slot_index: usize, fast: bool) -> Result<Self, FiberError> {
-        Ok(Self {
+    const fn new(slot_index: usize, fast: bool) -> Self {
+        Self {
             owner: AtomicUsize::new(0),
             slot_index,
             cooperative_lock_depth: AtomicUsize::new(0),
@@ -485,7 +485,7 @@ impl GreenTaskSlot {
             record: RuntimeCell::new(fast, GreenTaskRecord::empty()),
             completed: RuntimeCell::new(fast, None),
             handle_refs: AtomicUsize::new(0),
-        })
+        }
     }
 
     const fn context_ptr(&self) -> *mut () {
@@ -701,6 +701,8 @@ impl GreenTaskSlot {
             .with(|yield_action| core::mem::replace(yield_action, CurrentGreenYieldAction::Requeue))
     }
 
+    // These assignment fields mirror the stored task record and are intentionally explicit.
+    #[allow(clippy::too_many_arguments)]
     fn assign<F>(
         &self,
         id: u64,
@@ -719,6 +721,8 @@ impl GreenTaskSlot {
         Ok(())
     }
 
+    // These assignment fields mirror the stored task record and are intentionally explicit.
+    #[allow(clippy::too_many_arguments)]
     fn assign_explicit_task<T>(
         &self,
         id: u64,
@@ -745,6 +749,8 @@ impl GreenTaskSlot {
         Ok(())
     }
 
+    // These assignment fields mirror the stored task record and are intentionally explicit.
+    #[allow(clippy::too_many_arguments)]
     fn assign_generated_task<T>(
         &self,
         id: u64,
@@ -1274,7 +1280,7 @@ impl GreenTaskRegistry {
 
         for slot_index in 0..slots.len() {
             unsafe {
-                slots.write(slot_index, GreenTaskSlot::new(slot_index, fast)?)?;
+                slots.write(slot_index, GreenTaskSlot::new(slot_index, fast))?;
             }
         }
 
@@ -1331,6 +1337,8 @@ impl GreenTaskRegistry {
         }
     }
 
+    // These assignment fields mirror the stored task record and are intentionally explicit.
+    #[allow(clippy::too_many_arguments)]
     fn assign_job<F>(
         &self,
         slot_index: usize,
@@ -1349,6 +1357,8 @@ impl GreenTaskRegistry {
         slot.assign(id, fiber_id, class, carrier, lease, task, job)
     }
 
+    // These assignment fields mirror the stored task record and are intentionally explicit.
+    #[allow(clippy::too_many_arguments)]
     fn assign_explicit_task<T>(
         &self,
         slot_index: usize,
@@ -1367,6 +1377,8 @@ impl GreenTaskRegistry {
         slot.assign_explicit_task(id, fiber_id, class, carrier, lease, task, explicit)
     }
 
+    // These assignment fields mirror the stored task record and are intentionally explicit.
+    #[allow(clippy::too_many_arguments)]
     fn assign_generated_task<T>(
         &self,
         slot_index: usize,

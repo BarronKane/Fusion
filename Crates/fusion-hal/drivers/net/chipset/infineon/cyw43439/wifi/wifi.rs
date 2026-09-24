@@ -101,7 +101,8 @@ pub struct Cyw43439Driver<H: Cyw43439HardwareContract = UnsupportedBackend> {
     marker: PhantomData<fn() -> H>,
 }
 
-pub fn driver_metadata() -> &'static DriverMetadata {
+#[must_use]
+pub const fn driver_metadata() -> &'static DriverMetadata {
     &CYW43439_WIFI_DRIVER_METADATA
 }
 
@@ -184,13 +185,13 @@ where
 {
     /// Creates one universal CYW43439 Wi-Fi provider over one hardware-facing substrate.
     #[must_use]
-    pub(crate) fn new(chipset: Cyw43439Chipset<H>) -> Self {
+    pub(crate) const fn new(chipset: Cyw43439Chipset<H>) -> Self {
         Self {
             chipset: Some(chipset),
         }
     }
 
-    fn chipset(&self) -> Option<&Cyw43439Chipset<H>> {
+    const fn chipset(&self) -> Option<&Cyw43439Chipset<H>> {
         self.chipset.as_ref()
     }
 }
@@ -275,7 +276,7 @@ impl<H> Cyw43439Adapter<H>
 where
     H: Cyw43439HardwareContract,
 {
-    fn unsupported<T>() -> Result<T, WifiError> {
+    const fn unsupported<T>() -> Result<T, WifiError> {
         Err(WifiError::unsupported())
     }
 }

@@ -48,10 +48,7 @@ pub trait AcpiPhysicalTableResolver {
     /// # Errors
     ///
     /// Returns one honest error when the table cannot be resolved or mapped.
-    fn resolve_table_bytes<'a>(
-        &'a self,
-        physical_address: u64,
-    ) -> Result<&'a [u8], AcpiRealizationError>;
+    fn resolve_table_bytes(&self, physical_address: u64) -> Result<&[u8], AcpiRealizationError>;
 }
 
 /// Borrowed discovery result for the ACPI definition-table subset needed by AML bring-up.
@@ -130,7 +127,7 @@ impl<'tables, 'issues> DiscoveredAcpiPlatformWithAml<'tables, 'issues> {
     }
 
     #[must_use]
-    pub fn into_parts(
+    pub const fn into_parts(
         self,
     ) -> (
         AcpiDefinitionTableDiscovery<'tables>,
@@ -146,7 +143,7 @@ struct SecondaryDefinitionTableWriter<'a, 'tables> {
 }
 
 impl<'a, 'tables> SecondaryDefinitionTableWriter<'a, 'tables> {
-    fn new(storage: &'a mut [MaybeUninit<AcpiTableView<'tables>>]) -> Self {
+    const fn new(storage: &'a mut [MaybeUninit<AcpiTableView<'tables>>]) -> Self {
         Self { storage, len: 0 }
     }
 
@@ -159,7 +156,7 @@ impl<'a, 'tables> SecondaryDefinitionTableWriter<'a, 'tables> {
         Ok(())
     }
 
-    fn finish(self) -> &'a [AcpiTableView<'tables>] {
+    const fn finish(self) -> &'a [AcpiTableView<'tables>] {
         unsafe {
             slice::from_raw_parts(
                 self.storage.as_ptr().cast::<AcpiTableView<'tables>>(),
@@ -223,11 +220,13 @@ where
 ///
 /// Returns one honest error when table discovery fails, AML namespace loading fails, backend
 /// verification fails, or AML lifecycle activation cannot complete cleanly.
-pub fn realize_platform_from_xsdt_with_aml<'records, 'tables, 'issues, R>(
+// Storage is an owned bring-up bundle and represents one use of its caller-provided scratch space.
+#[allow(clippy::needless_pass_by_value)]
+pub fn realize_platform_from_xsdt_with_aml<'tables, 'issues, R>(
     fingerprint: &AcpiPlatformFingerprint,
     xsdt: Xsdt<'tables>,
     resolver: &'tables R,
-    storage: AcpiAmlBringupStorage<'records, 'tables, 'issues>,
+    storage: AcpiAmlBringupStorage<'_, 'tables, 'issues>,
     host: &dyn AmlRegionAccessHost,
     runtime: &AmlRuntimeState<'_>,
 ) -> Result<DiscoveredAcpiPlatformWithAml<'tables, 'issues>, AcpiRealizationError>
@@ -252,7 +251,7 @@ where
     })
 }
 
-fn map_acpi_table_error(error: AcpiError) -> AcpiRealizationError {
+const fn map_acpi_table_error(error: AcpiError) -> AcpiRealizationError {
     match error.kind() {
         AcpiErrorKind::Truncated
         | AcpiErrorKind::InvalidSignature
@@ -300,10 +299,10 @@ mod tests {
     }
 
     impl AcpiPhysicalTableResolver for StaticAcpiTableResolver {
-        fn resolve_table_bytes<'a>(
-            &'a self,
+        fn resolve_table_bytes(
+            &self,
             physical_address: u64,
-        ) -> Result<&'a [u8], AcpiRealizationError> {
+        ) -> Result<&[u8], AcpiRealizationError> {
             self.tables
                 .get(&physical_address)
                 .copied()
@@ -317,7 +316,7 @@ mod tests {
 
     fn build_xsdt(entries: &[u64]) -> &'static [u8] {
         let mut bytes = vec![0_u8; 36 + entries.len() * 8];
-        let length = bytes.len() as u32;
+        let length = u32::try_from(bytes.len()).expect("test XSDT length fits u32");
         bytes[0..4].copy_from_slice(b"XSDT");
         bytes[4..8].copy_from_slice(&length.to_le_bytes());
         bytes[8] = 1;
@@ -335,13 +334,17 @@ mod tests {
 
     fn build_fadt(dsdt_address: u64) -> &'static [u8] {
         let mut bytes = vec![0_u8; 148];
-        let length = bytes.len() as u32;
+        let length = u32::try_from(bytes.len()).expect("test FADT length fits u32");
         bytes[0..4].copy_from_slice(b"FACP");
         bytes[4..8].copy_from_slice(&length.to_le_bytes());
         bytes[8] = 6;
         bytes[10..16].copy_from_slice(b"FUSION");
         bytes[16..24].copy_from_slice(b"HWDISCOV");
-        bytes[40..44].copy_from_slice(&(dsdt_address as u32).to_le_bytes());
+        bytes[40..44].copy_from_slice(
+            &u32::try_from(dsdt_address)
+                .expect("test DSDT address fits u32")
+                .to_le_bytes(),
+        );
         bytes[140..148].copy_from_slice(&dsdt_address.to_le_bytes());
         let checksum =
             (!bytes.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte))).wrapping_add(1);
@@ -351,7 +354,7 @@ mod tests {
 
     fn build_definition_table(signature: [u8; 4], payload: &[u8]) -> &'static [u8] {
         let mut bytes = vec![0_u8; 36 + payload.len()];
-        let length = bytes.len() as u32;
+        let length = u32::try_from(bytes.len()).expect("test ACPI table length fits u32");
         bytes[0..4].copy_from_slice(&signature);
         bytes[4..8].copy_from_slice(&length.to_le_bytes());
         bytes[8] = 2;
@@ -418,7 +421,10 @@ mod tests {
         let discovered =
             discover_definition_tables_from_xsdt(xsdt, &resolver, &mut secondary_storage).unwrap();
         let mut definition_storage = [MaybeUninit::<AmlDefinitionBlock<'static>>::uninit(); 8];
-        let mut namespace_storage = [MaybeUninit::<AmlNamespaceLoadRecord>::uninit(); 8192];
+        let mut namespace_storage: Vec<_> =
+            core::iter::repeat_with(MaybeUninit::<AmlNamespaceLoadRecord>::uninit)
+                .take(8192)
+                .collect();
         let namespace = load_namespace_from_definition_tables(
             discovered.dsdt(),
             discovered.secondary_definition_tables(),

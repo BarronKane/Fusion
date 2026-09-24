@@ -867,6 +867,9 @@ const fn generated_stack_structural_overhead_bytes() -> usize {
     fusion_sys::fiber::system_context_support().structural_stack_overhead_bytes
 }
 
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub const fn admit_generated_fiber_task_stack_bytes(
     stack_bytes: NonZeroUsize,
 ) -> Result<NonZeroUsize, FiberError> {

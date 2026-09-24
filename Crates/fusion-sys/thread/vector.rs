@@ -177,10 +177,8 @@ impl Default for VectorSystem {
 }
 
 impl VectorTableBuilder {
-    unsafe fn from_platform_builder_mut(
-        inner: &mut PlatformVectorBuilder,
-    ) -> &mut VectorTableBuilder {
-        unsafe { &mut *(inner as *mut PlatformVectorBuilder as *mut VectorTableBuilder) }
+    unsafe fn from_platform_builder_mut(inner: &mut PlatformVectorBuilder) -> &mut Self {
+        unsafe { &mut *core::ptr::from_mut::<PlatformVectorBuilder>(inner).cast::<Self>() }
     }
 
     /// Reports the truthful vector support captured by this builder.
@@ -411,6 +409,7 @@ impl VectorTableBuilder {
     /// # Errors
     ///
     /// Returns any honest backend ownership, reservation, or priority-programming failure.
+    #[allow(clippy::missing_const_for_fn)] // The platform vector reservation occurs at runtime.
     pub fn bind_reserved_event_timeout_wake(
         &mut self,
         priority: Option<VectorPriority>,
@@ -423,6 +422,7 @@ impl VectorTableBuilder {
     /// # Errors
     ///
     /// Returns any honest backend seal-time failure.
+    #[allow(clippy::missing_const_for_fn)] // The platform vector-table contract seals at runtime.
     pub fn seal(self) -> Result<SealedVectorTable, VectorError> {
         let inner = VectorTableBuilderControlContract::seal(self.inner)?;
         Ok(SealedVectorTable { inner })

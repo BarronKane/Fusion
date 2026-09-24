@@ -45,6 +45,7 @@ pub trait AmlLoweringTarget {
     fn lowering_target(&self) -> AmlLoweringTargetKind;
 }
 
+#[must_use]
 pub fn backend_notification_query_target<B: AcpiAmlBackend>(
     provider: u8,
     query: u8,
@@ -52,6 +53,7 @@ pub fn backend_notification_query_target<B: AcpiAmlBackend>(
     backend_method_target::<B>(provider, query_handler_suffix(query))
 }
 
+#[must_use]
 pub fn backend_event_handler_target<B: AcpiAmlBackend>(
     provider: u8,
     kind: AmlEventHandlerKind,
@@ -60,10 +62,14 @@ pub fn backend_event_handler_target<B: AcpiAmlBackend>(
     backend_method_target::<B>(provider, event_handler_suffix(kind, event))
 }
 
-pub fn dispatch_backend_notification_query<'records, 'blocks, B: AcpiAmlBackend>(
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
+pub fn dispatch_backend_notification_query<B: AcpiAmlBackend>(
     provider: u8,
     vm: &mut AmlVm,
-    namespace: AmlLoadedNamespace<'records, 'blocks>,
+    namespace: AmlLoadedNamespace<'_, '_>,
     host: &dyn AmlRegionAccessHost,
     runtime: &AmlRuntimeState<'_>,
     query: u8,
@@ -76,10 +82,14 @@ pub fn dispatch_backend_notification_query<'records, 'blocks, B: AcpiAmlBackend>
     }
 }
 
-pub fn dispatch_backend_event_handler<'records, 'blocks, B: AcpiAmlBackend>(
+///
+/// # Errors
+///
+/// Returns an error if the requested operation cannot be completed.
+pub fn dispatch_backend_event_handler<B: AcpiAmlBackend>(
     provider: u8,
     vm: &mut AmlVm,
-    namespace: AmlLoadedNamespace<'records, 'blocks>,
+    namespace: AmlLoadedNamespace<'_, '_>,
     host: &dyn AmlRegionAccessHost,
     runtime: &AmlRuntimeState<'_>,
     kind: AmlEventHandlerKind,
@@ -317,12 +327,12 @@ mod tests {
     fn encode_pkg_length(payload_len: usize) -> Vec<u8> {
         let one_byte_value = payload_len + 1;
         if one_byte_value < 0x40 {
-            return vec![one_byte_value as u8];
+            return vec![u8::try_from(one_byte_value).expect("short AML package length fits")];
         }
         let two_byte_value = payload_len + 2;
         vec![
-            0b0100_0000 | ((two_byte_value & 0x0f) as u8),
-            ((two_byte_value >> 4) & 0xff) as u8,
+            0b0100_0000 | u8::try_from(two_byte_value & 0x0f).expect("low nibble fits"),
+            u8::try_from((two_byte_value >> 4) & 0xff).expect("high byte fits"),
         ]
     }
 
@@ -370,7 +380,11 @@ mod tests {
     fn definition_block(payload: &[u8]) -> AmlDefinitionBlock<'static> {
         let mut table = Vec::from([0_u8; 36]);
         table[0..4].copy_from_slice(b"DSDT");
-        table[4..8].copy_from_slice(&((36 + payload.len()) as u32).to_le_bytes());
+        table[4..8].copy_from_slice(
+            &u32::try_from(36 + payload.len())
+                .expect("test DSDT fits in u32")
+                .to_le_bytes(),
+        );
         table[8] = 2;
         table[10..16].copy_from_slice(b"FUSION");
         table[16..24].copy_from_slice(b"AMLLOWER");

@@ -282,7 +282,8 @@ mod tests {
     fn build_fadt(length: usize) -> Vec<u8> {
         let mut bytes = vec![0_u8; length];
         bytes[0..4].copy_from_slice(b"FACP");
-        bytes[4..8].copy_from_slice(&(length as u32).to_le_bytes());
+        let length = u32::try_from(length).expect("test FADT length fits u32");
+        bytes[4..8].copy_from_slice(&length.to_le_bytes());
         bytes[8] = 6;
         bytes[10..16].copy_from_slice(b"FUSION");
         bytes[16..24].copy_from_slice(b"FADTTEST");

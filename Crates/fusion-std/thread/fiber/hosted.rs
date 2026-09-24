@@ -288,8 +288,9 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
         let summary = system_cpu()
             .topology_summary()
             .map_err(|_| FiberError::unsupported())?;
-        let carrier_count = carrier_count_for_profile(summary, CarrierWorkloadProfile::GeneralPurpose)
-            .ok_or_else(FiberError::unsupported)?;
+        let carrier_count =
+            carrier_count_for_profile(summary, CarrierWorkloadProfile::GeneralPurpose)
+                .ok_or_else(FiberError::unsupported)?;
         Ok(Self {
             carrier_count,
             bootstrap: HostedCarrierBootstrap::Direct,
@@ -311,8 +312,9 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
         let summary = system_cpu()
             .topology_summary()
             .map_err(|_| FiberError::unsupported())?;
-        let carrier_count = carrier_count_for_profile(summary, CarrierWorkloadProfile::DedicatedCore)
-            .ok_or_else(FiberError::unsupported)?;
+        let carrier_count =
+            carrier_count_for_profile(summary, CarrierWorkloadProfile::DedicatedCore)
+                .ok_or_else(FiberError::unsupported)?;
         Ok(Self {
             carrier_count,
             bootstrap: HostedCarrierBootstrap::Direct,
@@ -331,8 +333,9 @@ impl<'a> HostedFiberRuntimeConfig<'a> {
         let summary = system_cpu()
             .topology_summary()
             .map_err(|_| FiberError::unsupported())?;
-        let carrier_count = carrier_count_for_profile(summary, CarrierWorkloadProfile::PackageLocal)
-            .ok_or_else(FiberError::unsupported)?;
+        let carrier_count =
+            carrier_count_for_profile(summary, CarrierWorkloadProfile::PackageLocal)
+                .ok_or_else(FiberError::unsupported)?;
         Ok(Self {
             carrier_count,
             bootstrap: HostedCarrierBootstrap::Direct,
@@ -744,7 +747,12 @@ impl HostedFiberRuntime {
     pub fn into_parts(self) -> (HostedCarrierRuntime, GreenPool) {
         let this = ManuallyDrop::new(self);
         // SAFETY: `this` will not run `Drop`; we move both owned fields out exactly once.
-        unsafe { (ptr::read(&this.carriers), ptr::read(&this.fibers)) }
+        unsafe {
+            (
+                ptr::read(&raw const this.carriers),
+                ptr::read(&raw const this.fibers),
+            )
+        }
     }
 }
 

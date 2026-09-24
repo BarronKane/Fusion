@@ -183,7 +183,7 @@ impl<'a, const MAX_SCOPE_NODES: usize> ClaimScopeTrie<'a, MAX_SCOPE_NODES> {
         }
     }
 
-    fn clear(&mut self) {
+    const fn clear(&mut self) {
         self.nodes = [None; MAX_SCOPE_NODES];
         if MAX_SCOPE_NODES != 0 {
             self.nodes[0] = Some(ClaimTrieNode {
@@ -196,8 +196,8 @@ impl<'a, const MAX_SCOPE_NODES: usize> ClaimScopeTrie<'a, MAX_SCOPE_NODES> {
             self.free_head = None;
         } else {
             self.next_free = 0;
-            self.free_head = None;
         }
+        self.free_head = None;
     }
 
     fn insert(&mut self, claim: ClaimName<'a>, claim_index: usize) -> Result<(), ClaimsError> {
@@ -444,7 +444,7 @@ impl<'a, const MAX_SCOPE_NODES: usize> ClaimScopeTrie<'a, MAX_SCOPE_NODES> {
         Ok(index)
     }
 
-    fn release_node(&mut self, index: usize) -> Result<(), ClaimsError> {
+    const fn release_node(&mut self, index: usize) -> Result<(), ClaimsError> {
         if index == 0 {
             return Err(ClaimsError::state_conflict());
         }
@@ -476,18 +476,16 @@ impl<'a> ClaimPatternQuery<'a> {
         if raw.contains('?') || raw.contains('\\') {
             return Self::Complex;
         }
-        if let Some(prefix) = raw.strip_suffix(".*") {
-            if !prefix.is_empty() && !prefix.contains('*') {
-                return Self::Prefix(prefix);
-            }
+        if let Some(prefix) = raw.strip_suffix(".*")
+            && !prefix.is_empty()
+            && !prefix.contains('*')
+        {
+            return Self::Prefix(prefix);
         }
         if raw.contains('*') {
             return Self::Complex;
         }
-        match ClaimName::parse(raw) {
-            Ok(exact) => Self::Exact(exact),
-            Err(_) => Self::Complex,
-        }
+        ClaimName::parse(raw).map_or(Self::Complex, Self::Exact)
     }
 }
 
@@ -797,6 +795,7 @@ impl<
     ///
     /// Returns an honest error when either context does not exist, the attachment law is invalid
     /// for the current request, or per-context bond storage is exhausted.
+    #[allow(clippy::too_many_arguments)] // Each argument describes a distinct party, law, or lifetime boundary.
     pub fn issue_attachment_bond(
         &mut self,
         bond: AttachmentBondId,
@@ -959,21 +958,27 @@ impl<
         if record.descriptor.awareness.is_blind() {
             return Err(ClaimsError::permission_denied());
         }
-        let Some(claim_index) = record.claim_trie.exact_claim_index(qualified.claim()) else {
-            return match Self::find_claim_index(record, qualified)
-                .and_then(|index| record.claims.get(index).and_then(|slot| *slot))
-            {
-                Some(grant) => match grant.state {
-                    ClaimGrantState::Revoked => Err(ClaimsError::revoked()),
-                    ClaimGrantState::Expired => Err(ClaimsError::expired()),
-                    ClaimGrantState::Pending | ClaimGrantState::Consumed => {
-                        Err(ClaimsError::permission_denied())
-                    }
-                    ClaimGrantState::Granted => Err(ClaimsError::state_conflict()),
+        let claim_index = record
+            .claim_trie
+            .exact_claim_index(qualified.claim())
+            .map_or_else(
+                || {
+                    Self::find_claim_index(record, qualified)
+                        .and_then(|index| record.claims.get(index).and_then(|slot| *slot))
+                        .map_or_else(
+                            || Err(ClaimsError::not_found()),
+                            |grant| match grant.state {
+                                ClaimGrantState::Revoked => Err(ClaimsError::revoked()),
+                                ClaimGrantState::Expired => Err(ClaimsError::expired()),
+                                ClaimGrantState::Pending | ClaimGrantState::Consumed => {
+                                    Err(ClaimsError::permission_denied())
+                                }
+                                ClaimGrantState::Granted => Err(ClaimsError::state_conflict()),
+                            },
+                        )
                 },
-                None => Err(ClaimsError::not_found()),
-            };
-        };
+                Ok,
+            )?;
         let Some(grant) = record.claims.get(claim_index).and_then(|slot| *slot) else {
             return Err(ClaimsError::not_found());
         };
@@ -1028,7 +1033,8 @@ impl<
             .iter()
             .flatten()
             .filter(|grant| matches!(grant.state, ClaimGrantState::Granted))
-            .count() as u32;
+            .count();
+        let granted_claim_count = u32::try_from(granted_claim_count).unwrap_or(u32::MAX);
         record.descriptor.image_seal = record
             .descriptor
             .image_seal
@@ -1076,6 +1082,7 @@ impl<
         )
     }
 
+    #[allow(clippy::large_types_passed_by_value)] // Fixed-capacity tables own a copy of each bond.
     fn attach_bond(
         &mut self,
         context: ClaimContextId,
@@ -1162,12 +1169,11 @@ impl<
 }
 
 impl<
-    'a,
     const MAX_CONTEXTS: usize,
     const MAX_CLAIMS: usize,
     const MAX_BONDS: usize,
     const MAX_SCOPE_NODES: usize,
-> Default for ClaimContextRegistry<'a, MAX_CONTEXTS, MAX_CLAIMS, MAX_BONDS, MAX_SCOPE_NODES>
+> Default for ClaimContextRegistry<'_, MAX_CONTEXTS, MAX_CLAIMS, MAX_BONDS, MAX_SCOPE_NODES>
 {
     fn default() -> Self {
         Self::new()
@@ -1454,7 +1460,7 @@ impl<
 
     /// Bumps the bond revocation epoch, invalidating outstanding bonds from older epochs.
     #[must_use]
-    pub fn bump_revocation_epoch(&mut self) -> u64 {
+    pub const fn bump_revocation_epoch(&mut self) -> u64 {
         self.current_revocation_epoch += 1;
         self.current_revocation_epoch
     }
@@ -1536,7 +1542,7 @@ impl<
         Ok(claim_context)
     }
 
-    fn next_seal(
+    const fn next_seal(
         &mut self,
         image_digest: ClaimsDigest,
         claims_digest: ClaimsDigest,

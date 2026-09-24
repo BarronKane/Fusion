@@ -20,6 +20,8 @@ use super::types::{
 };
 
 /// Public output and presentation surface for one display connector/path.
+/// Operational failures use the backend's `DisplayResult` error contract.
+#[allow(clippy::missing_errors_doc)] // Each operation's concrete failure set is backend-defined.
 pub trait DisplayPortContract {
     /// Returns one static descriptor for this output path.
     fn descriptor(&self) -> DisplayResult<DisplayPortDescriptor>;

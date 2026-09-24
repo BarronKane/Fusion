@@ -174,7 +174,7 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
                         .capture_state
                         .get()
                         .epoch()
-                        .unwrap_or(self.channel.observation_epoch());
+                        .unwrap_or_else(|| self.channel.observation_epoch());
                     let _ = self.channel.clear_pending_messages();
                     if self.active_span_count.get() == 0 {
                         self.capture_state
@@ -188,7 +188,7 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
         }
     }
 
-    fn current_epoch(&self) -> Option<u64> {
+    const fn current_epoch(&self) -> Option<u64> {
         self.capture_state.get().epoch()
     }
 
@@ -202,8 +202,7 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
         let active = self.active_span_count.get();
         debug_assert!(
             active != 0,
-            "timeline span close underflow: no active spans remained for token {:?}",
-            token
+            "timeline span close underflow: no active spans remained for token {token:?}"
         );
         if active == 0 {
             return;
@@ -239,6 +238,10 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     ///
     /// Returns `Ok(None)` when no listeners are attached or when the timeline is draining a prior
     /// disconnected session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn begin_span(
         &self,
         parent: Option<InsightTimelineSpanToken>,
@@ -256,7 +259,7 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
             .filter(|token| token.epoch == epoch)
             .map(InsightTimelineSpanToken::id);
 
-        match self.channel.try_send_if_observed(self.producer, || {
+        if self.channel.try_send_if_observed(self.producer, || {
             InsightTimelineRecord::SpanOpened {
                 epoch,
                 span,
@@ -264,15 +267,12 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
                 meta,
             }
         })? {
-            true => {
-                self.active_span_count
-                    .set(self.active_span_count.get().saturating_add(1));
-                Ok(Some(InsightTimelineSpanToken { span, epoch }))
-            }
-            false => {
-                self.sync_observation();
-                Ok(None)
-            }
+            self.active_span_count
+                .set(self.active_span_count.get().saturating_add(1));
+            Ok(Some(InsightTimelineSpanToken { span, epoch }))
+        } else {
+            self.sync_observation();
+            Ok(None)
         }
     }
 
@@ -280,6 +280,10 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     ///
     /// Stale spans from a prior capture epoch are ignored. Spans closed while the timeline is
     /// draining are retired internally without emitting new records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn end_span(&self, token: InsightTimelineSpanToken) -> Result<(), ChannelError> {
         self.sync_observation();
         let Some(epoch) = self.current_epoch() else {
@@ -309,6 +313,10 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     }
 
     /// Attaches one consumer to the underlying timeline channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn attach_consumer(
         &self,
         request: TransportAttachmentRequest,
@@ -317,11 +325,19 @@ impl<Meta, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     }
 
     /// Detaches one consumer from the underlying timeline channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn detach_consumer(&self, attachment: usize) -> Result<(), TransportError> {
         self.channel.detach_consumer(attachment)
     }
 
     /// Receives one timeline record from the underlying channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn try_receive(
         &self,
         consumer: usize,

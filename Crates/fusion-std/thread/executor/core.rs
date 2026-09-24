@@ -41,8 +41,8 @@ const SLOT_RUN_SCHEDULED: u8 = 0b01;
 const SLOT_RUN_RUNNING: u8 = 0b10;
 
 impl AsyncTaskSlot {
-    fn new(slot_index: usize, fast: bool) -> Result<Self, ExecutorError> {
-        Ok(Self {
+    const fn new(slot_index: usize, fast: bool) -> Self {
+        Self {
             generation: AtomicUsize::new(0),
             core: ExecutorCell::new(fast, None),
             #[cfg(feature = "debug-insights")]
@@ -57,7 +57,7 @@ impl AsyncTaskSlot {
             handle_live: AtomicBool::new(false),
             waker_refs: AtomicUsize::new(0),
             waker: AsyncTaskWakerData::new(slot_index),
-        })
+        }
     }
 
     fn clear_run_state(&self) {
@@ -149,10 +149,7 @@ impl AsyncTaskSlot {
         self.state.load(Ordering::Acquire)
     }
 
-    fn initialize_for_allocation(
-        &self,
-        spill_store: &AsyncTaskSpillStore,
-    ) -> Result<u64, ExecutorError> {
+    fn initialize_for_allocation(&self) -> Result<u64, ExecutorError> {
         if self.state() != SLOT_EMPTY {
             return Err(executor_invalid());
         }
@@ -165,8 +162,8 @@ impl AsyncTaskSlot {
             .map_err(|_| executor_overflow())?;
         let generation = previous.checked_add(1).ok_or_else(executor_overflow)? as u64;
 
-        self.future.with(|future| future.clear(spill_store))??;
-        self.result.with(|result| result.clear(spill_store))??;
+        self.future.with(InlineAsyncFutureStorage::clear)?;
+        self.result.with(InlineAsyncResultStorage::clear)?;
         self.error.with(|error| *error = None)?;
         #[cfg(feature = "debug-insights")]
         self.task_id.with(|task_id| *task_id = None)?;
@@ -241,11 +238,7 @@ impl AsyncTaskSlot {
             .with(|future| future.poll_in_place(&self.result, spill_store, context))?
     }
 
-    fn complete(
-        &self,
-        spill_store: &AsyncTaskSpillStore,
-        generation: u64,
-    ) -> Result<(), ExecutorError> {
+    fn complete(&self, generation: u64) -> Result<(), ExecutorError> {
         if self.generation() != generation {
             return Ok(());
         }
@@ -262,7 +255,7 @@ impl AsyncTaskSlot {
             return Ok(());
         }
 
-        self.future.with(|future| future.clear(spill_store))??;
+        self.future.with(InlineAsyncFutureStorage::clear)?;
         self.error.with(|error| *error = None)?;
         self.clear_run_state();
         self.wake_join_waker()?;
@@ -270,12 +263,7 @@ impl AsyncTaskSlot {
         Ok(())
     }
 
-    fn fail(
-        &self,
-        spill_store: &AsyncTaskSpillStore,
-        generation: u64,
-        error: ExecutorError,
-    ) -> Result<(), ExecutorError> {
+    fn fail(&self, generation: u64, error: ExecutorError) -> Result<(), ExecutorError> {
         if self.generation() != generation {
             return Ok(());
         }
@@ -292,8 +280,8 @@ impl AsyncTaskSlot {
             return Ok(());
         }
 
-        self.future.with(|future| future.clear(spill_store))??;
-        self.result.with(|result| result.clear(spill_store))??;
+        self.future.with(InlineAsyncFutureStorage::clear)?;
+        self.result.with(InlineAsyncResultStorage::clear)?;
         self.error.with(|slot| *slot = Some(error))?;
         self.clear_run_state();
         self.wake_join_waker()?;
@@ -301,12 +289,8 @@ impl AsyncTaskSlot {
         Ok(())
     }
 
-    fn cancel(
-        &self,
-        spill_store: &AsyncTaskSpillStore,
-        generation: u64,
-    ) -> Result<(), ExecutorError> {
-        self.fail(spill_store, generation, ExecutorError::Cancelled)
+    fn cancel(&self, generation: u64) -> Result<(), ExecutorError> {
+        self.fail(generation, ExecutorError::Cancelled)
     }
 
     fn clear_core_if_no_wakers(&self, generation: u64) -> Result<bool, ExecutorError> {
@@ -321,18 +305,14 @@ impl AsyncTaskSlot {
         Ok(true)
     }
 
-    fn force_shutdown(
-        &self,
-        spill_store: &AsyncTaskSpillStore,
-        generation: u64,
-    ) -> Result<(), ExecutorError> {
+    fn force_shutdown(&self, generation: u64) -> Result<(), ExecutorError> {
         if self.generation() != generation {
             return Ok(());
         }
 
         match self.state() {
             SLOT_PENDING => {
-                let _ = self.fail(spill_store, generation, ExecutorError::Stopped);
+                let _ = self.fail(generation, ExecutorError::Stopped);
             }
             SLOT_READY | SLOT_FAILED | SLOT_EMPTY => {}
             _ => return Err(executor_invalid()),
@@ -350,16 +330,12 @@ impl AsyncTaskSlot {
         Ok(matches!(self.state(), SLOT_READY | SLOT_FAILED))
     }
 
-    fn take_result<T: 'static>(
-        &self,
-        spill_store: &AsyncTaskSpillStore,
-        generation: u64,
-    ) -> Result<T, ExecutorError> {
+    fn take_result<T: 'static>(&self, generation: u64) -> Result<T, ExecutorError> {
         if self.generation() != generation {
             return Err(ExecutorError::Stopped);
         }
         match self.state() {
-            SLOT_READY => self.result.with(|result| result.take::<T>(spill_store))?,
+            SLOT_READY => self.result.with(InlineAsyncResultStorage::take::<T>)?,
             SLOT_FAILED => Err(self
                 .error
                 .with(Option::take)?
@@ -388,17 +364,13 @@ impl AsyncTaskSlot {
             && matches!(state, SLOT_READY | SLOT_FAILED))
     }
 
-    fn reset_empty(
-        &self,
-        spill_store: &AsyncTaskSpillStore,
-        generation: u64,
-    ) -> Result<(), ExecutorError> {
+    fn reset_empty(&self, generation: u64) -> Result<(), ExecutorError> {
         if self.generation() != generation {
             return Err(ExecutorError::Stopped);
         }
 
-        self.future.with(|future| future.clear(spill_store))??;
-        self.result.with(|result| result.clear(spill_store))??;
+        self.future.with(InlineAsyncFutureStorage::clear)?;
+        self.result.with(InlineAsyncResultStorage::clear)?;
         self.error.with(|error| *error = None)?;
         #[cfg(feature = "debug-insights")]
         self.task_id.with(|task_id| *task_id = None)?;
@@ -449,7 +421,7 @@ impl AsyncTaskSlot {
         let completed = self.completed.with_ref(|completed| {
             completed
                 .as_ref()
-                .map(|completed| ::core::ptr::from_ref(completed))
+                .map(::core::ptr::from_ref)
                 .ok_or_else(executor_invalid)
         })??;
         // SAFETY: the slot keeps its completion semaphore allocated for the active generation.
@@ -520,9 +492,9 @@ impl AsyncTaskRegistry {
         let arena = allocators
             .registry
             .arena(arena_capacity, executor_registry_align())?;
-        let slots = match arena
-            .try_alloc_array_with(capacity, |slot_index| AsyncTaskSlot::new(slot_index, fast))
-        {
+        let slots = match arena.try_alloc_array_with(capacity, |slot_index| {
+            Ok(AsyncTaskSlot::new(slot_index, fast))
+        }) {
             Ok(slots) => slots,
             Err(ArenaInitError::Alloc(error)) => return Err(executor_error_from_alloc(error)),
             Err(ArenaInitError::Init(error)) => return Err(error),
@@ -545,9 +517,7 @@ impl AsyncTaskRegistry {
             .free
             .with(FixedIndexStack::pop)?
             .ok_or_else(executor_busy)?;
-        let generation = self
-            .slot(slot_index)?
-            .initialize_for_allocation(&self.spill_store)?;
+        let generation = self.slot(slot_index)?.initialize_for_allocation()?;
         Ok((slot_index, generation))
     }
 
@@ -619,8 +589,8 @@ impl Drop for AsyncTaskRegistry {
             if generation == 0 {
                 continue;
             }
-            let _ = slot.force_shutdown(&self.spill_store, generation);
-            let _ = slot.reset_empty(&self.spill_store, generation);
+            let _ = slot.force_shutdown(generation);
+            let _ = slot.reset_empty(generation);
         }
     }
 }
@@ -779,7 +749,7 @@ impl fmt::Debug for ExecutorCore {
 }
 
 impl ExecutorCore {
-    fn runtime_tick(&self) -> u64 {
+    pub(super) fn runtime_tick() -> u64 {
         match runtime_monotonic_raw_now() {
             Ok(fusion_sys::thread::MonotonicRawInstant::Bits32(raw)) => u64::from(raw),
             Ok(fusion_sys::thread::MonotonicRawInstant::Bits64(raw)) => raw,
@@ -794,7 +764,7 @@ impl ExecutorCore {
             return Ok(());
         };
         runtime_sink
-            .record_context(courier_id, context_id, self.runtime_tick())
+            .record_context(courier_id, context_id, Self::runtime_tick())
             .map_err(executor_error_from_runtime_sink)
     }
 
@@ -830,7 +800,7 @@ impl ExecutorCore {
             active_units.saturating_sub(runnable_units.saturating_add(running_units));
         let available_slots = registry.available_slots()?;
         let responsiveness = runtime_sink
-            .evaluate_responsiveness(courier_id, self.runtime_tick())
+            .evaluate_responsiveness(courier_id, Self::runtime_tick())
             .map_err(executor_error_from_runtime_sink)?;
         let summary = CourierRuntimeSummary::new(
             match self.scheduler {
@@ -856,7 +826,7 @@ impl ExecutorCore {
             available_slots,
         });
         runtime_sink
-            .record_runtime_summary(courier_id, summary, self.runtime_tick())
+            .record_runtime_summary(courier_id, summary, Self::runtime_tick())
             .map_err(executor_error_from_runtime_sink)
     }
 
@@ -870,17 +840,14 @@ impl ExecutorCore {
         }
         let driver = self
             .reactor_driver
-            .with_ref(|driver| driver.as_ref().cloned())?
+            .with_ref(core::clone::Clone::clone)?
             .ok_or(ExecutorError::Unsupported)?;
         driver.ensure_started(&self.reactor_state, &self.reactor_driver_ready)
     }
 
     #[cfg(feature = "std")]
     fn join_reactor_driver(&self) {
-        if let Ok(Some(driver)) = self
-            .reactor_driver
-            .with_ref(|driver| driver.as_ref().cloned())
-        {
+        if let Ok(Some(driver)) = self.reactor_driver.with_ref(core::clone::Clone::clone) {
             driver.join();
         }
     }
@@ -922,7 +889,7 @@ impl ExecutorCore {
     }
 
     #[cfg_attr(not(feature = "debug-insights"), allow(dead_code))]
-    fn scheduler_tag(&self) -> AsyncTaskSchedulerTag {
+    const fn scheduler_tag(&self) -> AsyncTaskSchedulerTag {
         AsyncTaskSchedulerTag::from_scheduler(&self.scheduler)
     }
 
@@ -1048,7 +1015,7 @@ impl ExecutorCore {
         &self,
         slot_index: usize,
         generation: u64,
-        scheduled_core: Option<ControlLease<ExecutorCore>>,
+        scheduled_core: Option<ControlLease<Self>>,
     ) -> Result<(), ExecutorError> {
         let registry = self.registry()?;
         let slot = registry.slot(slot_index)?;
@@ -1061,11 +1028,13 @@ impl ExecutorCore {
         self.dispatch_marked_slot_with_lease(slot_index, generation, scheduled_core)
     }
 
+    // The argument is retained here so one active reactor lease spans dispatch setup.
+    #[allow(clippy::needless_pass_by_value)]
     fn dispatch_marked_slot_with_lease(
         &self,
         slot_index: usize,
         generation: u64,
-        scheduled_core: Option<ControlLease<ExecutorCore>>,
+        scheduled_core: Option<ControlLease<Self>>,
     ) -> Result<(), ExecutorError> {
         let registry = self.registry()?;
         let slot = registry.slot(slot_index)?;
@@ -1075,7 +1044,7 @@ impl ExecutorCore {
         let tracked = self.scheduler.uses_external_carrier();
         if tracked && let Err(error) = self.begin_external_schedule() {
             slot.clear_run_state();
-            let _ = slot.fail(&registry.spill_store, generation, error);
+            let _ = slot.fail(generation, error);
             let _ = self.recycle_slot_if_possible(slot_index, generation);
             return Err(error);
         }
@@ -1123,13 +1092,15 @@ impl ExecutorCore {
                 self.finish_external_schedule();
             }
             slot.clear_run_state();
-            let _ = slot.fail(&registry.spill_store, generation, error);
+            let _ = slot.fail(generation, error);
             let _ = self.recycle_slot_if_possible(slot_index, generation);
             return Err(error);
         }
         Ok(())
     }
 
+    // Keep the state transitions together: their ordering is part of the slot protocol.
+    #[allow(clippy::too_many_lines)]
     fn run_slot_by_ref(&self, slot_index: usize, generation: u64) -> AsyncSlotRunDisposition {
         let Ok(registry) = self.registry() else {
             return AsyncSlotRunDisposition::Terminal;
@@ -1181,7 +1152,7 @@ impl ExecutorCore {
                     });
                 }
                 let _ = slot.finish_pending_run();
-                let _ = slot.complete(&registry.spill_store, generation);
+                let _ = slot.complete(generation);
                 #[cfg(feature = "debug-insights")]
                 if let Some(task) = task_id {
                     self.emit_task_lifecycle(AsyncTaskLifecycleRecord::Completed {
@@ -1231,7 +1202,7 @@ impl ExecutorCore {
             }
             Err(error) => {
                 let _ = slot.finish_pending_run();
-                let _ = slot.fail(&registry.spill_store, generation, error);
+                let _ = slot.fail(generation, error);
                 #[cfg(feature = "debug-insights")]
                 if let Some(task) = task_id {
                     self.emit_task_lifecycle(AsyncTaskLifecycleRecord::Failed {
@@ -1272,7 +1243,7 @@ impl ExecutorCore {
             return Ok(());
         }
         self.clear_wait(slot_index, generation)?;
-        slot.reset_empty(&registry.spill_store, generation)?;
+        slot.reset_empty(generation)?;
         let released = registry.release_slot(slot_index, generation);
         let _ = self.publish_runtime_summary();
         released
@@ -1309,7 +1280,7 @@ impl ExecutorCore {
             }
             let slot_index = slot.waker.slot_index;
             let _ = self.clear_wait(slot_index, generation);
-            let _ = slot.force_shutdown(&registry.spill_store, generation);
+            let _ = slot.force_shutdown(generation);
         }
         #[cfg(feature = "std")]
         self.join_reactor_driver();

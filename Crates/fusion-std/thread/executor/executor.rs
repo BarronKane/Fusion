@@ -197,7 +197,11 @@ use super::{
 };
 
 mod engine;
-use self::engine::*;
+use self::engine::{
+    run_scheduled_green_slot_lease,
+    poll_future_contained,
+    ExecutorInner,
+};
 
 #[cfg(feature = "std")]
 mod hosted;
@@ -1058,7 +1062,7 @@ impl<T> TaskHandleInner<T> {
             }
         }
 
-        let result = slot.take_result::<T>(&registry.spill_store, self.generation);
+        let result = slot.take_result::<T>(self.generation);
         self.active = false;
         let _ = self.core.detach_handle(self.slot_index, self.generation);
         result
@@ -1067,8 +1071,7 @@ impl<T> TaskHandleInner<T> {
     fn abort(&self) -> Result<(), ExecutorError> {
         let slot = self.core.registry()?.slot(self.slot_index)?;
         let _ = self.core.clear_wait(self.slot_index, self.generation);
-        let registry = self.core.registry()?;
-        slot.cancel(&registry.spill_store, self.generation)?;
+        slot.cancel(self.generation)?;
         #[cfg(feature = "debug-insights")]
         if let Some(task) = slot.task_id() {
             self.core
@@ -1103,11 +1106,7 @@ impl<T> TaskHandleInner<T> {
         }
         match slot.is_finished(self.generation) {
             Ok(true) => {
-                let registry = match self.core.registry() {
-                    Ok(registry) => registry,
-                    Err(error) => return Poll::Ready(Err(error)),
-                };
-                let result = slot.take_result::<T>(&registry.spill_store, self.generation);
+                let result = slot.take_result::<T>(self.generation);
                 self.active = false;
                 let _ = self.core.detach_handle(self.slot_index, self.generation);
                 Poll::Ready(result)
@@ -1508,6 +1507,9 @@ impl CurrentAsyncRuntime {
 
     /// Returns the explicit current-thread runtime backing plan under one explicit allocator
     /// layout policy.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn backing_plan_with_layout_policy(
         config: ExecutorConfig,
         layout_policy: AllocatorLayoutPolicy,
@@ -1520,6 +1522,9 @@ impl CurrentAsyncRuntime {
 
     /// Returns the explicit current-thread runtime backing plan under one explicit allocator
     /// layout policy and one explicit executor-planning surface.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn backing_plan_with_layout_policy_and_planning_support(
         config: ExecutorConfig,
         layout_policy: AllocatorLayoutPolicy,
@@ -1583,6 +1588,8 @@ impl CurrentAsyncRuntime {
     /// # Errors
     ///
     /// Returns any honest sizing, partitioning, or bootstrap failure.
+    // Ownership transfers here and is released after partition handles retain the backing.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn from_bound_slab(
         config: ExecutorConfig,
         slab: MemoryResourceHandle,
@@ -2032,7 +2039,7 @@ fn executor_registry_capacity(capacity: usize) -> Result<usize, ExecutorError> {
     )
 }
 
-fn executor_registry_align() -> usize {
+const fn executor_registry_align() -> usize {
     executor_registry_align_with_planning_support(ExecutorPlanningSupport::compiled_binary())
 }
 
@@ -2043,15 +2050,15 @@ fn executor_registry_capacity_with_planning_support(
     planning.registry_capacity(capacity)
 }
 
-fn executor_registry_align_with_planning_support(planning: ExecutorPlanningSupport) -> usize {
+const fn executor_registry_align_with_planning_support(planning: ExecutorPlanningSupport) -> usize {
     planning.registry_align()
 }
 
-fn executor_reactor_align() -> usize {
+const fn executor_reactor_align() -> usize {
     executor_reactor_align_with_planning_support(ExecutorPlanningSupport::compiled_binary())
 }
 
-fn executor_reactor_align_with_planning_support(planning: ExecutorPlanningSupport) -> usize {
+const fn executor_reactor_align_with_planning_support(planning: ExecutorPlanningSupport) -> usize {
     planning.reactor_align()
 }
 

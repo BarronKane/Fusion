@@ -180,7 +180,7 @@ where
 {
     /// Wraps one already-owned hardware-facing PCI function handle.
     #[must_use]
-    pub fn from_inner(inner: F) -> Self {
+    pub const fn from_inner(inner: F) -> Self {
         Self { inner }
     }
 
@@ -198,7 +198,7 @@ where
     type Function = PciFunction<H::Function>;
 
     fn controller(&self) -> &'static PciControllerDescriptor {
-        Pci::controller(self).unwrap_or_else(|_| panic!("invalid pci provider {}", self.provider))
+        Self::controller(self).unwrap_or_else(|_| panic!("invalid pci provider {}", self.provider))
     }
 
     fn support(&self) -> PciSupport {
@@ -713,7 +713,7 @@ mod tests {
         }
 
         fn read_config_u32(&self, offset: PciConfigOffset) -> Result<u32, PciError> {
-            Ok(offset.0 as u32)
+            Ok(u32::from(offset.0))
         }
 
         fn write_config_u8(

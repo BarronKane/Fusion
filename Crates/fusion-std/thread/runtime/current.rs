@@ -14,7 +14,58 @@ use core::sync::atomic::{
     AtomicUsize,
     Ordering,
 };
-use super::*;
+use super::{
+    CurrentFiberPool,
+    UnsafeCell,
+    CurrentAsyncRuntime,
+    NonNull,
+    ExtentLease,
+    CourierId,
+    ContextId,
+    CourierRuntimeSink,
+    CourierLaunchControl,
+    CourierChildLaunchRequest,
+    CourierPlan,
+    CourierSchedulingPolicy,
+    CourierResponsiveness,
+    runtime_tick,
+    FiberPoolBootstrap,
+    FiberError,
+    current_thread_default_guard_pages,
+    selected_stack_size_with_optional_floor,
+    default_runtime_sizing_strategy,
+    ensure_runtime_reserved_wake_vectors_best_effort,
+    ExecutorError,
+    ExecutorConfig,
+    uses_explicit_bound_runtime_backing,
+    allocate_owned_runtime_slab,
+    current_runtime_error_from_owned_backing,
+    executor_error_from_current_runtime,
+    Allocator,
+    executor_error_from_alloc,
+    executor_invalid,
+    MemoryPoolExtentRequest,
+    fiber_error_from_executor,
+    executor_error_from_runtime_sync,
+    initial_runtime_capacity,
+    next_bounded_runtime_capacity,
+    FiberErrorKind,
+    executor_error_from_fiber,
+    executor_resource_exhausted,
+    size_of,
+    align_of,
+    executor_overflow,
+    executor_busy,
+    CourierRuntimeSummary,
+    CourierLaneSummary,
+    CourierRunState,
+    CurrentFiberHandle,
+    NonZeroUsize,
+    Future,
+    TaskHandle,
+    system_thread,
+    spin_loop,
+};
 
 #[unsafe(no_mangle)]
 pub static CURRENT_SINGLETON_FIBER_SPAWN_PHASE: AtomicU32 = AtomicU32::new(0);
@@ -154,6 +205,12 @@ fn current_singleton_runtime_dispatch_callback(context: usize) {
     // `CurrentFiberAsyncSingleton` instances.
     let runtime = unsafe { &*(context as *const CurrentFiberAsyncSingleton) };
     runtime.autonomous_dispatch_once();
+}
+
+impl Default for CurrentFiberAsyncSingleton {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CurrentFiberAsyncSingleton {
@@ -315,7 +372,7 @@ impl CurrentFiberAsyncSingleton {
                     let registered =
                         fusion_pal::sys::runtime_dispatch::register_runtime_dispatch_callback(
                             current_singleton_runtime_dispatch_callback,
-                            self as *const Self as usize,
+                            core::ptr::from_ref::<Self>(self) as usize,
                         )
                         .ok();
                     let stored = registered
@@ -404,14 +461,9 @@ impl CurrentFiberAsyncSingleton {
         // service fiber seize the whole lane and turns "autonomous dispatch" back into hidden
         // manual-pump theater with extra steps.
         for _ in 0..Self::AUTONOMOUS_DISPATCH_BATCH_LIMIT {
-            let mut progressed = false;
-
-            if matches!(self.pump_async_once(), Ok(true)) {
-                progressed = true;
-            }
-            if matches!(self.pump_fiber_once(), Ok(true)) {
-                progressed = true;
-            }
+            let async_progress = matches!(self.pump_async_once(), Ok(true));
+            let fiber_progress = matches!(self.pump_fiber_once(), Ok(true));
+            let progressed = async_progress || fiber_progress;
 
             if !progressed {
                 break;
@@ -432,33 +484,37 @@ impl CurrentFiberAsyncSingleton {
     }
 
     fn effective_fiber_capacity_limit(&self) -> Option<usize> {
-        match self.fiber_capacity_limit {
-            Some(limit) => Some(limit),
-            None => self.courier_plan.map(|plan| {
-                if plan.max_live_fibers == 0 {
-                    1
-                } else {
-                    plan.max_live_fibers
-                }
-            }),
-        }
+        self.fiber_capacity_limit.map_or_else(
+            || {
+                self.courier_plan.map(|plan| {
+                    if plan.max_live_fibers == 0 {
+                        1
+                    } else {
+                        plan.max_live_fibers
+                    }
+                })
+            },
+            Some,
+        )
     }
 
-    fn effective_initial_fiber_capacity(&self) -> Option<usize> {
+    const fn effective_initial_fiber_capacity(&self) -> Option<usize> {
         self.initial_fiber_capacity
     }
 
     fn effective_async_capacity_limit(&self) -> Option<usize> {
-        match self.async_capacity_limit {
-            Some(limit) => Some(limit),
-            None => self.courier_plan.map(|plan| {
-                if plan.max_async_tasks == 0 {
-                    1
-                } else {
-                    plan.max_async_tasks
-                }
-            }),
-        }
+        self.async_capacity_limit.map_or_else(
+            || {
+                self.courier_plan.map(|plan| {
+                    if plan.max_async_tasks == 0 {
+                        1
+                    } else {
+                        plan.max_async_tasks
+                    }
+                })
+            },
+            Some,
+        )
     }
 
     fn runnable_capacity_limit(&self) -> Option<usize> {
@@ -466,10 +522,11 @@ impl CurrentFiberAsyncSingleton {
     }
 
     fn scheduling_policy(&self, fallback: CourierSchedulingPolicy) -> CourierSchedulingPolicy {
-        match self.courier_plan.and_then(|plan| plan.time_slice_ticks) {
-            Some(quantum_ticks) => CourierSchedulingPolicy::TimeSliced { quantum_ticks },
-            None => fallback,
-        }
+        self.courier_plan
+            .and_then(|plan| plan.time_slice_ticks)
+            .map_or(fallback, |quantum_ticks| {
+                CourierSchedulingPolicy::TimeSliced { quantum_ticks }
+            })
     }
 
     fn courier_responsiveness(
@@ -489,10 +546,11 @@ impl CurrentFiberAsyncSingleton {
         fiber_capacity: usize,
         stack_floor_bytes: usize,
     ) -> Result<FiberPoolBootstrap<'static>, FiberError> {
-        let guard_pages = match self.guard_pages {
-            Some(guard_pages) => guard_pages,
-            None => current_thread_default_guard_pages(),
-        };
+        let guard_pages = self
+            .guard_pages
+            .map_or_else(current_thread_default_guard_pages, |guard_pages| {
+                guard_pages
+            });
         let stack_floor_bytes = (stack_floor_bytes != 0).then_some(stack_floor_bytes);
         FiberPoolBootstrap::uniform_growing(
             selected_stack_size_with_optional_floor(stack_floor_bytes)?,
@@ -603,7 +661,7 @@ impl CurrentFiberAsyncSingleton {
             CURRENT_SINGLETON_FIBER_SPAWN_PHASE.store(0x22, Ordering::Release);
             state.configured_capacity = initial_runtime_capacity(
                 self.effective_fiber_capacity_limit(),
-                requested_capacity.or(self.effective_initial_fiber_capacity()),
+                requested_capacity.or_else(|| self.effective_initial_fiber_capacity()),
             )
             .ok_or_else(FiberError::resource_exhausted)?;
             state.effective_stack_floor_bytes = self
@@ -692,7 +750,7 @@ impl CurrentFiberAsyncSingleton {
             }
             _ if state.runtime.is_none() => initial_runtime_capacity(
                 self.effective_fiber_capacity_limit(),
-                requested_fiber_capacity.or(self.effective_initial_fiber_capacity()),
+                requested_fiber_capacity.or_else(|| self.effective_initial_fiber_capacity()),
             )
             .ok_or_else(FiberError::resource_exhausted)?,
             _ => state.configured_capacity,
@@ -983,8 +1041,7 @@ impl CurrentFiberAsyncSingleton {
         &'static self,
         responsiveness: CourierResponsiveness,
     ) -> Result<Option<CourierRuntimeSummary>, FiberError> {
-        Ok(self
-            .fiber_runtime_if_initialized()?
+        self.fiber_runtime_if_initialized()?
             .map(|runtime| {
                 runtime
                     .runtime_summary_with_responsiveness(responsiveness)
@@ -993,7 +1050,7 @@ impl CurrentFiberAsyncSingleton {
                         summary
                     })
             })
-            .transpose()?)
+            .transpose()
     }
 
     /// Returns one courier-facing run summary for the currently realized async lane, if any.
@@ -1097,7 +1154,7 @@ impl CurrentFiberAsyncSingleton {
             policy: self.scheduling_policy(
                 fiber_summary
                     .map(|summary| summary.policy)
-                    .or(async_summary.map(|summary| summary.policy))
+                    .or_else(|| async_summary.map(|summary| summary.policy))
                     .unwrap_or(CourierSchedulingPolicy::CooperativePriority),
             ),
             run_state: if fiber_lane.is_some_and(|lane| lane.running_units != 0)
@@ -1119,6 +1176,9 @@ impl CurrentFiberAsyncSingleton {
         .with_responsiveness(responsiveness))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn spawn_fiber<F, T>(&'static self, job: F) -> Result<CurrentFiberHandle<T>, FiberError>
     where
         F: FnOnce() -> T + Send + 'static,
@@ -1140,6 +1200,9 @@ impl CurrentFiberAsyncSingleton {
         Ok(handle)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn spawn_fiber_with_stack<const STACK_BYTES: usize, F, T>(
         &'static self,
         job: F,
@@ -1164,6 +1227,9 @@ impl CurrentFiberAsyncSingleton {
         Ok(handle)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn spawn_planned_fiber<T>(
         &'static self,
         task: T,
@@ -1338,6 +1404,9 @@ impl CurrentFiberAsyncSingleton {
         handle.join()
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn shutdown_fibers(&'static self) -> Result<(), FiberError> {
         self.fiber_runtime_if_initialized()?
             .map_or(Ok(()), |runtime| runtime.shutdown())

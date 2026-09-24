@@ -100,7 +100,6 @@ impl RuntimeBackendSlot {
                     self.state.store(BACKEND_READY, Ordering::Release);
                     return unsafe { &*(*self.value.get()).as_ptr() };
                 }
-                BACKEND_RUNNING => spin_loop(),
                 _ => spin_loop(),
             }
         }
@@ -126,18 +125,17 @@ fn build_backend() -> Result<CarrierRuntimeBackend, &'static str> {
             .map_err(|_| "generated default fiber stack should resolve")?,
     )
     .ok_or("fiber stack size should be non-zero")?;
-    let fiber_config =
-        FiberPoolConfig::fixed_growing(
-            fiber_stack_size,
-            RP2350_EXAMPLE_FIBER_CAPACITY,
-            RP2350_EXAMPLE_FIBER_GROWTH_CHUNK,
-        )
-        .map_err(|_| "fiber config should be valid")?
-        .with_guard_pages(0)
-        .with_fcfs_steal_locality(fusion_std::thread::CarrierSpawnLocalityPolicy::SameCore)
-        .with_reactor_policy(GreenReactorPolicy::Disabled)
-        .with_courier_id(MAIN_COURIER_ID)
-        .with_context_id(MAIN_CONTEXT_ID);
+    let fiber_config = FiberPoolConfig::fixed_growing(
+        fiber_stack_size,
+        RP2350_EXAMPLE_FIBER_CAPACITY,
+        RP2350_EXAMPLE_FIBER_GROWTH_CHUNK,
+    )
+    .map_err(|_| "fiber config should be valid")?
+    .with_guard_pages(0)
+    .with_fcfs_steal_locality(fusion_std::thread::CarrierSpawnLocalityPolicy::SameCore)
+    .with_reactor_policy(GreenReactorPolicy::Disabled)
+    .with_courier_id(MAIN_COURIER_ID)
+    .with_context_id(MAIN_CONTEXT_ID);
     let fibers = GreenPool::new(&fiber_config, &carrier).map_err(|_| "fiber pool should build")?;
 
     let (async_runtime, async_slab_owner) =
@@ -194,8 +192,13 @@ pub fn ensure_runtime_ready() {
     let _ = backend();
 }
 
-pub fn request_runtime_dispatch() {}
+pub const fn request_runtime_dispatch() {}
 
+/// Spawns one fiber on the RP2350 example runtime.
+///
+/// # Errors
+///
+/// Returns the runtime's fiber error if the task cannot be admitted.
 pub fn spawn<F, T>(job: F) -> Result<GreenHandle<T>, FiberError>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -204,10 +207,20 @@ where
     backend().fibers.spawn(job)
 }
 
+/// Shuts down fibers owned by the RP2350 example runtime.
+///
+/// # Errors
+///
+/// Returns the runtime's fiber error if shutdown cannot complete.
 pub fn shutdown_fibers() -> Result<(), FiberError> {
     backend().fibers.shutdown()
 }
 
+/// Spawns one asynchronous task on the RP2350 example runtime.
+///
+/// # Errors
+///
+/// Returns the executor error if the task cannot be admitted.
 pub fn spawn_async<F>(future: F) -> Result<TaskHandle<F::Output>, ExecutorError>
 where
     F: Future + Send + 'static,
@@ -216,6 +229,11 @@ where
     backend().async_runtime.spawn(future)
 }
 
+/// Runs one future to completion on the RP2350 example runtime.
+///
+/// # Errors
+///
+/// Returns the executor error if execution cannot complete.
 pub fn block_on<F>(future: F) -> Result<F::Output, ExecutorError>
 where
     F: Future + 'static,

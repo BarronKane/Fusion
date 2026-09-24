@@ -100,7 +100,7 @@ where
     }
 
     /// Returns a mutable reference to the owned signal pin for direct driver access.
-    pub fn signal_mut(&mut self) -> &mut P {
+    pub const fn signal_mut(&mut self) -> &mut P {
         &mut self.signal
     }
 

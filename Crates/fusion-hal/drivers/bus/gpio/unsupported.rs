@@ -1,4 +1,4 @@
-//! Unsupported hardware-facing GPIO substrate used when no SoC or interface backend is selected.
+//! Unsupported hardware-facing GPIO substrate used when no `SoC` or interface backend is selected.
 
 use fusion_hal::contract::drivers::bus::gpio::{
     GpioCapabilities,

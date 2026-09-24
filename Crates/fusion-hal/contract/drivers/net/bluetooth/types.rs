@@ -332,6 +332,7 @@ pub struct BluetoothAdapterDescriptor {
 
 /// Advertising parameters for one advertising set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct BluetoothAdvertisingParameters {
     pub mode: BluetoothAdvertisingMode,
     pub connectable: bool,
@@ -420,6 +421,7 @@ pub struct BluetoothL2capChannelDescriptor {
 
 /// Pairing/bonding request parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::struct_excessive_bools)] // Public request has independent policy flags.
 pub struct BluetoothPairingParameters {
     pub bond: bool,
     pub mitm_required: bool,

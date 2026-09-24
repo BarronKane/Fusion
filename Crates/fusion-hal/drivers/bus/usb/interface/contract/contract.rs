@@ -117,7 +117,7 @@ pub trait UsbHardwareThunderbolt: UsbHardware {
 }
 
 #[allow(dead_code)]
-fn _trait_shape_check<T>()
+const fn _trait_shape_check<T>()
 where
     T: UsbCoreContract
         + UsbTopologyContract

@@ -271,7 +271,7 @@ const fn static_allocatable_layout() -> AllocatorLayoutPolicy {
     AllocatorLayoutPolicy::exact_static()
 }
 
-fn static_allocatable_geometry() -> MemoryGeometry {
+const fn static_allocatable_geometry() -> MemoryGeometry {
     MemoryGeometry {
         base_granule: NonZeroUsize::new(1).expect("non-zero"),
         alloc_granule: NonZeroUsize::new(1).expect("non-zero"),

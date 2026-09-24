@@ -25,7 +25,6 @@ use fd_bus_gpio::interface::contract::{
     GpioHardwarePin as GpioHardwarePinContract,
 };
 
-use crate::pal::soc::cortex_m::hal::soc::rp2350::RP2350_PICO2W_RESERVED_GPIO_PINS;
 use crate::pal::soc::cortex_m::hal::soc::rp2350::{
     RP2350_IO_BANK0_BASE,
     RP2350_PADS_BANK0_BASE,
@@ -43,7 +42,8 @@ use crate::pal::soc::cortex_m::hal::soc::rp2350::drivers::net::chipset::infineon
     claim_cyw43439_wl_gpio_pin,
 };
 
-const RP2350_GPIO_COUNT: u8 = 30 - RP2350_PICO2W_RESERVED_GPIO_PINS.len() as u8;
+// The RP2350 exposes 30 GPIOs and this board reserves four for its integrated CYW radio.
+const RP2350_GPIO_COUNT: u8 = 26;
 const RP2350_GPIO_PUBLIC_MASK: u32 =
     ((1_u32 << 23) - 1) | (1_u32 << 26) | (1_u32 << 27) | (1_u32 << 28);
 const RP2350_GPIO_RESERVED_MASK: u32 =
@@ -157,7 +157,7 @@ impl GpioHardwareContract for Rp2350GpioHardware {
                 | GpioProviderCaps::DRIVE_STRENGTH
                 | GpioProviderCaps::INTERRUPTS,
             implementation: GpioImplementationKind::Native,
-            pin_count: RP2350_GPIO_PINS.len() as u16,
+            pin_count: u16::try_from(RP2350_GPIO_PINS.len()).expect("RP2350 GPIO count fits u16"),
         }
     }
 
@@ -204,7 +204,7 @@ impl GpioHardwarePinContract for Rp2350GpioPinHardware {
     }
 
     fn read_level(&self) -> Result<bool, GpioError> {
-        read_claimed(self.pin)
+        Ok(read_claimed(self.pin))
     }
 
     fn configure_output(&mut self, initial_high: bool) -> Result<(), GpioError> {
@@ -212,7 +212,8 @@ impl GpioHardwarePinContract for Rp2350GpioPinHardware {
     }
 
     fn set_level(&mut self, high: bool) -> Result<(), GpioError> {
-        write_claimed(self.pin, high)
+        write_claimed(self.pin, high);
+        Ok(())
     }
 
     fn set_pull(&mut self, pull: GpioPull) -> Result<(), GpioError> {
@@ -374,7 +375,7 @@ pub fn gpio_signal_level(source: GpioSignalSource) -> Result<bool, GpioError> {
     Err(GpioError::invalid())
 }
 
-fn validate_pin(pin: u8) -> Result<(), GpioError> {
+const fn validate_pin(pin: u8) -> Result<(), GpioError> {
     if pin_is_public(pin) {
         Ok(())
     } else {
@@ -382,7 +383,7 @@ fn validate_pin(pin: u8) -> Result<(), GpioError> {
     }
 }
 
-fn validate_board_owned_pin(pin: u8) -> Result<(), GpioError> {
+const fn validate_board_owned_pin(pin: u8) -> Result<(), GpioError> {
     if pin_is_reserved(pin) {
         Ok(())
     } else {
@@ -517,7 +518,7 @@ fn set_function_claimed(pin: u8, function: GpioFunction) -> Result<(), GpioError
         GpioFunction::Sio => RP2350_SIO_FUNCSEL,
         GpioFunction::Raw(value) => u32::from(value),
     };
-    let register = ctrl_register(pin)?;
+    let register = ctrl_register(pin);
     // SAFETY: this writes one selected-SoC GPIO control register.
     unsafe { ptr::write_volatile(register, value) };
     Ok(())
@@ -525,7 +526,7 @@ fn set_function_claimed(pin: u8, function: GpioFunction) -> Result<(), GpioError
 
 fn configure_input_claimed(pin: u8) -> Result<(), GpioError> {
     ensure_bank0_ready()?;
-    let pad = pad_register(pin)?;
+    let pad = pad_register(pin);
     let sio_oe_clear = sio_register_mut(RP2350_SIO_GPIO_OE_CLR_OFFSET);
     // SAFETY: these are selected-SoC GPIO pad and SIO registers surfaced by static topology.
     unsafe {
@@ -542,7 +543,7 @@ fn configure_input_claimed(pin: u8) -> Result<(), GpioError> {
 fn configure_output_claimed(pin: u8, initial_high: bool) -> Result<(), GpioError> {
     ensure_bank0_ready()?;
     set_function_claimed(pin, GpioFunction::Sio)?;
-    let pad = pad_register(pin)?;
+    let pad = pad_register(pin);
     // SAFETY: this reads and writes one selected-SoC pad-control register so output mode clears
     // isolation/open-drain state left behind by reset or prior use before SIO starts driving.
     unsafe {
@@ -552,14 +553,14 @@ fn configure_output_claimed(pin: u8, initial_high: bool) -> Result<(), GpioError
             (pad_value | RP2350_PAD_IE_BIT) & !(RP2350_PAD_OD_BIT | RP2350_PAD_ISO_BIT),
         );
     }
-    write_claimed(pin, initial_high)?;
+    write_claimed(pin, initial_high);
     let sio_oe_set = sio_register_mut(RP2350_SIO_GPIO_OE_SET_OFFSET);
     // SAFETY: this writes one selected-SoC SIO GPIO output-enable register.
     unsafe { ptr::write_volatile(sio_oe_set, 1_u32 << pin) };
     Ok(())
 }
 
-fn write_claimed(pin: u8, high: bool) -> Result<(), GpioError> {
+fn write_claimed(pin: u8, high: bool) {
     let register = if high {
         sio_register_mut(RP2350_SIO_GPIO_OUT_SET_OFFSET)
     } else {
@@ -567,14 +568,13 @@ fn write_claimed(pin: u8, high: bool) -> Result<(), GpioError> {
     };
     // SAFETY: this writes one selected-SoC SIO GPIO output register alias.
     unsafe { ptr::write_volatile(register, 1_u32 << pin) };
-    Ok(())
 }
 
-fn read_claimed(pin: u8) -> Result<bool, GpioError> {
+fn read_claimed(pin: u8) -> bool {
     let sio_in = sio_register(RP2350_SIO_GPIO_IN_OFFSET);
     // SAFETY: claimed pins are already board-validated at claim time. The hot path must not pay a
     // descriptor walk and a string-based peripheral lookup on every sample.
-    Ok(unsafe { ptr::read_volatile(sio_in) } & (1_u32 << pin) != 0)
+    (unsafe { ptr::read_volatile(sio_in) } & (1_u32 << pin)) != 0
 }
 
 fn read_pin_level_direct(pin: u8) -> Result<bool, GpioError> {
@@ -589,7 +589,7 @@ fn read_pin_level_direct(pin: u8) -> Result<bool, GpioError> {
 
 fn set_pull_claimed(pin: u8, pull: GpioPull) -> Result<(), GpioError> {
     ensure_bank0_ready()?;
-    let pad = pad_register(pin)?;
+    let pad = pad_register(pin);
     // SAFETY: this reads and writes one selected-SoC pad-control register.
     unsafe {
         let mut value = ptr::read_volatile(pad);
@@ -606,7 +606,7 @@ fn set_pull_claimed(pin: u8, pull: GpioPull) -> Result<(), GpioError> {
 
 fn set_drive_strength_claimed(pin: u8, strength: GpioDriveStrength) -> Result<(), GpioError> {
     ensure_bank0_ready()?;
-    let pad = pad_register(pin)?;
+    let pad = pad_register(pin);
     let drive_bits = match strength {
         GpioDriveStrength::MilliAmps2 => 0,
         GpioDriveStrength::MilliAmps4 => 1,
@@ -623,21 +623,21 @@ fn set_drive_strength_claimed(pin: u8, strength: GpioDriveStrength) -> Result<()
     Ok(())
 }
 
-fn ctrl_register(pin: u8) -> Result<*mut u32, GpioError> {
-    Ok(rebase_mut(
+fn ctrl_register(pin: u8) -> *mut u32 {
+    rebase_mut(
         RP2350_IO_BANK0_BASE,
         usize::from(pin) * RP2350_GPIO_CTRL_STRIDE + RP2350_GPIO_CTRL_FUNCSEL_OFFSET,
-    ) as *mut u32)
+    ) as *mut u32
 }
 
-fn pad_register(pin: u8) -> Result<*mut u32, GpioError> {
-    Ok(rebase_mut(
+fn pad_register(pin: u8) -> *mut u32 {
+    rebase_mut(
         RP2350_PADS_BANK0_BASE,
         RP2350_PADS_BANK0_FIRST_PAD_OFFSET + usize::from(pin) * RP2350_PAD_STRIDE,
-    ) as *mut u32)
+    ) as *mut u32
 }
 
-fn sio_register(offset: usize) -> *const u32 {
+const fn sio_register(offset: usize) -> *const u32 {
     // The selected RP2350 substrate has one fixed SIO base. We keep the dynamic descriptor table
     // for enumeration/reporting, but hot GPIO writes must not pay a 45-entry string search every
     // time a multiplexed display clocks one bit, especially under `opt-level = "z"` where the
@@ -645,7 +645,7 @@ fn sio_register(offset: usize) -> *const u32 {
     rebase(RP2350_SIO_BASE, offset) as *const u32
 }
 
-fn sio_register_mut(offset: usize) -> *mut u32 {
+const fn sio_register_mut(offset: usize) -> *mut u32 {
     rebase_mut(RP2350_SIO_BASE, offset) as *mut u32
 }
 

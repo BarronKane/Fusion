@@ -274,14 +274,14 @@ impl CourierRuntimeLedger {
         }
     }
 
-    pub fn record_context(&mut self, context: RuntimeContextId, updated_tick: u64) {
+    pub const fn record_context(&mut self, context: RuntimeContextId, updated_tick: u64) {
         self.current_context = Some(CourierRuntimeContextRecord {
             context,
             updated_tick,
         });
     }
 
-    pub fn register_fiber(&mut self, class: CourierFiberClass) {
+    pub const fn register_fiber(&mut self, class: CourierFiberClass) {
         match class {
             CourierFiberClass::Planned => {
                 self.active_planned_fibers = self.active_planned_fibers.saturating_add(1);
@@ -293,7 +293,7 @@ impl CourierRuntimeLedger {
         self.recompute_runnable_units();
     }
 
-    pub fn release_fiber(&mut self, class: CourierFiberClass) {
+    pub const fn release_fiber(&mut self, class: CourierFiberClass) {
         match class {
             CourierFiberClass::Planned => {
                 self.active_planned_fibers = self.active_planned_fibers.saturating_sub(1);
@@ -329,7 +329,7 @@ impl CourierRuntimeLedger {
         self.recompute_runnable_units();
     }
 
-    fn recompute_runnable_units(&mut self) {
+    const fn recompute_runnable_units(&mut self) {
         self.active_runnable_units = self
             .active_planned_fibers
             .saturating_add(self.active_dynamic_fibers)
@@ -355,10 +355,10 @@ impl From<crate::domain::DomainError> for CourierRuntimeSinkError {
             DomainErrorKind::Unsupported => Self::Unsupported,
             DomainErrorKind::Invalid => Self::Invalid,
             DomainErrorKind::NotFound => Self::NotFound,
-            DomainErrorKind::NotVisible => Self::Busy,
             DomainErrorKind::ResourceExhausted => Self::ResourceExhausted,
             DomainErrorKind::StateConflict => Self::StateConflict,
-            DomainErrorKind::Busy
+            DomainErrorKind::NotVisible
+            | DomainErrorKind::Busy
             | DomainErrorKind::PermissionDenied
             | DomainErrorKind::Platform(_) => Self::Busy,
         }
@@ -386,7 +386,10 @@ unsafe impl Sync for CourierRuntimeSink {}
 impl PartialEq for CourierRuntimeSink {
     fn eq(&self, other: &Self) -> bool {
         self.context == other.context
-            && core::ptr::eq(self.vtable as *const _, other.vtable as *const _)
+            && core::ptr::eq(
+                core::ptr::from_ref(self.vtable),
+                core::ptr::from_ref(other.vtable),
+            )
     }
 }
 
@@ -395,7 +398,7 @@ impl Eq for CourierRuntimeSink {}
 impl Hash for CourierRuntimeSink {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.context.hash(state);
-        (self.vtable as *const CourierRuntimeSinkVTable).hash(state);
+        core::ptr::from_ref::<CourierRuntimeSinkVTable>(self.vtable).hash(state);
     }
 }
 
@@ -405,6 +408,10 @@ impl CourierRuntimeSink {
         Self { context, vtable }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn record_context(
         self,
         courier: CourierId,
@@ -415,6 +422,11 @@ impl CourierRuntimeSink {
         unsafe { (self.vtable.record_context)(self.context, courier, context, tick) }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
+    #[allow(clippy::too_many_arguments)] // These fields are the fixed runtime callback contract.
     pub fn register_fiber(
         self,
         courier: CourierId,
@@ -440,6 +452,10 @@ impl CourierRuntimeSink {
         }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn update_fiber(
         self,
         courier: CourierId,
@@ -450,6 +466,10 @@ impl CourierRuntimeSink {
         unsafe { (self.vtable.update_fiber)(self.context, courier, snapshot, tick) }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn mark_fiber_terminal(
         self,
         courier: CourierId,
@@ -461,6 +481,10 @@ impl CourierRuntimeSink {
         unsafe { (self.vtable.mark_fiber_terminal)(self.context, courier, fiber, terminal, tick) }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn record_runtime_summary(
         self,
         courier: CourierId,
@@ -471,6 +495,10 @@ impl CourierRuntimeSink {
         unsafe { (self.vtable.record_runtime_summary)(self.context, courier, summary, tick) }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn runtime_ledger(
         self,
         courier: CourierId,
@@ -479,6 +507,10 @@ impl CourierRuntimeSink {
         unsafe { (self.vtable.runtime_ledger)(self.context, courier) }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn fiber_record(
         self,
         courier: CourierId,
@@ -488,6 +520,10 @@ impl CourierRuntimeSink {
         unsafe { (self.vtable.fiber_record)(self.context, courier, fiber) }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn evaluate_responsiveness(
         self,
         courier: CourierId,
@@ -497,6 +533,10 @@ impl CourierRuntimeSink {
         unsafe { (self.vtable.evaluate_responsiveness)(self.context, courier, tick) }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn upsert_metadata(
         self,
         courier: CourierId,
@@ -509,6 +549,10 @@ impl CourierRuntimeSink {
         unsafe { (self.vtable.upsert_metadata)(self.context, courier, subject, key, value, tick) }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn remove_metadata(
         self,
         courier: CourierId,
@@ -519,6 +563,10 @@ impl CourierRuntimeSink {
         unsafe { (self.vtable.remove_metadata)(self.context, courier, subject, key) }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn register_obligation(
         self,
         courier: CourierId,
@@ -529,6 +577,10 @@ impl CourierRuntimeSink {
         unsafe { (self.vtable.register_obligation)(self.context, courier, spec, tick) }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn record_obligation_progress(
         self,
         courier: CourierId,
@@ -539,6 +591,10 @@ impl CourierRuntimeSink {
         unsafe { (self.vtable.record_obligation_progress)(self.context, courier, obligation, tick) }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn remove_obligation(
         self,
         courier: CourierId,
@@ -553,6 +609,8 @@ impl CourierRuntimeSink {
 pub struct CourierRuntimeSinkVTable {
     pub record_context:
         unsafe fn(*mut (), CourierId, RuntimeContextId, u64) -> Result<(), CourierRuntimeSinkError>,
+    #[allow(clippy::type_complexity)]
+    // This callback signature is the stable erased ABI used by the runtime.
     pub register_fiber: unsafe fn(
         *mut (),
         CourierId,
@@ -595,6 +653,8 @@ pub struct CourierRuntimeSinkVTable {
             CourierId,
             u64,
         ) -> Result<CourierResponsiveness, CourierRuntimeSinkError>,
+    #[allow(clippy::type_complexity)]
+    // This callback signature is the stable erased ABI used by the runtime.
     pub upsert_metadata: unsafe fn(
         *mut (),
         CourierId,
@@ -804,6 +864,10 @@ impl<'a, const MAX_RECORDS: usize> CourierAppMetadataStore<'a, MAX_RECORDS> {
         }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn upsert(
         &mut self,
         subject: CourierAppMetadataSubject,
@@ -832,6 +896,10 @@ impl<'a, const MAX_RECORDS: usize> CourierAppMetadataStore<'a, MAX_RECORDS> {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn remove(
         &mut self,
         subject: CourierAppMetadataSubject,
@@ -885,7 +953,7 @@ impl<'a, const MAX_RECORDS: usize> CourierAppMetadataStore<'a, MAX_RECORDS> {
     }
 }
 
-impl<'a, const MAX_RECORDS: usize> Default for CourierAppMetadataStore<'a, MAX_RECORDS> {
+impl<const MAX_RECORDS: usize> Default for CourierAppMetadataStore<'_, MAX_RECORDS> {
     fn default() -> Self {
         Self::new()
     }
@@ -1031,7 +1099,7 @@ impl<'a> CourierObligationRecord<'a> {
     }
 
     #[must_use]
-    pub fn evaluate_at(mut self, now_tick: u64) -> Self {
+    pub const fn evaluate_at(mut self, now_tick: u64) -> Self {
         let elapsed = now_tick.saturating_sub(self.last_progress_tick);
         self.responsiveness =
             if self.non_responsive_after_ticks != 0 && elapsed >= self.non_responsive_after_ticks {
@@ -1064,6 +1132,10 @@ impl<'a, const MAX_OBLIGATIONS: usize> CourierObligationRegistry<'a, MAX_OBLIGAT
         }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn register(
         &mut self,
         spec: CourierObligationSpec<'a>,
@@ -1087,6 +1159,10 @@ impl<'a, const MAX_OBLIGATIONS: usize> CourierObligationRegistry<'a, MAX_OBLIGAT
         Ok(id)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn record_progress(
         &mut self,
         obligation: CourierObligationId,
@@ -1105,6 +1181,10 @@ impl<'a, const MAX_OBLIGATIONS: usize> CourierObligationRegistry<'a, MAX_OBLIGAT
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn remove(
         &mut self,
         obligation: CourierObligationId,
@@ -1120,6 +1200,10 @@ impl<'a, const MAX_OBLIGATIONS: usize> CourierObligationRegistry<'a, MAX_OBLIGAT
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn evaluate(
         &mut self,
         now_tick: u64,
@@ -1129,7 +1213,7 @@ impl<'a, const MAX_OBLIGATIONS: usize> CourierObligationRegistry<'a, MAX_OBLIGAT
             *record = record.evaluate_at(now_tick);
             match record.responsiveness {
                 CourierResponsiveness::NonResponsive => {
-                    worst = CourierResponsiveness::NonResponsive
+                    worst = CourierResponsiveness::NonResponsive;
                 }
                 CourierResponsiveness::Stale
                     if !matches!(worst, CourierResponsiveness::NonResponsive) =>
@@ -1168,7 +1252,7 @@ impl<'a, const MAX_OBLIGATIONS: usize> CourierObligationRegistry<'a, MAX_OBLIGAT
     }
 }
 
-impl<'a, const MAX_OBLIGATIONS: usize> Default for CourierObligationRegistry<'a, MAX_OBLIGATIONS> {
+impl<const MAX_OBLIGATIONS: usize> Default for CourierObligationRegistry<'_, MAX_OBLIGATIONS> {
     fn default() -> Self {
         Self::new()
     }
@@ -1200,6 +1284,7 @@ pub struct ChildCourierLaunchRecord<'a> {
 }
 
 impl<'a> ChildCourierLaunchRecord<'a> {
+    #[allow(clippy::too_many_arguments)] // This initializes each distinct launch fact in the record.
     #[must_use]
     pub const fn new(
         child: CourierId,
@@ -1285,7 +1370,11 @@ impl<'a, const MAX_DEPTH: usize> CourierPedigree<'a, MAX_DEPTH> {
         }
     }
 
-    pub fn push(
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
+    pub const fn push(
         &mut self,
         record: CourierPedigreeRecord<'a>,
     ) -> Result<(), crate::domain::DomainError> {
@@ -1307,7 +1396,6 @@ impl<'a, const MAX_DEPTH: usize> CourierPedigree<'a, MAX_DEPTH> {
         self.depth == 0
     }
 
-    #[must_use]
     pub fn iter(&self) -> impl Iterator<Item = &CourierPedigreeRecord<'a>> {
         self.records[..self.depth].iter().flatten()
     }
@@ -1318,7 +1406,7 @@ impl<'a, const MAX_DEPTH: usize> CourierPedigree<'a, MAX_DEPTH> {
     }
 
     #[must_use]
-    pub fn root(&self) -> Option<&CourierPedigreeRecord<'a>> {
+    pub const fn root(&self) -> Option<&CourierPedigreeRecord<'a>> {
         if self.depth == 0 {
             None
         } else {
@@ -1327,7 +1415,7 @@ impl<'a, const MAX_DEPTH: usize> CourierPedigree<'a, MAX_DEPTH> {
     }
 }
 
-impl<'a, const MAX_DEPTH: usize> Default for CourierPedigree<'a, MAX_DEPTH> {
+impl<const MAX_DEPTH: usize> Default for CourierPedigree<'_, MAX_DEPTH> {
     fn default() -> Self {
         Self::new()
     }
@@ -1394,7 +1482,7 @@ impl CourierFiberRecord {
         self.responsiveness = CourierResponsiveness::Responsive;
     }
 
-    pub fn mark_terminal(&mut self, terminal: FiberTerminalStatus, tick: u64) {
+    pub const fn mark_terminal(&mut self, terminal: FiberTerminalStatus, tick: u64) {
         self.last_transition_tick = tick;
         self.last_progress_tick = tick;
         self.responsiveness = CourierResponsiveness::Responsive;
@@ -1423,6 +1511,10 @@ impl<'a, const MAX_CHILDREN: usize> ChildCourierRegistry<'a, MAX_CHILDREN> {
         }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn register(
         &mut self,
         record: ChildCourierLaunchRecord<'a>,
@@ -1450,6 +1542,10 @@ impl<'a, const MAX_CHILDREN: usize> ChildCourierRegistry<'a, MAX_CHILDREN> {
             .find(|record| record.child == courier)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn record_progress(
         &mut self,
         courier: CourierId,
@@ -1468,6 +1564,10 @@ impl<'a, const MAX_CHILDREN: usize> ChildCourierRegistry<'a, MAX_CHILDREN> {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn mark_stale(&mut self, courier: CourierId) -> Result<(), crate::domain::DomainError> {
         let Some(record) = self
             .records
@@ -1481,6 +1581,10 @@ impl<'a, const MAX_CHILDREN: usize> ChildCourierRegistry<'a, MAX_CHILDREN> {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn mark_non_responsive(
         &mut self,
         courier: CourierId,
@@ -1512,7 +1616,7 @@ impl<'a, const MAX_CHILDREN: usize> ChildCourierRegistry<'a, MAX_CHILDREN> {
     }
 }
 
-impl<'a, const MAX_CHILDREN: usize> Default for ChildCourierRegistry<'a, MAX_CHILDREN> {
+impl<const MAX_CHILDREN: usize> Default for ChildCourierRegistry<'_, MAX_CHILDREN> {
     fn default() -> Self {
         Self::new()
     }
@@ -1534,6 +1638,10 @@ impl<const MAX_FIBERS: usize> CourierFiberLedger<MAX_FIBERS> {
         }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn register(
         &mut self,
         snapshot: ManagedFiberSnapshot,
@@ -1573,6 +1681,10 @@ impl<const MAX_FIBERS: usize> CourierFiberLedger<MAX_FIBERS> {
             .find(|record| record.fiber == fiber)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn update_from_snapshot(
         &mut self,
         snapshot: ManagedFiberSnapshot,
@@ -1590,6 +1702,10 @@ impl<const MAX_FIBERS: usize> CourierFiberLedger<MAX_FIBERS> {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn mark_terminal(
         &mut self,
         fiber: FiberId,
@@ -1608,6 +1724,10 @@ impl<const MAX_FIBERS: usize> CourierFiberLedger<MAX_FIBERS> {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn mark_stale(&mut self, fiber: FiberId) -> Result<(), crate::domain::DomainError> {
         let Some(record) = self
             .records
@@ -1621,6 +1741,10 @@ impl<const MAX_FIBERS: usize> CourierFiberLedger<MAX_FIBERS> {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn mark_non_responsive(
         &mut self,
         fiber: FiberId,
@@ -1744,6 +1868,10 @@ impl<'a> CourierLaunchControl<'a> {
         Self { context, vtable }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn register_child_courier(
         self,
         request: CourierChildLaunchRequest<'a>,
@@ -1944,6 +2072,10 @@ pub trait CourierClaims: CourierBaseContract {
     }
 
     /// Returns the live claim-context ID or one honest denial when the courier cannot mediate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     fn require_claim_context(&self) -> Result<ClaimContextId, ClaimsError> {
         if self.claim_awareness().is_blind() {
             return Err(ClaimsError::permission_denied());
@@ -1953,11 +2085,19 @@ pub trait CourierClaims: CourierBaseContract {
     }
 
     /// Validates that this courier is mediating the supplied claim context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     fn validate_claim_context(&self, expected: ClaimContextId) -> Result<(), ClaimsError> {
         validate_courier_claim_context(self.courier_support(), expected)
     }
 
     /// Validates that one black fiber is running under this courier's current claim context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     fn validate_fiber_claim_context(
         &self,
         fiber_awareness: ClaimAwareness,

@@ -22,7 +22,7 @@ pub const BLUETOOTH_HCI_OPCODE_READ_LOCAL_SUPPORTED_COMMANDS: u16 = 0x1002;
 pub const BLUETOOTH_HCI_OPCODE_READ_LOCAL_SUPPORTED_FEATURES: u16 = 0x1003;
 /// Canonical HCI Read Buffer Size opcode.
 pub const BLUETOOTH_HCI_OPCODE_READ_BUFFER_SIZE: u16 = 0x1005;
-/// Canonical HCI Read BD_ADDR opcode.
+/// Canonical HCI Read `BD_ADDR` opcode.
 pub const BLUETOOTH_HCI_OPCODE_READ_BD_ADDR: u16 = 0x1009;
 /// Canonical LE Read Buffer Size opcode.
 pub const BLUETOOTH_HCI_OPCODE_LE_READ_BUFFER_SIZE: u16 = 0x2002;
@@ -250,22 +250,23 @@ impl BluetoothHciLeAdvertisingParameters {
     }
 }
 
-impl<'a> BluetoothHciLeAdvertisingData<'a> {
+impl BluetoothHciLeAdvertisingData<'_> {
     pub const ENCODED_LEN: usize = 32;
 
     /// Encodes one canonical legacy LE advertising or scan-response payload.
+    #[must_use]
     pub fn encode(self) -> Option<[u8; BluetoothHciLeAdvertisingData::ENCODED_LEN]> {
         if self.bytes.len() > 31 {
             return None;
         }
         let mut out = [0_u8; Self::ENCODED_LEN];
-        out[0] = self.bytes.len() as u8;
-        out[1..1 + self.bytes.len()].copy_from_slice(self.bytes);
+        out[0] = u8::try_from(self.bytes.len()).ok()?;
+        out[1..][..self.bytes.len()].copy_from_slice(self.bytes);
         Some(out)
     }
 }
 
-impl<'a> BluetoothHciFrameView<'a> {
+impl BluetoothHciFrameView<'_> {
     /// Returns the canonical HCI packet family carried by this frame.
     #[must_use]
     pub const fn packet_type(self) -> BluetoothHciPacketType {
@@ -311,7 +312,7 @@ impl<'a> BluetoothHciEventFrame<'a> {
     }
 }
 
-impl<'a> BluetoothHciCommandComplete<'a> {
+impl BluetoothHciCommandComplete<'_> {
     /// Parses the return parameters as Read Local Version Information.
     #[must_use]
     pub fn local_version_information(self) -> Option<BluetoothHciLocalVersionInformation> {
@@ -339,7 +340,7 @@ impl<'a> BluetoothHciCommandComplete<'a> {
         })
     }
 
-    /// Parses the return parameters as Read BD_ADDR.
+    /// Parses the return parameters as Read `BD_ADDR`.
     #[must_use]
     pub fn bd_addr(self) -> Option<(u8, BluetoothAddress)> {
         if self.opcode != BLUETOOTH_HCI_OPCODE_READ_BD_ADDR || self.return_parameters.len() != 7 {
@@ -531,6 +532,11 @@ mod tests {
 
     #[test]
     fn le_advertising_data_encode() {
+        let empty = BluetoothHciLeAdvertisingData { bytes: &[] }
+            .encode()
+            .expect("empty payload should fit");
+        assert_eq!(empty[0], 0);
+
         let encoded = BluetoothHciLeAdvertisingData { bytes: b"Fusion" }
             .encode()
             .expect("payload should fit");

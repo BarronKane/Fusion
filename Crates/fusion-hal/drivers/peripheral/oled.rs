@@ -53,12 +53,12 @@ where
     }
 
     /// Returns a mutable reference to the owned SCL pin.
-    pub fn scl_mut(&mut self) -> &mut Scl {
+    pub const fn scl_mut(&mut self) -> &mut Scl {
         &mut self.scl
     }
 
     /// Returns a mutable reference to the owned SDA pin.
-    pub fn sda_mut(&mut self) -> &mut Sda {
+    pub const fn sda_mut(&mut self) -> &mut Sda {
         &mut self.sda
     }
 

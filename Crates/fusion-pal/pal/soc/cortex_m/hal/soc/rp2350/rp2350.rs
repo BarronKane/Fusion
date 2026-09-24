@@ -333,7 +333,7 @@ unsafe fn fusion_pal_rp2350_pre_init() {
     rp2350_initialize_stock_boot_clocks_raw();
 }
 
-fn rp2350_boot_clock_profile_name(sys_clock_hz: u32) -> Option<&'static str> {
+const fn rp2350_boot_clock_profile_name(sys_clock_hz: u32) -> Option<&'static str> {
     match sys_clock_hz {
         150_000_000 => Some("stock-150mhz"),
         200_000_000 => Some("oc-200mhz"),
@@ -489,6 +489,7 @@ fn rp2350_clock_configure_aux_undivided(
     rp2350_atomic_register_set(ctrl_register, RP2350_CLOCKS_CLK_CTRL_ENABLE_BITS);
 }
 
+#[allow(clippy::too_many_lines)] // Keep the hardware clock register sequence auditable in one place.
 fn rp2350_initialize_stock_boot_clocks_raw() {
     // Disable any stale resus configuration left behind by prior software before we start moving
     // clk_sys around. This matches the SDK's first step and avoids “rescue” logic fighting the
@@ -796,7 +797,7 @@ fn rp2350_gpio_irq_summary_snapshot(irqn: u16) -> Result<Rp2350GpioIrqSummary, H
     }
 
     Ok(Rp2350GpioIrqSummary {
-        word_count: word_count as u8,
+        word_count: u8::try_from(word_count).map_err(|_| HardwareError::resource_exhausted())?,
         words,
     })
 }
@@ -833,7 +834,10 @@ fn rp2350_pio_irq_summary_snapshot(irqn: u16) -> Result<Rp2350PioIrqSummary, Har
     };
     let register = (base + offset) as *const u32;
     // SAFETY: `PIO_IRQx_INTS` is the read-only processor-facing summary for one PIO block.
-    let raw = unsafe { ptr::read_volatile(register) as u16 };
+    let raw = unsafe {
+        u16::try_from(ptr::read_volatile(register) & u32::from(u16::MAX))
+            .expect("hardware register field was masked")
+    };
     Ok(Rp2350PioIrqSummary { raw })
 }
 
@@ -896,7 +900,7 @@ const fn rp2350_valid_lane_mask(mask: PioLaneMask) -> bool {
     bits != 0 && (bits & !RP2350_PIO_VALID_LANE_MASK) == 0
 }
 
-fn rp2350_validate_engine_claim(claim: &PioEngineClaim) -> Result<usize, PioError> {
+fn rp2350_validate_engine_claim(claim: PioEngineClaim) -> Result<usize, PioError> {
     let engine_index = usize::from(claim.engine().0);
     if engine_index >= RP2350_PIO_ENGINE_COUNT {
         return Err(PioError::invalid());
@@ -907,7 +911,7 @@ fn rp2350_validate_engine_claim(claim: &PioEngineClaim) -> Result<usize, PioErro
     Ok(engine_index)
 }
 
-fn rp2350_validate_lane_claim(claim: &PioLaneClaim) -> Result<(usize, u8), PioError> {
+fn rp2350_validate_lane_claim(claim: PioLaneClaim) -> Result<(usize, u8), PioError> {
     let engine_index = usize::from(claim.engine().0);
     let bits = claim.lanes().bits();
     if engine_index >= RP2350_PIO_ENGINE_COUNT || !rp2350_valid_lane_mask(claim.lanes()) {
@@ -940,7 +944,10 @@ fn rp2350_spi_irq_summary_snapshot(irqn: u16) -> Result<Rp2350SpiIrqSummary, Har
     };
     let register = (base + RP2350_SPI_SSPMIS_OFFSET) as *const u32;
     // SAFETY: `SPI_SSPMIS` is the masked interrupt summary register for one SPI instance.
-    let raw = unsafe { ptr::read_volatile(register) as u8 };
+    let raw = unsafe {
+        u8::try_from(ptr::read_volatile(register) & u32::from(u8::MAX))
+            .expect("hardware register field was masked")
+    };
     Ok(Rp2350SpiIrqSummary { raw })
 }
 
@@ -1077,7 +1084,8 @@ fn rp2350_irq_acknowledge_line(irqn: u16) -> Result<(), HardwareError> {
 fn rp2350_event_timeout_deadline(timeout: Duration) -> u32 {
     let micros = timeout.as_micros();
     let delta = u32::try_from(micros).unwrap_or(u32::MAX);
-    let now = rp2350_monotonic_now_ticks() as u32;
+    let now = u32::try_from(rp2350_monotonic_now_ticks() & u64::from(u32::MAX))
+        .expect("masked tick count fits u32");
     now.wrapping_add(delta.max(1))
 }
 
@@ -1127,16 +1135,16 @@ fn rp2350_monotonic_now_ticks() -> u64 {
     rp2350_ensure_timer0_tick_started();
 
     let timer_base = RP2350_EVENT_TIMEOUT_TIMER_BASE;
-    let timerawh = (timer_base + RP2350_TIMER_TIMERAWH_OFFSET) as *const u32;
-    let timerawl = (timer_base + RP2350_TIMER_TIMERAWL_OFFSET) as *const u32;
+    let timer_high_register = (timer_base + RP2350_TIMER_TIMERAWH_OFFSET) as *const u32;
+    let timer_low_register = (timer_base + RP2350_TIMER_TIMERAWL_OFFSET) as *const u32;
 
     loop {
         // SAFETY: TIMERAWH/TIMERAWL are side-effect-free raw reads of the RP2350 timer register
         // pair. Reading high/low/high until the high word is stable yields one coherent 64-bit
         // monotonic tick snapshot.
-        let high_before = unsafe { ptr::read_volatile(timerawh) };
-        let low = unsafe { ptr::read_volatile(timerawl) };
-        let high_after = unsafe { ptr::read_volatile(timerawh) };
+        let high_before = unsafe { ptr::read_volatile(timer_high_register) };
+        let low = unsafe { ptr::read_volatile(timer_low_register) };
+        let high_after = unsafe { ptr::read_volatile(timer_high_register) };
         if high_before == high_after {
             return (u64::from(high_before) << 32) | u64::from(low);
         }
@@ -1540,17 +1548,21 @@ pub const fn pio_support() -> PioSupport {
 
 /// Returns the RP2350 programmable-IO engine descriptors.
 #[must_use]
-pub fn pio_engines() -> &'static [PioEngineDescriptor] {
+pub const fn pio_engines() -> &'static [PioEngineDescriptor] {
     &PIO_ENGINES
 }
 
 /// Returns the RP2350 programmable-IO lane descriptors for one engine.
 #[must_use]
-pub fn pio_lanes(engine: PioEngineId) -> &'static [PioLaneDescriptor] {
+pub const fn pio_lanes(engine: PioEngineId) -> &'static [PioLaneDescriptor] {
     rp2350_pio_lane_descriptors(engine)
 }
 
 /// Claims one RP2350 PIO engine exclusively.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn claim_pio_engine(engine: PioEngineId) -> Result<PioEngineClaim, PioError> {
     let engine_index = usize::from(engine.0);
     if engine_index >= RP2350_PIO_ENGINE_COUNT {
@@ -1567,6 +1579,10 @@ pub fn claim_pio_engine(engine: PioEngineId) -> Result<PioEngineClaim, PioError>
 }
 
 /// Releases one RP2350 PIO engine claim.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn release_pio_engine(claim: PioEngineClaim) -> Result<(), PioError> {
     let engine_index = usize::from(claim.engine().0);
     if engine_index >= RP2350_PIO_ENGINE_COUNT {
@@ -1579,6 +1595,10 @@ pub fn release_pio_engine(claim: PioEngineClaim) -> Result<(), PioError> {
 }
 
 /// Claims one or more RP2350 PIO lanes.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn claim_pio_lanes(engine: PioEngineId, lanes: PioLaneMask) -> Result<PioLaneClaim, PioError> {
     let engine_index = usize::from(engine.0);
     let bits = lanes.bits();
@@ -1603,8 +1623,12 @@ pub fn claim_pio_lanes(engine: PioEngineId, lanes: PioLaneMask) -> Result<PioLan
 }
 
 /// Releases one RP2350 PIO lane claim.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn release_pio_lanes(claim: PioLaneClaim) -> Result<(), PioError> {
-    let (engine_index, bits) = rp2350_validate_lane_claim(&claim)?;
+    let (engine_index, bits) = rp2350_validate_lane_claim(claim)?;
     let claims = &RP2350_PIO_LANE_CLAIMS[engine_index];
     loop {
         let current = claims.load(Ordering::Acquire);
@@ -1622,11 +1646,15 @@ pub fn release_pio_lanes(claim: PioLaneClaim) -> Result<(), PioError> {
 }
 
 /// Loads one native RP2350 PIO program image into a claimed engine.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn load_pio_program(
     claim: &PioEngineClaim,
     image: &PioProgramImage<'_>,
 ) -> Result<PioProgramLease, PioError> {
-    let _engine_index = rp2350_validate_engine_claim(claim)?;
+    let _engine_index = rp2350_validate_engine_claim(*claim)?;
     let base = rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)?;
     if image.words.is_empty() {
         return Err(PioError::invalid());
@@ -1653,13 +1681,17 @@ pub fn load_pio_program(
     Ok(PioProgramLease {
         engine: claim.engine(),
         program: image.id,
-        word_count: image.words.len() as u16,
+        word_count: u16::try_from(image.words.len()).map_err(|_| PioError::resource_exhausted())?,
     })
 }
 
 /// Unloads one native RP2350 PIO program image from a claimed engine.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn unload_pio_program(claim: &PioEngineClaim, lease: PioProgramLease) -> Result<(), PioError> {
-    let _engine_index = rp2350_validate_engine_claim(claim)?;
+    let _engine_index = rp2350_validate_engine_claim(*claim)?;
     if claim.engine().0 != lease.engine().0 {
         return Err(PioError::invalid());
     }
@@ -1675,8 +1707,12 @@ pub fn unload_pio_program(claim: &PioEngineClaim, lease: PioProgramLease) -> Res
 }
 
 /// Starts one claimed RP2350 PIO lane set.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn start_pio_lanes(claim: &PioLaneClaim) -> Result<(), PioError> {
-    let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
+    let (_engine_index, bits) = rp2350_validate_lane_claim(*claim)?;
     let register =
         rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)? + RP2350_PIO_CTRL_OFFSET;
     rp2350_atomic_register_set(register, u32::from(bits) & RP2350_PIO_CTRL_SM_ENABLE_MASK);
@@ -1684,8 +1720,12 @@ pub fn start_pio_lanes(claim: &PioLaneClaim) -> Result<(), PioError> {
 }
 
 /// Stops one claimed RP2350 PIO lane set.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn stop_pio_lanes(claim: &PioLaneClaim) -> Result<(), PioError> {
-    let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
+    let (_engine_index, bits) = rp2350_validate_lane_claim(*claim)?;
     let register =
         rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)? + RP2350_PIO_CTRL_OFFSET;
     rp2350_atomic_register_clear(register, u32::from(bits) & RP2350_PIO_CTRL_SM_ENABLE_MASK);
@@ -1693,8 +1733,12 @@ pub fn stop_pio_lanes(claim: &PioLaneClaim) -> Result<(), PioError> {
 }
 
 /// Restarts one claimed RP2350 PIO lane set.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn restart_pio_lanes(claim: &PioLaneClaim) -> Result<(), PioError> {
-    let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
+    let (_engine_index, bits) = rp2350_validate_lane_claim(*claim)?;
     let register =
         rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)? + RP2350_PIO_CTRL_OFFSET;
     let bits = u32::from(bits) & RP2350_PIO_CTRL_SM_ENABLE_MASK;
@@ -1706,8 +1750,12 @@ pub fn restart_pio_lanes(claim: &PioLaneClaim) -> Result<(), PioError> {
 }
 
 /// Writes one word to one claimed RP2350 PIO TX FIFO.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn write_pio_tx_fifo(claim: &PioLaneClaim, lane: PioLaneId, word: u32) -> Result<(), PioError> {
-    let (_engine_index, _) = rp2350_validate_lane_claim(claim)?;
+    let (_engine_index, _) = rp2350_validate_lane_claim(*claim)?;
     if !claim.contains_lane(lane) {
         return Err(PioError::invalid());
     }
@@ -1727,8 +1775,12 @@ pub fn write_pio_tx_fifo(claim: &PioLaneClaim, lane: PioLaneId, word: u32) -> Re
 }
 
 /// Reads one word from one claimed RP2350 PIO RX FIFO.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn read_pio_rx_fifo(claim: &PioLaneClaim, lane: PioLaneId) -> Result<u32, PioError> {
-    let (_engine_index, _) = rp2350_validate_lane_claim(claim)?;
+    let (_engine_index, _) = rp2350_validate_lane_claim(*claim)?;
     if !claim.contains_lane(lane) {
         return Err(PioError::invalid());
     }
@@ -1755,7 +1807,7 @@ const fn rp2350_encode_pio_jmp(target: u8) -> u16 {
 }
 
 fn rp2350_clear_pio_fifos(base: usize, bits: u8) {
-    for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE as u8 {
+    for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE_U8 {
         if bits & (1u8 << lane_index) == 0 {
             continue;
         }
@@ -1789,7 +1841,7 @@ fn rp2350_clear_pio_fifo_debug(base: usize, bits: u8) {
 
 fn rp2350_prime_pio_program_counter(base: usize, bits: u8, initial_pc: u8) {
     let jmp = u32::from(rp2350_encode_pio_jmp(initial_pc));
-    for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE as u8 {
+    for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE_U8 {
         if bits & (1u8 << lane_index) == 0 {
             continue;
         }
@@ -1802,11 +1854,15 @@ fn rp2350_prime_pio_program_counter(base: usize, bits: u8, initial_pc: u8) {
 }
 
 /// Applies the RP2350-equivalent `pio_sm_init()` sequence to one claimed lane set.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn initialize_pio_lanes(claim: &PioLaneClaim, initial_pc: u8) -> Result<(), PioError> {
-    if initial_pc >= RP2350_PIO_INSTRUCTION_WORDS as u8 {
+    if initial_pc >= 32_u8 {
         return Err(PioError::invalid());
     }
-    let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
+    let (_engine_index, bits) = rp2350_validate_lane_claim(*claim)?;
     let base = rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)?;
     stop_pio_lanes(claim)?;
     rp2350_clear_pio_fifos(base, bits);
@@ -1817,6 +1873,10 @@ pub fn initialize_pio_lanes(claim: &PioLaneClaim, initial_pc: u8) -> Result<(), 
 }
 
 /// Applies one RP2350 PIO execution-state bundle to all lanes in the supplied claim.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn apply_pio_execution_config(
     claim: &PioLaneClaim,
     clkdiv: u32,
@@ -1824,10 +1884,10 @@ pub fn apply_pio_execution_config(
     shiftctrl: u32,
     pinctrl: u32,
 ) -> Result<(), PioError> {
-    let (_engine_index, bits) = rp2350_validate_lane_claim(claim)?;
+    let (_engine_index, bits) = rp2350_validate_lane_claim(*claim)?;
     let base = rp2350_pio_base(claim.engine()).ok_or_else(PioError::invalid)?;
 
-    for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE as u8 {
+    for lane_index in 0..RP2350_PIO_LANES_PER_ENGINE_U8 {
         if bits & (1u8 << lane_index) == 0 {
             continue;
         }
@@ -2124,6 +2184,10 @@ pub fn irq_acknowledge(irqn: u16) -> Result<(), HardwareError> {
 ///
 /// This is the driver-local escape hatch for shared-summary GPIO IRQs where the generic board
 /// contract intentionally refuses to lie about a universal acknowledge path.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn gpio_irq_summary(irqn: u16) -> Result<Rp2350GpioIrqSummary, HardwareError> {
     rp2350_gpio_irq_summary_snapshot(irqn)
 }
@@ -2144,6 +2208,10 @@ pub fn gpio_irq_clear_edges(
 }
 
 /// Returns a raw PIO-summary snapshot for one RP2350 PIO IRQ line.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn pio_irq_summary(irqn: u16) -> Result<Rp2350PioIrqSummary, HardwareError> {
     rp2350_pio_irq_summary_snapshot(irqn)
 }
@@ -2152,11 +2220,19 @@ pub fn pio_irq_summary(irqn: u16) -> Result<Rp2350PioIrqSummary, HardwareError> 
 ///
 /// This does not pretend FIFO threshold conditions are clearable; it only clears the internal
 /// `PIO_IRQ` flag byte.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn pio_irq_clear_internal_flags(irqn: u16, flags: u8) -> Result<(), HardwareError> {
     rp2350_pio_irq_clear_internal_flags(irqn, flags)
 }
 
 /// Returns a raw SPI-summary snapshot for one RP2350 SPI IRQ line.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn spi_irq_summary(irqn: u16) -> Result<Rp2350SpiIrqSummary, HardwareError> {
     rp2350_spi_irq_summary_snapshot(irqn)
 }
@@ -2164,6 +2240,10 @@ pub fn spi_irq_summary(irqn: u16) -> Result<Rp2350SpiIrqSummary, HardwareError> 
 /// Acknowledges the clearable SPI interrupt causes for one RP2350 SPI IRQ line.
 ///
 /// The returned mask contains the RT/ROR bits that were actually cleared.
+///
+/// # Errors
+///
+/// Returns an error when the hardware operation cannot be completed.
 pub fn spi_irq_acknowledge_clearable(irqn: u16) -> Result<u8, HardwareError> {
     rp2350_spi_irq_acknowledge_clearable(irqn)
 }

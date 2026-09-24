@@ -51,7 +51,6 @@ use fusion_hal::contract::drivers::bus::gpio::{
 };
 use fusion_pal::sys::pcu::{
     PcuBaseContract,
-    PcuDispatchContract,
     PcuInvocationBindings,
     PcuInvocationParameters,
     PcuPersistentHandle,
@@ -59,6 +58,7 @@ use fusion_pal::sys::pcu::{
     system_pcu,
 };
 use fusion_pcu::model::PcuStreamKernelBuilder;
+use fusion_pcu::PcuStreamBackend;
 use fusion_sys::thread::system_monotonic_time;
 
 fusion_example_rp2350_on_device::fusion_rp2350_export_build_id!();
@@ -132,16 +132,17 @@ fn panic_led_pin() -> Result<&'static mut SystemGpioPin, ()> {
 }
 
 fn set_panic_led(high: bool) -> Result<(), ()> {
-    match panic_led_pin() {
-        Ok(pin) => pin.set_level(high).map_err(|_| ()),
-        Err(()) => {
+    panic_led_pin().map_or_else(
+        |()| {
             PANIC_LED_STATE.store(PANIC_LED_FAILED, Ordering::Release);
             Err(())
-        }
-    }
+        },
+        |pin| pin.set_level(high).map_err(|_| ()),
+    )
 }
 
 #[fusion_firmware::fusion_firmware_main]
+#[allow(clippy::too_many_lines)] // This hardware smoke demo keeps stream setup and display cadence together.
 fn main() -> ! {
     RP2350_DISPLAY_PCU_DEBUG_STATE
         .phase
@@ -254,9 +255,8 @@ fn main() -> ! {
         RP2350_DISPLAY_PCU_DEBUG_STATE
             .phase
             .store(100, Ordering::Release);
-        let _ = system_monotonic_time().sleep_for(Duration::from_millis(
-            DISPLAY_STEP_PERIOD_MILLIS,
-        ));
+        let _ =
+            system_monotonic_time().sleep_for(Duration::from_millis(DISPLAY_STEP_PERIOD_MILLIS));
         RP2350_DISPLAY_PCU_DEBUG_STATE
             .phase
             .store(101, Ordering::Release);
@@ -273,7 +273,7 @@ fn main() -> ! {
             .phase
             .store(102, Ordering::Release);
         display
-            .set_hex(value as u16)
+            .set_hex(u16::try_from(value & u32::from(u16::MAX)).expect("masked display value fits"))
             .expect("display value should write");
         RP2350_DISPLAY_PCU_DEBUG_STATE
             .phase

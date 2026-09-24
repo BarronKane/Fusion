@@ -153,6 +153,9 @@ impl CurrentFiberPoolBackingPlan {
     ///
     /// The total byte count includes worst-case padding for an arbitrarily aligned caller-owned
     /// slab base.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn combined(self) -> Result<CurrentFiberPoolCombinedBackingPlan, FiberError> {
         self.combined_with_base_alignment(1)
     }
@@ -162,6 +165,9 @@ impl CurrentFiberPoolBackingPlan {
     ///
     /// When `base_align` satisfies the slab alignment, the layout becomes exact instead of
     /// reserving worst-case arbitrary-base padding.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn combined_for_base_alignment(
         self,
         base_align: usize,
@@ -218,6 +224,9 @@ impl CurrentFiberPool {
     /// This plan is currently honest for the legacy single-slab stack configuration. Class-backed
     /// current-thread pools still use the older hosted-style construction path and are rejected
     /// here until their backing domains are split out properly.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn backing_plan(
         config: &FiberPoolConfig<'_>,
     ) -> Result<CurrentFiberPoolBackingPlan, FiberError> {
@@ -232,6 +241,9 @@ impl CurrentFiberPool {
     ///
     /// This is the build-time honest path for targets like bare metal, where slab sizing should
     /// reflect the target context ABI instead of whatever host happened to run `build.rs`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn backing_plan_with_planning_support(
         config: &FiberPoolConfig<'_>,
         planning: FiberPlanningSupport,
@@ -500,6 +512,8 @@ impl CurrentFiberPool {
     /// # Errors
     ///
     /// Returns any honest sizing, partitioning, or bootstrap failure.
+    // Ownership transfers here and is released after partition handles retain the backing.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn from_bound_slab(
         config: &FiberPoolConfig<'_>,
         slab: MemoryResourceHandle,
@@ -977,7 +991,7 @@ fn current_fiber_pool_owned_backing(
     Ok(Some(backing))
 }
 
-fn fiber_error_from_current_runtime_backing(error: RuntimeBackingError) -> FiberError {
+const fn fiber_error_from_current_runtime_backing(error: RuntimeBackingError) -> FiberError {
     match error.kind() {
         RuntimeBackingErrorKind::Unsupported => FiberError::unsupported(),
         RuntimeBackingErrorKind::Invalid => FiberError::invalid(),
@@ -986,7 +1000,7 @@ fn fiber_error_from_current_runtime_backing(error: RuntimeBackingError) -> Fiber
     }
 }
 
-fn fiber_error_from_runtime_sink(
+const fn fiber_error_from_runtime_sink(
     error: fusion_sys::courier::CourierRuntimeSinkError,
 ) -> FiberError {
     match error {
@@ -1001,7 +1015,7 @@ fn fiber_error_from_runtime_sink(
     }
 }
 
-fn fiber_error_from_launch_control(
+const fn fiber_error_from_launch_control(
     error: fusion_sys::courier::CourierLaunchControlError,
 ) -> FiberError {
     match error {

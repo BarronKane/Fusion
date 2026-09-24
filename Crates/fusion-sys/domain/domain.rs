@@ -179,7 +179,7 @@ impl<
 {
     /// Creates one fixed-capacity domain registry.
     #[must_use]
-    pub fn new(descriptor: DomainDescriptor<'a>) -> Self {
+    pub const fn new(descriptor: DomainDescriptor<'a>) -> Self {
         Self {
             domain: DomainRecord {
                 descriptor,
@@ -203,7 +203,7 @@ impl<
         &mut self,
         descriptor: CourierDescriptor<'a>,
     ) -> Result<(), DomainError> {
-        self.validate_courier_descriptor(descriptor)?;
+        Self::validate_courier_descriptor(descriptor)?;
         self.insert_courier(CourierRecord {
             descriptor,
             support: CourierSupport {
@@ -231,6 +231,11 @@ impl<
     ///
     /// Returns an honest error when the parent or child is invalid, storage is exhausted, or the
     /// parent's declared courier plan cannot admit another child.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
+    #[allow(clippy::too_many_arguments)] // Registration records distinct identity, authority, and launch facts.
     pub fn register_child_courier(
         &mut self,
         parent: CourierId,
@@ -244,7 +249,7 @@ impl<
         // Child couriers publish launch truth to the parent immediately. The parent keeps this
         // ledger even if the child's root/main fiber later becomes non-responsive or simply stops
         // servicing one required externally visible interaction.
-        self.validate_courier_descriptor(descriptor)?;
+        Self::validate_courier_descriptor(descriptor)?;
         let Some(parent_index) = self.index_of_courier(parent) else {
             return Err(DomainError::not_found());
         };
@@ -309,6 +314,10 @@ impl<
     ///
     /// Returns an honest error when the child does not exist, is not parented by `parent`, or the
     /// parent has no launch record for that child.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn record_child_progress(
         &mut self,
         parent: CourierId,
@@ -407,6 +416,7 @@ impl<
     /// Returns an honest error when the courier does not exist, its declared plan cannot admit
     /// another live fiber of the requested class, or the record conflicts with the existing
     /// ledger.
+    #[allow(clippy::too_many_arguments)] // Admission needs the snapshot, generation, class, root flag, metadata, and tick.
     pub fn register_fiber_with_class(
         &mut self,
         courier: CourierId,
@@ -556,19 +566,11 @@ impl<
             }
             (record.parent, derived)
         };
-        if let Some(parent) = parent {
-            match derived {
-                CourierResponsiveness::Responsive => {
-                    self.record_child_progress(parent, courier, tick)
-                }
-                CourierResponsiveness::Stale => self.mark_child_stale(parent, courier),
-                CourierResponsiveness::NonResponsive => {
-                    self.mark_child_non_responsive(parent, courier)
-                }
-            }
-        } else {
-            Ok(())
-        }
+        parent.map_or(Ok(()), |parent| match derived {
+            CourierResponsiveness::Responsive => self.record_child_progress(parent, courier, tick),
+            CourierResponsiveness::Stale => self.mark_child_stale(parent, courier),
+            CourierResponsiveness::NonResponsive => self.mark_child_non_responsive(parent, courier),
+        })
     }
 
     /// Returns one copy of the courier-owned runtime ledger.
@@ -1060,7 +1062,7 @@ impl<
                 CourierResponsiveness::Responsive => {}
                 CourierResponsiveness::Stale => self.mark_child_stale(parent, courier)?,
                 CourierResponsiveness::NonResponsive => {
-                    self.mark_child_non_responsive(parent, courier)?
+                    self.mark_child_non_responsive(parent, courier)?;
                 }
             }
         }
@@ -1386,7 +1388,7 @@ impl<
     #[must_use]
     pub fn runtime_sink(&mut self) -> CourierRuntimeSink {
         CourierRuntimeSink::new(
-            self as *mut Self as *mut (),
+            core::ptr::from_mut::<Self>(self).cast::<()>(),
             runtime_sink_vtable::<
                 MAX_COURIERS,
                 MAX_CONTEXTS,
@@ -1402,7 +1404,7 @@ impl<
     #[must_use]
     pub fn launch_control(&mut self) -> CourierLaunchControl<'a> {
         CourierLaunchControl::new(
-            self as *mut Self as *mut (),
+            core::ptr::from_mut::<Self>(self).cast::<()>(),
             launch_control_vtable::<
                 'a,
                 MAX_COURIERS,
@@ -1429,10 +1431,7 @@ impl<
         Ok(())
     }
 
-    fn validate_courier_descriptor(
-        &self,
-        descriptor: CourierDescriptor<'a>,
-    ) -> Result<(), DomainError> {
+    fn validate_courier_descriptor(descriptor: CourierDescriptor<'a>) -> Result<(), DomainError> {
         if !is_valid_courier_local_name(descriptor.name) {
             return Err(DomainError::invalid());
         }
@@ -1542,16 +1541,13 @@ impl<
         courier: CourierId,
         tick: u64,
     ) -> Result<(), DomainError> {
-        if let Some(parent) = parent {
+        parent.map_or(Ok(()), |parent| {
             self.record_child_progress(parent, courier, tick)
-        } else {
-            Ok(())
-        }
+        })
     }
 }
 
 impl<
-    'a,
     const MAX_COURIERS: usize,
     const MAX_CONTEXTS: usize,
     const MAX_VISIBLE: usize,
@@ -1560,7 +1556,7 @@ impl<
     const MAX_METADATA: usize,
 > DomainBaseContract
     for DomainRegistry<
-        'a,
+        '_,
         MAX_COURIERS,
         MAX_CONTEXTS,
         MAX_VISIBLE,

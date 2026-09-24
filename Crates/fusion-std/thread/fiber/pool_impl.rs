@@ -57,7 +57,7 @@ impl GreenPool {
         carrier_workers: usize,
         backing: GreenPoolOwnedBacking,
     ) -> Result<Self, FiberError> {
-        let support = GreenPool::support();
+        let support = Self::support();
         if !support.context.caps.contains(ContextCaps::MAKE)
             || !support.context.caps.contains(ContextCaps::SWAP)
         {
@@ -543,6 +543,8 @@ struct GreenPoolOwnedBacking {
     slab_owner: Option<fusion_sys::alloc::ExtentLease>,
 }
 
+// Keep sizing and partitioning together so every owned domain uses the same checked layout.
+#[allow(clippy::too_many_lines)]
 fn green_pool_owned_backing(
     config: &FiberPoolConfig<'_>,
     carrier_workers: usize,
@@ -568,8 +570,13 @@ fn green_pool_owned_backing(
     }
 
     let alignment = support.context.min_stack_alignment.max(16);
-    let (_, backing) =
-        FiberStackSlab::build_backing(config.stack_backing, 0, 1, alignment, support.context.stack_direction)?;
+    let (_, backing) = FiberStackSlab::build_backing(
+        config.stack_backing,
+        0,
+        1,
+        alignment,
+        support.context.stack_direction,
+    )?;
     if matches!(backing, FiberStackBackingState::Elastic { .. }) {
         return Ok(None);
     }
@@ -585,14 +592,16 @@ fn green_pool_owned_backing(
         FiberPoolBackingRequest {
             bytes: config
                 .max_fibers_per_carrier
-                .checked_mul(FiberStackSlab::build_backing(
-                    config.stack_backing,
-                    0,
-                    1,
-                    alignment,
-                    support.context.stack_direction,
-                )?
-                .0)
+                .checked_mul(
+                    FiberStackSlab::build_backing(
+                        config.stack_backing,
+                        0,
+                        1,
+                        alignment,
+                        support.context.stack_direction,
+                    )?
+                    .0,
+                )
                 .ok_or_else(FiberError::resource_exhausted)?,
             align: alignment,
         },
@@ -1206,9 +1215,10 @@ fn run_ready_task(
             }
         };
         FUSION_GREEN_RESUME_PHASE.store(13, Ordering::Release);
-        if let Err(error) = inner
-            .tasks
-            .materialize_fiber(slot_index, task_id, green_task_entry, context)
+        if let Err(error) =
+            inner
+                .tasks
+                .materialize_fiber(slot_index, task_id, green_task_entry, context)
         {
             FUSION_GREEN_RESUME_ERROR_KIND.store(
                 match error.kind() {
@@ -1301,40 +1311,43 @@ fn run_ready_task(
     match resume {
         Ok(FiberYield::Yielded) => {
             FUSION_GREEN_RESUME_PHASE.store(2, Ordering::Release);
-            match take_current_green_yield_action(inner, slot_index)
-            .inspect_err(|error| {
+            match take_current_green_yield_action(inner, slot_index).inspect_err(|error| {
                 trace_carrier_failure(
                     "run_ready_task.take_current_green_yield_action",
                     carrier_index,
                     error,
                 );
             })? {
-            CurrentGreenYieldAction::Requeue => {
-                inner
-                    .tasks
-                    .set_state(slot_index, task_id, GreenTaskState::Yielded)?;
-                inner.update_runtime_fiber(
-                    runtime_fiber_id,
-                    fusion_sys::fiber::FiberState::Suspended,
-                    true,
-                )?;
-                inner.dispatch_capacity_for_task(slot_index, task_id)?;
-                inner.enqueue_with_signal(carrier_index, slot_index, false)?;
-            }
-            CurrentGreenYieldAction::WaitReadiness { source, interest } => {
-                inner.update_runtime_fiber(
-                    runtime_fiber_id,
-                    fusion_sys::fiber::FiberState::Suspended,
-                    true,
-                )?;
-                inner.dispatch_capacity_for_task(slot_index, task_id)?;
-                if let Err(error) =
-                    inner.park_on_readiness(carrier_index, slot_index, task_id, source, interest)
-                {
-                    inner.finish_task(slot_index, task_id, GreenTaskState::Failed(error))?;
+                CurrentGreenYieldAction::Requeue => {
+                    inner
+                        .tasks
+                        .set_state(slot_index, task_id, GreenTaskState::Yielded)?;
+                    inner.update_runtime_fiber(
+                        runtime_fiber_id,
+                        fusion_sys::fiber::FiberState::Suspended,
+                        true,
+                    )?;
+                    inner.dispatch_capacity_for_task(slot_index, task_id)?;
+                    inner.enqueue_with_signal(carrier_index, slot_index, false)?;
+                }
+                CurrentGreenYieldAction::WaitReadiness { source, interest } => {
+                    inner.update_runtime_fiber(
+                        runtime_fiber_id,
+                        fusion_sys::fiber::FiberState::Suspended,
+                        true,
+                    )?;
+                    inner.dispatch_capacity_for_task(slot_index, task_id)?;
+                    if let Err(error) = inner.park_on_readiness(
+                        carrier_index,
+                        slot_index,
+                        task_id,
+                        source,
+                        interest,
+                    ) {
+                        inner.finish_task(slot_index, task_id, GreenTaskState::Failed(error))?;
+                    }
                 }
             }
-        }
         }
         Ok(FiberYield::Completed(_)) => {
             FUSION_GREEN_RESUME_PHASE.store(3, Ordering::Release);
@@ -1404,7 +1417,10 @@ pub fn wait_blocking_for_readiness(
 fn run_capacity_callback_contained(callback: fn(FiberCapacityEvent), event: FiberCapacityEvent) {
     #[cfg(feature = "std")]
     {
-        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::panic::{
+            AssertUnwindSafe,
+            catch_unwind,
+        };
 
         let _ = catch_unwind(AssertUnwindSafe(|| callback(event)));
     }
@@ -1420,7 +1436,10 @@ fn run_yield_budget_callback_contained(
     callback: fn(FiberYieldBudgetEvent),
     event: FiberYieldBudgetEvent,
 ) {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::panic::{
+        AssertUnwindSafe,
+        catch_unwind,
+    };
 
     let _ = catch_unwind(AssertUnwindSafe(|| callback(event)));
 }
@@ -1441,7 +1460,10 @@ fn run_yield_budget_watchdog(inner: GreenPoolLease) {
 fn run_green_job_contained(runner: InlineGreenJobRunner) -> Result<(), ()> {
     #[cfg(feature = "std")]
     {
-        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::panic::{
+            AssertUnwindSafe,
+            catch_unwind,
+        };
 
         catch_unwind(AssertUnwindSafe(|| runner.run())).map_err(|_| ())
     }
@@ -1465,14 +1487,16 @@ unsafe fn run_carrier_loop_job(context: *mut ()) {
     #[cfg(feature = "std")]
     context.publish_current_observation();
     FUSION_GREEN_CARRIER_PHASE.store(8, Ordering::Release);
-    if let Err(_error) = run_carrier_loop(inner, context) {
+    if let Err(error) = run_carrier_loop(inner, context) {
+        #[cfg(not(feature = "std"))]
+        let _ = error;
         #[cfg(feature = "std")]
         {
             if std::env::var_os("FUSION_TRACE_CARRIER_ERRORS").is_some() {
                 std::eprintln!(
                     "fusion-std carrier loop error: carrier_index={} kind={:?}",
                     context.carrier_index,
-                    _error.kind()
+                    error.kind()
                 );
             }
         }

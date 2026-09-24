@@ -55,6 +55,7 @@ const DISPLAY_TIMER_INTE_OFFSET: usize = 0x40;
 const DISPLAY_SLICE_PERIOD_MICROS: u32 = 500;
 const DISPLAY_FRAME_BANKS: usize = 2;
 const DISPLAY_DIGITS: usize = 4;
+const DISPLAY_DIGITS_U8: u8 = 4;
 const DISPLAY_INTERRUPT_STACK_BYTES: usize = 1024;
 const DISPLAY_TIMER_ALLOWED_ALARM_MASK: u32 = (1_u32 << 2) | (1_u32 << 3);
 const DISPLAY_TIMER_STRAY_ALARM_MASK: u32 = !DISPLAY_TIMER_ALLOWED_ALARM_MASK & 0x0f;
@@ -121,7 +122,7 @@ impl DisplayController {
                         continue;
                     }
 
-                    let result = self.initialize_hardware(
+                    let result = Self::initialize_hardware(
                         data_pin,
                         output_enable_pin,
                         latch_pin,
@@ -163,12 +164,14 @@ impl DisplayController {
         sanitize_unclaimed_timer0_alarm_state()?;
         sanitize_unclaimed_timer1_alarm_state()?;
         arm_next_display_alarm(self)?;
-        hardware.interrupt.enable().map_err(gpio_error_from_thread)?;
+        hardware
+            .interrupt
+            .enable()
+            .map_err(gpio_error_from_thread)?;
         Ok(())
     }
 
     fn initialize_hardware(
-        &self,
         data_pin: u8,
         output_enable_pin: u8,
         latch_pin: u8,
@@ -214,10 +217,15 @@ impl DisplayController {
 
         let next_bank = usize::from(self.active_bank.load(Ordering::Acquire) ^ 1);
         for (index, glyph) in glyphs.into_iter().enumerate() {
-            self.frames[next_bank][index]
-                .store(encode_display_frame(index, glyph, polarity), Ordering::Release);
+            self.frames[next_bank][index].store(
+                encode_display_frame(index, glyph, polarity),
+                Ordering::Release,
+            );
         }
-        self.active_bank.store(next_bank as u8, Ordering::Release);
+        self.active_bank.store(
+            u8::try_from(next_bank).map_err(|_| GpioError::invalid())?,
+            Ordering::Release,
+        );
         Ok(())
     }
 
@@ -234,16 +242,21 @@ impl DisplayController {
         }
 
         let bank = usize::from(self.active_bank.load(Ordering::Acquire) & 1);
-        let digit = usize::from(self.next_digit.load(Ordering::Acquire) as usize % DISPLAY_DIGITS);
+        let digit = usize::from(self.next_digit.load(Ordering::Acquire) % DISPLAY_DIGITS_U8);
         let frame = self.frames[bank][digit].load(Ordering::Acquire);
 
         let hardware = unsafe { (*self.hardware.get()).assume_init_mut() };
-        if hardware.register.write_bytes_msb_first(&frame.to_le_bytes()).is_err() {
+        if hardware
+            .register
+            .write_bytes_msb_first(&frame.to_le_bytes())
+            .is_err()
+        {
             return;
         }
 
-        self.next_digit
-            .store(((digit + 1) % DISPLAY_DIGITS) as u8, Ordering::Release);
+        let next_digit = u8::try_from((digit + 1) % DISPLAY_DIGITS)
+            .expect("next display digit is below the four-digit count");
+        self.next_digit.store(next_digit, Ordering::Release);
     }
 }
 
@@ -343,6 +356,7 @@ fn display_interrupt_stack_policy() -> VectorInlineStackPolicy {
     VectorInlineStackPolicy::DedicatedReserved(VectorInlineReservedStack { base, size_bytes })
 }
 
+#[allow(clippy::cast_possible_truncation)] // Alarm deadlines intentionally use the low 32 wrapping timer bits.
 fn arm_next_display_alarm(controller: &DisplayController) -> Result<(), GpioError> {
     let now = cortex_m_soc_board::monotonic_raw_now().map_err(gpio_error_from_hardware)? as u32;
     let previous_deadline = controller.last_alarm_deadline.load(Ordering::Acquire);
@@ -357,27 +371,29 @@ fn arm_next_display_alarm(controller: &DisplayController) -> Result<(), GpioErro
     let alarm = (DISPLAY_TIMER0_BASE
         + DISPLAY_TIMER_ALARM0_OFFSET
         + (DISPLAY_TIMER_ALARM_INDEX * 4)) as *mut u32;
-    let inte = (DISPLAY_TIMER0_BASE + DISPLAY_TIMER_INTE_OFFSET) as *mut u32;
+    let interrupt_enable = (DISPLAY_TIMER0_BASE + DISPLAY_TIMER_INTE_OFFSET) as *mut u32;
     let alarm_bit = 1_u32 << DISPLAY_TIMER_ALARM_INDEX;
 
     unsafe {
         ptr::write_volatile(alarm, deadline);
-        let current = ptr::read_volatile(inte);
-        ptr::write_volatile(inte, current | alarm_bit);
+        let current = ptr::read_volatile(interrupt_enable);
+        ptr::write_volatile(interrupt_enable, current | alarm_bit);
     }
 
-    controller.last_alarm_deadline.store(deadline, Ordering::Release);
+    controller
+        .last_alarm_deadline
+        .store(deadline, Ordering::Release);
     Ok(())
 }
 
 fn sanitize_unclaimed_timer0_alarm_state() -> Result<(), GpioError> {
-    let intr = (DISPLAY_TIMER0_BASE + DISPLAY_TIMER_INTR_OFFSET) as *mut u32;
-    let inte = (DISPLAY_TIMER0_BASE + DISPLAY_TIMER_INTE_OFFSET) as *mut u32;
+    let interrupt_status = (DISPLAY_TIMER0_BASE + DISPLAY_TIMER_INTR_OFFSET) as *mut u32;
+    let interrupt_enable = (DISPLAY_TIMER0_BASE + DISPLAY_TIMER_INTE_OFFSET) as *mut u32;
 
     unsafe {
-        let enabled = ptr::read_volatile(inte);
-        ptr::write_volatile(inte, enabled & DISPLAY_TIMER_ALLOWED_ALARM_MASK);
-        ptr::write_volatile(intr, DISPLAY_TIMER_STRAY_ALARM_MASK);
+        let enabled = ptr::read_volatile(interrupt_enable);
+        ptr::write_volatile(interrupt_enable, enabled & DISPLAY_TIMER_ALLOWED_ALARM_MASK);
+        ptr::write_volatile(interrupt_status, DISPLAY_TIMER_STRAY_ALARM_MASK);
     }
 
     cortex_m_soc_board::irq_clear_pending(0).map_err(gpio_error_from_hardware)?;
@@ -386,12 +402,12 @@ fn sanitize_unclaimed_timer0_alarm_state() -> Result<(), GpioError> {
 }
 
 fn sanitize_unclaimed_timer1_alarm_state() -> Result<(), GpioError> {
-    let intr = (DISPLAY_TIMER1_BASE + DISPLAY_TIMER_INTR_OFFSET) as *mut u32;
-    let inte = (DISPLAY_TIMER1_BASE + DISPLAY_TIMER_INTE_OFFSET) as *mut u32;
+    let interrupt_status = (DISPLAY_TIMER1_BASE + DISPLAY_TIMER_INTR_OFFSET) as *mut u32;
+    let interrupt_enable = (DISPLAY_TIMER1_BASE + DISPLAY_TIMER_INTE_OFFSET) as *mut u32;
 
     unsafe {
-        ptr::write_volatile(inte, 0);
-        ptr::write_volatile(intr, DISPLAY_TIMER_ALL_ALARM_MASK);
+        ptr::write_volatile(interrupt_enable, 0);
+        ptr::write_volatile(interrupt_status, DISPLAY_TIMER_ALL_ALARM_MASK);
     }
 
     cortex_m_soc_board::irq_clear_pending(4).map_err(gpio_error_from_hardware)?;

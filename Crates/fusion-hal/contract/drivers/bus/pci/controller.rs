@@ -1,14 +1,23 @@
 //! PCI controller/provider vocabulary.
 
-use super::core::*;
-use super::dma::*;
-use super::error::*;
-use super::hotplug::*;
-use super::interrupt::*;
-use super::pcie::*;
-use super::power::*;
-use super::topology::*;
-use super::virtualization::*;
+use super::core::{
+    PciSegment,
+    PciBus,
+    PciFunctionContract,
+    PciSupport,
+    PciFunctionAddress,
+};
+use super::dma::PciDmaContract;
+use super::error::{
+    PciErrorReportingContract,
+    PciError,
+};
+use super::hotplug::PciHotplugContract;
+use super::interrupt::PciInterruptContract;
+use super::pcie::PciExpressContract;
+use super::power::PciPowerContract;
+use super::topology::PciTopologyContract;
+use super::virtualization::PciVirtualizationContract;
 
 /// Human-facing descriptor for one PCI controller/provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -93,8 +93,7 @@ where
     ///
     /// Returns one honest GPIO error when the backing pin cannot be driven.
     pub fn on(&mut self) -> Result<(), GpioError> {
-        self.pin
-            .set_level(if self.active_high { true } else { false })?;
+        self.pin.set_level(self.active_high)?;
         self.sounding = true;
         Ok(())
     }
@@ -105,8 +104,7 @@ where
     ///
     /// Returns one honest GPIO error when the backing pin cannot be driven.
     pub fn off(&mut self) -> Result<(), GpioError> {
-        self.pin
-            .set_level(if self.active_high { false } else { true })?;
+        self.pin.set_level(!self.active_high)?;
         self.sounding = false;
         Ok(())
     }

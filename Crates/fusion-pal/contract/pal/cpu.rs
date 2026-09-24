@@ -256,7 +256,7 @@ macro_rules! define_cache_padded {
 
             /// Returns an exclusive reference to the inner value.
             #[must_use]
-            pub fn get_mut(&mut self) -> &mut T {
+            pub const fn get_mut(&mut self) -> &mut T {
                 &mut self.value
             }
         }

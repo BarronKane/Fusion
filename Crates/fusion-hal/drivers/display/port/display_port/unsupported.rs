@@ -1,3 +1,3 @@
-//! Unsupported DisplayPort backend placeholder exports.
+//! Unsupported `DisplayPort` backend placeholder exports.
 
 pub use crate::UnsupportedDisplayPortHardware;

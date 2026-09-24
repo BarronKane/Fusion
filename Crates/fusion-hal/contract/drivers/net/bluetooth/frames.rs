@@ -13,6 +13,10 @@ pub trait BluetoothCanonicalFrameControlContract {
     /// Waits until at least one canonical Bluetooth frame is available to read.
     ///
     /// Implementations should return `Ok(false)` on timeout without consuming any pending frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     fn wait_frame(&mut self, timeout_ms: Option<u32>) -> Result<bool, BluetoothError>;
 
     /// Sends one canonical Bluetooth frame using caller-owned scratch storage for any temporary
@@ -30,6 +34,10 @@ pub trait BluetoothCanonicalFrameControlContract {
     /// Receives one canonical Bluetooth frame into caller-owned storage.
     ///
     /// Returns `Ok(None)` when no frame is currently available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     fn recv_frame<'a>(
         &mut self,
         out: &'a mut [u8],

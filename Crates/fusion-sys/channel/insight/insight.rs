@@ -104,6 +104,7 @@ impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     /// # Errors
     ///
     /// Returns `InsightError::not_enabled()` when `debug-insights` is disabled.
+    #[allow(clippy::missing_const_for_fn)] // Enabled and disabled feature builds share one constructor API.
     pub fn new(
         class: InsightChannelClass,
         capture: InsightCaptureMode,
@@ -206,6 +207,10 @@ impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
     ///
     /// Returns `Ok(false)` when no consumer is attached, so the caller can skip all expensive
     /// capture work in release builds with insight enabled but inactive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn try_send_if_observed<F>(&self, producer: usize, build: F) -> Result<bool, ChannelError>
     where
         F: FnOnce() -> P::Message,
@@ -218,6 +223,11 @@ impl<P: ProtocolContract, const CAPACITY: usize, const MAX_CONSUMERS: usize>
         Ok(true)
     }
 
+    #[allow(
+        clippy::unused_self,
+        clippy::missing_const_for_fn,
+        clippy::unnecessary_wraps
+    )] // Feature-off builds keep the same fallible instance API.
     pub(crate) fn clear_pending_messages(&self) -> Result<usize, ChannelError> {
         #[cfg(feature = "debug-insights")]
         {
@@ -563,14 +573,13 @@ mod tests {
         let mut built = false;
 
         assert!(!channel.is_observed());
-        assert_eq!(
-            channel
+        assert!(
+            !channel
                 .try_send_if_observed(producer, || {
                     built = true;
                     0xfeed_beef
                 })
-                .expect("lazy send should not fail"),
-            false
+                .expect("lazy send should not fail")
         );
         assert!(!built);
     }
@@ -593,14 +602,13 @@ mod tests {
         let mut built = false;
 
         assert!(channel.is_observed());
-        assert_eq!(
+        assert!(
             channel
                 .try_send_if_observed(producer, || {
                     built = true;
                     0xfeed_beef
                 })
-                .expect("lazy send should succeed"),
-            true
+                .expect("lazy send should succeed")
         );
         assert!(built);
         assert_eq!(

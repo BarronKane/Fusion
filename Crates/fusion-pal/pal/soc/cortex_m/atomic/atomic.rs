@@ -222,7 +222,7 @@ impl AtomicWord32Contract for CortexMAtomicWord32 {
         validate_load_ordering(ordering)?;
         #[cfg(target_has_atomic = "32")]
         {
-            return Ok(self.inner.load(ordering));
+            Ok(self.inner.load(ordering))
         }
 
         #[cfg(not(target_has_atomic = "32"))]
@@ -240,7 +240,7 @@ impl AtomicWord32Contract for CortexMAtomicWord32 {
         #[cfg(target_has_atomic = "32")]
         {
             self.inner.store(value, ordering);
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(target_has_atomic = "32"))]
@@ -260,7 +260,7 @@ impl AtomicWord32Contract for CortexMAtomicWord32 {
         validate_rmw_ordering(ordering)?;
         #[cfg(target_has_atomic = "32")]
         {
-            return Ok(self.inner.swap(value, ordering));
+            Ok(self.inner.swap(value, ordering))
         }
 
         #[cfg(not(target_has_atomic = "32"))]
@@ -287,12 +287,12 @@ impl AtomicWord32Contract for CortexMAtomicWord32 {
         validate_compare_exchange_orderings(success, failure)?;
         #[cfg(target_has_atomic = "32")]
         {
-            return Ok(
+            Ok(
                 match self.inner.compare_exchange(current, new, success, failure) {
                     Ok(_) => AtomicCompareExchangeOutcome32::Exchanged,
                     Err(observed) => AtomicCompareExchangeOutcome32::Mismatch(observed),
                 },
-            );
+            )
         }
 
         #[cfg(not(target_has_atomic = "32"))]
@@ -318,7 +318,7 @@ impl AtomicWord32Contract for CortexMAtomicWord32 {
         validate_rmw_ordering(ordering)?;
         #[cfg(target_has_atomic = "32")]
         {
-            return Ok(self.inner.fetch_add(value, ordering));
+            Ok(self.inner.fetch_add(value, ordering))
         }
 
         #[cfg(not(target_has_atomic = "32"))]
@@ -339,7 +339,7 @@ impl AtomicWord32Contract for CortexMAtomicWord32 {
         validate_rmw_ordering(ordering)?;
         #[cfg(target_has_atomic = "32")]
         {
-            return Ok(self.inner.fetch_sub(value, ordering));
+            Ok(self.inner.fetch_sub(value, ordering))
         }
 
         #[cfg(not(target_has_atomic = "32"))]
@@ -360,7 +360,7 @@ impl AtomicWord32Contract for CortexMAtomicWord32 {
         validate_rmw_ordering(ordering)?;
         #[cfg(target_has_atomic = "32")]
         {
-            return Ok(self.inner.fetch_and(value, ordering));
+            Ok(self.inner.fetch_and(value, ordering))
         }
 
         #[cfg(not(target_has_atomic = "32"))]
@@ -381,7 +381,7 @@ impl AtomicWord32Contract for CortexMAtomicWord32 {
         validate_rmw_ordering(ordering)?;
         #[cfg(target_has_atomic = "32")]
         {
-            return Ok(self.inner.fetch_or(value, ordering));
+            Ok(self.inner.fetch_or(value, ordering))
         }
 
         #[cfg(not(target_has_atomic = "32"))]
@@ -402,7 +402,7 @@ impl AtomicWord32Contract for CortexMAtomicWord32 {
         validate_rmw_ordering(ordering)?;
         #[cfg(target_has_atomic = "32")]
         {
-            return Ok(self.inner.fetch_xor(value, ordering));
+            Ok(self.inner.fetch_xor(value, ordering))
         }
 
         #[cfg(not(target_has_atomic = "32"))]
@@ -439,7 +439,6 @@ impl AtomicWord32Contract for CortexMAtomicWord32 {
 const fn validate_load_ordering(ordering: Ordering) -> Result<(), AtomicError> {
     match ordering {
         Ordering::Relaxed | Ordering::Acquire | Ordering::SeqCst => Ok(()),
-        Ordering::Release | Ordering::AcqRel => Err(AtomicError::invalid()),
         _ => Err(AtomicError::invalid()),
     }
 }
@@ -447,7 +446,6 @@ const fn validate_load_ordering(ordering: Ordering) -> Result<(), AtomicError> {
 const fn validate_store_ordering(ordering: Ordering) -> Result<(), AtomicError> {
     match ordering {
         Ordering::Relaxed | Ordering::Release | Ordering::SeqCst => Ok(()),
-        Ordering::Acquire | Ordering::AcqRel => Err(AtomicError::invalid()),
         _ => Err(AtomicError::invalid()),
     }
 }
@@ -472,10 +470,8 @@ const fn validate_compare_exchange_orderings(
     }
 
     match (success, failure) {
-        (Ordering::Relaxed, Ordering::Relaxed)
-        | (Ordering::Acquire, Ordering::Relaxed | Ordering::Acquire)
-        | (Ordering::Release, Ordering::Relaxed)
-        | (Ordering::AcqRel, Ordering::Relaxed | Ordering::Acquire)
+        (Ordering::Relaxed | Ordering::Release, Ordering::Relaxed)
+        | (Ordering::Acquire | Ordering::AcqRel, Ordering::Relaxed | Ordering::Acquire)
         | (Ordering::SeqCst, Ordering::Relaxed | Ordering::Acquire | Ordering::SeqCst) => Ok(()),
         _ => Err(AtomicError::invalid()),
     }

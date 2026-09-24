@@ -60,6 +60,9 @@ pub fn fusion_firmware_main(attr: TokenStream, item: TokenStream) -> TokenStream
     }
 }
 
+// Keep validation, generated entry construction, and diagnostics together because they form one
+// transformation whose order is part of the macro contract.
+#[allow(clippy::too_many_lines)]
 fn expand_fusion_firmware_main(
     args: FusionFirmwareMainArgs,
     function: ItemFn,
@@ -266,14 +269,12 @@ fn validate_single_argument(argument: &FnArg) -> Result<(), Error> {
             "#[fusion_firmware_main] cannot be used on methods",
         )),
         FnArg::Typed(argument) => {
-            if let Type::Reference(reference) = argument.ty.as_ref() {
-                if let Type::Path(path) = reference.elem.as_ref() {
-                    if let Some(segment) = path.path.segments.last() {
-                        if segment.ident == "FirmwareBootstrapContext" {
-                            return Ok(());
-                        }
-                    }
-                }
+            if let Type::Reference(reference) = argument.ty.as_ref()
+                && let Type::Path(path) = reference.elem.as_ref()
+                && let Some(segment) = path.path.segments.last()
+                && segment.ident == "FirmwareBootstrapContext"
+            {
+                return Ok(());
             }
             Err(Error::new(
                 argument.ty.span(),

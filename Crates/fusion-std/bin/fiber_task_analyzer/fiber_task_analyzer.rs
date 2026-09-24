@@ -80,6 +80,8 @@ struct AnalyzerConfig {
 }
 
 impl AnalyzerConfig {
+    // Keep parsing of the analyzer's positional CLI schema in one place.
+    #[allow(clippy::too_many_lines)]
     fn parse() -> Result<Self, String> {
         let mut args = env::args_os();
         let _program = args.next();
@@ -350,6 +352,8 @@ struct SymbolResolutionContext<'a> {
     root_type_name: &'a str,
 }
 
+// This orchestration deliberately keeps the related report inputs and generated outputs together.
+#[allow(clippy::too_many_lines)]
 fn generate_outputs(config: &AnalyzerConfig) -> Result<GeneratedOutputs, String> {
     let roots = load_roots(&config.roots_path)?;
     let async_poll_stack_roots = config
@@ -1246,13 +1250,14 @@ fn apply_objdump_stack_effect(
         return;
     }
 
-    if mnemonic.starts_with("add") && objdump_targets_stack_pointer(operands) {
-        if let Some(bytes) = parse_objdump_stack_immediate(operands) {
-            if *current_depth == 0 {
-                *max_depth = (*max_depth).max(bytes);
-            } else {
-                *current_depth = current_depth.saturating_sub(bytes);
-            }
+    if mnemonic.starts_with("add")
+        && objdump_targets_stack_pointer(operands)
+        && let Some(bytes) = parse_objdump_stack_immediate(operands)
+    {
+        if *current_depth == 0 {
+            *max_depth = (*max_depth).max(bytes);
+        } else {
+            *current_depth = current_depth.saturating_sub(bytes);
         }
     }
 }
@@ -1262,16 +1267,14 @@ fn objdump_push_pop_bytes(mnemonic: &str, operands: &str) -> Option<usize> {
         && operands.contains('{')
         && operands.contains('}')
     {
-        let register_bytes = if mnemonic.starts_with("v") { 8 } else { 4 };
+        let register_bytes = if mnemonic.starts_with('v') { 8 } else { 4 };
         let register_count = count_objdump_register_list_entries(operands)?;
         return Some(register_count * register_bytes);
     }
 
     match mnemonic {
-        "push" | "pushq" => return Some(8),
-        "pushl" => return Some(4),
-        "pop" | "popq" => return Some(8),
-        "popl" => return Some(4),
+        "push" | "pushq" | "pop" | "popq" => return Some(8),
+        "pushl" | "popl" => return Some(4),
         _ => {}
     }
 
@@ -1307,7 +1310,7 @@ fn parse_objdump_register_index(token: &str) -> Option<usize> {
     let digits = token
         .trim_start_matches(|ch: char| !ch.is_ascii_digit())
         .chars()
-        .take_while(|ch| ch.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
         .collect::<String>();
     if digits.is_empty() {
         match token {
@@ -1424,7 +1427,7 @@ fn normalize_demangled_symbol(symbol: &str) -> &str {
 }
 
 impl ArtifactSymbolIndex {
-    fn merge(&mut self, other: ArtifactSymbolIndex) {
+    fn merge(&mut self, other: Self) {
         for entry in other.entries {
             if self
                 .entries

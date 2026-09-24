@@ -75,8 +75,8 @@ fn selected_lane() -> &'static str {
         Ok(other) => panic!(
             "fusion-pal could not infer PAL lane for target_os={other:?}; enable one of `soc` or `hosted`"
         ),
-        Err(_) => panic!(
-            "fusion-pal could not infer PAL lane because CARGO_CFG_TARGET_OS was unavailable"
+        Err(error) => panic!(
+            "fusion-pal could not infer PAL lane because CARGO_CFG_TARGET_OS was unavailable: {error}"
         ),
     }
 }
@@ -124,8 +124,8 @@ fn selected_pal_glue(lane: &str) -> String {
                 Ok(other) => panic!(
                     "fusion-pal could not select hosted PAL platform glue for target_os={other:?}"
                 ),
-                Err(_) => panic!(
-                    "fusion-pal could not select hosted PAL platform glue because CARGO_CFG_TARGET_OS was unavailable"
+                Err(error) => panic!(
+                    "fusion-pal could not select hosted PAL platform glue because CARGO_CFG_TARGET_OS was unavailable: {error}"
                 ),
             }
         }

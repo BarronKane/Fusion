@@ -1,6 +1,6 @@
 //! USB controller identity and capability vocabulary.
 
-use super::core::*;
+use super::core::UsbCoreContract;
 
 /// Canonical USB controller implementation family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -75,6 +75,7 @@ pub struct UsbControllerIdentity {
 
 /// Controller capability truth that sits below the shared USB framework layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct UsbControllerCapabilities {
     pub dma: bool,
     pub sixty_four_bit_addressing: bool,

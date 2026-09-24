@@ -1,4 +1,64 @@
-use super::*;
+use super::{
+    ControlLease,
+    ExecutorCore,
+    ExecutorError,
+    Executor,
+    ExecutorConfig,
+    SchedulerBinding,
+    CurrentAsyncRuntimeBacking,
+    Reactor,
+    ExecutorBackingAllocators,
+    ExecutorReactorState,
+    ExecutorRegistry,
+    AtomicBool,
+    AtomicUsize,
+    current_async_runtime_virtual_backing,
+    executor_error_from_alloc,
+    executor_error_from_fiber,
+    ExecutorBackingRequest,
+    apply_executor_sizing_strategy,
+    Allocator,
+    executor_invalid,
+    CurrentAsyncRuntimeBackingPlan,
+    ExecutorDomainAllocator,
+    ExecutorMode,
+    CourierRuntimeSummary,
+    CourierResponsiveness,
+    CourierSchedulingPolicy,
+    CourierRunState,
+    CourierLaneSummary,
+    RunnableUnitKind,
+    AsyncTaskLifecycleInsight,
+    Future,
+    TaskHandle,
+    AsyncTaskAdmission,
+    GeneratedExplicitAsyncPollStackContract,
+    generated_explicit_async_poll_stack_bytes,
+    TaskHandleInner,
+    PhantomData,
+    LocalTaskHandle,
+    system_thread,
+    spin_loop,
+    ThreadPool,
+    GreenPool,
+    AsyncSlotRunDisposition,
+    green_yield_now,
+    FiberTaskAttributes,
+    GreenExecutorDispatchTask,
+    ExplicitFiberTask,
+    Pin,
+    Context,
+    Poll,
+    generated_async_poll_stack_root,
+};
+#[cfg(not(feature = "std"))]
+use super::executor_error_from_thread_pool;
+#[cfg(feature = "std")]
+use super::HostedFiberRuntime;
+#[cfg(any(feature = "std", feature = "debug-insights"))]
+use super::ExecutorCell;
+#[cfg(feature = "std")]
+use core::num::NonZeroUsize;
 #[cfg(feature = "std")]
 use super::hosted::{
     ExecutorReactorDriverState,
@@ -345,7 +405,7 @@ impl Executor {
         let slot = registry.slot(slot_index)?;
         if let Err(error) = slot.bind_core(self.core_lease()?, generation) {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(&registry.spill_store, generation)?;
+            slot.reset_empty(generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
@@ -354,7 +414,7 @@ impl Executor {
 
         if let Err(error) = slot.store_future(&registry.spill_store, future) {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(&registry.spill_store, generation)?;
+            slot.reset_empty(generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
@@ -465,7 +525,7 @@ impl Executor {
         let slot = registry.slot(slot_index)?;
         if let Err(error) = slot.bind_core(self.core_lease()?, generation) {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(&registry.spill_store, generation)?;
+            slot.reset_empty(generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
@@ -474,7 +534,7 @@ impl Executor {
 
         if let Err(error) = slot.store_future(&registry.spill_store, future) {
             slot.mark_handle_released(generation)?;
-            slot.reset_empty(&registry.spill_store, generation)?;
+            slot.reset_empty(generation)?;
             registry.release_slot(slot_index, generation)?;
             return Err(error);
         }
@@ -643,9 +703,7 @@ impl Executor {
             return Err(ExecutorError::Unsupported);
         }
         green
-            .validate_task_attributes(
-                green_executor_dispatch_task_attributes().map_err(executor_error_from_fiber)?,
-            )
+            .validate_task_attributes(green_executor_dispatch_task_attributes())
             .map_err(executor_error_from_fiber)?;
 
         let executor = Self::with_scheduler(
@@ -686,6 +744,8 @@ pub(super) fn run_scheduled_slot_lease(
     core.finish_external_schedule();
 }
 
+// This lease stays owned by the scheduled green task through its final poll.
+#[allow(clippy::needless_pass_by_value)]
 pub(super) fn run_scheduled_green_slot_lease(
     core: ControlLease<ExecutorCore>,
     slot_index: usize,
@@ -699,8 +759,7 @@ pub(super) fn run_scheduled_green_slot_lease(
                     if let Ok(registry) = core.registry()
                         && let Ok(slot) = registry.slot(slot_index)
                     {
-                        let _ =
-                            slot.fail(&registry.spill_store, generation, ExecutorError::Stopped);
+                        let _ = slot.fail(generation, ExecutorError::Stopped);
                         let _ = core.recycle_slot_if_possible(slot_index, generation);
                     }
                     break;
@@ -711,13 +770,13 @@ pub(super) fn run_scheduled_green_slot_lease(
     core.finish_external_schedule();
 }
 
-pub(super) fn green_executor_dispatch_task_attributes() -> Result<FiberTaskAttributes, FiberError> {
-    Ok(GreenExecutorDispatchTask::ATTRIBUTES)
+pub(super) const fn green_executor_dispatch_task_attributes() -> FiberTaskAttributes {
+    GreenExecutorDispatchTask::ATTRIBUTES
 }
 
 #[cfg(feature = "std")]
-pub(super) fn green_executor_dispatch_stack_size() -> Result<NonZeroUsize, FiberError> {
-    Ok(GreenExecutorDispatchTask::STACK_BYTES)
+pub(super) const fn green_executor_dispatch_stack_size() -> NonZeroUsize {
+    GreenExecutorDispatchTask::STACK_BYTES
 }
 
 #[cfg(feature = "std")]

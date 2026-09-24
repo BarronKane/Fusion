@@ -93,22 +93,22 @@ where
     }
 
     /// Returns a mutable reference to the tip pin for direct driver access.
-    pub fn tip_mut(&mut self) -> &mut Tip {
+    pub const fn tip_mut(&mut self) -> &mut Tip {
         &mut self.tip
     }
 
     /// Returns a mutable reference to the ring 1 pin for direct driver access.
-    pub fn ring1_mut(&mut self) -> &mut Ring1 {
+    pub const fn ring1_mut(&mut self) -> &mut Ring1 {
         &mut self.ring1
     }
 
     /// Returns a mutable reference to the ring 2 pin for direct driver access.
-    pub fn ring2_mut(&mut self) -> &mut Ring2 {
+    pub const fn ring2_mut(&mut self) -> &mut Ring2 {
         &mut self.ring2
     }
 
     /// Returns a mutable reference to the sleeve pin for direct driver access.
-    pub fn sleeve_mut(&mut self) -> &mut Sleeve {
+    pub const fn sleeve_mut(&mut self) -> &mut Sleeve {
         &mut self.sleeve
     }
 
@@ -176,17 +176,17 @@ where
     }
 
     /// Returns a mutable reference to the tip pin for direct driver access.
-    pub fn tip_mut(&mut self) -> &mut Tip {
+    pub const fn tip_mut(&mut self) -> &mut Tip {
         &mut self.tip
     }
 
     /// Returns a mutable reference to the ring pin for direct driver access.
-    pub fn ring_mut(&mut self) -> &mut Ring {
+    pub const fn ring_mut(&mut self) -> &mut Ring {
         &mut self.ring
     }
 
     /// Returns a mutable reference to the sleeve pin for direct driver access.
-    pub fn sleeve_mut(&mut self) -> &mut Sleeve {
+    pub const fn sleeve_mut(&mut self) -> &mut Sleeve {
         &mut self.sleeve
     }
 

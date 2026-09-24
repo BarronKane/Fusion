@@ -4,7 +4,7 @@
 //! enough for capability inspection; BAR index / table offset / PBA offset can be added when the
 //! first real backend needs to program MSI-X instead of merely describe it.
 
-/// Conventional PCI INTx pin.
+/// Conventional PCI `INTx` pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PciInterruptPin {
     IntA,

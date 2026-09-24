@@ -253,7 +253,7 @@ where
     }
 
     /// Overwrites all four buffered glyphs.
-    pub fn set_glyphs(&mut self, glyphs: [SevenSegmentGlyph; 4]) {
+    pub const fn set_glyphs(&mut self, glyphs: [SevenSegmentGlyph; 4]) {
         self.glyphs = glyphs;
     }
 
@@ -262,7 +262,11 @@ where
     /// # Errors
     ///
     /// Returns one honest GPIO error when the digit index is out of range.
-    pub fn set_digit(&mut self, index: usize, glyph: SevenSegmentGlyph) -> Result<(), GpioError> {
+    pub const fn set_digit(
+        &mut self,
+        index: usize,
+        glyph: SevenSegmentGlyph,
+    ) -> Result<(), GpioError> {
         if index >= self.glyphs.len() {
             return Err(GpioError::invalid());
         }
@@ -271,12 +275,16 @@ where
     }
 
     /// Clears the framebuffer to blanks.
-    pub fn clear(&mut self) {
+    pub const fn clear(&mut self) {
         self.glyphs = [SevenSegmentGlyph::BLANK; 4];
     }
 
     /// Writes one four-nibble hexadecimal value into the framebuffer.
-    pub fn set_hex(&mut self, value: u16) {
+    ///
+    /// # Panics
+    ///
+    /// The guarded glyph conversion is exhaustive for every masked four-bit nibble.
+    pub const fn set_hex(&mut self, value: u16) {
         self.glyphs = [
             SevenSegmentGlyph::from_hex(((value >> 12) & 0x0f) as u8)
                 .expect("upper nibble should be valid"),
@@ -334,6 +342,7 @@ where
 
     /// Releases the owned GPIO pins back to the caller.
     #[must_use]
+    #[allow(clippy::many_single_char_names)] // Segment pins are conventionally named a-g.
     pub fn into_pins(self) -> FourDigitSevenSegmentPins<Seg, Dig> {
         let [a, b, c, d, e, f, g, dp] = self.segments;
         let [d1, d2, d3, d4] = self.digits;
@@ -524,7 +533,7 @@ where
     }
 
     /// Overwrites all four buffered glyphs.
-    pub fn set_glyphs(&mut self, glyphs: [SevenSegmentGlyph; 4]) {
+    pub const fn set_glyphs(&mut self, glyphs: [SevenSegmentGlyph; 4]) {
         self.glyphs = glyphs;
     }
 
@@ -533,7 +542,11 @@ where
     /// # Errors
     ///
     /// Returns one honest GPIO error when the digit index is out of range.
-    pub fn set_digit(&mut self, index: usize, glyph: SevenSegmentGlyph) -> Result<(), GpioError> {
+    pub const fn set_digit(
+        &mut self,
+        index: usize,
+        glyph: SevenSegmentGlyph,
+    ) -> Result<(), GpioError> {
         if index >= self.glyphs.len() {
             return Err(GpioError::invalid());
         }
@@ -542,12 +555,16 @@ where
     }
 
     /// Clears the framebuffer to blanks.
-    pub fn clear(&mut self) {
+    pub const fn clear(&mut self) {
         self.glyphs = [SevenSegmentGlyph::BLANK; 4];
     }
 
     /// Writes one four-nibble hexadecimal value into the framebuffer.
-    pub fn set_hex(&mut self, value: u16) {
+    ///
+    /// # Panics
+    ///
+    /// The guarded glyph conversion is exhaustive for every masked four-bit nibble.
+    pub const fn set_hex(&mut self, value: u16) {
         self.glyphs = [
             SevenSegmentGlyph::from_hex(((value >> 12) & 0x0f) as u8)
                 .expect("upper nibble should be valid"),
@@ -683,7 +700,7 @@ where
     }
 
     fn clear(&mut self) {
-        Self::clear(self)
+        Self::clear(self);
     }
 
     fn disable(&mut self) -> Result<(), Self::Error> {
@@ -730,7 +747,7 @@ where
     }
 
     fn clear(&mut self) {
-        Self::clear(self)
+        Self::clear(self);
     }
 
     fn disable(&mut self) -> Result<(), Self::Error> {

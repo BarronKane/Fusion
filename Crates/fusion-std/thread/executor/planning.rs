@@ -402,6 +402,9 @@ impl CurrentAsyncRuntimeBackingPlan {
     /// The optional async spill domain is part of the full plan so hosted or explicitly
     /// provisioned runtimes can reserve exact-envelope backing up front instead of improvising
     /// another acquisition story later.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn for_config(config: ExecutorConfig) -> Result<Self, ExecutorError> {
         Self::for_config_with_layout_policy(
             config,
@@ -413,6 +416,9 @@ impl CurrentAsyncRuntimeBackingPlan {
 
     /// Returns the explicit backing plan for one current-thread runtime configuration under one
     /// explicit allocator layout policy.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn for_config_with_layout_policy(
         config: ExecutorConfig,
         layout_policy: AllocatorLayoutPolicy,
@@ -426,6 +432,9 @@ impl CurrentAsyncRuntimeBackingPlan {
 
     /// Returns the explicit backing plan for one current-thread runtime configuration under one
     /// explicit allocator layout policy and one explicit executor-planning surface.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn for_config_with_layout_policy_and_planning_support(
         config: ExecutorConfig,
         layout_policy: AllocatorLayoutPolicy,
@@ -489,12 +498,18 @@ impl CurrentAsyncRuntimeBackingPlan {
     ///
     /// The total byte count includes worst-case padding for an arbitrarily aligned caller-owned
     /// slab base.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn combined(self) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
         self.combined_with_base_alignment(1)
     }
 
     /// Packs the per-domain requests into one owning slab for a caller that can guarantee the
     /// slab base is aligned to at least `base_align`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn combined_for_base_alignment(
         self,
         base_align: usize,
@@ -506,12 +521,18 @@ impl CurrentAsyncRuntimeBackingPlan {
     ///
     /// Exact task backing is now part of the honest runtime floor, so the eager plan includes the
     /// shared async spill domain as well.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn combined_eager(self) -> Result<CurrentAsyncRuntimeCombinedBackingPlan, ExecutorError> {
         self.combined_eager_with_base_alignment(1)
     }
 
     /// Packs only the eagerly required domains into one owning slab for a caller that can
     /// guarantee the slab base is aligned to at least `base_align`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn combined_eager_for_base_alignment(
         self,
         base_align: usize,

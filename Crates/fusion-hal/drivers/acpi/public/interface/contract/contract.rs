@@ -39,6 +39,7 @@ pub trait AcpiHardware {
 }
 
 /// Hardware-facing ACPI battery substrate.
+#[allow(clippy::missing_errors_doc)] // Hardware errors are backend-defined `AcpiError` values.
 pub trait AcpiBatteryHardware: AcpiHardware {
     fn batteries(provider: u8) -> &'static [AcpiBatteryDescriptor];
     fn battery_support(provider: u8, index: u8) -> Result<AcpiBatterySupport, AcpiError>;
@@ -47,6 +48,7 @@ pub trait AcpiBatteryHardware: AcpiHardware {
 }
 
 /// Hardware-facing ACPI power-source substrate.
+#[allow(clippy::missing_errors_doc)] // Hardware errors are backend-defined `AcpiError` values.
 pub trait AcpiPowerSourceHardware: AcpiHardware {
     fn power_sources(provider: u8) -> &'static [AcpiPowerSourceDescriptor];
     fn power_source_support(provider: u8, index: u8) -> Result<AcpiPowerSourceSupport, AcpiError>;
@@ -54,6 +56,7 @@ pub trait AcpiPowerSourceHardware: AcpiHardware {
 }
 
 /// Hardware-facing ACPI thermal-zone substrate.
+#[allow(clippy::missing_errors_doc)] // Hardware errors are backend-defined `AcpiError` values.
 pub trait AcpiThermalHardware: AcpiHardware {
     fn thermal_zones(provider: u8) -> &'static [AcpiThermalZoneDescriptor];
     fn thermal_zone_support(provider: u8, index: u8) -> Result<AcpiThermalSupport, AcpiError>;
@@ -61,6 +64,7 @@ pub trait AcpiThermalHardware: AcpiHardware {
 }
 
 /// Hardware-facing ACPI fan substrate.
+#[allow(clippy::missing_errors_doc)] // Hardware errors are backend-defined `AcpiError` values.
 pub trait AcpiFanHardware: AcpiHardware {
     fn fans(provider: u8) -> &'static [AcpiFanDescriptor];
     fn fan_support(provider: u8, index: u8) -> Result<AcpiFanSupport, AcpiError>;
@@ -68,6 +72,7 @@ pub trait AcpiFanHardware: AcpiHardware {
 }
 
 /// Hardware-facing ACPI button/switch substrate.
+#[allow(clippy::missing_errors_doc)] // Hardware errors are backend-defined `AcpiError` values.
 pub trait AcpiButtonHardware: AcpiHardware {
     fn buttons(provider: u8) -> &'static [AcpiButtonDescriptor];
     fn button_support(provider: u8, index: u8) -> Result<AcpiButtonSupport, AcpiError>;
@@ -75,6 +80,7 @@ pub trait AcpiButtonHardware: AcpiHardware {
 }
 
 /// Hardware-facing ACPI lid substrate.
+#[allow(clippy::missing_errors_doc)] // Hardware errors are backend-defined `AcpiError` values.
 pub trait AcpiLidHardware: AcpiHardware {
     fn lids(provider: u8) -> &'static [AcpiLidDescriptor];
     fn lid_support(provider: u8, index: u8) -> Result<AcpiLidSupport, AcpiError>;
@@ -82,6 +88,7 @@ pub trait AcpiLidHardware: AcpiHardware {
 }
 
 /// Hardware-facing ACPI embedded-controller substrate.
+#[allow(clippy::missing_errors_doc)] // Hardware errors are backend-defined `AcpiError` values.
 pub trait AcpiEmbeddedControllerHardware: AcpiHardware {
     fn embedded_controllers(provider: u8) -> &'static [AcpiEmbeddedControllerDescriptor];
     fn embedded_controller_support(
@@ -98,6 +105,7 @@ pub trait AcpiEmbeddedControllerHardware: AcpiHardware {
 }
 
 /// Hardware-facing ACPI processor substrate.
+#[allow(clippy::missing_errors_doc)] // Hardware errors are backend-defined `AcpiError` values.
 pub trait AcpiProcessorHardware: AcpiHardware {
     fn processors(provider: u8) -> &'static [AcpiProcessorDescriptor];
     fn processor_support(provider: u8, index: u8) -> Result<AcpiProcessorSupport, AcpiError>;

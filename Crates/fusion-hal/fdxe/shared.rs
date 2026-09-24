@@ -30,6 +30,9 @@ pub const FDXE_MODULE_V1_ABI_VERSION: u32 = 1;
 pub const FDXE_ENDIANNESS_LITTLE: u8 = 1;
 /// Big-endian layout tag.
 pub const FDXE_ENDIANNESS_BIG: u8 = 2;
+// All supported Rust pointer widths fit in one byte in the FDXE ABI header.
+#[allow(clippy::cast_possible_truncation)]
+const FDXE_POINTER_WIDTH_BITS: u8 = usize::BITS as u8;
 /// Platform error code surfaced when one requested FDXE module carries the wrong magic tag.
 pub const FDXE_DRIVER_PLATFORM_BAD_MAGIC: i32 = -12_001;
 /// Platform error code surfaced when one requested FDXE module uses the wrong ABI version.
@@ -65,7 +68,7 @@ impl FdxeStr {
     /// The caller must ensure the pointer/length pair originated from a valid static UTF-8
     /// string in the loaded module image.
     #[must_use]
-    pub unsafe fn as_str(self) -> &'static str {
+    pub const unsafe fn as_str(self) -> &'static str {
         let bytes = unsafe { slice::from_raw_parts(self.ptr, self.len) };
         unsafe { str::from_utf8_unchecked(bytes) }
     }
@@ -130,7 +133,7 @@ impl FdxeStaticModuleV1 {
     pub const fn new(module: &'static FdxeModuleV1) -> Self {
         Self {
             struct_size: size_of::<Self>(),
-            module: module as *const FdxeModuleV1,
+            module: core::ptr::from_ref::<FdxeModuleV1>(module),
         }
     }
 }
@@ -176,7 +179,7 @@ impl FdxeModuleV1 {
             struct_size: size_of::<Self>(),
             export_struct_size: size_of::<FdxeDriverExportV1>(),
             driver_metadata_size: size_of::<DriverMetadata>(),
-            pointer_width_bits: usize::BITS as u8,
+            pointer_width_bits: FDXE_POINTER_WIDTH_BITS,
             endianness: if cfg!(target_endian = "little") {
                 FDXE_ENDIANNESS_LITTLE
             } else {
@@ -212,7 +215,7 @@ impl FdxeModuleV1 {
         if self.driver_metadata_size != size_of::<DriverMetadata>() {
             return Err(FdxeModuleError::layout_mismatch());
         }
-        if self.pointer_width_bits != usize::BITS as u8 {
+        if self.pointer_width_bits != FDXE_POINTER_WIDTH_BITS {
             return Err(FdxeModuleError::layout_mismatch());
         }
 
@@ -323,15 +326,15 @@ impl FdxeModuleError {
 impl From<FdxeModuleError> for DriverError {
     fn from(error: FdxeModuleError) -> Self {
         match error.kind() {
-            FdxeModuleErrorKind::BadMagic => DriverError::platform(FDXE_DRIVER_PLATFORM_BAD_MAGIC),
+            FdxeModuleErrorKind::BadMagic => Self::platform(FDXE_DRIVER_PLATFORM_BAD_MAGIC),
             FdxeModuleErrorKind::AbiMismatch => {
-                DriverError::platform(FDXE_DRIVER_PLATFORM_ABI_MISMATCH)
+                Self::platform(FDXE_DRIVER_PLATFORM_ABI_MISMATCH)
             }
             FdxeModuleErrorKind::LayoutMismatch => {
-                DriverError::platform(FDXE_DRIVER_PLATFORM_LAYOUT_MISMATCH)
+                Self::platform(FDXE_DRIVER_PLATFORM_LAYOUT_MISMATCH)
             }
-            FdxeModuleErrorKind::DuplicateModule => DriverError::already_registered(),
-            FdxeModuleErrorKind::CapacityExhausted => DriverError::resource_exhausted(),
+            FdxeModuleErrorKind::DuplicateModule => Self::already_registered(),
+            FdxeModuleErrorKind::CapacityExhausted => Self::resource_exhausted(),
         }
     }
 }
@@ -354,7 +357,7 @@ pub struct FdxeModuleInventory {
     pub driver_count: usize,
 }
 
-fn resolve_static_module(entry: &FdxeStaticModuleV1) -> Result<&'static FdxeModuleV1, FdxeModuleError> {
+const fn resolve_static_module(entry: &FdxeStaticModuleV1) -> Result<&'static FdxeModuleV1, FdxeModuleError> {
     if entry.struct_size != size_of::<FdxeStaticModuleV1>() {
         return Err(FdxeModuleError::layout_mismatch());
     }
@@ -399,7 +402,7 @@ pub struct FdxeRegistry<'a> {
 impl<'a> FdxeRegistry<'a> {
     /// Creates one runtime registry over caller-owned storage.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         modules: &'a mut [MaybeUninit<&'static FdxeModuleV1>],
         drivers: &'a mut [MaybeUninit<&'static FdxeDriverExportV1>],
     ) -> Self {
@@ -482,14 +485,14 @@ impl<'a> FdxeRegistry<'a> {
 
     /// Returns all registered module headers.
     #[must_use]
-    pub fn modules(&self) -> &[&'static FdxeModuleV1] {
+    pub const fn modules(&self) -> &[&'static FdxeModuleV1] {
         // SAFETY: the prefix `[0..module_count)` is initialized by `register_module`.
         unsafe { slice::from_raw_parts(self.modules.as_ptr().cast(), self.module_count) }
     }
 
     /// Returns all exported driver entries collected from registered modules.
     #[must_use]
-    pub fn drivers(&self) -> &[&'static FdxeDriverExportV1] {
+    pub const fn drivers(&self) -> &[&'static FdxeDriverExportV1] {
         // SAFETY: the prefix `[0..driver_count)` is initialized by `register_module`.
         unsafe { slice::from_raw_parts(self.drivers.as_ptr().cast(), self.driver_count) }
     }

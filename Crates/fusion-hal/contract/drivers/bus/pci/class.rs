@@ -1,6 +1,6 @@
 //! Shared PCI class-taxonomy helpers.
 
-use super::core::*;
+use super::core::PciClassCode;
 
 /// Known base-class taxonomy for one PCI class code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

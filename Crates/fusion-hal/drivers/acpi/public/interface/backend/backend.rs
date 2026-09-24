@@ -64,6 +64,10 @@ pub struct AcpiAmlNamespaceDescriptor {
 /// This does not evaluate AML itself. It declares which namespace roots, methods, fields, and
 /// opregions a backend expects the firmware AML lane to realize.
 pub trait AcpiAmlBackend: AcpiHardware {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     fn aml_namespace(provider: u8) -> Result<AcpiAmlNamespaceDescriptor, AcpiError>;
     fn aml_methods(provider: u8) -> &'static [AcpiAmlMethodDescriptor];
     fn aml_fields(provider: u8) -> &'static [AcpiAmlFieldDescriptor];

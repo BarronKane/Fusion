@@ -5,7 +5,7 @@
 //! piece of typed truth, and inventing a zero/default device id would be a lie dressed up as
 //! ergonomics.
 
-use super::core::*;
+use super::core::PciDeviceId;
 
 /// SR-IOV capability truth for one PF.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

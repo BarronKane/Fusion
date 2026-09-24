@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
@@ -88,10 +89,10 @@ fn render_str_list(name: &str, values: &[impl AsRef<str>]) -> String {
         return format!("pub const {name}: &[&str] = &[];\n");
     }
 
-    let body = values
-        .iter()
-        .map(|value| format!("    {:?},\n", value.as_ref()))
-        .collect::<String>();
+    let mut body = String::new();
+    for value in values {
+        writeln!(&mut body, "    {:?},", value.as_ref()).expect("writing to a String cannot fail");
+    }
     format!("pub const {name}: &[&str] = &[\n{body}];\n")
 }
 
@@ -130,11 +131,15 @@ fn main() {
         "REQUESTED_FDXE_MODULE_CRATE_NAMES",
         &requests,
     ));
-    rendered.push_str(&format!(
-        "pub const REQUESTED_FDXE_MODULE_CAPACITY: usize = {module_capacity};\n"
-    ));
-    rendered.push_str(&format!(
-        "pub const REQUESTED_FDXE_DRIVER_CAPACITY: usize = {driver_capacity};\n"
-    ));
+    writeln!(
+        &mut rendered,
+        "pub const REQUESTED_FDXE_MODULE_CAPACITY: usize = {module_capacity};"
+    )
+    .expect("writing to a String cannot fail");
+    writeln!(
+        &mut rendered,
+        "pub const REQUESTED_FDXE_DRIVER_CAPACITY: usize = {driver_capacity};"
+    )
+    .expect("writing to a String cannot fail");
     fs::write(&requests_out, rendered).expect("write selected FDXE request list");
 }

@@ -1,7 +1,7 @@
 //! Backend-owned deferred runtime dispatch broker.
 //!
 //! Higher layers can register courier/runtime callbacks here without learning how the selected
-//! backend actually schedules them. On Cortex-M this is realized through reserved PendSV
+//! backend actually schedules them. On Cortex-M this is realized through reserved `PendSV`
 //! dispatch. Backends without a truthful deferred-dispatch substrate fall back to synchronous
 //! local dispatch so callers never have to regress to manual pump vocabulary just to stay alive.
 
@@ -66,7 +66,8 @@ pub fn register_runtime_dispatch_callback(
         return Err(HardwareError::state_conflict());
     }
     RUNTIME_DISPATCH_CONTEXTS[index].store(context, Ordering::Release);
-    Ok(RuntimeDispatchCookie(cookie as u32))
+    let cookie = u32::try_from(cookie).map_err(|_| HardwareError::resource_exhausted())?;
+    Ok(RuntimeDispatchCookie(cookie))
 }
 
 /// Unregisters one previously registered runtime-dispatch callback.
@@ -117,7 +118,7 @@ pub fn request_runtime_dispatch(cookie: RuntimeDispatchCookie) -> Result<(), Har
 /// Runs one batch of currently pending runtime-dispatch callbacks.
 ///
 /// This is the backend-facing path invoked from reserved deferred-dispatch handlers such as
-/// Cortex-M PendSV. Callers outside the PAL should use [`request_runtime_dispatch()`] instead.
+/// Cortex-M `PendSV`. Callers outside the PAL should use [`request_runtime_dispatch()`] instead.
 pub fn dispatch_pending_runtime_callbacks() {
     RUNTIME_DISPATCH_PHASE.store(10, Ordering::Release);
     if RUNTIME_DISPATCH_RUNNING

@@ -263,11 +263,9 @@ impl ExecutorReactorState {
             return Ok(());
         };
         self.wake.with_ref(|wake| {
-            if let Some(wake) = wake.as_ref() {
+            wake.as_ref().map_or(Ok(()), |wake| {
                 wake.signal.signal().map_err(executor_error_from_fiber_host)
-            } else {
-                Ok(())
-            }
+            })
         })??;
         Ok(())
     }
@@ -467,7 +465,6 @@ impl ExecutorReactorState {
                     waits[slot_index] = AsyncReactorWaitEntry::EMPTY;
                     None
                 }
-                AsyncReactorWaitKind::None => None,
                 _ => None,
             }
         })?;
@@ -506,10 +503,9 @@ impl ExecutorReactorState {
             waits.iter().fold(
                 None::<CanonicalInstant>,
                 |next_deadline, entry| match entry.kind {
-                    AsyncReactorWaitKind::Sleep { deadline, .. } => Some(match next_deadline {
-                        Some(current) => current.min(deadline),
-                        None => deadline,
-                    }),
+                    AsyncReactorWaitKind::Sleep { deadline, .. } => {
+                        Some(next_deadline.map_or(deadline, |current| current.min(deadline)))
+                    }
                     _ => next_deadline,
                 },
             )
@@ -532,7 +528,7 @@ impl ExecutorReactorState {
         loop {
             let key = self.pending_deregister.with(|queue| {
                 Ok::<Option<EventKey>, ExecutorError>(
-                    queue.iter_mut().find_map(|entry| entry.take()),
+                    queue.iter_mut().find_map(core::option::Option::take),
                 )
             })??;
             let Some(key) = key else {
@@ -550,7 +546,7 @@ impl ExecutorReactorState {
         reactor: Reactor,
     ) -> Result<bool, ExecutorError> {
         let mut progressed = false;
-        let slot_count = self.waits.with_ref(|waits| waits.len())?;
+        let slot_count = self.waits.with_ref(fusion_sys::alloc::ArenaSlice::len)?;
         for slot_index in 0..slot_count {
             let pending = self.waits.with_ref(|waits| match waits[slot_index].kind {
                 AsyncReactorWaitKind::ReadinessPending {
@@ -616,7 +612,7 @@ impl ExecutorReactorState {
         now_raw: Option<MonotonicRawInstant>,
     ) -> Result<bool, ExecutorError> {
         let mut progressed = false;
-        let slot_count = self.waits.with_ref(|waits| waits.len())?;
+        let slot_count = self.waits.with_ref(fusion_sys::alloc::ArenaSlice::len)?;
         for slot_index in 0..slot_count {
             let generation = self.waits.with(|waits| {
                 let AsyncReactorWaitKind::Sleep {
@@ -702,11 +698,9 @@ impl ExecutorReactorState {
         #[cfg(feature = "std")]
         if wake_event {
             self.wake.with_ref(|wake| {
-                if let Some(wake) = wake.as_ref() {
+                wake.as_ref().map_or(Ok(()), |wake| {
                     wake.signal.drain().map_err(executor_error_from_fiber_host)
-                } else {
-                    Ok(())
-                }
+                })
             })??;
         }
         Ok(progressed)
@@ -716,7 +710,8 @@ impl ExecutorReactorState {
         if !self.ensure_poller(reactor)? {
             return Ok(());
         }
-        let result = self.poller.with(|poller_slot| {
+
+        self.poller.with(|poller_slot| {
             let Some(poller) = poller_slot.as_mut() else {
                 return Ok(());
             };
@@ -732,8 +727,7 @@ impl ExecutorReactorState {
                 }
                 Err(error) => Err(executor_error_from_event(error)),
             }
-        })?;
-        result
+        })?
     }
 
     fn drive(
@@ -855,7 +849,7 @@ impl HostedReadyQueueState {
         }
     }
 
-    fn enqueue(&mut self, job: CurrentJob) -> Result<(), ExecutorError> {
+    const fn enqueue(&mut self, job: CurrentJob) -> Result<(), ExecutorError> {
         if self.len == self.entries.len() {
             return Err(executor_overflow());
         }
@@ -865,7 +859,7 @@ impl HostedReadyQueueState {
         Ok(())
     }
 
-    fn dequeue(&mut self) -> Option<CurrentJob> {
+    const fn dequeue(&mut self) -> Option<CurrentJob> {
         if self.len == 0 {
             return None;
         }
@@ -876,7 +870,7 @@ impl HostedReadyQueueState {
     }
 
     #[allow(dead_code)]
-    fn clear(&mut self) -> usize {
+    const fn clear(&mut self) -> usize {
         let dropped = self.len;
         while self.dequeue().is_some() {}
         dropped
@@ -916,7 +910,7 @@ impl FixedIndexStack {
     }
 
     fn contains(&self, value: usize) -> bool {
-        self.entries[..self.len].iter().any(|entry| *entry == value)
+        self.entries[..self.len].contains(&value)
     }
 }
 
@@ -994,16 +988,15 @@ impl InlineAsyncFutureStorage {
         unsafe { poll(self, result, spill_store, context) }
     }
 
-    fn clear(&mut self, spill_store: &AsyncTaskSpillStore) -> Result<(), ExecutorError> {
+    fn clear(&mut self) {
         self.drop_value_only();
         if let Some(allocation) = self.allocation.take() {
-            spill_store.deallocate(allocation)?;
+            AsyncTaskSpillStore::deallocate(allocation);
         }
         self.poll = None;
-        Ok(())
     }
 
-    fn storage_ptr(&mut self) -> *mut u8 {
+    fn storage_ptr(&self) -> *mut u8 {
         self.allocation
             .as_ref()
             .expect("async futures always live inside one exact lifecycle envelope")
@@ -1011,7 +1004,7 @@ impl InlineAsyncFutureStorage {
             .as_ptr()
     }
 
-    fn take_allocation(&mut self) -> Option<ExtentLease> {
+    const fn take_allocation(&mut self) -> Option<ExtentLease> {
         self.allocation.take()
     }
 
@@ -1044,11 +1037,11 @@ struct AsyncTaskSpillStore {
 }
 
 impl AsyncTaskSpillStore {
-    fn new(_fast: bool, allocator: Option<ExecutorDomainAllocator>) -> Self {
+    const fn new(_fast: bool, allocator: Option<ExecutorDomainAllocator>) -> Self {
         Self { allocator }
     }
 
-    fn supports_layout(&self, _len: usize, _align: usize) -> bool {
+    const fn supports_layout(&self, _len: usize, _align: usize) -> bool {
         self.allocator.is_some()
     }
 
@@ -1077,9 +1070,8 @@ impl AsyncTaskSpillStore {
         self.allocate_for_layout(len, align)
     }
 
-    fn deallocate(&self, allocation: ExtentLease) -> Result<(), ExecutorError> {
+    fn deallocate(allocation: ExtentLease) {
         drop(allocation);
-        Ok(())
     }
 }
 
@@ -1132,7 +1124,7 @@ impl InlineAsyncResultStorage {
         Ok(())
     }
 
-    fn take<T: 'static>(&mut self, spill_store: &AsyncTaskSpillStore) -> Result<T, ExecutorError> {
+    fn take<T: 'static>(&mut self) -> Result<T, ExecutorError> {
         if !self.occupied || self.type_id != Some(TypeId::of::<T>()) {
             return Err(executor_invalid());
         }
@@ -1142,21 +1134,20 @@ impl InlineAsyncResultStorage {
         self.occupied = false;
         let value = unsafe { self.storage_ptr().cast::<T>().read() };
         if let Some(allocation) = self.allocation.take() {
-            spill_store.deallocate(allocation)?;
+            AsyncTaskSpillStore::deallocate(allocation);
         }
         Ok(value)
     }
 
-    fn clear(&mut self, spill_store: &AsyncTaskSpillStore) -> Result<(), ExecutorError> {
+    fn clear(&mut self) {
         self.drop_value_only();
         if let Some(allocation) = self.allocation.take() {
-            spill_store.deallocate(allocation)?;
+            AsyncTaskSpillStore::deallocate(allocation);
         }
         self.type_id = None;
-        Ok(())
     }
 
-    fn storage_ptr(&mut self) -> *mut u8 {
+    fn storage_ptr(&self) -> *mut u8 {
         self.allocation
             .as_ref()
             .expect("async results always live inside one exact lifecycle envelope")

@@ -18,6 +18,8 @@ use super::types::{
 };
 
 /// Public management and capability surface for one display sink.
+/// Operational failures use the backend's `DisplayResult` error contract.
+#[allow(clippy::missing_errors_doc)] // Each operation's concrete failure set is backend-defined.
 pub trait DisplayControlContract {
     /// Concrete opened port surface owned by this control surface.
     type Port<'a>: DisplayPortContract

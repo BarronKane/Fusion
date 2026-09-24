@@ -30,7 +30,7 @@ impl DomainBaseContract for UnsupportedDomain {
         DomainId::new(0)
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "unsupported-domain"
     }
 
@@ -55,7 +55,7 @@ impl CourierBaseContract for UnsupportedCourier {
         CourierId::new(0)
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "unsupported-courier"
     }
 
@@ -90,7 +90,7 @@ impl ContextBaseContract for UnsupportedContext {
         ContextId::new(0)
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "unsupported-context"
     }
 

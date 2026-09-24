@@ -15,6 +15,8 @@ use super::types::{
 use super::DisplaySurfaceId;
 
 /// Canonical machine-display composition surface.
+/// Operational failures use the backend's `DisplayResult` error contract.
+#[allow(clippy::missing_errors_doc)] // Each operation's concrete failure set is backend-defined.
 pub trait DisplayLayoutContract {
     /// Concrete borrowed control handle/view returned for one display output.
     ///

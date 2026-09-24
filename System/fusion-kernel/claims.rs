@@ -96,6 +96,8 @@ impl<
     ///
     /// Returns an honest error when the parent does not exist, the descriptor is invalid, or
     /// storage is exhausted.
+    // Keep each authority digest explicit at this boundary to match the signed claim contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn admit_child_courier(
         &mut self,
         parent: CourierId,
@@ -198,7 +200,7 @@ impl<
 
     /// Bumps the attachment-bond revocation epoch.
     #[must_use]
-    pub fn bump_revocation_epoch(&mut self) -> u64 {
+    pub const fn bump_revocation_epoch(&mut self) -> u64 {
         self.authority.bump_revocation_epoch()
     }
 

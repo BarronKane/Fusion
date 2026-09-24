@@ -23,7 +23,7 @@ impl Semaphore {
     ///
     /// Returns an error if the backend rejects the requested semaphore shape or does not
     /// support semaphores honestly on the current platform.
-    pub fn new(initial: u32, max: u32) -> Result<Self, SyncError> {
+    pub const fn new(initial: u32, max: u32) -> Result<Self, SyncError> {
         match PlatformSemaphore::new(initial, max) {
             Ok(raw) => Ok(Self { raw }),
             Err(error) => Err(error),

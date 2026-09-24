@@ -41,30 +41,43 @@ pub enum AmlValue<'a> {
     None,
 }
 
-impl<'a> AmlValue<'a> {
+#[allow(clippy::needless_pass_by_value)] // Value projection consumes an interpreter result.
+impl AmlValue<'_> {
     #[must_use]
     pub const fn integer(value: u64, width: AmlIntegerWidth) -> Self {
         match width {
-            AmlIntegerWidth::Bits32 => Self::Integer((value as u32) as u64),
+            AmlIntegerWidth::Bits32 => Self::Integer(value & 0xffff_ffff),
             AmlIntegerWidth::Bits64 => Self::Integer(value),
         }
     }
 
-    pub fn as_integer(self) -> AmlResult<u64> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
+    pub const fn as_integer(self) -> AmlResult<u64> {
         match self {
             Self::Integer(value) => Ok(value),
             _ => Err(AmlError::unsupported()),
         }
     }
 
-    pub fn as_package_handle(self) -> AmlResult<AmlRuntimePackageHandle> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
+    pub const fn as_package_handle(self) -> AmlResult<AmlRuntimePackageHandle> {
         match self {
             Self::PackageHandle(handle) => Ok(handle),
             _ => Err(AmlError::unsupported()),
         }
     }
 
-    pub fn as_buffer_handle(self) -> AmlResult<AmlRuntimeBufferHandle> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
+    pub const fn as_buffer_handle(self) -> AmlResult<AmlRuntimeBufferHandle> {
         match self {
             Self::BufferHandle(handle) => Ok(handle),
             _ => Err(AmlError::unsupported()),
@@ -72,18 +85,18 @@ impl<'a> AmlValue<'a> {
     }
 
     #[must_use]
-    pub fn as_logic(self) -> bool {
+    pub const fn as_logic(self) -> bool {
         match self {
             Self::Integer(value) => value != 0,
             Self::None => false,
-            Self::DebugObject => true,
+            Self::DebugObject
+            | Self::StaticString(_)
+            | Self::BufferHandle(_)
+            | Self::StaticPackage(_)
+            | Self::PackageHandle(_) => true,
             Self::String(value) => !value.is_empty(),
-            Self::StaticString(_) => true,
             Self::Buffer(value) => !value.is_empty(),
-            Self::BufferHandle(_) => true,
             Self::Package(value) => !value.is_empty(),
-            Self::StaticPackage(_) => true,
-            Self::PackageHandle(_) => true,
         }
     }
 }

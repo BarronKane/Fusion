@@ -228,14 +228,12 @@ impl<const MEMBERS: usize, const EXTENTS: usize> MemoryPool<MEMBERS, EXTENTS> {
             .state
             .lock()
             .map_err(|error| MemoryPoolError::synchronization(error.kind))?;
-        let mut seen = 0;
-        for record in state.extents.iter().flatten() {
+        for (seen, record) in state.extents.iter().flatten().enumerate() {
             if seen == index {
                 return Ok(Some(
                     record.public_info(self.member_id(record.member_index)?),
                 ));
             }
-            seen += 1;
         }
         Ok(None)
     }

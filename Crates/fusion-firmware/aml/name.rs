@@ -14,6 +14,10 @@ pub struct AmlNameSeg([u8; 4]);
 impl AmlNameSeg {
     pub const BLANK: Self = Self(*b"____");
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn from_bytes(bytes: [u8; 4]) -> AmlResult<Self> {
         if bytes
             .iter()
@@ -94,6 +98,10 @@ impl AmlResolvedNamePath {
         Some(path)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn push(&mut self, segment: AmlNameSeg) -> AmlResult<()> {
         if usize::from(self.segment_count) >= AML_MAX_PATH_SEGMENTS {
             return Err(AmlError::overflow());
@@ -104,6 +112,10 @@ impl AmlResolvedNamePath {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn pop(&mut self) -> AmlResult<()> {
         if self.segment_count == 0 {
             return Err(AmlError::invalid_name());
@@ -114,6 +126,10 @@ impl AmlResolvedNamePath {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn resolve(self, encoded: AmlEncodedNameString<'_>) -> AmlResult<Self> {
         if encoded.is_null {
             return Ok(self);
@@ -121,8 +137,7 @@ impl AmlResolvedNamePath {
 
         let mut path = match encoded.anchor {
             AmlNameAnchor::Root => Self::root(),
-            AmlNameAnchor::ParentPrefix => self,
-            AmlNameAnchor::Local => self,
+            AmlNameAnchor::ParentPrefix | AmlNameAnchor::Local => self,
         };
 
         if matches!(encoded.anchor, AmlNameAnchor::ParentPrefix) {
@@ -142,6 +157,10 @@ impl AmlResolvedNamePath {
         Ok(path)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn parse_text(raw: &str) -> AmlResult<Self> {
         if !raw.is_ascii() || raw.is_empty() {
             return Err(AmlError::invalid_name());
@@ -181,6 +200,10 @@ pub struct AmlNameString<'a> {
 }
 
 impl<'a> AmlNameString<'a> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn new(raw: &'a str) -> AmlResult<Self> {
         if raw.is_empty() || !raw.is_ascii() {
             return Err(AmlError::invalid_name());
@@ -215,6 +238,10 @@ pub struct AmlEncodedNameString<'a> {
 }
 
 impl<'a> AmlEncodedNameString<'a> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn parse(bytes: &'a [u8]) -> AmlResult<Self> {
         if bytes.is_empty() {
             return Err(AmlError::truncated());
@@ -237,7 +264,7 @@ impl<'a> AmlEncodedNameString<'a> {
 
         let opcode = *bytes.get(offset).ok_or_else(AmlError::truncated)?;
         let (segment_count, raw_segments, consumed_tail, is_null) = match opcode {
-            0x00 => (0_u8, &bytes[offset + 1..offset + 1], 1_usize, true),
+            0x00 => (0_u8, &bytes[offset..offset], 1_usize, true),
             0x2e => {
                 let start = offset + 1;
                 let end = start + 8;
@@ -296,7 +323,7 @@ impl<'a> AmlEncodedNameString<'a> {
 }
 
 fn validate_namesegs(bytes: &[u8]) -> AmlResult<()> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(AmlError::invalid_name());
     }
 

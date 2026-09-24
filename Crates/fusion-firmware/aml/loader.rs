@@ -102,6 +102,10 @@ impl<'a> AmlNamespaceLoadPlan<'a> {
         ]
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn load_into<'storage>(
         self,
         storage: &'storage mut [MaybeUninit<AmlNamespaceLoadRecord>],
@@ -117,6 +121,9 @@ struct AmlNamespaceLoader<'plan, 'storage> {
     next_id: u32,
 }
 
+// Construction rejects definition blocks and record storage larger than the u32 AML span/index
+// domain. Subsequent usize offsets are derived from slices of those checked blocks.
+#[allow(clippy::cast_possible_truncation)]
 impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
     const ROOT_NODE_ID: AmlNamespaceNodeId = AmlNamespaceNodeId(0);
 
@@ -124,6 +131,16 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
         plan: AmlNamespaceLoadPlan<'plan>,
         storage: &'storage mut [MaybeUninit<AmlNamespaceLoadRecord>],
     ) -> AmlResult<Self> {
+        if u32::try_from(storage.len()).is_err()
+            || u32::try_from(plan.blocks.dsdt.bytes.len()).is_err()
+            || plan
+                .blocks
+                .ssdts
+                .iter()
+                .any(|block| u32::try_from(block.bytes.len()).is_err())
+        {
+            return Err(AmlError::overflow());
+        }
         let mut loader = Self {
             plan,
             storage,
@@ -285,10 +302,10 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
                     length: data_consumed as u32,
                 },
             }),
-            match name_value {
-                Some(value) => AmlNamespaceNodePayload::NameInteger(value),
-                None => AmlNamespaceNodePayload::None,
-            },
+            name_value.map_or(
+                AmlNamespaceNodePayload::None,
+                AmlNamespaceNodePayload::NameInteger,
+            ),
         )?;
         Ok(data_offset + data_consumed)
     }
@@ -318,8 +335,7 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
             )?;
         }
 
-        let mut consumed = object_end;
-        if bytes.get(object_end) == Some(&0xa1) {
+        let consumed = if bytes.get(object_end) == Some(&0xa1) {
             let else_pkg = AmlPkgLength::parse(&bytes[object_end + 1..])?;
             let else_end = object_end + 1 + else_pkg.value as usize;
             let else_bytes = bytes
@@ -335,8 +351,10 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
                     current_scope_id,
                 )?;
             }
-            consumed = else_end;
-        }
+            else_end
+        } else {
+            object_end
+        };
 
         Ok(consumed)
     }
@@ -803,7 +821,7 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
         Ok(descriptor.id)
     }
 
-    fn next_node_id(&mut self) -> AmlNamespaceNodeId {
+    const fn next_node_id(&mut self) -> AmlNamespaceNodeId {
         let id = AmlNamespaceNodeId(self.next_id);
         self.next_id += 1;
         id
@@ -825,7 +843,7 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
         self.find_record(path).map(|record| record.descriptor.id)
     }
 
-    fn loaded_namespace(&self) -> AmlLoadedNamespace<'_, 'plan> {
+    const fn loaded_namespace(&self) -> AmlLoadedNamespace<'_, 'plan> {
         let records = unsafe {
             slice::from_raw_parts(
                 self.storage.as_ptr().cast::<AmlNamespaceLoadRecord>(),
@@ -879,7 +897,7 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
             0x92 => {
                 let (value, consumed) =
                     self.evaluate_load_time_term_arg(&bytes[1..], current_scope_path)?;
-                Ok(((value == 0) as u64, 1 + consumed))
+                Ok((u64::from(value == 0), 1 + consumed))
             }
             0x93..=0x95 => {
                 let (lhs, lhs_consumed) =
@@ -903,9 +921,10 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
                 let path = self
                     .loaded_namespace()
                     .resolve_lookup_path(current_scope_path, encoded)?;
-                let value = match self.find_record(path).map(|record| record.payload) {
-                    Some(AmlNamespaceNodePayload::NameInteger(value)) => value,
-                    _ => return Err(AmlError::unsupported()),
+                let Some(AmlNamespaceNodePayload::NameInteger(value)) =
+                    self.find_record(path).map(|record| record.payload)
+                else {
+                    return Err(AmlError::unsupported());
                 };
                 Ok((value, usize::from(encoded.consumed_bytes)))
             }
@@ -913,6 +932,7 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // These arguments are the explicit parse context for one AML Field term.
     fn parse_field_entries(
         &mut self,
         object_bytes: &[u8],
@@ -988,7 +1008,7 @@ impl<'plan, 'storage> AmlNamespaceLoader<'plan, 'storage> {
     }
 }
 
-fn scope_capable(kind: AmlObjectKind) -> bool {
+const fn scope_capable(kind: AmlObjectKind) -> bool {
     matches!(
         kind,
         AmlObjectKind::Scope
@@ -1008,16 +1028,14 @@ fn classify_method_kind(path: AmlResolvedNamePath) -> AmlMethodKind {
         [b'_', b'S', b'T', b'A'] => AmlMethodKind::Status,
         [b'_', b'R', b'E', b'G'] => AmlMethodKind::RegionAvailability,
         [b'_', b'Q', _, _] => AmlMethodKind::NotificationQuery,
-        [b'_', b'L', hi, lo] | [b'_', b'E', hi, lo]
-            if hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit() =>
-        {
+        [b'_', b'L' | b'E', hi, lo] if hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit() => {
             AmlMethodKind::EventHandler
         }
         _ => AmlMethodKind::Ordinary,
     }
 }
 
-fn map_address_space(value: u8) -> AmlAddressSpaceId {
+const fn map_address_space(value: u8) -> AmlAddressSpaceId {
     match value {
         0x00 => AmlAddressSpaceId::SystemMemory,
         0x01 => AmlAddressSpaceId::SystemIo,
@@ -1035,9 +1053,8 @@ fn map_address_space(value: u8) -> AmlAddressSpaceId {
     }
 }
 
-fn decode_field_access(flags: u8) -> AmlFieldAccessKind {
+const fn decode_field_access(flags: u8) -> AmlFieldAccessKind {
     match flags & 0x0f {
-        0x00 => AmlFieldAccessKind::Any,
         0x01 => AmlFieldAccessKind::Byte,
         0x02 => AmlFieldAccessKind::Word,
         0x03 => AmlFieldAccessKind::DWord,
@@ -1047,7 +1064,7 @@ fn decode_field_access(flags: u8) -> AmlFieldAccessKind {
     }
 }
 
-fn decode_field_update(flags: u8) -> AmlFieldUpdateKind {
+const fn decode_field_update(flags: u8) -> AmlFieldUpdateKind {
     match (flags >> 5) & 0b11 {
         0b01 => AmlFieldUpdateKind::WriteAsOnes,
         0b10 => AmlFieldUpdateKind::WriteAsZeros,
@@ -1182,8 +1199,7 @@ fn parse_data_object(bytes: &[u8]) -> AmlResult<(Option<u64>, usize)> {
 fn parse_target(bytes: &[u8]) -> AmlResult<usize> {
     let opcode = *bytes.first().ok_or_else(AmlError::truncated)?;
     match opcode {
-        0x00 => Ok(1),
-        0x60..=0x6e => Ok(1),
+        0x00 | 0x60..=0x6e => Ok(1),
         0x5b => {
             let sub = *bytes.get(1).ok_or_else(AmlError::truncated)?;
             match sub {
@@ -1215,7 +1231,11 @@ mod tests {
         let bytes = {
             let mut table = Vec::from([0_u8; 36]);
             table[0..4].copy_from_slice(b"DSDT");
-            table[4..8].copy_from_slice(&((36 + payload.len()) as u32).to_le_bytes());
+            table[4..8].copy_from_slice(
+                &u32::try_from(36 + payload.len())
+                    .expect("test DSDT fits in u32")
+                    .to_le_bytes(),
+            );
             table[8] = 2;
             table[10..16].copy_from_slice(b"FUSION");
             table[16..24].copy_from_slice(b"AMLLOAD ");

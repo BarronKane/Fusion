@@ -1928,6 +1928,8 @@ fn cleanup_failed_spawn_for(inner: &GreenPoolLease, reservation: &SpawnReservati
     inner.active.fetch_sub(1, Ordering::AcqRel);
 }
 
+// The reservation is an owned rollback token and must live through every failure path.
+#[allow(clippy::needless_pass_by_value)]
 fn complete_spawn_reservation<T>(
     inner: &GreenPoolLease,
     class: fusion_sys::courier::CourierFiberClass,

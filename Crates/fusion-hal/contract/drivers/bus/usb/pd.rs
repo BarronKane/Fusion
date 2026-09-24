@@ -1,7 +1,7 @@
 //! USB Power Delivery policy and contract vocabulary.
 
-use super::core::*;
-use super::error::*;
+use super::core::UsbCoreContract;
+use super::error::UsbError;
 
 /// USB Power Delivery revision truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

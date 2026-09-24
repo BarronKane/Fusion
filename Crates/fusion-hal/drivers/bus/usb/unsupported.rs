@@ -1,4 +1,4 @@
-//! Unsupported hardware-facing USB substrate used when no SoC or interface backend is selected.
+//! Unsupported hardware-facing USB substrate used when no `SoC` or interface backend is selected.
 
 use fusion_hal::contract::drivers::bus::usb::{
     ThunderboltMetadata,

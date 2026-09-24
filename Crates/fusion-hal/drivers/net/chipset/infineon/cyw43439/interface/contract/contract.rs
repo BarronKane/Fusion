@@ -144,9 +144,17 @@ pub trait Cyw43439HardwareContract {
     fn bluetooth_adapters(&self) -> &'static [BluetoothAdapterDescriptor];
 
     /// Returns the truthful Bluetooth host-transport shape for this substrate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn bluetooth_transport(&self) -> Result<Cyw43439BluetoothTransport, Cyw43439Error>;
 
     /// Returns the truthful Bluetooth host-transport clock/baud plan for this substrate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn bluetooth_transport_clock_profile(
         &self,
     ) -> Result<Cyw43439BluetoothTransportClockProfile, Cyw43439Error>;
@@ -158,30 +166,54 @@ pub trait Cyw43439HardwareContract {
     fn wifi_adapters(&self) -> &'static [WifiAdapterDescriptor];
 
     /// Returns the truthful WLAN host-transport shape for this substrate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn wifi_transport(&self) -> Result<Cyw43439WlanTransport, Cyw43439Error>;
 
     /// Returns the truthful WLAN host-transport clock plan for this substrate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn wifi_transport_clock_profile(
         &self,
     ) -> Result<Cyw43439WlanTransportClockProfile, Cyw43439Error>;
 
     /// Returns whether the two radio facets reach the host through split or shared transport
     /// plumbing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn transport_topology(&self) -> Result<Cyw43439TransportTopology, Cyw43439Error>;
 
     /// Returns the truthful controller-plumbing capability surface for one radio facet.
     fn controller_caps(&self, radio: Cyw43439Radio) -> Cyw43439ControllerCaps;
 
     /// Claims one radio facet exclusively.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn claim_controller(&mut self, radio: Cyw43439Radio) -> Result<(), Cyw43439Error>;
 
     /// Releases one previously claimed radio facet.
     fn release_controller(&mut self, radio: Cyw43439Radio);
 
     /// Returns whether one logical radio facet is currently enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn facet_enabled(&self, radio: Cyw43439Radio) -> Result<bool, Cyw43439Error>;
 
     /// Enables or disables one logical radio facet without pretending it owns the whole chip.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn set_facet_enabled(
         &mut self,
         radio: Cyw43439Radio,
@@ -189,24 +221,48 @@ pub trait Cyw43439HardwareContract {
     ) -> Result<(), Cyw43439Error>;
 
     /// Returns whether the shared controller rail is currently powered.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn controller_powered(&self) -> Result<bool, Cyw43439Error>;
 
     /// Powers the shared controller rail on or off.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn set_controller_powered(&mut self, powered: bool) -> Result<(), Cyw43439Error>;
 
     /// Asserts or deasserts the shared controller reset line.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn set_controller_reset(&mut self, asserted: bool) -> Result<(), Cyw43439Error>;
 
     /// Asserts or deasserts the shared controller wake line.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn set_controller_wake(&mut self, awake: bool) -> Result<(), Cyw43439Error>;
 
     /// Acquires the shared controller transport for one logical radio facet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn acquire_transport(&mut self, radio: Cyw43439Radio) -> Result<(), Cyw43439Error>;
 
     /// Releases one previously acquired shared controller transport lease.
     fn release_transport(&mut self, radio: Cyw43439Radio);
 
     /// Waits for one controller interrupt indication relevant to one radio facet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn wait_for_controller_irq(
         &mut self,
         radio: Cyw43439Radio,
@@ -214,9 +270,17 @@ pub trait Cyw43439HardwareContract {
     ) -> Result<bool, Cyw43439Error>;
 
     /// Acknowledges one pending controller interrupt indication.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn acknowledge_controller_irq(&mut self, radio: Cyw43439Radio) -> Result<(), Cyw43439Error>;
 
     /// Writes one raw controller transport frame for one radio facet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn write_controller_transport(
         &mut self,
         radio: Cyw43439Radio,
@@ -224,6 +288,10 @@ pub trait Cyw43439HardwareContract {
     ) -> Result<(), Cyw43439Error>;
 
     /// Reads one raw controller transport frame into caller-owned storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn read_controller_transport(
         &mut self,
         radio: Cyw43439Radio,
@@ -236,6 +304,10 @@ pub trait Cyw43439HardwareContract {
     /// controller-internal activity LED or similar witness, and the driver may toggle it to show
     /// "driver is currently doing work" without pretending this is part of Bluetooth or Wi-Fi
     /// protocol law.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn set_driver_activity_indicator(&mut self, _active: bool) -> Result<(), Cyw43439Error> {
         Ok(())
     }
@@ -251,6 +323,10 @@ pub trait Cyw43439HardwareContract {
     }
 
     /// Returns the truthful capability snapshot for one WL GPIO line.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn wl_gpio_capabilities(&self, wl_gpio: u8) -> Result<GpioCapabilities, Cyw43439Error> {
         self.wl_gpio_pins()
             .iter()
@@ -260,16 +336,28 @@ pub trait Cyw43439HardwareContract {
     }
 
     /// Configures one WL GPIO line for input sampling.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn configure_wl_gpio_input(&mut self, _wl_gpio: u8) -> Result<(), Cyw43439Error> {
         Err(Cyw43439Error::unsupported())
     }
 
     /// Reads one WL GPIO input level.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn read_wl_gpio(&mut self, _wl_gpio: u8) -> Result<bool, Cyw43439Error> {
         Err(Cyw43439Error::unsupported())
     }
 
     /// Configures one WL GPIO line for output and drives the initial level.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn configure_wl_gpio_output(
         &mut self,
         _wl_gpio: u8,
@@ -279,6 +367,10 @@ pub trait Cyw43439HardwareContract {
     }
 
     /// Drives one WL GPIO line to the requested level.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn set_wl_gpio_level(&mut self, _wl_gpio: u8, _high: bool) -> Result<(), Cyw43439Error> {
         Err(Cyw43439Error::unsupported())
     }
@@ -289,6 +381,10 @@ pub trait Cyw43439HardwareContract {
 
     /// Reads one bootstrap-phase WLAN F0 register before the host has switched the shared bus into
     /// the normal 32-bit transport mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn bootstrap_read_wlan_register_swapped_u32(
         &mut self,
         _register: Cyw43439GspiF0Register,
@@ -298,6 +394,10 @@ pub trait Cyw43439HardwareContract {
 
     /// Writes one bootstrap-phase WLAN F0 register before the shared bus has switched into the
     /// normal 32-bit transport mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn bootstrap_write_wlan_register_swapped_u32(
         &mut self,
         _register: Cyw43439GspiF0Register,
@@ -306,23 +406,47 @@ pub trait Cyw43439HardwareContract {
         Err(Cyw43439Error::unsupported())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn bootstrap_write_raw_bytes(&mut self, _payload: &[u8]) -> Result<(), Cyw43439Error> {
         Err(Cyw43439Error::unsupported())
     }
 
     /// Returns one optional controller firmware image for one radio facet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn firmware_image(&self, radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error>;
 
     /// Returns one optional controller NVRAM/config image for one radio facet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn nvram_image(&self, radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error>;
 
     /// Returns one optional controller CLM/regulatory image for one radio facet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn clm_image(&self, radio: Cyw43439Radio) -> Result<Option<&'static [u8]>, Cyw43439Error>;
 
     /// Returns the selected controller reference clock frequency when the board surfaces one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn reference_clock_hz(&self) -> Result<Option<u32>, Cyw43439Error>;
 
     /// Returns the selected controller external sleep clock frequency when the board surfaces one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed chip-interface error when the operation is unsupported or fails.
     fn sleep_clock_hz(&self) -> Result<Option<u32>, Cyw43439Error>;
 
     /// Sleeps for one board-truthful delay interval.

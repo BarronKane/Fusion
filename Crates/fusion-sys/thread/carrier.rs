@@ -624,6 +624,7 @@ pub const fn system_carrier() -> CarrierSystem {
 impl CarrierSystem {
     /// Returns the synthesized carrier support surface for the current machine.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // One capability synthesis needs to preserve cross-subsystem dependencies.
     pub fn support(&self) -> CarrierSupport {
         let hardware = system_cpu().support();
         let thread = system_thread().support();
@@ -778,6 +779,10 @@ impl CarrierSystem {
     }
 
     /// Writes scheduler-visible logical carrier identifiers into `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn write_logical_cpus(
         &self,
         output: &mut [ThreadLogicalCpuId],
@@ -786,6 +791,10 @@ impl CarrierSystem {
     }
 
     /// Writes core identifiers into `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn write_cores(
         &self,
         output: &mut [ThreadCoreId],
@@ -794,6 +803,10 @@ impl CarrierSystem {
     }
 
     /// Writes cluster identifiers into `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn write_clusters(
         &self,
         output: &mut [ThreadClusterId],
@@ -802,6 +815,10 @@ impl CarrierSystem {
     }
 
     /// Writes package identifiers into `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn write_packages(
         &self,
         output: &mut [HardwareTopologyNodeId],
@@ -810,6 +827,10 @@ impl CarrierSystem {
     }
 
     /// Writes NUMA-node identifiers into `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn write_numa_nodes(
         &self,
         output: &mut [HardwareTopologyNodeId],
@@ -818,6 +839,10 @@ impl CarrierSystem {
     }
 
     /// Writes heterogeneous core-class identifiers into `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn write_core_classes(
         &self,
         output: &mut [ThreadCoreClassId],

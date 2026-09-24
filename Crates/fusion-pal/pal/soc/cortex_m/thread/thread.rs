@@ -325,10 +325,10 @@ impl ThreadPlacementControlContract for CortexMThread {
         Err(ThreadError::unsupported())
     }
 
-    fn placement(&self, _handle: &Self::Handle) -> Result<ThreadPlacementOutcome, ThreadError> {
+    fn placement(&self, handle: &Self::Handle) -> Result<ThreadPlacementOutcome, ThreadError> {
         #[cfg(feature = "soc-rp2350")]
         if rp2350_threading_available() {
-            return rp2350_thread_placement(*_handle);
+            return rp2350_thread_placement(*handle);
         }
 
         Err(ThreadError::unsupported())
@@ -613,10 +613,8 @@ fn rp2350_validate_spawn_config(
             match target {
                 ThreadPlacementTarget::LogicalCpus(cpus)
                     if cpus.len() == 1 && cpus[0].group.0 == 0 && cpus[0].index == 1 => {}
-                ThreadPlacementTarget::LogicalCpus(_) => {
-                    return Err(ThreadError::placement_denied());
-                }
-                ThreadPlacementTarget::Packages(_)
+                ThreadPlacementTarget::LogicalCpus(_)
+                | ThreadPlacementTarget::Packages(_)
                 | ThreadPlacementTarget::NumaNodes(_)
                 | ThreadPlacementTarget::CoreClasses(_) => {
                     return Err(ThreadError::placement_denied());
@@ -670,6 +668,8 @@ unsafe fn rp2350_spawn_thread(
     RP2350_THREAD_ACTIVE.store(true, Ordering::Release);
     RP2350_THREAD_STATE.store(RP2350_THREAD_LAUNCHING, Ordering::Release);
 
+    // Stack top is rounded down to the architecture-required 8-byte alignment before this cast.
+    #[allow(clippy::cast_ptr_alignment)]
     let stack_top = stack_base
         .as_ptr()
         .wrapping_add(stack_len.get())
@@ -872,7 +872,9 @@ fn rp2350_launch_secondary_core(entry: unsafe fn(), sp: *mut u32) -> Result<(), 
             rp2350_fifo_drain();
             unsafe { asm!("sev", options(nomem, nostack, preserves_flags)) };
         }
-        rp2350_fifo_push_blocking(command as u32);
+        rp2350_fifo_push_blocking(
+            u32::try_from(command).map_err(|_| ThreadError::resource_exhausted())?,
+        );
         let response = rp2350_fifo_pop_blocking() as usize;
         seq = if response == command { seq + 1 } else { 0 };
     }

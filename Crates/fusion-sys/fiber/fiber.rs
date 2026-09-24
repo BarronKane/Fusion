@@ -592,6 +592,7 @@ impl<'state, T: FiberRunnable> PinnedFiber<'state, T> {
     /// # Errors
     ///
     /// Returns any honest low-level fiber construction failure.
+    #[allow(clippy::needless_pass_by_value)] // Pin<&mut T> is the ownership token transferred into the fiber.
     pub fn new(state: Pin<&'state mut T>, stack: FiberStack) -> Result<Self, FiberError> {
         let state_ptr = NonNull::from(state.as_ref().get_ref());
         let fiber = Fiber::new(stack, pinned_fiber_entry::<T>, state_ptr.as_ptr().cast())?;
@@ -604,21 +605,21 @@ impl<'state, T: FiberRunnable> PinnedFiber<'state, T> {
 
     /// Returns one shared view of the pinned fiber state.
     #[must_use]
-    pub fn state(&self) -> &T {
+    pub const fn state(&self) -> &T {
         // SAFETY: the state pointer comes from one live pinned reference held for `'state`.
         unsafe { self.state.as_ref() }
     }
 
     /// Returns one pinned mutable view of the fiber state.
     #[must_use]
-    pub fn state_mut(&mut self) -> Pin<&mut T> {
+    pub const fn state_mut(&mut self) -> Pin<&mut T> {
         // SAFETY: the state remains pinned for `'state` and `&mut self` guarantees exclusivity.
         unsafe { Pin::new_unchecked(self.state.as_mut()) }
     }
 
     /// Returns the lifecycle state of the underlying low-level fiber.
     #[must_use]
-    pub fn fiber_state(&self) -> FiberState {
+    pub const fn fiber_state(&self) -> FiberState {
         self.fiber.state()
     }
 
@@ -732,12 +733,12 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
     ///
     /// This is a transitional low-level hook. The real courier runtime should set this
     /// automatically at admission time once the scheduler/courier boundary owns that truth.
-    pub fn bind_to_courier(&mut self, courier_id: CourierId) {
+    pub const fn bind_to_courier(&mut self, courier_id: CourierId) {
         self.courier_id = Some(courier_id);
     }
 
     /// Binds this managed fiber to one context identity for runtime self-query surfaces.
-    pub fn bind_to_context(&mut self, context_id: ContextId) {
+    pub const fn bind_to_context(&mut self, context_id: ContextId) {
         self.context_id = Some(context_id);
     }
 
@@ -798,7 +799,11 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
 
     /// Returns one shared view of the pinned fiber state.
     #[must_use]
-    pub fn state(&self) -> &T {
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
+    pub const fn state(&self) -> &T {
         self.fiber
             .as_ref()
             .expect("managed fiber state should remain present until stack extraction")
@@ -807,7 +812,11 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
 
     /// Returns one pinned mutable view of the managed fiber state.
     #[must_use]
-    pub fn state_mut(&mut self) -> Pin<&mut T> {
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
+    pub const fn state_mut(&mut self) -> Pin<&mut T> {
         self.fiber
             .as_mut()
             .expect("managed fiber state should remain present until stack extraction")
@@ -816,7 +825,11 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
 
     /// Returns the lifecycle state of the underlying low-level fiber.
     #[must_use]
-    pub fn fiber_state(&self) -> FiberState {
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
+    pub const fn fiber_state(&self) -> FiberState {
         self.fiber
             .as_ref()
             .expect("managed fiber state should remain present until stack extraction")
@@ -825,7 +838,7 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
 
     /// Returns a stable snapshot of the managed fiber's current execution and claim state.
     #[must_use]
-    pub fn snapshot(&self) -> ManagedFiberSnapshot {
+    pub const fn snapshot(&self) -> ManagedFiberSnapshot {
         ManagedFiberSnapshot {
             id: self.id,
             state: self.fiber_state(),
@@ -837,19 +850,19 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
 
     /// Returns the managed fiber's current situation for courier-facing supervision.
     #[must_use]
-    pub fn current_situation(&self) -> ManagedFiberSnapshot {
+    pub const fn current_situation(&self) -> ManagedFiberSnapshot {
         self.snapshot()
     }
 
     /// Returns whether the managed fiber is actively running right now.
     #[must_use]
-    pub fn is_running(&self) -> bool {
+    pub const fn is_running(&self) -> bool {
         matches!(self.fiber_state(), FiberState::Running)
     }
 
     /// Returns whether the managed fiber has completed permanently.
     #[must_use]
-    pub fn is_completed(&self) -> bool {
+    pub const fn is_completed(&self) -> bool {
         matches!(self.fiber_state(), FiberState::Completed)
     }
 
@@ -858,6 +871,10 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
     /// # Errors
     ///
     /// Returns any honest low-level fiber resumption failure.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn resume(&mut self) -> Result<FiberYield, FiberError> {
         if !self.started {
             self.publish_metadata(FiberMetadataMessage::Started { fiber: self.id });
@@ -893,6 +910,10 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
     /// # Errors
     ///
     /// Returns a state-conflict error when the fiber has not completed yet.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal invariant is violated.
     pub fn into_stack(mut self) -> Result<FiberStack, FiberError> {
         self.fiber
             .take()
@@ -911,8 +932,8 @@ impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: 
     }
 }
 
-impl<'state, T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: usize> Drop
-    for ManagedFiber<'state, T, META_CAPACITY, MAX_CONSUMERS>
+impl<T: FiberRunnable, const META_CAPACITY: usize, const MAX_CONSUMERS: usize> Drop
+    for ManagedFiber<'_, T, META_CAPACITY, MAX_CONSUMERS>
 {
     fn drop(&mut self) {
         if let Some(fiber) = self.fiber.as_ref() {
@@ -937,11 +958,14 @@ impl Fiber {
     pub fn new(stack: FiberStack, entry: FiberEntry, arg: *mut ()) -> Result<Self, FiberError> {
         FUSION_FIBER_NEW_PHASE.store(1, Ordering::Release);
         FUSION_FIBER_NEW_STACK_BASE_LOW.store(
-            (stack.base.as_ptr() as usize & 0xffff_ffff) as u32,
+            u32::try_from(stack.base.as_ptr() as usize & 0xffff_ffff).unwrap_or(0),
             Ordering::Release,
         );
         FUSION_FIBER_NEW_STACK_TOP_LOW.store(
-            ((stack.base.as_ptr() as usize).saturating_add(stack.len.get()) & 0xffff_ffff) as u32,
+            u32::try_from(
+                (stack.base.as_ptr() as usize).saturating_add(stack.len.get()) & 0xffff_ffff,
+            )
+            .unwrap_or(0),
             Ordering::Release,
         );
         let context = system_context();
@@ -990,10 +1014,10 @@ impl Fiber {
     /// # Errors
     ///
     /// Returns any honest low-level fiber construction failure.
-    pub fn spawn_pinned<'state, T: FiberRunnable>(
+    pub fn spawn_pinned<T: FiberRunnable>(
         stack: FiberStack,
-        state: Pin<&'state mut T>,
-    ) -> Result<PinnedFiber<'state, T>, FiberError> {
+        state: Pin<&mut T>,
+    ) -> Result<PinnedFiber<'_, T>, FiberError> {
         PinnedFiber::new(state, stack)
     }
 
@@ -1003,14 +1027,13 @@ impl Fiber {
     ///
     /// Returns any honest low-level fiber construction failure.
     pub fn spawn_managed<
-        'state,
         T: FiberRunnable,
         const META_CAPACITY: usize,
         const MAX_CONSUMERS: usize,
     >(
         stack: FiberStack,
-        state: Pin<&'state mut T>,
-    ) -> Result<ManagedFiber<'state, T, META_CAPACITY, MAX_CONSUMERS>, FiberError> {
+        state: Pin<&mut T>,
+    ) -> Result<ManagedFiber<'_, T, META_CAPACITY, MAX_CONSUMERS>, FiberError> {
         ManagedFiber::new(state, stack)
     }
 
@@ -1020,14 +1043,13 @@ impl Fiber {
     ///
     /// Returns any honest low-level fiber or metadata-channel construction failure.
     pub fn spawn_managed_with_publication<
-        'state,
         T: FiberRunnable,
         const META_CAPACITY: usize,
         const MAX_CONSUMERS: usize,
     >(
         stack: FiberStack,
-        state: Pin<&'state mut T>,
-    ) -> Result<ManagedFiber<'state, T, META_CAPACITY, MAX_CONSUMERS>, FiberError> {
+        state: Pin<&mut T>,
+    ) -> Result<ManagedFiber<'_, T, META_CAPACITY, MAX_CONSUMERS>, FiberError> {
         ManagedFiber::new_with_publication(state, stack)
     }
 
@@ -1045,6 +1067,10 @@ impl Fiber {
     ///
     /// Scheduler layers that already know the owning fiber/courier/context should use this
     /// instead of hoping higher introspection surfaces can rediscover that truth after the fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested operation cannot be completed.
     pub fn resume_bound(
         &mut self,
         fiber_id: Option<FiberId>,
@@ -1529,7 +1555,10 @@ mod tests {
             let state = self.get_mut();
             let id =
                 current_courier_id().expect("managed courier id should be visible while running");
-            state.observed.store(id.get() as usize, Ordering::Release);
+            state.observed.store(
+                usize::try_from(id.get()).expect("test courier id fits usize"),
+                Ordering::Release,
+            );
             let _ = yield_now();
             FiberReturn::new(0)
         }

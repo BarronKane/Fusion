@@ -6,6 +6,7 @@
 
 /// Slot and hot-plug capability truth for one function/path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[allow(clippy::struct_excessive_bools)] // Public record of independent capability flags.
 pub struct PciHotplugProfile {
     pub hotplug_capable: bool,
     pub surprise_hotplug_capable: bool,

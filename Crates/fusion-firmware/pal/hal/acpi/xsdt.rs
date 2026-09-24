@@ -40,7 +40,7 @@ impl<'a> Xsdt<'a> {
     /// Returns one honest error when the table is malformed, truncated, or not one XSDT.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, AcpiError> {
         let table = AcpiTableView::parse_signature(bytes, AcpiSignature::XSDT)?;
-        if table.payload().len() % size_of::<u64>() != 0 {
+        if !table.payload().len().is_multiple_of(size_of::<u64>()) {
             return Err(AcpiError::invalid_layout());
         }
         Ok(Self { table })
@@ -89,6 +89,7 @@ pub struct XsdtEntryIter<'a> {
     offset: usize,
 }
 
+#[allow(clippy::copy_iterator)] // A copied cursor provides an independent table traversal.
 impl Iterator for XsdtEntryIter<'_> {
     type Item = u64;
 

@@ -85,27 +85,82 @@ pub trait DisplayLayoutBackend {
 
     fn layout_count() -> u8;
     fn layout_id(layout: u8) -> Option<&'static str>;
+    /// Enumerates the outputs exposed by one layout into `out`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the layout cannot be queried.
     fn enumerate_outputs(layout: u8, out: &mut [DisplayOutputId]) -> DisplayResult<usize>;
+    /// Returns the descriptor for one output when it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the layout cannot be queried.
     fn output_descriptor(
         layout: u8,
         id: DisplayOutputId,
     ) -> DisplayResult<Option<DisplayOutputDescriptor>>;
+    /// Returns the current state of one layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the layout cannot be queried.
     fn layout_state(layout: u8) -> DisplayResult<DisplayLayoutState>;
+    /// Checks a layout configuration without applying it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the configuration is unsupported or invalid.
     fn validate_layout(
         layout: u8,
         config: &DisplayLayoutConfig<'_>,
     ) -> Result<(), DisplayLayoutValidationError>;
+    /// Applies a validated layout configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend or validation error when the configuration cannot be applied.
     fn apply_layout(layout: u8, config: &DisplayLayoutConfig<'_>) -> DisplayResult<()>;
+    /// Returns the current primary output for one layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the layout cannot be queried.
     fn primary_output(layout: u8) -> DisplayResult<Option<DisplayOutputId>>;
+    /// Sets or clears the primary output for one layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the output cannot be selected.
     fn set_primary_output(layout: u8, output: Option<DisplayOutputId>) -> DisplayResult<()>;
+    /// Opens one output control surface when available.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the output cannot be opened.
     fn control<'a>(layout: u8, id: DisplayOutputId) -> DisplayResult<Option<Self::Control<'a>>>;
+    /// Opens one mutable output control surface when available.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the output cannot be opened.
     fn control_mut<'a>(layout: u8, id: DisplayOutputId)
     -> DisplayResult<Option<Self::Control<'a>>>;
+    /// Places one surface in the selected layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend or validation error when placement fails.
     fn place_surface(
         layout: u8,
         surface: DisplaySurfaceId,
         placement: &DisplaySurfacePlacement,
     ) -> DisplayResult<()>;
+    /// Presents the current layout and reports the resulting output state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when presentation fails.
     fn present_layout(
         layout: u8,
         request: &DisplayLayoutPresentRequest<'_>,
