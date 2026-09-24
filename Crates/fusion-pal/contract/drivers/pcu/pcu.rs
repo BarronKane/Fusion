@@ -37,3 +37,6 @@ pub mod unsupported {
 
 pub mod protocol;
 pub use protocol::*;
+
+pub mod pio_u32_profile;
+pub use pio_u32_profile::*;
