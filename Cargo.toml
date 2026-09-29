@@ -41,6 +41,7 @@ fusion-hal = { path = "Crates/fusion-hal", default-features = false }
 fusion-pal = { path = "Crates/fusion-pal", default-features = false }
 fusion-pcu-macros = { path = "Crates/fusion-pcu/Crates/macros" }
 fusion-pcu = { path = "Crates/fusion-pcu/Crates/fusion-pcu", default-features = false }
+fusion-pcu-core = { package = "fusion-pcu-core", path = "Crates/fusion-pcu/Crates/core", default-features = false }
 fusion-pcu-spirv = { path = "Crates/fusion-pcu/Crates/backends/spirv", default-features = false }
 fusion-pcu-rocm = { path = "Crates/fusion-pcu/Crates/backends/rocm", default-features = false }
 fusion-pcu-runner = { path = "Crates/fusion-pcu/Crates/runner", default-features = false }
